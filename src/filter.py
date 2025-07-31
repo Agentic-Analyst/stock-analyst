@@ -3,7 +3,7 @@
 filter.py - Filter scraped articles to keep only the most relevant ones.
 
 ▶ Usage:
-    python filter.py --ticker NVDA --min-score 0.6 --max-articles 5
+    python filter.py --ticker NVDA --min-score 5.0 --max-articles 5
 """
 
 from __future__ import annotations
@@ -122,38 +122,69 @@ class ArticleFilter:
             return None
     
     def calculate_relevance_score(self, article: Dict) -> float:
-        """Calculate relevance score based on content analysis."""
+        """Calculate relevance score based on content analysis (0.0 to 1.0 scale)."""
         full_text = f"{article['title']} {article['text']}".lower()
-        score = 0.0
-        
-        # Check for ticker symbol mentions (high weight)
-        ticker_mentions = len(re.findall(rf'\b{self.ticker.lower()}\b', full_text))
-        score += ticker_mentions * 2.0
-        
-        # Check relevance keywords
-        for category, keywords in self.relevance_keywords.items():
-            for keyword, weight in keywords.items():
-                mentions = len(re.findall(rf'\b{re.escape(keyword.lower())}\b', full_text))
-                score += mentions * weight
-        
-        # Apply negative keywords
-        for keyword, weight in self.negative_keywords.items():
-            mentions = len(re.findall(rf'\b{re.escape(keyword.lower())}\b', full_text))
-            score += mentions * weight
-        
-        # Apply quality indicators
-        for keyword, weight in self.quality_indicators.items():
-            mentions = len(re.findall(rf'\b{re.escape(keyword.lower())}\b', full_text))
-            score += mentions * weight
-        
-        # Normalize by content length (favor substantial articles)
         word_count = article["word_count"]
-        if word_count > 500:
-            score *= 1.2  # Bonus for longer articles
-        elif word_count < 100:
-            score *= 0.5  # Penalty for very short articles
         
-        return max(0.0, score)  # Ensure non-negative score
+        # Base score components
+        raw_score = 0.0
+        total_possible_score = 0.0
+        
+        # 1. Ticker symbol mentions (highest priority)
+        ticker_mentions = len(re.findall(rf'\b{self.ticker.lower()}\b', full_text))
+        ticker_score = min(ticker_mentions * 0.15, 0.3)  # Cap at 30% of total
+        raw_score += ticker_score
+        
+        # 2. Relevance keywords with diminishing returns
+        keyword_score = 0.0
+        for category, keywords in self.relevance_keywords.items():
+            for keyword, base_weight in keywords.items():
+                mentions = len(re.findall(rf'\b{re.escape(keyword.lower())}\b', full_text))
+                if mentions > 0:
+                    # Diminishing returns: first mention = full weight, subsequent = 50%
+                    weight = base_weight * 0.02  # Scale down base weights
+                    contribution = weight + (mentions - 1) * weight * 0.5
+                    keyword_score += min(contribution, weight * 2)  # Cap per keyword
+        
+        keyword_score = min(keyword_score, 0.4)  # Cap at 40% of total
+        raw_score += keyword_score
+        
+        # 3. Quality indicators
+        quality_score = 0.0
+        for keyword, base_weight in self.quality_indicators.items():
+            mentions = len(re.findall(rf'\b{re.escape(keyword.lower())}\b', full_text))
+            if mentions > 0:
+                quality_score += base_weight * 0.02
+        
+        quality_score = min(quality_score, 0.2)  # Cap at 20% of total
+        raw_score += quality_score
+        
+        # 4. Apply negative keywords (penalties)
+        penalty = 0.0
+        for keyword, base_weight in self.negative_keywords.items():
+            mentions = len(re.findall(rf'\b{re.escape(keyword.lower())}\b', full_text))
+            if mentions > 0:
+                penalty += abs(base_weight) * 0.05 * mentions
+        
+        penalty = min(penalty, 0.3)  # Cap penalty at 30%
+        raw_score = max(0.0, raw_score - penalty)
+        
+        # 5. Content length adjustment
+        if word_count > 1000:
+            length_multiplier = 1.1  # Bonus for very long articles
+        elif word_count > 500:
+            length_multiplier = 1.05  # Small bonus for substantial articles
+        elif word_count < 100:
+            length_multiplier = 0.7   # Penalty for very short articles
+        elif word_count < 200:
+            length_multiplier = 0.85  # Small penalty for short articles
+        else:
+            length_multiplier = 1.0   # Neutral for medium articles
+        
+        final_score = raw_score * length_multiplier
+        
+        # Ensure score is between 0.0 and 1.0
+        return max(0.0, min(1.0, final_score))
     
     def calculate_freshness_score(self, article: Dict) -> float:
         """Calculate freshness score based on publication date."""
@@ -209,21 +240,22 @@ class ArticleFilter:
         return 0.5  # Default for unknown sources
     
     def calculate_overall_score(self, article: Dict) -> float:
-        """Calculate overall score combining all factors."""
-        relevance = self.calculate_relevance_score(article)
-        freshness = self.calculate_freshness_score(article)
-        source_quality = self.calculate_source_quality_score(article)
+        """Calculate overall score combining all factors (0.0 to 10.0 scale for user-friendly display)."""
+        relevance = self.calculate_relevance_score(article)  # 0.0 to 1.0
+        freshness = self.calculate_freshness_score(article)  # 0.0 to 1.0
+        source_quality = self.calculate_source_quality_score(article)  # 0.0 to 1.0
         
-        # Weighted combination
-        overall_score = (
+        # Weighted combination (still 0.0 to 1.0)
+        normalized_score = (
             relevance * 0.6 +      # Relevance is most important
             freshness * 0.2 +      # Freshness matters
             source_quality * 0.2   # Source quality matters
         )
         
-        return overall_score
+        # Scale to 0-10 for user-friendly display
+        return normalized_score * 10.0
     
-    def filter_articles(self, min_score: float = 0.5, max_articles: int = 10) -> List[Tuple[Dict, float]]:
+    def filter_articles(self, min_score: float = 3.0, max_articles: int = 10) -> List[Tuple[Dict, float]]:
         """Filter articles and return the best ones with their scores."""
         if not self.company_dir.exists():
             print(f"[error] Directory {self.company_dir} does not exist")
@@ -232,7 +264,12 @@ class ArticleFilter:
         articles_with_scores = []
         
         # Load all markdown files
-        for md_file in self.company_dir.glob("*.md"):
+        searched_dir = self.company_dir / "searched"
+        if not searched_dir.exists():
+            print(f"[error] Searched directory {searched_dir} does not exist")
+            return []
+
+        for md_file in searched_dir.glob("*.md"):
             if md_file.name == "README.md":  # Skip README files
                 continue
             
@@ -302,7 +339,7 @@ class ArticleFilter:
 def main():
     parser = argparse.ArgumentParser(description="Filter scraped articles for relevance")
     parser.add_argument("--ticker", required=True, help="Stock ticker, e.g. NVDA")
-    parser.add_argument("--min-score", type=float, default=0.5, help="Minimum relevance score (0.0-10.0)")
+    parser.add_argument("--min-score", type=float, default=3.0, help="Minimum relevance score (0.0-10.0)")
     parser.add_argument("--max-articles", type=int, default=10, help="Maximum number of articles to keep")
     parser.add_argument("--output-report", action="store_true", help="Generate a summary report")
     parser.add_argument("--save-filtered", action="store_true", help="Save filtered articles to separate directory")
