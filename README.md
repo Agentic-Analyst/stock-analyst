@@ -24,6 +24,7 @@ pip install pyyaml python-slugify newspaper3k google-search-results lxml_html_cl
 
 ```sh
 export SERPAPI_API_KEY='your_api_key_here'
+export OPENAI_API_KEY='your_api_key_here'
 ```
 
 On Windows:
