@@ -8,7 +8,7 @@ This is the main entry point that orchestrates the complete stock analysis workf
 3. Analyze filtered articles with LLM (ArticleScreener)
 
 ▶ Usage:
-    
+    python main.py --ticker NVDA --company "NVIDIA" --pipeline full
     python main.py --ticker NVDA --company "NVIDIA" --pipeline scrape-only
     python main.py --ticker NVDA --company "NVIDIA" --pipeline filter-screen
 """

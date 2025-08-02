@@ -1,5 +1,14 @@
-pyyaml>=6.0.2
+# Stock Analyst Pipeline Requirements
+
+# Core dependencies
+PyYAML>=6.0.2
 python-slugify>=8.0.4
 newspaper3k>=0.2.8
 google-search-results>=2.4.2
 lxml_html_clean>=0.4.2
+
+# AI/LLM functionality  
+openai>=1.30.0
+
+# Data processing (usually included with Python but explicit for clarity)
+# pathlib, json, csv, re, datetime, typing, dataclasses, collections - built-in modules

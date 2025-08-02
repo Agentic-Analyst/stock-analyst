@@ -1,0 +1,43 @@
+# Exclude data directory (will be mounted as volume)
+data/
+
+# Exclude documentation and development files
+*.md
+COMPATIBILITY_ANALYSIS.md
+EFFICIENCY_FIX_SUMMARY.md
+PROMPT_REFACTORING.md
+RESTRUCTURING_COMPLETE.md
+
+# Exclude Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Exclude IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Exclude OS files
+.DS_Store
+Thumbs.db
+
+# Exclude git
+.git/
+.gitignore
+
+# Exclude Docker files themselves
+Dockerfile
+DockerFile
+.dockerignore
+
+# Exclude conda environment files
+environment.yml
+conda-meta/
