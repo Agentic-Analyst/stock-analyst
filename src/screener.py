@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-screener.py - Systematically screen and analyze filtered articles for investment insights.
+screener.py - LLM-powered stock screening and analysis of filtered articles.
+
+This module uses AI prompts stored in external markdown files to analyze news articles
+for investment insights including growth catalysts, risks, and mitigation strategies.
 
 ▶ Usage:
-    python screener.py --ticker NVDA --output-report
-    python screener.py --ticker NVDA --min-confidence 0.7 --detailed-analysis
+    python src/screener.py --ticker NVDA --output-report
+    python src/screener.py --ticker NVDA --min-confidence 0.7 --detailed-analysis
 """
 
 from __future__ import annotations
@@ -25,6 +28,14 @@ except ImportError:
         raise ImportError("LLM functionality not available. Please check llms.py")
 
 DATA_ROOT = pathlib.Path("data")
+PROMPTS_ROOT = pathlib.Path("prompts")
+
+def load_prompt(prompt_name: str) -> str:
+    """Load a prompt template from the prompts directory."""
+    prompt_file = PROMPTS_ROOT / f"{prompt_name}.md"
+    if not prompt_file.exists():
+        raise FileNotFoundError(f"Prompt file not found: {prompt_file}")
+    return prompt_file.read_text(encoding="utf-8")
 
 @dataclass
 class Catalyst:
@@ -73,338 +84,49 @@ class ArticleScreener:
         # Cost tracking for LLM usage
         self.total_llm_cost = 0.0
         self.llm_call_count = 0
-        
-        # Define catalyst patterns and keywords
-        self.catalyst_patterns = {
-            'product': {
-                'keywords': [
-                    'new product', 'product launch', 'next generation', 'innovation',
-                    'breakthrough', 'revolutionary', 'cutting-edge', 'advanced',
-                    'upgrade', 'enhanced', 'improved performance'
-                ],
-                'phrases': [
-                    r'launch(?:ing|ed)?\s+(?:new|next|latest)',
-                    r'introduc(?:ing|ed)\s+(?:new|revolutionary)',
-                    r'unveil(?:ing|ed)\s+(?:new|next-gen)',
-                    r'(?:new|next)\s+generation\s+of',
-                    r'breakthrough\s+in\s+(?:technology|product)',
-                ]
-            },
-            'market': {
-                'keywords': [
-                    'market expansion', 'new market', 'growing demand', 'market opportunity',
-                    'addressable market', 'tam', 'market size', 'market growth',
-                    'emerging market', 'untapped market'
-                ],
-                'phrases': [
-                    r'market\s+(?:expand|expansion|growth|opportunity)',
-                    r'growing\s+(?:demand|market)',
-                    r'addressable\s+market',
-                    r'billion.*market',
-                    r'market\s+size.*billion',
-                ]
-            },
-            'partnership': {
-                'keywords': [
-                    'partnership', 'collaboration', 'alliance', 'joint venture',
-                    'strategic partnership', 'deal', 'agreement', 'contract',
-                    'customer wins', 'major client'
-                ],
-                'phrases': [
-                    r'partner(?:ship)?\s+with',
-                    r'collaborat(?:ion|ing)\s+with',
-                    r'strategic\s+(?:partnership|alliance)',
-                    r'signed.*(?:deal|contract|agreement)',
-                    r'major\s+(?:client|customer|deal)',
-                ]
-            },
-            'technology': {
-                'keywords': [
-                    'technological advancement', 'breakthrough technology', 'r&d',
-                    'research and development', 'patent', 'intellectual property',
-                    'competitive advantage', 'moat', 'differentiation'
-                ],
-                'phrases': [
-                    r'technological\s+(?:breakthrough|advancement)',
-                    r'(?:ai|artificial intelligence)\s+(?:breakthrough|advancement)',
-                    r'patent(?:ed|s)?\s+technology',
-                    r'competitive\s+(?:advantage|moat)',
-                    r'proprietary\s+technology',
-                ]
-            },
-            'financial': {
-                'keywords': [
-                    'revenue growth', 'profit margin', 'cash flow', 'profitability',
-                    'cost reduction', 'efficiency', 'margin expansion',
-                    'return on investment', 'roi'
-                ],
-                'phrases': [
-                    r'revenue\s+(?:growth|increase|up)',
-                    r'profit\s+margin.*(?:expand|increase|improve)',
-                    r'cash\s+flow.*(?:positive|strong|improve)',
-                    r'cost\s+(?:reduction|savings|efficiency)',
-                    r'margin\s+expansion',
-                ]
-            }
-        }
-        
-        # Define risk patterns
-        self.risk_patterns = {
-            'market': {
-                'keywords': [
-                    'market downturn', 'recession', 'economic slowdown', 'demand decline',
-                    'market saturation', 'cyclical downturn', 'macro headwinds'
-                ],
-                'phrases': [
-                    r'market\s+(?:downturn|decline|weakness)',
-                    r'economic\s+(?:slowdown|recession|headwinds)',
-                    r'demand\s+(?:decline|weakness|slowdown)',
-                    r'cyclical\s+(?:downturn|headwinds)',
-                ]
-            },
-            'competitive': {
-                'keywords': [
-                    'competition', 'competitive pressure', 'market share loss',
-                    'pricing pressure', 'commoditization', 'rivals', 'competitors'
-                ],
-                'phrases': [
-                    r'competitive\s+(?:pressure|threat|challenge)',
-                    r'market\s+share.*(?:loss|decline|pressure)',
-                    r'pricing\s+pressure',
-                    r'intense\s+competition',
-                    r'competitor.*(?:threat|challenge)',
-                ]
-            },
-            'regulatory': {
-                'keywords': [
-                    'regulation', 'regulatory risk', 'government intervention',
-                    'policy changes', 'compliance', 'legal risk', 'antitrust'
-                ],
-                'phrases': [
-                    r'regulatory\s+(?:risk|pressure|challenge)',
-                    r'government\s+(?:intervention|regulation)',
-                    r'antitrust\s+(?:concern|investigation)',
-                    r'policy\s+(?:change|uncertainty)',
-                    r'compliance\s+(?:risk|cost)',
-                ]
-            },
-            'technological': {
-                'keywords': [
-                    'technology risk', 'obsolescence', 'disruption', 'innovation risk',
-                    'technology shift', 'platform shift'
-                ],
-                'phrases': [
-                    r'technology\s+(?:risk|disruption|shift)',
-                    r'(?:technological|platform)\s+(?:obsolescence|disruption)',
-                    r'innovation\s+risk',
-                    r'disruptive\s+technology',
-                ]
-            },
-            'financial': {
-                'keywords': [
-                    'financial risk', 'debt burden', 'liquidity risk', 'credit risk',
-                    'cash flow risk', 'margin pressure', 'cost inflation'
-                ],
-                'phrases': [
-                    r'financial\s+(?:risk|pressure|challenge)',
-                    r'debt\s+(?:burden|concern|risk)',
-                    r'cash\s+flow.*(?:risk|pressure|concern)',
-                    r'margin\s+(?:pressure|compression)',
-                    r'cost\s+(?:inflation|pressure)',
-                ]
-            }
-        }
-        
-        # Define mitigation patterns
-        self.mitigation_patterns = {
-            'keywords': [
-                'mitigate', 'address', 'counter', 'hedge', 'diversify', 'reduce risk',
-                'contingency plan', 'risk management', 'strategic initiative'
-            ],
-            'phrases': [
-                r'(?:plan|planning|strategy)\s+to\s+(?:address|mitigate|counter)',
-                r'(?:diversif|hedge)(?:y|ying|ed).*(?:risk|exposure)',
-                r'risk\s+(?:management|mitigation|reduction)',
-                r'contingency\s+plan',
-                r'strategic\s+(?:initiative|plan).*(?:address|mitigate)',
-                r'taking\s+steps\s+to.*(?:address|mitigate|reduce)',
-            ]
-        }
-        
-        # Timeline keywords
-        self.timeline_keywords = {
-            'immediate': ['immediately', 'now', 'current', 'already', 'today'],
-            'short-term': ['this quarter', 'next quarter', 'this year', 'near term', 'soon', 'within months'],
-            'medium-term': ['next year', 'over the next', '12-18 months', 'medium term', '1-2 years'],
-            'long-term': ['long term', 'multi-year', 'over the coming years', '3-5 years', 'decade']
-        }
-        
-        # Severity indicators
-        self.severity_indicators = {
-            'critical': ['critical', 'severe', 'major threat', 'existential', 'catastrophic'],
-            'high': ['significant', 'substantial', 'serious', 'major', 'considerable'],
-            'medium': ['moderate', 'notable', 'meaningful', 'some concern'],
-            'low': ['minor', 'limited', 'small', 'manageable', 'minimal']
-        }
 
     # ============= LLM-POWERED ANALYSIS METHODS =============
     
     def _create_catalyst_analysis_prompt(self, article_content: str, company_ticker: str) -> List[Dict]:
         """Create Chain-of-Thought prompt for catalyst analysis."""
+        system_prompt = load_prompt("catalyst_analysis")
+        user_prompt = load_prompt("catalyst_user").format(
+            company_ticker=company_ticker,
+            article_content=article_content
+        )
+        
         return [
-            {
-                "role": "system",
-                "content": f"""You are an expert financial analyst specializing in identifying growth catalysts for public companies. 
-                You will analyze news articles to identify potential growth drivers that could positively impact a company's stock price and business performance.
-
-                Your task is to:
-                1. Read the article carefully
-                2. Think step-by-step about potential growth catalysts
-                3. Categorize each catalyst by type
-                4. Assess confidence and timeline
-                5. Provide clear reasoning
-
-                Growth Catalyst Categories:
-                - PRODUCT: New products, innovations, launches, technological breakthroughs
-                - MARKET: Market expansion, new markets, growing demand, market opportunities
-                - PARTNERSHIP: Strategic partnerships, deals, collaborations, major customer wins
-                - TECHNOLOGY: R&D breakthroughs, patents, competitive advantages, technological moats
-                - FINANCIAL: Revenue growth drivers, margin expansion, cost efficiencies, profitability improvements
-
-                Timeline Categories:
-                - IMMEDIATE: Already happening or within 3 months
-                - SHORT_TERM: 3-12 months
-                - MEDIUM_TERM: 1-3 years  
-                - LONG_TERM: 3+ years
-
-                Respond in JSON format with this structure:
-                {{
-                    "catalysts": [
-                        {{
-                            "type": "PRODUCT|MARKET|PARTNERSHIP|TECHNOLOGY|FINANCIAL",
-                            "description": "Clear, concise description of the catalyst",
-                            "confidence": 0.0-1.0,
-                            "timeline": "IMMEDIATE|SHORT_TERM|MEDIUM_TERM|LONG_TERM",
-                            "reasoning": "Step-by-step reasoning for why this is a catalyst",
-                            "supporting_evidence": ["key quote 1", "key quote 2"],
-                            "potential_impact": "Description of expected business impact"
-                        }}
-                    ]
-                }}"""
-            },
-            {
-                "role": "user", 
-                "content": f"""Analyze this article about {company_ticker} for growth catalysts:
-
-                ARTICLE CONTENT:
-                {article_content}
-
-                Please identify all potential growth catalysts using Chain-of-Thought reasoning. Be thorough but focus on the most significant catalysts with strong supporting evidence."""
-            }
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ]
 
     def _create_risk_analysis_prompt(self, article_content: str, company_ticker: str) -> List[Dict]:
         """Create Chain-of-Thought prompt for risk analysis."""
+        system_prompt = load_prompt("risk_analysis")
+        user_prompt = load_prompt("risk_user").format(
+            company_ticker=company_ticker,
+            article_content=article_content
+        )
+        
         return [
-            {
-                "role": "system",
-                "content": f"""You are an expert financial risk analyst specializing in identifying potential risks and threats that could negatively impact a company's stock price and business performance.
-
-                Your task is to:
-                1. Read the article carefully
-                2. Think step-by-step about potential risks and threats
-                3. Categorize each risk by type and severity
-                4. Assess confidence and potential impact
-                5. Provide clear reasoning
-
-                Risk Categories:
-                - MARKET: Market downturns, economic slowdowns, demand decline, cyclical risks
-                - COMPETITIVE: Competition, pricing pressure, market share loss, disruption
-                - REGULATORY: Government intervention, policy changes, compliance costs, antitrust
-                - TECHNOLOGICAL: Technology disruption, obsolescence, innovation risks
-                - FINANCIAL: Financial constraints, debt, cash flow, margin pressure
-
-                Severity Levels:
-                - CRITICAL: Existential threats, major business model risks
-                - HIGH: Significant impact on revenue/profitability  
-                - MEDIUM: Moderate impact, manageable challenges
-                - LOW: Minor concerns, limited impact
-
-                Respond in JSON format with this structure:
-                {{
-                    "risks": [
-                        {{
-                            "type": "MARKET|COMPETITIVE|REGULATORY|TECHNOLOGICAL|FINANCIAL",
-                            "description": "Clear, concise description of the risk",
-                            "severity": "CRITICAL|HIGH|MEDIUM|LOW",
-                            "confidence": 0.0-1.0,
-                            "reasoning": "Step-by-step reasoning for why this is a risk",
-                            "supporting_evidence": ["key quote 1", "key quote 2"],
-                            "potential_impact": "Description of expected negative impact",
-                            "probability": "Assessment of likelihood this risk materializes"
-                        }}
-                    ]
-                }}"""
-            },
-            {
-                "role": "user",
-                "content": f"""Analyze this article about {company_ticker} for potential risks and threats:
-
-                ARTICLE CONTENT:
-                {article_content}
-
-                Please identify all potential risks using Chain-of-Thought reasoning. Focus on risks that could meaningfully impact the business."""
-            }
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ]
 
     def _create_mitigation_analysis_prompt(self, article_content: str, company_ticker: str, identified_risks: List[Risk]) -> List[Dict]:
         """Create prompt for analyzing risk mitigation strategies."""
         risk_summary = "\n".join([f"- {risk.type}: {risk.description}" for risk in identified_risks])
         
+        system_prompt = load_prompt("mitigation_analysis")
+        user_prompt = load_prompt("mitigation_user").format(
+            company_ticker=company_ticker,
+            article_content=article_content,
+            risk_summary=risk_summary
+        )
+        
         return [
-            {
-                "role": "system", 
-                "content": f"""You are an expert business strategist analyzing how companies mitigate risks and what actions they are taking or planning to address identified threats.
-
-                Your task is to:
-                1. Review the article for mentions of mitigation strategies, company actions, or plans
-                2. Match mitigation strategies to specific risks
-                3. Assess the effectiveness of proposed/implemented mitigations
-                4. Identify what the company is doing or planning to do
-
-                Effectiveness Levels:
-                - HIGH: Proven strategies, strong track record, comprehensive approach
-                - MEDIUM: Reasonable strategies, some uncertainty, partial solutions
-                - LOW: Unproven strategies, limited scope, questionable effectiveness
-
-                Respond in JSON format with this structure:
-                {{
-                    "mitigations": [
-                        {{
-                            "risk_addressed": "Description of which risk this addresses",
-                            "strategy": "Description of the mitigation strategy",
-                            "company_action": "What the company is doing/planning to do",
-                            "effectiveness": "HIGH|MEDIUM|LOW",
-                            "confidence": 0.0-1.0,
-                            "reasoning": "Why this mitigation strategy will work",
-                            "supporting_evidence": ["key quote 1", "key quote 2"],
-                            "timeline": "When this mitigation will be effective"
-                        }}
-                    ]
-                }}"""
-            },
-            {
-                "role": "user",
-                "content": f"""Analyze this article about {company_ticker} for risk mitigation strategies and company actions:
-
-                ARTICLE CONTENT:
-                {article_content}
-
-                IDENTIFIED RISKS TO ADDRESS:
-                {risk_summary}
-
-                Please identify any mitigation strategies, company actions, or plans mentioned in the article that address these or other risks."""
-            }
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ]
 
     def _parse_llm_json_response(self, response_text: str, response_type: str) -> Dict:
@@ -557,314 +279,48 @@ class ArticleScreener:
         
         return articles
 
-    def extract_catalysts(self, articles: List[Dict], use_llm: bool = False) -> List[Catalyst]:
-        """Extract growth catalysts from articles using pattern matching and optionally LLM analysis."""
-        catalysts = []
-        
-        # Pattern-based analysis (existing method)
-        for article in articles:
-            full_text = f"{article['title']} {article['text']}".lower()
+    def extract_catalysts(self, articles: List[Dict]) -> List[Catalyst]:
+        """Extract growth catalysts from articles using LLM analysis."""
+        if not LLM_AVAILABLE:
+            print("[error] LLM functionality required for analysis but not available")
+            return []
             
-            for catalyst_type, patterns in self.catalyst_patterns.items():
-                # Check keywords
-                keyword_matches = []
-                for keyword in patterns['keywords']:
-                    if keyword.lower() in full_text:
-                        # Find sentences containing the keyword
-                        sentences = self._extract_sentences_with_keyword(
-                            article['text'], keyword
-                        )
-                        keyword_matches.extend(sentences)
-                
-                # Check regex patterns
-                phrase_matches = []
-                for pattern in patterns.get('phrases', []):
-                    matches = re.finditer(pattern, full_text, re.IGNORECASE)
-                    for match in matches:
-                        # Extract surrounding context
-                        context = self._extract_context(article['text'], match.start(), match.end())
-                        phrase_matches.append(context)
-                
-                # If we found matches, create a catalyst
-                all_matches = keyword_matches + phrase_matches
-                if all_matches:
-                    # Determine timeline
-                    timeline = self._determine_timeline(article['text'])
-                    
-                    # Calculate confidence based on number of matches and context
-                    confidence = self._calculate_catalyst_confidence(all_matches, catalyst_type)
-                    
-                    # Create description from best evidence
-                    description = self._create_catalyst_description(catalyst_type, all_matches)
-                    
-                    catalyst = Catalyst(
-                        type=catalyst_type,
-                        description=description,
-                        confidence=confidence,
-                        supporting_evidence=all_matches[:3],  # Top 3 pieces of evidence
-                        articles_mentioned=[article['file_name']],
-                        timeline=timeline
-                    )
-                    catalysts.append(catalyst)
+        catalysts = []
+        print(f"[info] Using LLM analysis for {len(articles)} articles...")
         
-        # LLM-based analysis (enhanced analysis)
-        if use_llm:
-            print(f"[info] Using LLM analysis for {len(articles)} articles...")
-            for article in articles:
-                llm_catalysts, _, _ = self.analyze_article_with_llm(article, use_llm=True)
-                catalysts.extend(llm_catalysts)
+        for article in articles:
+            llm_catalysts, _, _ = self.analyze_article_with_llm(article, use_llm=True)
+            catalysts.extend(llm_catalysts)
         
-        # Merge similar catalysts from both methods
         return self._merge_similar_catalysts(catalysts)
 
-    def extract_risks(self, articles: List[Dict], use_llm: bool = False) -> List[Risk]:
-        """Extract risks from articles using pattern matching and optionally LLM analysis."""
+    def extract_risks(self, articles: List[Dict]) -> List[Risk]:
+        """Extract risks from articles using LLM analysis."""
+        if not LLM_AVAILABLE:
+            print("[error] LLM functionality required for analysis but not available")
+            return []
+            
         risks = []
         
-        # Pattern-based analysis (existing method)
         for article in articles:
-            full_text = f"{article['title']} {article['text']}".lower()
-            
-            for risk_type, patterns in self.risk_patterns.items():
-                # Check keywords and phrases
-                keyword_matches = []
-                for keyword in patterns['keywords']:
-                    if keyword.lower() in full_text:
-                        sentences = self._extract_sentences_with_keyword(
-                            article['text'], keyword
-                        )
-                        keyword_matches.extend(sentences)
-                
-                phrase_matches = []
-                for pattern in patterns.get('phrases', []):
-                    matches = re.finditer(pattern, full_text, re.IGNORECASE)
-                    for match in matches:
-                        context = self._extract_context(article['text'], match.start(), match.end())
-                        phrase_matches.append(context)
-                
-                all_matches = keyword_matches + phrase_matches
-                if all_matches:
-                    # Determine severity
-                    severity = self._determine_severity(article['text'])
-                    
-                    # Calculate confidence
-                    confidence = self._calculate_risk_confidence(all_matches, risk_type)
-                    
-                    # Create description
-                    description = self._create_risk_description(risk_type, all_matches)
-                    
-                    # Determine potential impact
-                    potential_impact = self._determine_potential_impact(article['text'], all_matches)
-                    
-                    risk = Risk(
-                        type=risk_type,
-                        description=description,
-                        severity=severity,
-                        confidence=confidence,
-                        supporting_evidence=all_matches[:3],
-                        articles_mentioned=[article['file_name']],
-                        potential_impact=potential_impact
-                    )
-                    risks.append(risk)
-        
-        # LLM-based analysis (enhanced analysis)
-        if use_llm:
-            for article in articles:
-                _, llm_risks, _ = self.analyze_article_with_llm(article, use_llm=True)
-                risks.extend(llm_risks)
+            _, llm_risks, _ = self.analyze_article_with_llm(article, use_llm=True)
+            risks.extend(llm_risks)
         
         return self._merge_similar_risks(risks)
 
-    def extract_mitigations(self, articles: List[Dict], identified_risks: List[Risk], use_llm: bool = False) -> List[Mitigation]:
-        """Extract risk mitigation strategies using pattern matching and optionally LLM analysis."""
+    def extract_mitigations(self, articles: List[Dict], identified_risks: List[Risk]) -> List[Mitigation]:
+        """Extract risk mitigation strategies using LLM analysis."""
+        if not LLM_AVAILABLE:
+            print("[error] LLM functionality required for analysis but not available")
+            return []
+            
         mitigations = []
         
-        # Pattern-based analysis (existing method)
         for article in articles:
-            full_text = f"{article['title']} {article['text']}".lower()
-            
-            # Look for mitigation keywords and phrases
-            mitigation_evidence = []
-            
-            for keyword in self.mitigation_patterns['keywords']:
-                if keyword.lower() in full_text:
-                    sentences = self._extract_sentences_with_keyword(
-                        article['text'], keyword
-                    )
-                    mitigation_evidence.extend(sentences)
-            
-            for pattern in self.mitigation_patterns['phrases']:
-                matches = re.finditer(pattern, full_text, re.IGNORECASE)
-                for match in matches:
-                    context = self._extract_context(article['text'], match.start(), match.end())
-                    mitigation_evidence.append(context)
-            
-            if mitigation_evidence:
-                # Try to match mitigations to specific risks
-                for risk in identified_risks:
-                    risk_keywords = self._extract_risk_keywords(risk.description)
-                    
-                    # Check if mitigation evidence mentions risk-related terms
-                    relevance_score = 0
-                    relevant_evidence = []
-                    
-                    for evidence in mitigation_evidence:
-                        evidence_lower = evidence.lower()
-                        for risk_keyword in risk_keywords:
-                            if risk_keyword.lower() in evidence_lower:
-                                relevance_score += 1
-                                relevant_evidence.append(evidence)
-                                break
-                    
-                    if relevance_score > 0 or len(mitigation_evidence) > 2:
-                        # Create mitigation strategy
-                        strategy = self._create_mitigation_strategy(mitigation_evidence)
-                        confidence = min(0.9, relevance_score * 0.3 + len(relevant_evidence) * 0.2)
-                        effectiveness = self._determine_effectiveness(mitigation_evidence)
-                        
-                        mitigation = Mitigation(
-                            risk_addressed=risk.description,
-                            strategy=strategy,
-                            confidence=confidence,
-                            supporting_evidence=relevant_evidence[:3] if relevant_evidence else mitigation_evidence[:3],
-                            articles_mentioned=[article['file_name']],
-                            effectiveness=effectiveness
-                        )
-                        mitigations.append(mitigation)
-        
-        # LLM-based analysis (enhanced analysis)
-        if use_llm:
-            for article in articles:
-                _, _, llm_mitigations = self.analyze_article_with_llm(article, use_llm=True)
-                mitigations.extend(llm_mitigations)
+            _, _, llm_mitigations = self.analyze_article_with_llm(article, use_llm=True)
+            mitigations.extend(llm_mitigations)
         
         return self._merge_similar_mitigations(mitigations)
-
-    def _extract_sentences_with_keyword(self, text: str, keyword: str) -> List[str]:
-        """Extract sentences containing a specific keyword."""
-        sentences = re.split(r'[.!?]+', text)
-        matching_sentences = []
-        
-        for sentence in sentences:
-            if keyword.lower() in sentence.lower() and len(sentence.strip()) > 20:
-                matching_sentences.append(sentence.strip())
-        
-        return matching_sentences[:2]  # Limit to 2 sentences per keyword
-
-    def _extract_context(self, text: str, start: int, end: int, context_size: int = 100) -> str:
-        """Extract context around a matched pattern."""
-        context_start = max(0, start - context_size)
-        context_end = min(len(text), end + context_size)
-        return text[context_start:context_end].strip()
-
-    def _determine_timeline(self, text: str) -> str:
-        """Determine timeline based on text analysis."""
-        text_lower = text.lower()
-        
-        for timeline, keywords in self.timeline_keywords.items():
-            for keyword in keywords:
-                if keyword in text_lower:
-                    return timeline
-        
-        return 'medium-term'  # Default
-
-    def _determine_severity(self, text: str) -> str:
-        """Determine risk severity based on text analysis."""
-        text_lower = text.lower()
-        
-        for severity, indicators in self.severity_indicators.items():
-            for indicator in indicators:
-                if indicator in text_lower:
-                    return severity
-        
-        return 'medium'  # Default
-
-    def _calculate_catalyst_confidence(self, matches: List[str], catalyst_type: str) -> float:
-        """Calculate confidence score for catalyst."""
-        base_confidence = min(0.9, len(matches) * 0.2)
-        
-        # Boost confidence for specific catalyst types with strong evidence
-        if catalyst_type in ['product', 'partnership'] and len(matches) >= 2:
-            base_confidence += 0.1
-        
-        return max(0.1, min(1.0, base_confidence))
-
-    def _calculate_risk_confidence(self, matches: List[str], risk_type: str) -> float:
-        """Calculate confidence score for risk."""
-        base_confidence = min(0.8, len(matches) * 0.25)
-        return max(0.1, min(1.0, base_confidence))
-
-    def _create_catalyst_description(self, catalyst_type: str, matches: List[str]) -> str:
-        """Create a description for the catalyst."""
-        if not matches:
-            return f"Potential {catalyst_type} catalyst identified"
-        
-        # Use the most relevant match as basis for description
-        best_match = max(matches, key=len)
-        
-        # Clean and truncate
-        description = re.sub(r'\s+', ' ', best_match).strip()
-        if len(description) > 150:
-            description = description[:150] + "..."
-        
-        return description
-
-    def _create_risk_description(self, risk_type: str, matches: List[str]) -> str:
-        """Create a description for the risk."""
-        if not matches:
-            return f"Potential {risk_type} risk identified"
-        
-        best_match = max(matches, key=len)
-        description = re.sub(r'\s+', ' ', best_match).strip()
-        if len(description) > 150:
-            description = description[:150] + "..."
-        
-        return description
-
-    def _determine_potential_impact(self, text: str, matches: List[str]) -> str:
-        """Determine potential impact of risk."""
-        combined_text = (text + " " + " ".join(matches)).lower()
-        
-        # Look for impact indicators
-        if any(word in combined_text for word in ['revenue decline', 'profit loss', 'market share loss']):
-            return 'High financial impact expected'
-        elif any(word in combined_text for word in ['margin pressure', 'cost increase', 'efficiency loss']):
-            return 'Moderate financial impact expected'
-        else:
-            return 'Impact assessment required'
-
-    def _extract_risk_keywords(self, risk_description: str) -> List[str]:
-        """Extract key terms from risk description for matching."""
-        # Simple keyword extraction
-        words = re.findall(r'\b\w+\b', risk_description.lower())
-        # Filter out common words
-        stopwords = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were'}
-        keywords = [word for word in words if len(word) > 3 and word not in stopwords]
-        return keywords[:5]  # Top 5 keywords
-
-    def _create_mitigation_strategy(self, evidence: List[str]) -> str:
-        """Create mitigation strategy description."""
-        if not evidence:
-            return "Mitigation strategy identified"
-        
-        # Combine evidence and create coherent strategy
-        best_evidence = max(evidence, key=len)
-        strategy = re.sub(r'\s+', ' ', best_evidence).strip()
-        if len(strategy) > 200:
-            strategy = strategy[:200] + "..."
-        
-        return strategy
-
-    def _determine_effectiveness(self, evidence: List[str]) -> str:
-        """Determine effectiveness of mitigation strategy."""
-        combined_evidence = " ".join(evidence).lower()
-        
-        if any(word in combined_evidence for word in ['proven', 'successful', 'effective', 'strong track record']):
-            return 'high'
-        elif any(word in combined_evidence for word in ['plan', 'strategy', 'initiative', 'working on']):
-            return 'medium'
-        else:
-            return 'low'
 
     def _merge_similar_catalysts(self, catalysts: List[Catalyst]) -> List[Catalyst]:
         """Merge similar catalysts to avoid duplicates."""
@@ -999,12 +455,12 @@ class ArticleScreener:
         )
 
     def generate_screening_report(self, catalysts: List[Catalyst], risks: List[Risk], 
-                                mitigations: List[Mitigation], output_file: pathlib.Path, use_llm: bool = False):
+                                mitigations: List[Mitigation], output_file: pathlib.Path):
         """Generate comprehensive screening report with LLM insights."""
         with open(output_file, "w", encoding="utf-8") as f:
-            f.write(f"# {self.ticker} AI-Enhanced Stock Screening Analysis\n\n")
+            f.write(f"# {self.ticker} LLM-Powered Stock Screening Analysis\n\n")
             f.write(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"**Analysis Method:** {'LLM-Enhanced Pattern Analysis' if use_llm else 'Traditional Pattern Analysis'}\n\n")
+            f.write(f"**Analysis Method:** LLM-Enhanced Analysis\n\n")
             
             # Executive Summary
             f.write("## 📊 Executive Summary\n\n")
@@ -1039,7 +495,7 @@ class ArticleScreener:
                     f.write(f"\n**Timeline:** {catalyst.timeline.title()}\n")
                     f.write(f"**Description:** {catalyst.description}\n\n")
                     
-                    if use_llm and catalyst.llm_reasoning:
+                    if catalyst.llm_reasoning:
                         f.write("**AI Analysis:**\n")
                         f.write(f"> {catalyst.llm_reasoning}\n\n")
                     
@@ -1066,7 +522,7 @@ class ArticleScreener:
                     f.write(f"\n**Description:** {risk.description}\n")
                     f.write(f"**Potential Impact:** {risk.potential_impact}\n\n")
                     
-                    if use_llm and risk.llm_reasoning:
+                    if risk.llm_reasoning:
                         f.write("**AI Analysis:**\n")
                         f.write(f"> {risk.llm_reasoning}\n\n")
                     
@@ -1097,7 +553,7 @@ class ArticleScreener:
                     if mitigation.company_action:
                         f.write(f"**Company Action:** {mitigation.company_action}\n\n")
                     
-                    if use_llm and mitigation.llm_reasoning:
+                    if mitigation.llm_reasoning:
                         f.write("**AI Analysis:**\n")
                         f.write(f"> {mitigation.llm_reasoning}\n\n")
                     
@@ -1162,15 +618,15 @@ class ArticleScreener:
                 else:
                     f.write("**Investment Outlook:** 🔴 Cautious - Risks may outweigh near-term catalysts\n")
             
-            # Add cost information if LLM was used
-            if use_llm and self.llm_call_count > 0:
+            # Add cost information from LLM usage
+            if self.llm_call_count > 0:
                 f.write(f"\n## 💰 LLM Analysis Cost Summary\n\n")
                 f.write(f"**Total LLM Calls:** {self.llm_call_count}\n")
                 f.write(f"**Total Cost:** ${self.total_llm_cost:.6f} USD\n")
                 f.write(f"**Average Cost per Call:** ${self.total_llm_cost/self.llm_call_count:.6f} USD\n\n")
             
             f.write(f"\n---\n*Analysis completed using {len(catalysts + risks + mitigations)} insights from filtered articles.*")
-            if use_llm and self.llm_call_count > 0:
+            if self.llm_call_count > 0:
                 f.write(f" LLM analysis cost: ${self.total_llm_cost:.6f} USD")
             f.write("\n")
 
@@ -1189,13 +645,12 @@ class ArticleScreener:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
 def main():
-    parser = argparse.ArgumentParser(description="AI-Enhanced Stock Screening: Analyze filtered articles for investment insights")
+    parser = argparse.ArgumentParser(description="LLM-Powered Stock Screening: Analyze filtered articles for investment insights")
     parser.add_argument("--ticker", required=True, help="Stock ticker, e.g. NVDA")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="Minimum confidence threshold (0.0-1.0)")
     parser.add_argument("--output-report", action="store_true", help="Generate detailed screening report")
     parser.add_argument("--save-data", action="store_true", help="Save structured data as JSON")
     parser.add_argument("--detailed-analysis", action="store_true", help="Include detailed analysis in output")
-    parser.add_argument("--use-llm", action="store_true", help="Enable LLM-powered analysis (requires OpenAI API key)")
     
     args = parser.parse_args()
     
@@ -1210,26 +665,24 @@ def main():
         print("[warn] No filtered articles found")
         return
     
-    analysis_mode = "LLM-Enhanced" if args.use_llm else "Pattern-Based"
-    print(f"[info] Analyzing {len(articles)} filtered articles using {analysis_mode} analysis")
+    print(f"[info] Analyzing {len(articles)} filtered articles using LLM-Enhanced analysis")
     
-    if args.use_llm:
-        if not LLM_AVAILABLE:
-            print("[error] LLM functionality not available. Please check that llms.py is properly configured.")
-            return
-        print("[info] 🤖 LLM analysis enabled - this will provide deeper insights but take longer and cost API credits")
+    if not LLM_AVAILABLE:
+        print("[error] LLM functionality not available. Please check that llms.py is properly configured.")
+        return
+    print("[info] 🤖 LLM analysis enabled - this will provide deeper insights but take longer and cost API credits")
     
     # Extract insights
     print("[info] Extracting growth catalysts...")
-    catalysts = screener.extract_catalysts(articles, use_llm=args.use_llm)
+    catalysts = screener.extract_catalysts(articles)
     catalysts = [c for c in catalysts if c.confidence >= args.min_confidence]
     
     print("[info] Identifying risks...")
-    risks = screener.extract_risks(articles, use_llm=args.use_llm)
+    risks = screener.extract_risks(articles)
     risks = [r for r in risks if r.confidence >= args.min_confidence]
     
     print("[info] Analyzing mitigation strategies...")
-    mitigations = screener.extract_mitigations(articles, risks, use_llm=args.use_llm)
+    mitigations = screener.extract_mitigations(articles, risks)
     mitigations = [m for m in mitigations if m.confidence >= args.min_confidence]
     
     # Display summary
@@ -1238,8 +691,8 @@ def main():
     print(f"  Risks Identified: {len(risks)}")
     print(f"  Mitigation Strategies: {len(mitigations)}")
     
-    # Display LLM cost information if LLM was used
-    if args.use_llm and screener.llm_call_count > 0:
+    # Display LLM cost information
+    if screener.llm_call_count > 0:
         print(f"  LLM Calls Made: {screener.llm_call_count}")
         print(f"  Total LLM Cost: ${screener.total_llm_cost:.6f} USD")
         print(f"  Average Cost per Call: ${screener.total_llm_cost/screener.llm_call_count:.6f} USD")
@@ -1258,7 +711,7 @@ def main():
     # Generate reports
     if args.output_report:
         report_file = DATA_ROOT / args.ticker / "screening_report.md"
-        screener.generate_screening_report(catalysts, risks, mitigations, report_file, use_llm=args.use_llm)
+        screener.generate_screening_report(catalysts, risks, mitigations, report_file)
         print(f"[saved] Screening report: {report_file}")
     
     if args.save_data:
