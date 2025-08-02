@@ -157,9 +157,9 @@ class ArticleScreener:
             print(f"[warn] Error processing LLM {response_type} response: {e}")
             return {response_type: []}
 
-    def analyze_article_with_llm(self, article: Dict, use_llm: bool = False) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+    def analyze_article_with_llm(self, article: Dict) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
         """Analyze a single article using LLM for comprehensive insights."""
-        if not use_llm or not LLM_AVAILABLE:
+        if not LLM_AVAILABLE:
             return [], [], []
             
         article_content = f"Title: {article['title']}\n\nContent: {article['text']}"
@@ -289,7 +289,7 @@ class ArticleScreener:
         print(f"[info] Using LLM analysis for {len(articles)} articles...")
         
         for article in articles:
-            llm_catalysts, _, _ = self.analyze_article_with_llm(article, use_llm=True)
+            llm_catalysts, _, _ = self.analyze_article_with_llm(article)
             catalysts.extend(llm_catalysts)
         
         return self._merge_similar_catalysts(catalysts)
@@ -303,7 +303,7 @@ class ArticleScreener:
         risks = []
         
         for article in articles:
-            _, llm_risks, _ = self.analyze_article_with_llm(article, use_llm=True)
+            _, llm_risks, _ = self.analyze_article_with_llm(article)
             risks.extend(llm_risks)
         
         return self._merge_similar_risks(risks)
@@ -317,7 +317,7 @@ class ArticleScreener:
         mitigations = []
         
         for article in articles:
-            _, _, llm_mitigations = self.analyze_article_with_llm(article, use_llm=True)
+            _, _, llm_mitigations = self.analyze_article_with_llm(article)
             mitigations.extend(llm_mitigations)
         
         return self._merge_similar_mitigations(mitigations)
