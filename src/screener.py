@@ -279,48 +279,34 @@ class ArticleScreener:
         
         return articles
 
-    def extract_catalysts(self, articles: List[Dict]) -> List[Catalyst]:
-        """Extract growth catalysts from articles using LLM analysis."""
+    def analyze_all_articles(self, articles: List[Dict]) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+        """
+        Analyze all articles once and extract catalysts, risks, and mitigations.
+        This is the efficient method that should be used instead of calling individual extract methods.
+        """
         if not LLM_AVAILABLE:
             print("[error] LLM functionality required for analysis but not available")
-            return []
+            return [], [], []
             
-        catalysts = []
+        all_catalysts = []
+        all_risks = []
+        all_mitigations = []
+        
         print(f"[info] Using LLM analysis for {len(articles)} articles...")
         
         for article in articles:
-            llm_catalysts, _, _ = self.analyze_article_with_llm(article)
-            catalysts.extend(llm_catalysts)
+            llm_catalysts, llm_risks, llm_mitigations = self.analyze_article_with_llm(article)
+            all_catalysts.extend(llm_catalysts)
+            all_risks.extend(llm_risks)
+            all_mitigations.extend(llm_mitigations)
         
-        return self._merge_similar_catalysts(catalysts)
+        # Merge similar insights to avoid duplicates
+        merged_catalysts = self._merge_similar_catalysts(all_catalysts)
+        merged_risks = self._merge_similar_risks(all_risks)
+        merged_mitigations = self._merge_similar_mitigations(all_mitigations)
+        
+        return merged_catalysts, merged_risks, merged_mitigations
 
-    def extract_risks(self, articles: List[Dict]) -> List[Risk]:
-        """Extract risks from articles using LLM analysis."""
-        if not LLM_AVAILABLE:
-            print("[error] LLM functionality required for analysis but not available")
-            return []
-            
-        risks = []
-        
-        for article in articles:
-            _, llm_risks, _ = self.analyze_article_with_llm(article)
-            risks.extend(llm_risks)
-        
-        return self._merge_similar_risks(risks)
-
-    def extract_mitigations(self, articles: List[Dict], identified_risks: List[Risk]) -> List[Mitigation]:
-        """Extract risk mitigation strategies using LLM analysis."""
-        if not LLM_AVAILABLE:
-            print("[error] LLM functionality required for analysis but not available")
-            return []
-            
-        mitigations = []
-        
-        for article in articles:
-            _, _, llm_mitigations = self.analyze_article_with_llm(article)
-            mitigations.extend(llm_mitigations)
-        
-        return self._merge_similar_mitigations(mitigations)
 
     def _merge_similar_catalysts(self, catalysts: List[Catalyst]) -> List[Catalyst]:
         """Merge similar catalysts to avoid duplicates."""
@@ -672,18 +658,14 @@ def main():
         return
     print("[info] 🤖 LLM analysis enabled - this will provide deeper insights but take longer and cost API credits")
     
-    # Extract insights
-    print("[info] Extracting growth catalysts...")
-    catalysts = screener.extract_catalysts(articles)
-    catalysts = [c for c in catalysts if c.confidence >= args.min_confidence]
+    # Extract insights using efficient single-pass analysis
+    print("[info] Analyzing articles for catalysts, risks, and mitigations...")
+    all_catalysts, all_risks, all_mitigations = screener.analyze_all_articles(articles)
     
-    print("[info] Identifying risks...")
-    risks = screener.extract_risks(articles)
-    risks = [r for r in risks if r.confidence >= args.min_confidence]
-    
-    print("[info] Analyzing mitigation strategies...")
-    mitigations = screener.extract_mitigations(articles, risks)
-    mitigations = [m for m in mitigations if m.confidence >= args.min_confidence]
+    # Filter by confidence threshold
+    catalysts = [c for c in all_catalysts if c.confidence >= args.min_confidence]
+    risks = [r for r in all_risks if r.confidence >= args.min_confidence]
+    mitigations = [m for m in all_mitigations if m.confidence >= args.min_confidence]
     
     # Display summary
     print(f"\n[results] Analysis complete:")

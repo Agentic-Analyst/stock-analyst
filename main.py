@@ -83,8 +83,7 @@ class StockAnalysisPipeline:
         scraping_results = self.run_scraping_stage(max_articles)
         
         if scraping_results["scraped_count"] == 0:
-            print("❌ No articles scraped. Pipeline cannot continue.")
-            return self._get_pipeline_results()
+            print("❌ No new articles scraped.")
         
         # Stage 2: Filtering  
         print("\n🔍 STAGE 2: Article Filtering")
@@ -205,10 +204,8 @@ class StockAnalysisPipeline:
             
             print(f"🔍 Analyzing {len(articles_data)} articles with LLM...")
             
-            # Extract insights using LLM
-            catalysts = self.screener.extract_catalysts(articles_data)
-            risks = self.screener.extract_risks(articles_data)
-            mitigations = self.screener.extract_mitigations(articles_data, risks)
+            # Extract insights using LLM (efficient single-pass analysis)
+            catalysts, risks, mitigations = self.screener.analyze_all_articles(articles_data)
             
             # Filter by confidence
             high_conf_catalysts = [c for c in catalysts if c.confidence >= min_confidence]
