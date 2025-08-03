@@ -183,7 +183,7 @@ class ArticleScreener:
         
         try:
             # Step 1: Analyze Growth Catalysts
-            print(f"[llm] Analyzing catalysts for article: {article['file_name'][:50]}...")
+            self._log("info", f"[llm] Analyzing catalysts for article: {article['file_name'][:50]}...")
             catalyst_prompt = self._create_catalyst_analysis_prompt(article_content, self.ticker)
             catalyst_response, cost1 = gpt_4o_mini(catalyst_prompt)
             self.total_llm_cost += cost1
@@ -202,9 +202,9 @@ class ArticleScreener:
                     llm_confidence=cat_data.get("confidence", 0.5)
                 )
                 catalysts.append(catalyst)
-            
-            # Step 2: Analyze Risks  
-            print(f"[llm] Analyzing risks for article: {article['file_name'][:50]}...")
+
+            # Step 2: Analyze Risks
+            self._log("info", f"[llm] Analyzing risks for article: {article['file_name'][:50]}...")
             risk_prompt = self._create_risk_analysis_prompt(article_content, self.ticker)
             risk_response, cost2 = gpt_4o_mini(risk_prompt)
             self.total_llm_cost += cost2
@@ -227,7 +227,7 @@ class ArticleScreener:
             
             # Step 3: Analyze Mitigations
             if risks:  # Only analyze mitigations if risks were found
-                print(f"[llm] Analyzing mitigations for article: {article['file_name'][:50]}...")
+                self._log("info", f"[llm] Analyzing mitigations for article: {article['file_name'][:50]}...")
                 mitigation_prompt = self._create_mitigation_analysis_prompt(article_content, self.ticker, risks)
                 mitigation_response, cost3 = gpt_4o_mini(mitigation_prompt)
                 self.total_llm_cost += cost3
@@ -249,8 +249,8 @@ class ArticleScreener:
                     mitigations.append(mitigation)
             
         except Exception as e:
-            print(f"[error] LLM analysis failed for article {article['file_name']}: {e}")
-            
+            self._log("error", f"[error] LLM analysis failed for article {article['file_name']}: {e}")
+
         return catalysts, risks, mitigations
 
     # ============= END LLM METHODS =============
@@ -258,7 +258,7 @@ class ArticleScreener:
     def load_filtered_articles(self) -> List[Dict]:
         """Load all filtered articles."""
         if not self.filtered_dir.exists():
-            print(f"[error] Filtered directory {self.filtered_dir} does not exist")
+            self._log("error", f"[error] Filtered directory {self.filtered_dir} does not exist")
             return []
         
         articles = []
@@ -289,8 +289,8 @@ class ArticleScreener:
                     "word_count": len(text_content.split()),
                 })
             except Exception as e:
-                print(f"[warn] Could not load {md_file}: {e}")
-        
+                self._log("warn", f"[warn] Could not load {md_file}: {e}")
+
         return articles
 
     def analyze_all_articles(self, articles: List[Dict]) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
@@ -299,15 +299,15 @@ class ArticleScreener:
         This is the efficient method that should be used instead of calling individual extract methods.
         """
         if not LLM_AVAILABLE:
-            print("[error] LLM functionality required for analysis but not available")
+            self._log("error", "[error] LLM functionality required for analysis but not available")
             return [], [], []
             
         all_catalysts = []
         all_risks = []
         all_mitigations = []
-        
-        print(f"[info] Using LLM analysis for {len(articles)} articles...")
-        
+
+        self._log("info", f"[info] Using LLM analysis for {len(articles)} articles...")
+
         for article in articles:
             llm_catalysts, llm_risks, llm_mitigations = self.analyze_article_with_llm(article)
             all_catalysts.extend(llm_catalysts)
@@ -658,22 +658,22 @@ def main():
     screener = ArticleScreener(args.ticker)
     
     # Load filtered articles
-    print(f"[info] Loading filtered articles for {args.ticker}")
+    screener._log("info", f"Loading filtered articles for {args.ticker}")
     articles = screener.load_filtered_articles()
     
     if not articles:
-        print("[warn] No filtered articles found")
+        screener._log("warning", "No filtered articles found")
         return
     
-    print(f"[info] Analyzing {len(articles)} filtered articles using LLM-Enhanced analysis")
+    screener._log("info", f"Analyzing {len(articles)} filtered articles using LLM-Enhanced analysis")
     
     if not LLM_AVAILABLE:
-        print("[error] LLM functionality not available. Please check that llms.py is properly configured.")
+        screener._log("error", "LLM functionality not available. Please check that llms.py is properly configured.")
         return
-    print("[info] 🤖 LLM analysis enabled - this will provide deeper insights but take longer and cost API credits")
+    screener._log("info", "🤖 LLM analysis enabled - this will provide deeper insights but take longer and cost API credits")
     
     # Extract insights using efficient single-pass analysis
-    print("[info] Analyzing articles for catalysts, risks, and mitigations...")
+    screener._log("info", "Analyzing articles for catalysts, risks, and mitigations...")
     all_catalysts, all_risks, all_mitigations = screener.analyze_all_articles(articles)
     
     # Filter by confidence threshold
@@ -682,53 +682,53 @@ def main():
     mitigations = [m for m in all_mitigations if m.confidence >= args.min_confidence]
     
     # Display summary
-    print(f"\n[results] Analysis complete:")
-    print(f"  Growth Catalysts: {len(catalysts)}")
-    print(f"  Risks Identified: {len(risks)}")
-    print(f"  Mitigation Strategies: {len(mitigations)}")
+    screener._log("info", f"Analysis complete:")
+    screener._log("info", f"  Growth Catalysts: {len(catalysts)}")
+    screener._log("info", f"  Risks Identified: {len(risks)}")
+    screener._log("info", f"  Mitigation Strategies: {len(mitigations)}")
     
     # Display LLM cost information
     if screener.llm_call_count > 0:
-        print(f"  LLM Calls Made: {screener.llm_call_count}")
-        print(f"  Total LLM Cost: ${screener.total_llm_cost:.6f} USD")
-        print(f"  Average Cost per Call: ${screener.total_llm_cost/screener.llm_call_count:.6f} USD")
+        screener._log("info", f"  LLM Calls Made: {screener.llm_call_count}")
+        screener._log("info", f"  Total LLM Cost: ${screener.total_llm_cost:.6f} USD")
+        screener._log("info", f"  Average Cost per Call: ${screener.total_llm_cost/screener.llm_call_count:.6f} USD")
     
     if args.detailed_analysis:
-        print(f"\n[details] Top Catalysts:")
+        screener._log("info", "Top Catalysts:")
         for i, catalyst in enumerate(sorted(catalysts, key=lambda x: x.confidence, reverse=True)[:3], 1):
             llm_note = f" (LLM: {catalyst.llm_confidence:.1%})" if catalyst.llm_confidence else ""
-            print(f"  {i}. [{catalyst.confidence:.1%}{llm_note}] {catalyst.type.title()}: {catalyst.description[:80]}...")
+            screener._log("info", f"  {i}. [{catalyst.confidence:.1%}{llm_note}] {catalyst.type.title()}: {catalyst.description[:80]}...")
         
-        print(f"\n[details] Top Risks:")
+        screener._log("info", "Top Risks:")
         for i, risk in enumerate(sorted(risks, key=lambda x: x.confidence, reverse=True)[:3], 1):
             llm_note = f" (LLM: {risk.llm_confidence:.1%})" if risk.llm_confidence else ""
-            print(f"  {i}. [{risk.confidence:.1%}{llm_note}] {risk.type.title()}: {risk.description[:80]}...")
+            screener._log("info", f"  {i}. [{risk.confidence:.1%}{llm_note}] {risk.type.title()}: {risk.description[:80]}...")
     
     # Generate reports
     if args.output_report:
         report_file = DATA_ROOT / args.ticker / "screening_report.md"
         screener.generate_screening_report(catalysts, risks, mitigations, report_file)
-        print(f"[saved] Screening report: {report_file}")
+        screener._log("info", f"Screening report saved: {report_file}")
     
     if args.save_data:
         data_file = DATA_ROOT / args.ticker / "screening_data.json"
         screener.save_structured_data(catalysts, risks, mitigations, data_file)
-        print(f"[saved] Structured data: {data_file}")
+        screener._log("info", f"Structured data saved: {data_file}")
     
     # Quick investment outlook
     if catalysts or risks:
-        print(f"\n[insight] Quick Investment Outlook for {args.ticker}:")
+        screener._log("info", f"Quick Investment Outlook for {args.ticker}:")
         if catalysts:
             avg_catalyst_confidence = sum(c.confidence for c in catalysts) / len(catalysts)
-            print(f"  📈 Growth Potential: {avg_catalyst_confidence:.1%} (based on {len(catalysts)} catalysts)")
+            screener._log("info", f"  📈 Growth Potential: {avg_catalyst_confidence:.1%} (based on {len(catalysts)} catalysts)")
         
         if risks:
             avg_risk_confidence = sum(r.confidence for r in risks) / len(risks)
             high_severity_risks = len([r for r in risks if r.severity in ['high', 'critical']])
-            print(f"  ⚠️  Risk Level: {avg_risk_confidence:.1%} (including {high_severity_risks} high-severity risks)")
+            screener._log("info", f"  ⚠️  Risk Level: {avg_risk_confidence:.1%} (including {high_severity_risks} high-severity risks)")
         
         if mitigations:
-            print(f"  🛡️  Risk Management: {len(mitigations)} mitigation strategies identified")
+            screener._log("info", f"  🛡️  Risk Management: {len(mitigations)} mitigation strategies identified")
         
         # Simple net assessment
         if catalysts and risks:
@@ -745,7 +745,7 @@ def main():
             else:
                 outlook = "🔴 CAUTIOUS"
             
-            print(f"  📊 Net Outlook: {outlook} (Score: {net_score:.2f})")
+            screener._log("info", f"  📊 Net Outlook: {outlook} (Score: {net_score:.2f})")
 
 if __name__ == "__main__":
     main()
