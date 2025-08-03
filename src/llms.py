@@ -64,7 +64,7 @@ def gpt_4o_mini(messages: List[Dict], max_tokens: int = 1500, temperature: float
             return response.choices[0].message.content, cost
             
         except Exception as e:
-            wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+            wait_time = 1  # Exponential backoff: 1s, 2s, 4s
             # Use logger if available, otherwise print
             try:
                 from logger import get_logger
