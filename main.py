@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-main.py - Integrated stock analysis pipeline combining scraping, filtering, and screening.
+main.py - Integrated Stock Analysis Pipeline
 
-This is the main entry point that orchestrates the complete stock analysis workflow:
-1. Scrape news articles from Google News (ArticleScraper)
-2. Filter articles for relevance (ArticleFilter) 
-3. Analyze filtered articles with LLM (ArticleScreener)
+This module orchestrates the complete stock analysis workflow:
+1. Article Scraping (scraper.py) - Collect news articles from Google News
+2. Article Filtering (filter.py) - Filter for relevance and quality  
+3. LLM Analysis (screener.py) - Extract investment insights using AI
 
-▶ Usage:
+▶ Usage Examples:
     python main.py --ticker NVDA --company "NVIDIA" --pipeline full
-    python main.py --ticker NVDA --company "NVIDIA" --pipeline scrape-only
-    python main.py --ticker NVDA --company "NVIDIA" --pipeline filter-screen
+    python main.py --ticker AAPL --company "Apple Inc" --pipeline scrape-only --max-articles 30
+    python main.py --ticker TSLA --company "Tesla" --pipeline filter-screen --min-score 4.0
 """
 
 from __future__ import annotations
@@ -19,6 +19,15 @@ import pathlib
 import sys
 from typing import Optional, Dict, List
 from datetime import datetime
+
+# Add src directory to path for imports
+sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
+
+# Import pipeline modules
+from logger import setup_logger, StockAnalystLogger
+from scraper import ArticleScraper
+from filter import ArticleFilter
+from screener import ArticleScreener
 
 # Add src directory to path for imports
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
@@ -41,12 +50,20 @@ class StockAnalysisPipeline:
         self.ticker = ticker.upper()
         self.company_name = company_name
         
-        # Initialize all components
-        self.scraper = ArticleScraper(ticker, company_name)
-        self.filter = ArticleFilter(ticker)
-        self.screener = ArticleScreener(ticker)
+        # Setup centralized logging
+        self.logger = setup_logger(self.ticker)
         
-        # Pipeline statistics
+        # Initialize pipeline components with logger reference
+        self.scraper = ArticleScraper(self.ticker, self.company_name)
+        self.filter = ArticleFilter(self.ticker)
+        self.screener = ArticleScreener(self.ticker)
+        
+        # Pass logger to components (if they support it)
+        for component in [self.scraper, self.filter, self.screener]:
+            if hasattr(component, 'set_logger'):
+                component.set_logger(self.logger)
+        
+        # Pipeline tracking
         self.stats = {
             "start_time": datetime.now(),
             "stages_completed": [],
@@ -54,6 +71,9 @@ class StockAnalysisPipeline:
             "filtering": {},
             "screening": {}
         }
+        
+        self.logger.info(f"🎯 Pipeline initialized for {self.ticker} ({self.company_name})")
+        self.logger.info(f"📊 All logs will be saved to: {self.logger.get_log_file_path()}")
     
     def run_full_pipeline(self, 
                          max_articles: int = 20,
@@ -74,38 +94,37 @@ class StockAnalysisPipeline:
         Returns:
             Dictionary with complete pipeline results
         """
-        print(f"🚀 Starting full analysis pipeline for {self.ticker} ({self.company_name})")
-        print("=" * 80)
+        self.logger.stage_start(
+            "FULL PIPELINE", 
+            f"Analyzing {self.company_name} ({self.ticker}) with complete workflow"
+        )
         
         # Stage 1: Scraping
-        print("\n📰 STAGE 1: Article Scraping")
-        print("-" * 40)
+        self.logger.stage_start("ARTICLE SCRAPING", "Collecting news articles from Google News")
         scraping_results = self.run_scraping_stage(max_articles)
         
         if scraping_results["scraped_count"] == 0:
-            print("❌ No new articles scraped.")
+            self.logger.error("❌ No new articles scraped. Pipeline halted.")
         
-        # Stage 2: Filtering  
-        print("\n🔍 STAGE 2: Article Filtering")
-        print("-" * 40)
+        # Stage 2: Filtering
+        self.logger.stage_start("ARTICLE FILTERING", "Filtering articles for relevance and quality")
         filtering_results = self.run_filtering_stage(min_filter_score, max_filtered)
         
         if not filtering_results["filtered_articles"]:
-            print("❌ No articles passed filtering. Pipeline cannot continue.")
+            self.logger.error("❌ No articles passed filtering. Pipeline cannot continue.")
             return self._get_pipeline_results()
         
         # Stage 3: Screening
-        print("\n🤖 STAGE 3: LLM Analysis & Screening")
-        print("-" * 40)
+        self.logger.stage_start("LLM ANALYSIS & SCREENING", "Extracting investment insights using AI")
         screening_results = self.run_screening_stage(
             filtering_results["filtered_articles"], 
             min_confidence, 
             generate_reports
         )
         
-        # Final results
-        print(f"\n✅ Pipeline completed for {self.ticker}")
-        self._print_final_summary()
+        # Pipeline completion
+        duration = (datetime.now() - self.stats["start_time"]).total_seconds()
+        self.logger.session_end(duration, self.stats["stages_completed"])
         
         return self._get_pipeline_results()
     
@@ -116,7 +135,7 @@ class StockAnalysisPipeline:
             storage_info = self.scraper.get_storage_info()
             current_count = storage_info["total_articles"]
             
-            print(f"📊 Current articles in storage: {current_count}")
+            self.logger.info(f"📊 Current articles in storage: {current_count}")
             
             # Perform scraping
             scraping_results = self.scraper.scrape_articles(max_articles)
@@ -125,17 +144,19 @@ class StockAnalysisPipeline:
             self.stats["scraping"] = scraping_results
             self.stats["stages_completed"].append("scraping")
             
-            # Display results
-            print(f"✅ Scraping completed:")
-            print(f"   New articles: {scraping_results['scraped_count']}")
-            print(f"   Duplicates skipped: {scraping_results['duplicate_count']}")
-            print(f"   Failed attempts: {scraping_results['failed_count']}")
-            print(f"   Success rate: {scraping_results['success_rate']:.1%}")
+            # Log results
+            stats = {
+                "New articles": scraping_results['scraped_count'],
+                "Duplicates skipped": scraping_results['duplicate_count'],
+                "Failed attempts": scraping_results['failed_count'],
+                "Success rate": f"{scraping_results['success_rate']:.1%}"
+            }
+            self.logger.stage_end("ARTICLE SCRAPING", True, stats)
             
             return scraping_results
             
         except Exception as e:
-            print(f"❌ Scraping stage failed: {e}")
+            self.logger.error(f"❌ Scraping stage failed: {e}")
             return {"scraped_count": 0, "error": str(e)}
     
     def run_filtering_stage(self, min_score: float = 3.0, max_articles: int = 10) -> Dict:
@@ -145,7 +166,7 @@ class StockAnalysisPipeline:
             filtered_articles = self.filter.filter_articles(min_score, max_articles)
             
             if not filtered_articles:
-                print("⚠️  No articles met the filtering criteria")
+                self.logger.warning("⚠️  No articles met the filtering criteria")
                 return {"filtered_articles": [], "filtered_count": 0}
             
             # Save filtered articles
@@ -163,21 +184,24 @@ class StockAnalysisPipeline:
             self.stats["filtering"] = filtering_results
             self.stats["stages_completed"].append("filtering")
             
-            # Display results
-            print(f"✅ Filtering completed:")
-            print(f"   Articles meeting criteria: {len(filtered_articles)}")
-            print(f"   Average score: {filtering_results['avg_score']:.2f}")
-            print(f"   Score range: {filtered_articles[-1][1]:.2f} - {filtered_articles[0][1]:.2f}")
+            # Log results
+            stats = {
+                "Articles meeting criteria": len(filtered_articles),
+                "Average score": f"{filtering_results['avg_score']:.2f}",
+                "Score range": f"{filtered_articles[-1][1]:.2f} - {filtered_articles[0][1]:.2f}"
+            }
             
-            # Show top articles
-            print(f"   Top 3 articles:")
+            # Log top articles
+            self.logger.info("📄 Top 3 articles:")
             for i, (article, score) in enumerate(filtered_articles[:3], 1):
-                print(f"     {i}. [{score:.2f}] {article['title'][:60]}...")
+                self.logger.info(f"   {i}. [{score:.2f}] {article['title'][:60]}...")
+            
+            self.logger.stage_end("ARTICLE FILTERING", True, stats)
             
             return filtering_results
             
         except Exception as e:
-            print(f"❌ Filtering stage failed: {e}")
+            self.logger.error(f"❌ Filtering stage failed: {e}")
             return {"filtered_articles": [], "error": str(e)}
     
     def run_screening_stage(self, 
@@ -190,7 +214,7 @@ class StockAnalysisPipeline:
             if filtered_articles is None:
                 articles_data = self.screener.load_filtered_articles()
                 if not articles_data:
-                    print("❌ No filtered articles found for screening")
+                    self.logger.error("❌ No filtered articles found for screening")
                     return {"catalysts": [], "risks": [], "mitigations": []}
             else:
                 # Convert filtered articles to format expected by screener
@@ -202,7 +226,7 @@ class StockAnalysisPipeline:
                         article_copy['file_name'] = article_copy['file_path'].name
                     articles_data.append(article_copy)
             
-            print(f"🔍 Analyzing {len(articles_data)} articles with LLM...")
+            self.logger.info(f"🔍 Analyzing {len(articles_data)} articles with LLM...")
             
             # Extract insights using LLM (efficient single-pass analysis)
             catalysts, risks, mitigations = self.screener.analyze_all_articles(articles_data)
@@ -243,21 +267,22 @@ class StockAnalysisPipeline:
                     high_conf_catalysts, high_conf_risks, high_conf_mitigations, data_file
                 )
                 
-                print(f"📄 Reports generated:")
-                print(f"   Screening report: {report_file}")
-                print(f"   Structured data: {data_file}")
+                self.logger.file_operation("Report generated", report_file)
+                self.logger.file_operation("Structured data saved", data_file)
             
-            # Display results
-            print(f"✅ Screening completed:")
-            print(f"   Growth catalysts: {len(high_conf_catalysts)} (of {len(catalysts)} total)")
-            print(f"   Risks identified: {len(high_conf_risks)} (of {len(risks)} total)")
-            print(f"   Mitigation strategies: {len(high_conf_mitigations)} (of {len(mitigations)} total)")
-            print(f"   LLM cost: ${screening_results['llm_cost']:.6f} USD ({screening_results['llm_calls']} calls)")
+            # Log results
+            stats = {
+                "Growth catalysts": f"{len(high_conf_catalysts)} (of {len(catalysts)} total)",
+                "Risks identified": f"{len(high_conf_risks)} (of {len(risks)} total)",
+                "Mitigation strategies": f"{len(high_conf_mitigations)} (of {len(mitigations)} total)",
+                "LLM cost": f"${screening_results['llm_cost']:.6f} USD ({screening_results['llm_calls']} calls)"
+            }
+            self.logger.stage_end("LLM ANALYSIS & SCREENING", True, stats)
             
             return screening_results
             
         except Exception as e:
-            print(f"❌ Screening stage failed: {e}")
+            self.logger.error(f"❌ Screening stage failed: {e}")
             return {"catalysts": [], "risks": [], "mitigations": [], "error": str(e)}
     
     def _get_pipeline_results(self) -> Dict:
@@ -269,30 +294,6 @@ class StockAnalysisPipeline:
             "company_name": self.company_name,
             "statistics": self.stats
         }
-    
-    def _print_final_summary(self):
-        """Print final pipeline summary."""
-        duration = (datetime.now() - self.stats["start_time"]).total_seconds()
-        
-        print("\n" + "=" * 80)
-        print(f"📈 FINAL SUMMARY - {self.ticker} Analysis")
-        print("=" * 80)
-        print(f"🕒 Total Duration: {duration:.1f} seconds")
-        print(f"✅ Stages Completed: {', '.join(self.stats['stages_completed'])}")
-        
-        if "scraping" in self.stats:
-            s = self.stats["scraping"]
-            print(f"📰 Scraping: {s.get('scraped_count', 0)} new articles")
-        
-        if "filtering" in self.stats:
-            f = self.stats["filtering"]
-            print(f"🔍 Filtering: {f.get('filtered_count', 0)} articles selected")
-        
-        if "screening" in self.stats:
-            sc = self.stats["screening"]
-            print(f"🤖 Screening: {len(sc.get('catalysts', []))} catalysts, {len(sc.get('risks', []))} risks")
-            if sc.get('llm_cost', 0) > 0:
-                print(f"💰 LLM Cost: ${sc['llm_cost']:.6f} USD")
 
 def main():
     """Main entry point for the stock analysis pipeline."""
@@ -339,10 +340,10 @@ Examples:
         # Show stats if requested
         if args.stats:
             storage_info = pipeline.scraper.get_storage_info()
-            print(f"📊 Current storage statistics for {args.ticker}:")
-            print(f"   Directory: {storage_info['company_dir']}")
-            print(f"   Total articles: {storage_info['total_articles']}")
-            print(f"   Directories: {storage_info['directories_exist']}")
+            pipeline.logger.info(f"📊 Current storage statistics for {args.ticker}:")
+            pipeline.logger.info(f"   Directory: {storage_info['company_dir']}")
+            pipeline.logger.info(f"   Total articles: {storage_info['total_articles']}")
+            pipeline.logger.info(f"   Directories: {storage_info['directories_exist']}")
             return 0
         
         # Run selected pipeline
@@ -380,10 +381,16 @@ Examples:
         return 0
         
     except KeyboardInterrupt:
-        print("\n⏹️  Pipeline interrupted by user")
+        if 'pipeline' in locals():
+            pipeline.logger.warning("\n⏹️  Pipeline interrupted by user")
+        else:
+            print("\n⏹️  Pipeline interrupted by user")
         return 1
     except Exception as e:
-        print(f"❌ Pipeline failed: {e}")
+        if 'pipeline' in locals():
+            pipeline.logger.error(f"❌ Pipeline failed: {e}")
+        else:
+            print(f"❌ Pipeline failed: {e}")
         return 1
 
 if __name__ == "__main__":

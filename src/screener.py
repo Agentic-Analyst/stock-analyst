@@ -81,9 +81,23 @@ class ArticleScreener:
         self.company_dir = DATA_ROOT / self.ticker
         self.filtered_dir = self.company_dir / "filtered"
         
+        # Logger - will be set by pipeline if available
+        self.logger = None
+        
         # Cost tracking for LLM usage
         self.total_llm_cost = 0.0
         self.llm_call_count = 0
+    
+    def set_logger(self, logger):
+        """Set the logger instance."""
+        self.logger = logger
+    
+    def _log(self, level: str, message: str):
+        """Log message using logger if available, otherwise print."""
+        if self.logger:
+            getattr(self.logger, level)(message)
+        else:
+            print(f"[{level.upper()}] {message}")
 
     # ============= LLM-POWERED ANALYSIS METHODS =============
     
@@ -150,11 +164,11 @@ class ArticleScreener:
             return parsed
             
         except json.JSONDecodeError as e:
-            print(f"[warn] Failed to parse LLM {response_type} response as JSON: {e}")
-            print(f"[warn] Raw response: {response_text[:200]}...")
+            self._log("warning", f"Failed to parse LLM {response_type} response as JSON: {e}")
+            self._log("warning", f"Raw response: {response_text[:200]}...")
             return {response_type: []}
         except Exception as e:
-            print(f"[warn] Error processing LLM {response_type} response: {e}")
+            self._log("warning", f"Error processing LLM {response_type} response: {e}")
             return {response_type: []}
 
     def analyze_article_with_llm(self, article: Dict) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:

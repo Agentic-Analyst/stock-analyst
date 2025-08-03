@@ -65,13 +65,28 @@ def gpt_4o_mini(messages: List[Dict], max_tokens: int = 1500, temperature: float
             
         except Exception as e:
             wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-            print(f"[error] LLM call failed (attempt {attempt + 1}/{max_retries}): {e}")
+            # Use logger if available, otherwise print
+            try:
+                from logger import get_logger
+                logger = get_logger()
+                if logger:
+                    logger.error(f"LLM call failed (attempt {attempt + 1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"Retrying in {wait_time} seconds...")
+                    else:
+                        logger.error(f"All {max_retries} attempts failed")
+                else:
+                    raise ImportError("No logger available")
+            except ImportError:
+                print(f"[error] LLM call failed (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    print(f"[info] Retrying in {wait_time} seconds...")
+                else:
+                    print(f"[error] All {max_retries} attempts failed")
             
             if attempt < max_retries - 1:
-                print(f"[info] Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
             else:
-                print(f"[error] All {max_retries} attempts failed")
                 raise Exception(f"Connection error")
 
 
@@ -80,10 +95,31 @@ def test_connection() -> bool:
     try:
         test_messages = [{"role": "user", "content": "Hello"}]
         response, cost = gpt_4o_mini(test_messages)
-        print(f"[llm] Connection test passed! Cost: ${cost:.6f}")
+        
+        # Use logger if available, otherwise print
+        try:
+            from logger import get_logger
+            logger = get_logger()
+            if logger:
+                logger.info(f"Connection test passed! Cost: ${cost:.6f}")
+            else:
+                raise ImportError("No logger available")
+        except ImportError:
+            print(f"[llm] Connection test passed! Cost: ${cost:.6f}")
+        
         return True
     except Exception as e:
-        print(f"[llm] Connection test failed: {e}")
+        # Use logger if available, otherwise print
+        try:
+            from logger import get_logger
+            logger = get_logger()
+            if logger:
+                logger.error(f"Connection test failed: {e}")
+            else:
+                raise ImportError("No logger available")
+        except ImportError:
+            print(f"[llm] Connection test failed: {e}")
+        
         return False
 
 

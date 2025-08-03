@@ -37,6 +37,9 @@ class ArticleScraper:
         self.searched_dir = self.company_dir / "searched"
         self.index_csv = self.company_dir / "articles_index.csv"
         
+        # Logger - will be set by pipeline if available
+        self.logger = None
+        
         # Statistics tracking
         self.scraped_count = 0
         self.duplicate_count = 0
@@ -46,6 +49,17 @@ class ArticleScraper:
         self.api_key = os.getenv("SERPAPI_API_KEY")
         if not self.api_key:
             raise RuntimeError("SERPAPI_API_KEY environment variable must be set")
+    
+    def set_logger(self, logger):
+        """Set the logger instance."""
+        self.logger = logger
+    
+    def _log(self, level: str, message: str):
+        """Log message using logger if available, otherwise print."""
+        if self.logger:
+            getattr(self.logger, level)(message)
+        else:
+            print(f"[{level.upper()}] {message}")
     
     def _serpapi_news_links(self, query: str, max_results: int = 20) -> List[str]:
         """Return up to `max_results` news URLs from Google News via SerpAPI."""
@@ -73,7 +87,7 @@ class ArticleScraper:
                 "word_count": len(art.text.split()) if art.text else 0
             }
         except Exception as e:
-            print(f"[warn] Could not scrape {url}: {e}")
+            self._log("warning", f"Could not scrape {url}: {e}")
             self.failed_count += 1
             return None
     
@@ -140,16 +154,16 @@ class ArticleScraper:
         query = query_override or f"{self.company_name} stock news"
         
         # Get URLs from SerpAPI
-        print(f"[info] Searching for news articles: '{query}'")
+        self._log("info", f"Searching for news articles: '{query}'")
         urls = self._serpapi_news_links(query, max_results=max_articles)
         
         if not urls:
-            print("[warn] No URLs found from news search")
+            self._log("warning", "No URLs found from news search")
             return self._get_scraping_results()
         
         # Load previously seen URLs
         seen_urls = self._load_seen_urls()
-        print(f"[info] Found {len(urls)} candidate URLs, {len(seen_urls)} already seen")
+        self._log("info", f"Found {len(urls)} candidate URLs, {len(seen_urls)} already seen")
         
         # Scrape each URL
         scraped_files = []
@@ -158,7 +172,11 @@ class ArticleScraper:
                 self.duplicate_count += 1
                 continue
             
-            print(f"[info] Scraping: {url[:80]}...")
+            if self.logger:
+                self.logger.scraping_progress(url, "in progress")
+            else:
+                self._log("info", f"Scraping: {url[:80]}...")
+            
             article_data = self._scrape_article(url)
             
             if not article_data:
@@ -171,11 +189,15 @@ class ArticleScraper:
                 scraped_files.append(file_path)
                 self.scraped_count += 1
                 
-                print(f"[saved] {file_path}")
+                if self.logger:
+                    self.logger.file_operation("Article saved", file_path)
+                else:
+                    self._log("info", f"Saved: {file_path}")
+                
                 time.sleep(1)  # Be polite to servers
                 
             except Exception as e:
-                print(f"[error] Failed to save article from {url}: {e}")
+                self._log("error", f"Failed to save article from {url}: {e}")
                 self.failed_count += 1
         
         results = self._get_scraping_results()
@@ -232,27 +254,30 @@ def main():
         # Show stats if requested
         if args.stats:
             storage_info = scraper.get_storage_info()
-            print(f"[info] Storage statistics for {args.ticker}:")
-            print(f"  Company directory: {storage_info['company_dir']}")
-            print(f"  Total articles: {storage_info['total_articles']}")
-            print(f"  Directories exist: {storage_info['directories_exist']}")
+            scraper._log("info", f"Storage statistics for {args.ticker}:")
+            scraper._log("info", f"  Company directory: {storage_info['company_dir']}")
+            scraper._log("info", f"  Total articles: {storage_info['total_articles']}")
+            scraper._log("info", f"  Directories exist: {storage_info['directories_exist']}")
             return
         
         # Perform scraping
         results = scraper.scrape_articles(args.max, args.query)
         
         # Display results
-        print(f"\n[results] Scraping completed for {results['ticker']}:")
-        print(f"  New articles scraped: {results['scraped_count']}")
-        print(f"  Duplicates skipped: {results['duplicate_count']}")
-        print(f"  Failed attempts: {results['failed_count']}")
-        print(f"  Success rate: {results['success_rate']:.1%}")
+        scraper._log("info", f"Scraping completed for {results['ticker']}:")
+        scraper._log("info", f"  New articles scraped: {results['scraped_count']}")
+        scraper._log("info", f"  Duplicates skipped: {results['duplicate_count']}")
+        scraper._log("info", f"  Failed attempts: {results['failed_count']}")
+        scraper._log("info", f"  Success rate: {results['success_rate']:.1%}")
         
         if results['scraped_count'] > 0:
-            print(f"[info] Articles saved to: {scraper.searched_dir}")
+            scraper._log("info", f"Articles saved to: {scraper.searched_dir}")
         
     except Exception as e:
-        print(f"[error] Scraping failed: {e}")
+        if 'scraper' in locals():
+            scraper._log("error", f"Scraping failed: {e}")
+        else:
+            print(f"[error] Scraping failed: {e}")
         return 1
     
     return 0

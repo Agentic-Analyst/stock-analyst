@@ -19,6 +19,9 @@ class ArticleFilter:
         self.ticker = ticker.upper()
         self.company_dir = DATA_ROOT / self.ticker
         
+        # Logger - will be set by pipeline if available
+        self.logger = None
+        
         # Define relevance keywords and their weights
         self.relevance_keywords = {
             # High relevance - core investment topics
@@ -91,6 +94,17 @@ class ArticleFilter:
             "financial": 0.5,
         }
     
+    def set_logger(self, logger):
+        """Set the logger instance."""
+        self.logger = logger
+    
+    def _log(self, level: str, message: str):
+        """Log message using logger if available, otherwise print."""
+        if self.logger:
+            getattr(self.logger, level)(message)
+        else:
+            print(f"[{level.upper()}] {message}")
+    
     def load_article(self, file_path: pathlib.Path) -> Dict | None:
         """Load and parse a markdown article file."""
         try:
@@ -118,7 +132,7 @@ class ArticleFilter:
                 "word_count": len(text_content.split()),
             }
         except Exception as e:
-            print(f"[warn] Could not load {file_path}: {e}")
+            self._log("warning", f"Could not load {file_path}: {e}")
             return None
     
     def calculate_relevance_score(self, article: Dict) -> float:
@@ -258,7 +272,7 @@ class ArticleFilter:
     def filter_articles(self, min_score: float = 3.0, max_articles: int = 10) -> List[Tuple[Dict, float]]:
         """Filter articles and return the best ones with their scores."""
         if not self.company_dir.exists():
-            print(f"[error] Directory {self.company_dir} does not exist")
+            self._log("error", f"Directory {self.company_dir} does not exist")
             return []
         
         articles_with_scores = []
@@ -266,7 +280,7 @@ class ArticleFilter:
         # Load all markdown files
         searched_dir = self.company_dir / "searched"
         if not searched_dir.exists():
-            print(f"[error] Searched directory {searched_dir} does not exist")
+            self._log("error", f"Searched directory {searched_dir} does not exist")
             return []
 
         for md_file in searched_dir.glob("*.md"):
@@ -350,30 +364,30 @@ def main():
     filter_engine = ArticleFilter(args.ticker)
     
     # Filter articles
-    print(f"[info] Filtering articles for {args.ticker} with min score {args.min_score}")
+    filter_engine._log("info", f"Filtering articles for {args.ticker} with min score {args.min_score}")
     filtered_articles = filter_engine.filter_articles(args.min_score, args.max_articles)
     
     if not filtered_articles:
-        print("[warn] No articles met the filtering criteria")
+        filter_engine._log("warning", "No articles met the filtering criteria")
         return
     
-    print(f"[info] Found {len(filtered_articles)} relevant articles:")
+    filter_engine._log("info", f"Found {len(filtered_articles)} relevant articles:")
     
     # Display results
     for i, (article, score) in enumerate(filtered_articles, 1):
-        print(f"  {i}. [{score:.2f}] {article['title'][:80]}...")
+        filter_engine._log("info", f"  {i}. [{score:.2f}] {article['title'][:80]}...")
     
     # Generate report if requested
     if args.output_report:
         report_file = DATA_ROOT / args.ticker / "filtered_report.md"
         filter_engine.generate_filtered_report(filtered_articles, report_file)
-        print(f"[saved] Report generated: {report_file}")
+        filter_engine._log("info", f"Report generated: {report_file}")
     
     # Save filtered articles if requested
     if args.save_filtered:
         filtered_dir = DATA_ROOT / args.ticker / "filtered"
         filter_engine.save_filtered_articles(filtered_articles, filtered_dir)
-        print(f"[saved] Filtered articles saved to: {filtered_dir}")
+        filter_engine._log("info", f"Filtered articles saved to: {filtered_dir}")
 
 if __name__ == "__main__":
     main()
