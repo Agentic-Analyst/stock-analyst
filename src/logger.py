@@ -114,8 +114,7 @@ class StockAnalystLogger:
     
     def scraping_progress(self, url: str, status: str):
         """Log scraping progress."""
-        short_url = url[:60] + "..." if len(url) > 60 else url
-        self.logger.info(f"🌐 Scraping {status}: {short_url}")
+        self.logger.info(f"🌐 Scraping {status}: {url}")
     
     def analysis_result(self, category: str, count: int, details: str = ""):
         """Log analysis results."""

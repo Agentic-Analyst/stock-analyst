@@ -17,6 +17,7 @@ from typing import Dict, List, Tuple, Set, Optional
 from dataclasses import dataclass, asdict
 from collections import defaultdict, Counter
 import yaml
+import tiktoken
 
 # Conditionally import LLM functionality
 try:
@@ -87,6 +88,11 @@ class ArticleScreener:
         # Cost tracking for LLM usage
         self.total_llm_cost = 0.0
         self.llm_call_count = 0
+        
+        # Token management for handling long articles
+        self.encoding = tiktoken.encoding_for_model("gpt-4o-mini")
+        self.max_tokens_per_request = 15000  # Conservative limit for GPT-4o-mini (16k context)
+        self.prompt_overhead_tokens = 1000  # Reserve for system prompts and response
     
     def set_logger(self, logger):
         """Set the logger instance."""
@@ -98,6 +104,141 @@ class ArticleScreener:
             getattr(self.logger, level)(message)
         else:
             print(f"[{level.upper()}] {message}")
+
+    # ============= TOKEN MANAGEMENT METHODS =============
+    
+    def _count_tokens(self, text: str) -> int:
+        """Count tokens in a text string."""
+        return len(self.encoding.encode(text))
+    
+    def _estimate_prompt_tokens(self, system_prompt: str, user_prompt_template: str) -> int:
+        """Estimate total tokens for a prompt including system and user messages."""
+        # Estimate with placeholder content
+        sample_content = "Sample article content for token estimation"
+        estimated_user = user_prompt_template.format(
+            company_ticker=self.ticker,
+            article_content=sample_content
+        )
+        return self._count_tokens(system_prompt) + self._count_tokens(estimated_user)
+    
+    def _chunk_article_content(self, article: Dict, target_chunk_size: int) -> List[Dict]:
+        """
+        Intelligently chunk long articles while preserving context.
+        
+        Args:
+            article: Article dictionary with 'title', 'text', etc.
+            target_chunk_size: Target tokens per chunk
+            
+        Returns:
+            List of article chunks with metadata
+        """
+        title = article.get('title', '')
+        content = article.get('text', '')
+        
+        # If content is short enough, return as single chunk
+        total_tokens = self._count_tokens(f"Title: {title}\n\nContent: {content}")
+        if total_tokens <= target_chunk_size:
+            return [article]
+        
+        self._log("info", f"Article '{title[:50]}...' has {total_tokens} tokens, chunking into smaller pieces")
+        
+        # Split content into paragraphs first
+        paragraphs = content.split('\n\n')
+        
+        chunks = []
+        current_chunk = f"Title: {title}\n\n"
+        current_tokens = self._count_tokens(current_chunk)
+        chunk_num = 1
+        
+        for i, paragraph in enumerate(paragraphs):
+            paragraph_tokens = self._count_tokens(paragraph + '\n\n')
+            
+            # If adding this paragraph would exceed limit, save current chunk
+            if current_tokens + paragraph_tokens > target_chunk_size and current_chunk.strip():
+                # Add context about chunking
+                chunk_footer = f"\n\n[CHUNK {chunk_num} OF ARTICLE: {title[:50]}...]"
+                
+                chunk_article = article.copy()
+                chunk_article.update({
+                    'text': current_chunk + chunk_footer,
+                    'chunk_number': chunk_num,
+                    'total_chunks': 'TBD',  # Will be updated later
+                    'is_chunked': True,
+                    'original_title': title
+                })
+                chunks.append(chunk_article)
+                
+                chunk_num += 1
+                current_chunk = f"Title: {title} (Chunk {chunk_num})\n\nPrevious context: [This is part {chunk_num} of a longer article]\n\n"
+                current_tokens = self._count_tokens(current_chunk)
+            
+            # Add paragraph to current chunk
+            current_chunk += paragraph + '\n\n'
+            current_tokens += paragraph_tokens
+        
+        # Add final chunk if there's remaining content
+        if current_chunk.strip():
+            chunk_footer = f"\n\n[FINAL CHUNK {chunk_num} OF ARTICLE: {title[:50]}...]"
+            
+            chunk_article = article.copy()
+            chunk_article.update({
+                'text': current_chunk + chunk_footer,
+                'chunk_number': chunk_num,
+                'total_chunks': chunk_num,
+                'is_chunked': True,
+                'original_title': title
+            })
+            chunks.append(chunk_article)
+        
+        # Update total_chunks for all chunks
+        for chunk in chunks:
+            chunk['total_chunks'] = len(chunks)
+        
+        self._log("info", f"Split article into {len(chunks)} chunks")
+        return chunks
+    
+    def _merge_chunk_results(self, chunk_results: List[Tuple[List[Catalyst], List[Risk], List[Mitigation]]], 
+                           original_article: Dict) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+        """
+        Merge results from multiple chunks of the same article.
+        
+        Args:
+            chunk_results: List of (catalysts, risks, mitigations) tuples from each chunk
+            original_article: Original article metadata
+            
+        Returns:
+            Merged (catalysts, risks, mitigations) tuple
+        """
+        all_catalysts = []
+        all_risks = []
+        all_mitigations = []
+        
+        # Combine all results
+        for catalysts, risks, mitigations in chunk_results:
+            all_catalysts.extend(catalysts)
+            all_risks.extend(risks)
+            all_mitigations.extend(mitigations)
+        
+        # Update article references to use original filename
+        original_filename = original_article.get('file_name', 'unknown')
+        
+        for catalyst in all_catalysts:
+            catalyst.articles_mentioned = [original_filename]
+        
+        for risk in all_risks:
+            risk.articles_mentioned = [original_filename]
+            
+        for mitigation in all_mitigations:
+            mitigation.articles_mentioned = [original_filename]
+        
+        # Merge similar insights within the same article
+        merged_catalysts = self._merge_similar_catalysts(all_catalysts)
+        merged_risks = self._merge_similar_risks(all_risks)
+        merged_mitigations = self._merge_similar_mitigations(all_mitigations)
+        
+        self._log("info", f"Merged chunk results: {len(merged_catalysts)} catalysts, {len(merged_risks)} risks, {len(merged_mitigations)} mitigations")
+        
+        return merged_catalysts, merged_risks, merged_mitigations
 
     # ============= LLM-POWERED ANALYSIS METHODS =============
     
@@ -172,10 +313,42 @@ class ArticleScreener:
             return {response_type: []}
 
     def analyze_article_with_llm(self, article: Dict) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
-        """Analyze a single article using LLM for comprehensive insights."""
+        """
+        Analyze a single article using LLM for comprehensive insights.
+        Handles long articles by intelligently chunking them.
+        """
         if not LLM_AVAILABLE:
             return [], [], []
-            
+        
+        # Check if article needs chunking
+        article_content = f"Title: {article['title']}\n\nContent: {article['text']}"
+        
+        # Estimate tokens needed for prompts
+        try:
+            catalyst_prompt_tokens = self._estimate_prompt_tokens(
+                load_prompt("catalyst_analysis"), 
+                load_prompt("catalyst_user")
+            )
+        except FileNotFoundError:
+            # Fallback if prompt files don't exist
+            catalyst_prompt_tokens = 2000
+        
+        available_tokens = self.max_tokens_per_request - catalyst_prompt_tokens - self.prompt_overhead_tokens
+        
+        # Check if chunking is needed
+        content_tokens = self._count_tokens(article_content)
+        
+        if content_tokens <= available_tokens:
+            # Article fits in one request
+            self._log("info", f"Article '{article['file_name'][:50]}...' ({content_tokens} tokens) fits in single request")
+            return self._analyze_single_chunk(article)
+        else:
+            # Article needs chunking
+            self._log("info", f"Article '{article['file_name'][:50]}...' ({content_tokens} tokens) requires chunking")
+            return self._analyze_chunked_article(article, available_tokens)
+    
+    def _analyze_single_chunk(self, article: Dict) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+        """Analyze a single article chunk that fits in token limits."""
         article_content = f"Title: {article['title']}\n\nContent: {article['text']}"
         catalysts = []
         risks = []
@@ -249,9 +422,27 @@ class ArticleScreener:
                     mitigations.append(mitigation)
             
         except Exception as e:
-            self._log("error", f"[error] LLM analysis failed for article {article['file_name']}: {e}")
+            self._log("error", f"LLM analysis failed for article {article['file_name']}: {e}")
 
         return catalysts, risks, mitigations
+    
+    def _analyze_chunked_article(self, article: Dict, available_tokens: int) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+        """
+        Analyze a long article by splitting it into chunks and merging results.
+        """
+        # Split article into manageable chunks
+        chunks = self._chunk_article_content(article, available_tokens)
+        
+        chunk_results = []
+        for i, chunk in enumerate(chunks):
+            self._log("info", f"Analyzing chunk {i+1}/{len(chunks)} of article '{article['file_name'][:30]}...'")
+            
+            # Analyze this chunk
+            chunk_catalysts, chunk_risks, chunk_mitigations = self._analyze_single_chunk(chunk)
+            chunk_results.append((chunk_catalysts, chunk_risks, chunk_mitigations))
+        
+        # Merge results from all chunks
+        return self._merge_chunk_results(chunk_results, article)
 
     # ============= END LLM METHODS =============
 

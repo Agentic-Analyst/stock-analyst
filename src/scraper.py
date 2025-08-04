@@ -175,7 +175,7 @@ class ArticleScraper:
             if self.logger:
                 self.logger.scraping_progress(url, "in progress")
             else:
-                self._log("info", f"Scraping: {url[:80]}...")
+                self._log("info", f"Scraping: {url}")
             
             article_data = self._scrape_article(url)
             

@@ -2,6 +2,7 @@ from openai import OpenAI
 import time
 import os
 from typing import Tuple, List, Dict
+from logger import get_logger
 
 
 def calculate_cost(response, model_name):
@@ -28,7 +29,7 @@ def calculate_cost(response, model_name):
     return cost
 
 
-def gpt_4o_mini(messages: List[Dict], max_tokens: int = 1500, temperature: float = 0.3) -> Tuple[str, float]:
+def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, float]:
     """
     Call OpenAI GPT-4o-mini with retry logic and error handling.
     
@@ -44,7 +45,7 @@ def gpt_4o_mini(messages: List[Dict], max_tokens: int = 1500, temperature: float
         Exception: If all retry attempts fail
     """
     max_retries = 3
-    
+    logger = get_logger()
     for attempt in range(max_retries):
         try:
             client = OpenAI()
@@ -52,42 +53,27 @@ def gpt_4o_mini(messages: List[Dict], max_tokens: int = 1500, temperature: float
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=max_tokens,
                 temperature=temperature,
-                timeout=30
+                timeout=20
             )
             
             # Calculate cost
             cost = calculate_cost(response, "gpt-4o-mini")
-            
-            # print(f"[info] LLM call succeeded (attempt {attempt + 1}/{max_retries}):\n {response.choices[0].message.content}")
+            logger.info(f"LLM call succeeded (attempt {attempt + 1}/{max_retries}):\n {response.choices[0].message.content}")
+            logger.llm_call("gpt-4o-mini", cost, response.usage.total_tokens)
+
             return response.choices[0].message.content, cost
             
         except Exception as e:
+            logger.error(f"LLM call failed (attempt {attempt + 1}/{max_retries}): {e}")
+
             wait_time = 1  # Exponential backoff: 1s, 2s, 4s
             # Use logger if available, otherwise print
-            try:
-                from logger import get_logger
-                logger = get_logger()
-                if logger:
-                    logger.error(f"LLM call failed (attempt {attempt + 1}/{max_retries}): {e}")
-                    if attempt < max_retries - 1:
-                        logger.info(f"Retrying in {wait_time} seconds...")
-                    else:
-                        logger.error(f"All {max_retries} attempts failed")
-                else:
-                    raise ImportError("No logger available")
-            except ImportError:
-                print(f"[error] LLM call failed (attempt {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    print(f"[info] Retrying in {wait_time} seconds...")
-                else:
-                    print(f"[error] All {max_retries} attempts failed")
-            
             if attempt < max_retries - 1:
+                logger.info(f"Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
             else:
-                raise Exception(f"Connection error")
+                logger.error(f"All {max_retries} attempts failed")
 
 
 def test_connection() -> bool:
