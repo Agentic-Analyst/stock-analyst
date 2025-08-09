@@ -18,7 +18,8 @@ from slugify import slugify
 from serpapi import GoogleSearch
 from newspaper import Article
 
-DATA_ROOT = pathlib.Path("data")
+# Use environment variable for data path, default to local development
+DATA_ROOT = pathlib.Path(os.getenv('DATA_PATH', 'data'))
 
 class ArticleScraper:
     """News article scraper for collecting stock-related news articles."""

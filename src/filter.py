@@ -12,7 +12,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 import yaml
 
-DATA_ROOT = pathlib.Path("data")
+# Use environment variable for data path, default to local development
+DATA_ROOT = pathlib.Path(os.getenv('DATA_PATH', 'data'))
 
 class ArticleFilter:
     def __init__(self, ticker: str):

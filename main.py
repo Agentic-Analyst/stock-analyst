@@ -171,7 +171,9 @@ class StockAnalysisPipeline:
             
             # Save filtered articles
             from pathlib import Path
-            filtered_dir = Path("data") / self.ticker / "filtered"
+            import os
+            data_root = os.getenv('DATA_PATH', 'data')
+            filtered_dir = Path(data_root) / self.ticker / "filtered"
             self.filter.save_filtered_articles(filtered_articles, filtered_dir)
             
             # Update statistics
@@ -253,7 +255,9 @@ class StockAnalysisPipeline:
             # Generate reports if requested
             if generate_reports:
                 from pathlib import Path
-                data_dir = Path("data") / self.ticker
+                import os
+                data_root = os.getenv('DATA_PATH', 'data')
+                data_dir = Path(data_root) / self.ticker
                 
                 # Generate screening report
                 report_file = data_dir / "screening_report.md"

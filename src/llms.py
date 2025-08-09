@@ -1,4 +1,5 @@
 from openai import OpenAI
+from openai import RateLimitError, APITimeoutError, APIConnectionError
 import time
 import os
 from typing import Tuple, List, Dict
@@ -35,7 +36,6 @@ def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, fl
     
     Args:
         messages: List of message dictionaries with 'role' and 'content'
-        max_tokens: Maximum tokens in response
         temperature: Sampling temperature (0.0 to 1.0)
         
     Returns:
@@ -44,36 +44,77 @@ def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, fl
     Raises:
         Exception: If all retry attempts fail
     """
+    # Check API key first
+    if not os.getenv('OPENAI_API_KEY'):
+        raise Exception("OPENAI_API_KEY environment variable is not set")
+    
     max_retries = 3
     logger = get_logger()
+    last_error = None
+    
     for attempt in range(max_retries):
         try:
             client = OpenAI()
+            
+            # Dynamic timeout based on message length
+            # total_chars = sum(len(msg.get('content', '')) for msg in messages)
+            # timeout = min(60, max(30, total_chars // 1000))  # 30-60 seconds based on content
             
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
                 temperature=temperature,
-                timeout=20
+                timeout=60
             )
             
             # Calculate cost
             cost = calculate_cost(response, "gpt-4o-mini")
-            logger.info(f"LLM call succeeded (attempt {attempt + 1}/{max_retries}):\n {response.choices[0].message.content}")
-            logger.llm_call("gpt-4o-mini", cost, response.usage.total_tokens)
+            if logger:
+                logger.info(f"LLM call succeeded (attempt {attempt + 1}/{max_retries})")
+                logger.llm_call("gpt-4o-mini", cost, response.usage.total_tokens)
+            else:
+                print(f"[llm] LLM call succeeded (attempt {attempt + 1}/{max_retries})")
 
             return response.choices[0].message.content, cost
             
-        except Exception as e:
-            logger.error(f"LLM call failed (attempt {attempt + 1}/{max_retries}): {e}")
-
-            wait_time = 1  # Exponential backoff: 1s, 2s, 4s
-            # Use logger if available, otherwise print
-            if attempt < max_retries - 1:
-                logger.info(f"Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
+        except RateLimitError as e:
+            last_error = e
+            if logger:
+                logger.error(f"Rate limit exceeded (attempt {attempt + 1}/{max_retries}): {e}")
             else:
+                print(f"[llm] Rate limit exceeded (attempt {attempt + 1}/{max_retries}): {e}")
+            # wait_time = 2 ** (attempt + 2)  # Longer wait for rate limits: 8s, 16s, 32s
+            
+        except (APITimeoutError, APIConnectionError) as e:
+            last_error = e
+            if logger:
+                logger.error(f"Connection/timeout error (attempt {attempt + 1}/{max_retries}): {e}")
+            else:
+                print(f"[llm] Connection/timeout error (attempt {attempt + 1}/{max_retries}): {e}")
+            # wait_time = 2 ** (attempt + 1)  # Standard backoff: 2s, 4s, 8s
+            
+        except Exception as e:
+            last_error = e
+            error_type = type(e).__name__
+            if logger:
+                logger.error(f"Unexpected error (attempt {attempt + 1}/{max_retries}): {error_type}: {e}")
+            else:
+                print(f"[llm] Unexpected error (attempt {attempt + 1}/{max_retries}): {error_type}: {e}")
+            # wait_time = 2 ** (attempt + 1)  # Standard backoff: 2s, 4s, 8s
+
+        if attempt < max_retries - 1:
+            if logger:
+                logger.info(f"Retrying in 1 seconds...")
+            else:
+                print(f"[llm] Retrying in 1 seconds...")
+            # time.sleep(wait_time)
+        else:
+            error_msg = f"OpenAI API call failed after {max_retries} attempts. Last error: {type(last_error).__name__}: {last_error}"
+            if logger:
                 logger.error(f"All {max_retries} attempts failed")
+            else:
+                print(f"[llm] All {max_retries} attempts failed")
+            logger.error(error_msg)
 
 
 def test_connection() -> bool:

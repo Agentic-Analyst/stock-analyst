@@ -28,7 +28,8 @@ except ImportError:
     def gpt_4o_mini(*args, **kwargs):
         raise ImportError("LLM functionality not available. Please check llms.py")
 
-DATA_ROOT = pathlib.Path("data")
+# Use environment variable for data path, default to local development  
+DATA_ROOT = pathlib.Path(os.getenv('DATA_PATH', 'data'))
 PROMPTS_ROOT = pathlib.Path("prompts")
 
 def load_prompt(prompt_name: str) -> str:

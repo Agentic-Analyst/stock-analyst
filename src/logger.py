@@ -8,6 +8,7 @@ and provides both file logging and console output with proper formatting.
 
 import logging
 import pathlib
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -23,7 +24,10 @@ class StockAnalystLogger:
             console_level: Console logging level ('DEBUG', 'INFO', 'WARNING', 'ERROR')
         """
         self.ticker = ticker.upper()
-        self.data_dir = pathlib.Path("data") / self.ticker
+        
+        # Use environment variable for data path, default to local development
+        data_root = os.getenv('DATA_PATH', 'data')
+        self.data_dir = pathlib.Path(data_root) / self.ticker
         self.log_file = self.data_dir / "info.log"
         
         # Ensure data directory exists
