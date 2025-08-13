@@ -4,6 +4,7 @@ FROM python:3.11-slim
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV DATA_PATH=/data
 
 # Install system dependencies for newspaper3k and other packages
 RUN apt-get update && apt-get install -y \
@@ -29,10 +30,10 @@ COPY prompts/ prompts/
 COPY main.py .
 
 # Create data directory for outputs
-RUN mkdir -p /app/data
+RUN mkdir -p /data
 
 # Use a shared volume for outputs
-VOLUME ["/app/data"]
+VOLUME ["/data"]
 
 # Set the entry point
 ENTRYPOINT ["python", "main.py"]
