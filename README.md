@@ -37,7 +37,7 @@ set SERPAPI_API_KEY=your_api_key_here
 1. **Scrape articles:**
 
 ```sh
-python src/scraper.py --company "NVIDIA" --ticker NVDA --max 15
+python src/article_scraper.py --company "NVIDIA" --ticker NVDA --max 15
 ```
 
 2. **Filter articles:**

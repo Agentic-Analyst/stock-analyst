@@ -3,7 +3,7 @@
 main.py - Integrated Stock Analysis Pipeline
 
 This module orchestrates the complete stock analysis workflow:
-1. Article Scraping (scraper.py) - Collect news articles from Google News
+1. Article Scraping (article_scraper.py) - Collect news articles from Google News
 2. Article Filtering (filter.py) - Filter for relevance and quality  
 3. LLM Analysis (screener.py) - Extract investment insights using AI
 
@@ -25,14 +25,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
 
 # Import pipeline modules
 from logger import setup_logger, StockAnalystLogger
-from scraper import ArticleScraper
+from article_scraper import ArticleScraper
 from filter import ArticleFilter
 from screener import ArticleScreener
 
 # Add src directory to path for imports
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
 
-from scraper import ArticleScraper
+from article_scraper import ArticleScraper
 from filter import ArticleFilter
 from screener import ArticleScreener
 

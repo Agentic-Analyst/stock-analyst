@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-scraper.py - News article scraper and collector for stock analysis.
+article_scraper.py - News article scraper and collector for stock analysis.
 
 This module provides the ArticleScraper class for collecting and storing news articles
 from Google News via SerpAPI. Compatible with filter.py and screener.py modules.
 
 ▶ Usage:
-    python src/scraper.py --company "NVIDIA" --ticker NVDA --max 15
+    python src/article_scraper.py --company "NVIDIA" --ticker NVDA --max 15
 """
 
 from __future__ import annotations
