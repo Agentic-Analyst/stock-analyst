@@ -52,6 +52,24 @@ python src/filter.py --ticker NVDA --min-score 5.0 --max-articles 8 --save-filte
 python src/screener.py --ticker NVDA --min-confidence 0.7 --output-report --detailed-analysis
 ```
 
+4. **Scrape financial data:**
+
+```sh
+python src/financial_scraper.py --ticker NVDA --statements modeling --save
+```
+
+5. **Generate financial models:**
+
+```sh
+python src/financial_model_generator.py --ticker NVDA --model comprehensive --save-excel
+```
+
+6. **Complete pipeline:**
+
+```sh
+python demo_financial_modeling_pipeline.py --ticker NVDA --full-pipeline
+```
+
 ## Filter Logic
 
 **Balanced Weighting:** Clear distribution of score components:
@@ -69,7 +87,11 @@ python src/screener.py --ticker NVDA --min-confidence 0.7 --output-report --deta
 ## Features
 
 - **Autonomous News Collection:** Scrapes news and blog articles for any stock ticker
-- **Smart Filtering:** Advanced relevance scoring based on content analysis
+- **Smart Filtering:** Advanced relevance scoring based on content analysis  
 - **Investment Screening:** Extracts growth catalysts, risks, and mitigation strategies
+- **Financial Data Collection:** Comprehensive financial statements and market data scraping
+- **LLM-Powered Financial Modeling:** Generates professional DCF models and valuation analysis
+- **Excel/CSV Export:** Professional financial models in Excel format ready for analysis
 - **Structured Reports:** Generates comprehensive markdown reports and JSON data
+- **Complete Pipeline:** End-to-end workflow from news analysis to financial modeling
 - **Configurable:** Adjustable confidence thresholds and output options
