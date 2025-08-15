@@ -2,11 +2,10 @@ version: '3.8'
 
 services:
   stock-analyst:
-    build: .
-    image: stock-analyst:latest
+    image: fuzanwenn/stock-analyst:latest
     container_name: stock-analyst
     volumes:
-      - ./data:/app/data
+      - ./data:/data
     environment:
       - SERPAPI_API_KEY=${SERPAPI_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -15,11 +14,10 @@ services:
     
   # Optional: Add a development service for debugging
   stock-analyst-dev:
-    build: .
-    image: stock-analyst:latest
+    image: fuzanwenn/stock-analyst:latest
     container_name: stock-analyst-dev
     volumes:
-      - ./data:/app/data
+      - ./data:/data
       - ./src:/app/src  # Mount source for development
       - ./prompts:/app/prompts
     environment:
