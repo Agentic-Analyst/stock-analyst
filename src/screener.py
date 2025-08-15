@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-screener.py - LLM-powered stock screening and analysis of filtered articles.
+screener.py - Unified LLM-powered stock screening and analysis of filtered articles.
 
-This module uses AI prompts stored in external markdown files to analyze news articles
-for investment insights including growth catalysts, risks, and mitigation strategies.
+This module uses a single comprehensive AI prompt to analyze news articles for investment
+insights including growth catalysts, risks, and mitigation strategies in one efficient call.
 
 ▶ Usage:
     python src/screener.py --ticker NVDA --output-report
@@ -76,6 +76,17 @@ class Mitigation:
     company_action: Optional[str] = None  # What the company is doing/planning
     llm_reasoning: Optional[str] = None  # AI reasoning for this mitigation
     llm_confidence: Optional[float] = None  # LLM-provided confidence score
+
+@dataclass 
+class AnalysisSummary:
+    """Represents overall analysis summary from unified analysis."""
+    overall_sentiment: str  # 'bullish', 'neutral', 'bearish'
+    key_themes: List[str]
+    confidence_score: float  # 0.0 to 1.0
+    articles_analyzed: int = 0
+    total_catalysts: int = 0
+    total_risks: int = 0
+    total_mitigations: int = 0
 
 class ArticleScreener:
     def __init__(self, ticker: str):
@@ -243,10 +254,10 @@ class ArticleScreener:
 
     # ============= LLM-POWERED ANALYSIS METHODS =============
     
-    def _create_catalyst_analysis_prompt(self, article_content: str, company_ticker: str) -> List[Dict]:
-        """Create Chain-of-Thought prompt for catalyst analysis."""
-        system_prompt = load_prompt("catalyst_analysis")
-        user_prompt = load_prompt("catalyst_user").format(
+    def _create_unified_analysis_prompt(self, article_content: str, company_ticker: str) -> List[Dict]:
+        """Create unified prompt for comprehensive catalyst, risk, and mitigation analysis."""
+        system_prompt = load_prompt("unified_analysis")
+        user_prompt = load_prompt("unified_user").format(
             company_ticker=company_ticker,
             article_content=article_content
         )
@@ -255,35 +266,57 @@ class ArticleScreener:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-
-    def _create_risk_analysis_prompt(self, article_content: str, company_ticker: str) -> List[Dict]:
-        """Create Chain-of-Thought prompt for risk analysis."""
-        system_prompt = load_prompt("risk_analysis")
-        user_prompt = load_prompt("risk_user").format(
-            company_ticker=company_ticker,
-            article_content=article_content
-        )
-        
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-
-    def _create_mitigation_analysis_prompt(self, article_content: str, company_ticker: str, identified_risks: List[Risk]) -> List[Dict]:
-        """Create prompt for analyzing risk mitigation strategies."""
-        risk_summary = "\n".join([f"- {risk.type}: {risk.description}" for risk in identified_risks])
-        
-        system_prompt = load_prompt("mitigation_analysis")
-        user_prompt = load_prompt("mitigation_user").format(
-            company_ticker=company_ticker,
-            article_content=article_content,
-            risk_summary=risk_summary
-        )
-        
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+    
+    def _display_intermediate_analysis_results(self, analysis_data: Dict, article_name: str):
+        """Display user-friendly intermediate analysis results for real-time feedback."""
+        try:
+            # Get analysis summary if available
+            summary = analysis_data.get("analysis_summary", {})
+            sentiment = summary.get("overall_sentiment", "unknown")
+            themes = summary.get("key_themes", [])
+            
+            # Count insights
+            catalysts = analysis_data.get("catalysts", [])
+            risks = analysis_data.get("risks", [])
+            mitigations = analysis_data.get("mitigations", [])
+            
+            # Display article summary
+            self._log("info", f"📄 [{article_name[:40]}...] Analysis Complete:")
+            self._log("info", f"   📊 Sentiment: {sentiment.title()} | Insights: 🚀{len(catalysts)} catalyst ⚠️{len(risks)} risk 🛡️{len(mitigations)} mitigation")
+            
+            # Show key themes if available
+            if themes:
+                themes_str = ", ".join(themes[:2])  # Show top 2 themes
+                self._log("info", f"   🎯 Key Themes: {themes_str}")
+            
+            # Show top catalyst if found
+            if catalysts:
+                top_catalyst = max(catalysts, key=lambda x: x.get("confidence", 0))
+                catalyst_desc = top_catalyst.get("description", "")
+                catalyst_conf = top_catalyst.get("confidence", 0)
+                catalyst_type = top_catalyst.get("type", "unknown").title()
+                self._log("info", f"   🚀 Top Catalyst: {catalyst_type} ({catalyst_conf:.1%}) - {catalyst_desc}...")
+            
+            # Show top risk if found
+            if risks:
+                top_risk = max(risks, key=lambda x: x.get("confidence", 0))
+                risk_desc = top_risk.get("description", "")
+                risk_conf = top_risk.get("confidence", 0)
+                risk_severity = top_risk.get("severity", "unknown").upper()
+                risk_type = top_risk.get("type", "unknown").title()
+                self._log("info", f"   ⚠️  Top Risk: {risk_type} [{risk_severity}] ({risk_conf:.1%}) - {risk_desc}...")
+            
+            # Show top mitigation if found
+            if mitigations:
+                top_mitigation = mitigations[0]  # First mitigation
+                mit_strategy = top_mitigation.get("strategy", "")
+                mit_effectiveness = top_mitigation.get("effectiveness", "unknown").title()
+                self._log("info", f"   🛡️  Mitigation: [{mit_effectiveness}] {mit_strategy}...")
+            
+            self._log("info", f"   ─────────────────────────────────────────────────")
+            
+        except Exception as e:
+            self._log("warning", f"Could not display intermediate results for {article_name}: {e}")
 
     def _parse_llm_json_response(self, response_text: str, response_type: str) -> Dict:
         """Safely parse LLM JSON response with error handling."""
@@ -303,15 +336,52 @@ class ArticleScreener:
             
             # Parse JSON
             parsed = json.loads(response_text)
+            
+            # For unified analysis, ensure all required keys exist
+            if response_type == "unified_analysis":
+                if "catalysts" not in parsed:
+                    parsed["catalysts"] = []
+                if "risks" not in parsed:
+                    parsed["risks"] = []
+                if "mitigations" not in parsed:
+                    parsed["mitigations"] = []
+                if "analysis_summary" not in parsed:
+                    parsed["analysis_summary"] = {
+                        "overall_sentiment": "neutral",
+                        "key_themes": [],
+                        "confidence_score": 0.5
+                    }
+            
             return parsed
             
         except json.JSONDecodeError as e:
             self._log("warning", f"Failed to parse LLM {response_type} response as JSON: {e}")
             self._log("warning", f"Raw response: {response_text[:200]}...")
-            return {response_type: []}
+            
+            # Return appropriate empty structure based on response type
+            if response_type == "unified_analysis":
+                return {
+                    "analysis_summary": {"overall_sentiment": "neutral", "key_themes": [], "confidence_score": 0.5},
+                    "catalysts": [],
+                    "risks": [],
+                    "mitigations": []
+                }
+            else:
+                return {response_type: []}
+                
         except Exception as e:
             self._log("warning", f"Error processing LLM {response_type} response: {e}")
-            return {response_type: []}
+            
+            # Return appropriate empty structure based on response type
+            if response_type == "unified_analysis":
+                return {
+                    "analysis_summary": {"overall_sentiment": "neutral", "key_themes": [], "confidence_score": 0.5},
+                    "catalysts": [],
+                    "risks": [],
+                    "mitigations": []
+                }
+            else:
+                return {response_type: []}
 
     def analyze_article_with_llm(self, article: Dict) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
         """
@@ -325,17 +395,13 @@ class ArticleScreener:
         article_content = f"Title: {article['title']}\n\nContent: {article['text']}"
         
         # Estimate tokens needed for prompts
-        try:
-            catalyst_prompt_tokens = self._estimate_prompt_tokens(
-                load_prompt("catalyst_analysis"), 
-                load_prompt("catalyst_user")
-            )
-        except FileNotFoundError:
-            # Fallback if prompt files don't exist
-            catalyst_prompt_tokens = 2000
-        
-        available_tokens = self.max_tokens_per_request - catalyst_prompt_tokens - self.prompt_overhead_tokens
-        
+        unified_prompt_tokens = self._estimate_prompt_tokens(
+            load_prompt("unified_analysis"),
+            load_prompt("unified_user")
+        )
+
+        available_tokens = self.max_tokens_per_request - unified_prompt_tokens - self.prompt_overhead_tokens
+
         # Check if chunking is needed
         content_tokens = self._count_tokens(article_content)
         
@@ -349,22 +415,30 @@ class ArticleScreener:
             return self._analyze_chunked_article(article, available_tokens)
     
     def _analyze_single_chunk(self, article: Dict) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
-        """Analyze a single article chunk that fits in token limits."""
+        """Analyze a single article chunk using unified LLM analysis."""
         article_content = f"Title: {article['title']}\n\nContent: {article['text']}"
         catalysts = []
         risks = []
         mitigations = []
         
         try:
-            # Step 1: Analyze Growth Catalysts
-            self._log("info", f"[llm] Analyzing catalysts for article: {article['file_name'][:50]}...")
-            catalyst_prompt = self._create_catalyst_analysis_prompt(article_content, self.ticker)
-            catalyst_response, cost1 = gpt_4o_mini(catalyst_prompt)
-            self.total_llm_cost += cost1
-            self.llm_call_count += 1
-            catalyst_data = self._parse_llm_json_response(catalyst_response, "catalysts")
+            # Single unified LLM call for comprehensive analysis
+            article_title = article.get('title', 'Unknown Title')[:50]
+            self._log("info", f"🤖 Analyzing '{article_title}...' - Extracting catalysts, risks & mitigations...")
             
-            for cat_data in catalyst_data.get("catalysts", []):
+            unified_prompt = self._create_unified_analysis_prompt(article_content, self.ticker)
+            response, cost = gpt_4o_mini(unified_prompt)
+            self.total_llm_cost += cost
+            self.llm_call_count += 1
+            
+            # Parse the unified response
+            analysis_data = self._parse_llm_json_response(response, "unified_analysis")
+            
+            # Display intermediate results to user for real-time feedback
+            self._display_intermediate_analysis_results(analysis_data, article['file_name'])
+            
+            # Extract catalysts
+            for cat_data in analysis_data.get("catalysts", []):
                 catalyst = Catalyst(
                     type=cat_data.get("type", "unknown").lower(),
                     description=cat_data.get("description", ""),
@@ -377,53 +451,43 @@ class ArticleScreener:
                 )
                 catalysts.append(catalyst)
 
-            # Step 2: Analyze Risks
-            self._log("info", f"[llm] Analyzing risks for article: {article['file_name'][:50]}...")
-            risk_prompt = self._create_risk_analysis_prompt(article_content, self.ticker)
-            risk_response, cost2 = gpt_4o_mini(risk_prompt)
-            self.total_llm_cost += cost2
-            self.llm_call_count += 1
-            risk_data = self._parse_llm_json_response(risk_response, "risks")
-            
-            for risk_data_item in risk_data.get("risks", []):
+            # Extract risks
+            for risk_data in analysis_data.get("risks", []):
                 risk = Risk(
-                    type=risk_data_item.get("type", "unknown").lower(),
-                    description=risk_data_item.get("description", ""),
-                    severity=risk_data_item.get("severity", "medium").lower(),
-                    confidence=risk_data_item.get("confidence", 0.5),
-                    supporting_evidence=risk_data_item.get("supporting_evidence", []),
+                    type=risk_data.get("type", "unknown").lower(),
+                    description=risk_data.get("description", ""),
+                    severity=risk_data.get("severity", "medium").lower(),
+                    confidence=risk_data.get("confidence", 0.5),
+                    supporting_evidence=risk_data.get("supporting_evidence", []),
                     articles_mentioned=[article['file_name']],
-                    potential_impact=risk_data_item.get("potential_impact", ""),
-                    llm_reasoning=risk_data_item.get("reasoning", ""),
-                    llm_confidence=risk_data_item.get("confidence", 0.5)
+                    potential_impact=risk_data.get("potential_impact", ""),
+                    llm_reasoning=risk_data.get("reasoning", ""),
+                    llm_confidence=risk_data.get("confidence", 0.5)
                 )
                 risks.append(risk)
             
-            # Step 3: Analyze Mitigations
-            if risks:  # Only analyze mitigations if risks were found
-                self._log("info", f"[llm] Analyzing mitigations for article: {article['file_name'][:50]}...")
-                mitigation_prompt = self._create_mitigation_analysis_prompt(article_content, self.ticker, risks)
-                mitigation_response, cost3 = gpt_4o_mini(mitigation_prompt)
-                self.total_llm_cost += cost3
-                self.llm_call_count += 1
-                mitigation_data = self._parse_llm_json_response(mitigation_response, "mitigations")
-                
-                for mit_data in mitigation_data.get("mitigations", []):
-                    mitigation = Mitigation(
-                        risk_addressed=mit_data.get("risk_addressed", ""),
-                        strategy=mit_data.get("strategy", ""),
-                        confidence=mit_data.get("confidence", 0.5),
-                        supporting_evidence=mit_data.get("supporting_evidence", []),
-                        articles_mentioned=[article['file_name']],
-                        effectiveness=mit_data.get("effectiveness", "medium").lower(),
-                        company_action=mit_data.get("company_action", ""),
-                        llm_reasoning=mit_data.get("reasoning", ""),
-                        llm_confidence=mit_data.get("confidence", 0.5)
-                    )
-                    mitigations.append(mitigation)
+            # Extract mitigations
+            for mit_data in analysis_data.get("mitigations", []):
+                mitigation = Mitigation(
+                    risk_addressed=mit_data.get("risk_addressed", ""),
+                    strategy=mit_data.get("strategy", ""),
+                    confidence=mit_data.get("confidence", 0.5),
+                    supporting_evidence=mit_data.get("supporting_evidence", []),
+                    articles_mentioned=[article['file_name']],
+                    effectiveness=mit_data.get("effectiveness", "medium").lower(),
+                    company_action=mit_data.get("company_action", ""),
+                    llm_reasoning=mit_data.get("reasoning", ""),
+                    llm_confidence=mit_data.get("confidence", 0.5)
+                )
+                mitigations.append(mitigation)
+
+            self._log("info", f"[llm] Analysis complete: {len(catalysts)} catalysts, {len(risks)} risks, {len(mitigations)} mitigations")
             
+            # Show cost info
+            self._log("info", f"💰 Article cost: ${cost:.4f} USD | Running total: ${self.total_llm_cost:.4f} USD")
+
         except Exception as e:
-            self._log("error", f"LLM analysis failed for article {article['file_name']}: {e}")
+            self._log("error", f"Analysis failed for article {article['file_name']}: {e}")
 
         return catalysts, risks, mitigations
     
@@ -485,33 +549,93 @@ class ArticleScreener:
 
         return articles
 
-    def analyze_all_articles(self, articles: List[Dict]) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+    def analyze_all_articles(self, articles: List[Dict]) -> Tuple[List[Catalyst], List[Risk], List[Mitigation], AnalysisSummary]:
         """
-        Analyze all articles once and extract catalysts, risks, and mitigations.
-        This is the efficient method that should be used instead of calling individual extract methods.
+        Analyze all articles using unified LLM analysis and extract catalysts, risks, mitigations, and summary.
+        This is the efficient method that uses single LLM calls per article instead of three separate calls.
         """
         if not LLM_AVAILABLE:
             self._log("error", "[error] LLM functionality required for analysis but not available")
-            return [], [], []
+            return [], [], [], AnalysisSummary("neutral", [], 0.5)
             
         all_catalysts = []
         all_risks = []
         all_mitigations = []
 
-        self._log("info", f"[info] Using LLM analysis for {len(articles)} articles...")
+        self._log("info", f"[info] Performing LLM analysis for {len(articles)} articles (1 call per article)...")
+        self._log("info", f"🔄 Starting article-by-article analysis with real-time progress...")
 
-        for article in articles:
+        for i, article in enumerate(articles, 1):
+            self._log("info", f"📰 [{i}/{len(articles)}] Processing: {article['file_name'][:50]}...")
             llm_catalysts, llm_risks, llm_mitigations = self.analyze_article_with_llm(article)
             all_catalysts.extend(llm_catalysts)
             all_risks.extend(llm_risks)
             all_mitigations.extend(llm_mitigations)
         
+        self._log("info", f"🔄 Merging similar insights across {len(articles)} articles...")
         # Merge similar insights to avoid duplicates
         merged_catalysts = self._merge_similar_catalysts(all_catalysts)
         merged_risks = self._merge_similar_risks(all_risks)
         merged_mitigations = self._merge_similar_mitigations(all_mitigations)
         
-        return merged_catalysts, merged_risks, merged_mitigations
+        self._log("info", f"✅ Analysis complete! Raw insights: {len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️")
+        self._log("info", f"🔍 After deduplication: {len(merged_catalysts)}🚀 {len(merged_risks)}⚠️ {len(merged_mitigations)}🛡️")
+        
+        # Create overall analysis summary
+        overall_summary = AnalysisSummary(
+            overall_sentiment=self._determine_overall_sentiment(merged_catalysts, merged_risks),
+            key_themes=self._extract_key_themes(merged_catalysts, merged_risks),
+            confidence_score=self._calculate_overall_confidence(merged_catalysts, merged_risks, merged_mitigations),
+            articles_analyzed=len(articles),
+            total_catalysts=len(merged_catalysts),
+            total_risks=len(merged_risks),
+            total_mitigations=len(merged_mitigations)
+        )
+        
+        return merged_catalysts, merged_risks, merged_mitigations, overall_summary
+
+    def _determine_overall_sentiment(self, catalysts: List[Catalyst], risks: List[Risk]) -> str:
+        """Determine overall sentiment based on catalyst and risk balance."""
+        if not catalysts and not risks:
+            return "neutral"
+        
+        catalyst_score = sum(c.confidence for c in catalysts)
+        risk_score = sum(r.confidence * ({"low": 1, "medium": 2, "high": 3, "critical": 4}.get(r.severity, 2)) for r in risks)
+        
+        if catalyst_score > risk_score * 1.5:
+            return "bullish"
+        elif risk_score > catalyst_score * 1.5:
+            return "bearish"
+        else:
+            return "neutral"
+    
+    def _extract_key_themes(self, catalysts: List[Catalyst], risks: List[Risk]) -> List[str]:
+        """Extract key themes from catalysts and risks."""
+        themes = []
+        
+        # Catalyst themes
+        catalyst_types = Counter(c.type for c in catalysts)
+        for cat_type, count in catalyst_types.most_common(3):
+            themes.append(f"{cat_type.title()} Growth ({count} catalysts)")
+        
+        # Risk themes
+        risk_types = Counter(r.type for r in risks)
+        for risk_type, count in risk_types.most_common(2):
+            themes.append(f"{risk_type.title()} Risk ({count} risks)")
+        
+        return themes[:5]  # Limit to top 5 themes
+    
+    def _calculate_overall_confidence(self, catalysts: List[Catalyst], risks: List[Risk], mitigations: List[Mitigation]) -> float:
+        """Calculate overall confidence score based on all insights."""
+        if not any([catalysts, risks, mitigations]):
+            return 0.5
+        
+        all_confidences = []
+        all_confidences.extend(c.confidence for c in catalysts)
+        all_confidences.extend(r.confidence for r in risks)
+        all_confidences.extend(m.confidence for m in mitigations)
+        
+        return sum(all_confidences) / len(all_confidences) if all_confidences else 0.5
 
 
     def _merge_similar_catalysts(self, catalysts: List[Catalyst]) -> List[Catalyst]:
@@ -647,18 +771,28 @@ class ArticleScreener:
         )
 
     def generate_screening_report(self, catalysts: List[Catalyst], risks: List[Risk], 
-                                mitigations: List[Mitigation], output_file: pathlib.Path):
-        """Generate comprehensive screening report with LLM insights."""
+                                mitigations: List[Mitigation], analysis_summary: AnalysisSummary, output_file: pathlib.Path):
+        """Generate comprehensive screening report with LLM insights and analysis summary."""
         with open(output_file, "w", encoding="utf-8") as f:
-            f.write(f"# {self.ticker} LLM-Powered Stock Screening Analysis\n\n")
+            f.write(f"# {self.ticker} LLM Stock Screening Analysis\n\n")
             f.write(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"**Analysis Method:** LLM-Enhanced Analysis\n\n")
+            f.write(f"**Analysis Method:** LLM Analysis (3x more efficient)\n")
+            f.write(f"**Articles Analyzed:** {analysis_summary.articles_analyzed}\n")
+            f.write(f"**LLM Calls:** {self.llm_call_count} (reduced by ~66% vs. legacy method)\n\n")
             
-            # Executive Summary
+            # Executive Summary with Analysis Summary
             f.write("## 📊 Executive Summary\n\n")
+            f.write(f"**Overall Sentiment:** {analysis_summary.overall_sentiment.title()}\n")
+            f.write(f"**Analysis Confidence:** {analysis_summary.confidence_score:.1%}\n")
             f.write(f"**Growth Catalysts Identified:** {len(catalysts)}\n")
             f.write(f"**Risks Identified:** {len(risks)}\n")
             f.write(f"**Mitigation Strategies:** {len(mitigations)}\n\n")
+            
+            if analysis_summary.key_themes:
+                f.write("**Key Themes:**\n")
+                for theme in analysis_summary.key_themes:
+                    f.write(f"- {theme}\n")
+                f.write("\n")
             
             # High-level insights
             if catalysts or risks:
@@ -823,14 +957,21 @@ class ArticleScreener:
             f.write("\n")
 
     def save_structured_data(self, catalysts: List[Catalyst], risks: List[Risk], 
-                           mitigations: List[Mitigation], output_file: pathlib.Path):
+                           mitigations: List[Mitigation], analysis_summary: AnalysisSummary, output_file: pathlib.Path):
         """Save structured data as JSON for further analysis."""
         data = {
             "timestamp": datetime.now().isoformat(),
             "ticker": self.ticker,
+            "analysis_method": "unified_llm",
+            "analysis_summary": asdict(analysis_summary),
             "catalysts": [asdict(c) for c in catalysts],
             "risks": [asdict(r) for r in risks],
-            "mitigations": [asdict(m) for m in mitigations]
+            "mitigations": [asdict(m) for m in mitigations],
+            "llm_stats": {
+                "total_calls": self.llm_call_count,
+                "total_cost_usd": self.total_llm_cost,
+                "efficiency_improvement": "~66% fewer LLM calls vs legacy 3-step analysis"
+            }
         }
         
         with open(output_file, "w", encoding="utf-8") as f:
@@ -863,10 +1004,11 @@ def main():
         screener._log("error", "LLM functionality not available. Please check that llms.py is properly configured.")
         return
     screener._log("info", "🤖 LLM analysis enabled - this will provide deeper insights but take longer and cost API credits")
+    screener._log("info", "🔍 Real-time progress tracking enabled - you'll see intermediate results as each article is analyzed")
     
     # Extract insights using efficient single-pass analysis
     screener._log("info", "Analyzing articles for catalysts, risks, and mitigations...")
-    all_catalysts, all_risks, all_mitigations = screener.analyze_all_articles(articles)
+    all_catalysts, all_risks, all_mitigations, analysis_summary = screener.analyze_all_articles(articles)
     
     # Filter by confidence threshold
     catalysts = [c for c in all_catalysts if c.confidence >= args.min_confidence]
@@ -875,11 +1017,15 @@ def main():
     
     # Display summary
     screener._log("info", f"Analysis complete:")
+    screener._log("info", f"  Overall Sentiment: {analysis_summary.overall_sentiment.title()}")
+    screener._log("info", f"  Analysis Confidence: {analysis_summary.confidence_score:.1%}")
     screener._log("info", f"  Growth Catalysts: {len(catalysts)}")
     screener._log("info", f"  Risks Identified: {len(risks)}")
     screener._log("info", f"  Mitigation Strategies: {len(mitigations)}")
+    if analysis_summary.key_themes:
+        screener._log("info", f"  Key Themes: {', '.join(analysis_summary.key_themes)}")
     
-    # Display LLM cost information
+    # Display LLM efficiency improvements
     if screener.llm_call_count > 0:
         screener._log("info", f"  LLM Calls Made: {screener.llm_call_count}")
         screener._log("info", f"  Total LLM Cost: ${screener.total_llm_cost:.6f} USD")
@@ -899,12 +1045,12 @@ def main():
     # Generate reports
     if args.output_report:
         report_file = DATA_ROOT / args.ticker / "screening_report.md"
-        screener.generate_screening_report(catalysts, risks, mitigations, report_file)
+        screener.generate_screening_report(catalysts, risks, mitigations, analysis_summary, report_file)
         screener._log("info", f"Screening report saved: {report_file}")
     
     if args.save_data:
         data_file = DATA_ROOT / args.ticker / "screening_data.json"
-        screener.save_structured_data(catalysts, risks, mitigations, data_file)
+        screener.save_structured_data(catalysts, risks, mitigations, analysis_summary, data_file)
         screener._log("info", f"Structured data saved: {data_file}")
     
     # Quick investment outlook
