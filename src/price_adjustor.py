@@ -25,7 +25,7 @@ CLI Example:
 If screening file absent, falls back to unadjusted base price.
 """
 from __future__ import annotations
-import argparse, json, re, statistics, sys, time
+import argparse, json, re, statistics, sys, time, math, datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import ast
@@ -60,6 +60,18 @@ CONF_LINE = re.compile(r"^\*\*Confidence:\*\*\s*([0-9]+(?:\.[0-9]+)?)%")
 TIME_LINE = re.compile(r"^\*\*Timeline:\*\*\s*(.+?)\s*$", re.IGNORECASE)
 DESC_LINE = re.compile(r"^\*\*Description:\*\*\s*(.+?)\s*$")
 CATEGORY_IN_TITLE = re.compile(r"^(\w+)\s+-?\s*(.+)$")
+RISK_ID_PATTERN = re.compile(r"R(\d+)")
+
+
+def _load_structured_screen(path: Path) -> Optional[Dict[str, Any]]:
+    """Attempt to load structured JSON (screening_report.json)."""
+    jf = path.with_suffix('.json')
+    if jf.exists():
+        try:
+            return json.loads(jf.read_text(encoding='utf-8'))
+        except Exception:
+            return None
+    return None
 
 
 def parse_screening_report(path: Path) -> Dict[str, List[Dict[str, Any]]]:
@@ -70,6 +82,18 @@ def parse_screening_report(path: Path) -> Dict[str, List[Dict[str, Any]]]:
     """
     if not path.exists():
         return {"catalysts": [], "risks": [], "mitigations": []}
+    structured = _load_structured_screen(path)
+    if structured:
+        cats = structured.get('catalysts', [])
+        risks = structured.get('risks', [])
+        mits = structured.get('mitigations', [])
+        for idx, r in enumerate(risks, 1):
+            r.setdefault('id', f"R{idx}")
+        for idx, c in enumerate(cats, 1):
+            c.setdefault('id', f"C{idx}")
+        for idx, m in enumerate(mits, 1):
+            m.setdefault('id', f"M{idx}")
+        return {"catalysts": cats, "risks": risks, "mitigations": mits}
     catalysts: List[Dict[str, Any]] = []
     risks: List[Dict[str, Any]] = []
     mitigations: List[Dict[str, Any]] = []
@@ -153,6 +177,13 @@ def parse_screening_report(path: Path) -> Dict[str, List[Dict[str, Any]]]:
         elif current_type == 'mitigation':
             mitigations.append(current)
 
+    # Assign stable IDs for traceability
+    for i, r in enumerate(risks, 1):
+        r['id'] = f"R{i}"
+    for i, c in enumerate(catalysts, 1):
+        c['id'] = f"C{i}"
+    for i, m in enumerate(mitigations, 1):
+        m['id'] = f"M{i}"
     # Derive category heuristically from title prefix (e.g., "Financial Opportunity")
     for lst, typ in ((catalysts, 'catalyst'), (risks, 'risk'), (mitigations, 'mitigation')):
         for item in lst:
@@ -165,6 +196,16 @@ def parse_screening_report(path: Path) -> Dict[str, List[Dict[str, Any]]]:
             item.setdefault('confidence', 0.5)
             item.setdefault('timeline', 'Mid-Term')
             item.setdefault('description', '')
+    # Event classification (deterministic heuristics)
+    try:
+        from event_param_mapping import classify_event
+    except Exception:  # pragma: no cover
+        classify_event = None
+    if classify_event:
+        for c in catalysts:
+            c['event_type'] = classify_event(c.get('title'), c.get('description'))
+        for r in risks:
+            r['event_type'] = classify_event(r.get('title'), r.get('description'))
     return {"catalysts": catalysts, "risks": risks, "mitigations": mitigations}
 
 
@@ -172,7 +213,9 @@ def parse_screening_report(path: Path) -> Dict[str, List[Dict[str, Any]]]:
 
 def compute_adjustment(base_price: Optional[float], factors: Dict[str, List[Dict[str, Any]]],
                        scaling: float = 0.25, cap: float = 0.20,
-                       mitigation_max_relief: float = 0.35) -> Dict[str, Any]:
+                       mitigation_max_relief: float = 0.35,
+                       sector: Optional[str] = None,
+                       now_ts: Optional[float] = None) -> Dict[str, Any]:
     """Convert qualitative screening factors into a price adjustment.
 
     Formula:
@@ -189,11 +232,65 @@ def compute_adjustment(base_price: Optional[float], factors: Dict[str, List[Dict
         return {"base_price": None, "adjusted_price": None, "adjustment_pct": 0.0,
                 "detail": {"reason": "No base price available"}}
 
+    # Load external qualitative config (sector scaling, source weights, recency decay)
+    sector_scaling_adj = 1.0
+    sector_cap_adj = 1.0
+    source_weights = {}
+    recency_half_life = None
+    try:  # optional import safety
+        from qualitative_config import sector_adjustments, SOURCE_WEIGHTS, RECENCY_HALF_LIFE_DAYS
+        source_weights = SOURCE_WEIGHTS
+        recency_half_life = RECENCY_HALF_LIFE_DAYS
+        if sector:
+            s_adj = sector_adjustments(sector)
+            if s_adj.get('scaling'):
+                sector_scaling_adj = s_adj['scaling'] / scaling if scaling else 1.0
+            if s_adj.get('cap'):
+                sector_cap_adj = s_adj['cap'] / cap if cap else 1.0
+    except Exception:  # pragma: no cover
+        pass
+
+    # Adjust scaling & cap per sector
+    eff_scaling = scaling * sector_scaling_adj
+    eff_cap = cap * sector_cap_adj
+    if now_ts is None:
+        now_ts = time.time()
+
+    def extract_age_days(item: Dict[str, Any]) -> Optional[float]:
+        # If items eventually include a timestamp field (iso8601), compute age; else use timeline heuristic
+        ts = item.get('timestamp') or item.get('date')
+        if ts:
+            try:
+                dt = datetime.datetime.fromisoformat(ts.replace('Z',''))
+                return (now_ts - dt.timestamp()) / 86400.0
+            except Exception:
+                return None
+        # Heuristic: Immediate ~7d, Short-Term ~30d, Mid-Term ~90d, Long-Term ~180d
+        tl = (item.get('timeline') or '').lower()
+        if 'immediate' in tl:
+            return 7
+        if 'short' in tl:
+            return 30
+        if 'mid' in tl or 'medium' in tl:
+            return 90
+        if 'long' in tl:
+            return 180
+        return None
+
     def weight_item(item: Dict[str, Any]) -> Tuple[float, float]:
         conf = float(item.get('confidence', 0.0))
         tl = item.get('timeline', '').lower()
-        w = TIMELINE_WEIGHTS.get(tl, 0.5)
-        return conf * w, w
+        base_w = TIMELINE_WEIGHTS.get(tl, 0.5)
+        # Source credibility multiplier (if source metadata present)
+        src = (item.get('source') or '').lower()
+        src_mult = source_weights.get(src, 1.0) if source_weights else 1.0
+        # Recency decay
+        age_days = extract_age_days(item)
+        rec_mult = 1.0
+        if recency_half_life and age_days is not None:
+            rec_mult = 0.5 ** (age_days / recency_half_life)
+        weighted_conf = conf * base_w * src_mult * rec_mult
+        return weighted_conf, base_w
 
     cat_scores = [weight_item(c)[0] for c in catalysts]
     cat_weights = [weight_item(c)[1] for c in catalysts]
@@ -257,8 +354,8 @@ def compute_adjustment(base_price: Optional[float], factors: Dict[str, List[Dict
 
     total_weight = (sum(cat_weights) + sum(risk_weights)) or 1.0
     net_score = (sum(cat_scores) - sum(risk_scores)) / total_weight
-    raw_adj = net_score * scaling
-    adj_pct = max(-cap, min(cap, raw_adj))
+    raw_adj = net_score * eff_scaling
+    adj_pct = max(-eff_cap, min(eff_cap, raw_adj))
 
     # Volatility buffer derived from dispersion of item weights (higher dispersion -> wider range)
     dispersion: float = 0.0
@@ -287,8 +384,8 @@ def compute_adjustment(base_price: Optional[float], factors: Dict[str, List[Dict
             "mitigation_count": len(mitigations),
             "net_score": net_score,
             "raw_adjustment": raw_adj,
-            "cap": cap,
-            "scaling": scaling,
+            "cap": eff_cap,
+            "scaling": eff_scaling,
             "mitigation_relief_ratio": relief_ratio,
             "risk_score_reduction_pct": (1 - (sum(risk_scores) / (sum(risk_scores_raw) or 1))) if risk_scores_raw else 0.0,
             "mitigation_method": 'targeted' if targeted_relief_used else 'aggregate'
@@ -454,10 +551,11 @@ def _parse_args():
     p.add_argument('--term-growth', type=float, default=0.03)
     p.add_argument('--wacc', type=float, default=None)
     p.add_argument('--no-llm', action='store_true')
-    p.add_argument('--scaling', type=float, default=0.25, help='Scaling factor applied to net qualitative score')
-    p.add_argument('--cap', type=float, default=0.20, help='Absolute cap on adjustment (fraction)')
+    p.add_argument('--scaling', type=float, default=0.25, help='Base scaling factor applied to net qualitative score (pre sector adj)')
+    p.add_argument('--cap', type=float, default=0.20, help='Base absolute cap on adjustment (fraction) (pre sector adj)')
     p.add_argument('--json', action='store_true', help='Output JSON only')
     p.add_argument('--screen-file', type=str, default=None, help='Explicit screening_report.md path')
+    p.add_argument('--sector', type=str, default=None, help='Optional sector name for calibration (affects scaling & cap)')
     # LLM delta options
     p.add_argument('--llm-deltas', action='store_true', help='Invoke LLM to propose bounded parameter deltas (growth/margin/capex/wacc)')
     p.add_argument('--apply-deltas', action='store_true', help='Apply proposed deltas and recompute model price')
@@ -466,6 +564,11 @@ def _parse_args():
     p.add_argument('--delta-log', type=str, default=None, help='Optional path to write LLM delta audit log JSON')
     p.add_argument('--export-excel-scenarios', action='store_true', help='Export scenario comparison to Excel')
     p.add_argument('--llm-guardrail-threshold', type=float, default=0.07, help='Max allowed relative divergence between LLM-adjusted and qualitative-adjusted price before flag')
+    # Mapped deterministic parameter delta engine
+    p.add_argument('--use-mapped-deltas', action='store_true', help='Enable deterministic event->parameter mapping pipeline (primary)')
+    p.add_argument('--residual-overlay-cap', type=float, default=0.05, help='Max residual qualitative overlay cap when mapped deltas applied')
+    p.add_argument('--materiality-threshold', type=float, default=0.005, help='Min absolute price impact (fraction) for mapped parameter retention')
+    p.add_argument('--export-mitigation-matrix', action='store_true', help='Add mitigation matrix sheet to Excel export')
     return p.parse_args()
 
 
@@ -481,8 +584,9 @@ def main():
     # Step 2: parse qualitative factors
     factors = parse_screening_report(screen_path)
 
-    # Step 3: compute qualitative adjustment (catalyst vs risk weighting)
-    adj = compute_adjustment(base_price, factors, scaling=args.scaling, cap=args.cap)
+    # Step 3: compute qualitative adjustment (legacy scalar overlay)
+    adj_cap = args.cap
+    adj = compute_adjustment(base_price, factors, scaling=args.scaling, cap=adj_cap, sector=args.sector)
 
     output = {
         'ticker': ticker,
@@ -499,7 +603,129 @@ def main():
         'screen_file_present': Path(screen_path).exists(),
     }
 
-    # Optional Step 4: LLM proposes parameter deltas
+    # Optional Step 4a: deterministic mapped parameter deltas (primary path)
+    mapped_result = None
+    mapped_model_price = None
+    if args.use_mapped_deltas and base_price is not None:
+        try:
+            from event_param_mapping import aggregate_mapped_parameter_deltas
+            # Aggregate catalysts (positive) and risks (negative / adverse)
+            cat_map = aggregate_mapped_parameter_deltas(factors.get('catalysts', []), is_risk=False)
+            risk_map = aggregate_mapped_parameter_deltas(factors.get('risks', []), is_risk=True)
+            # Combine effective deltas
+            eff = {
+                'growth_delta_dec': (cat_map['effective']['growth_delta_dec'] + risk_map['effective']['growth_delta_dec']),
+                'margin_uplift_dec': (cat_map['effective']['margin_uplift_dec'] + risk_map['effective']['margin_uplift_dec']),
+                'capex_rate_delta_dec': (cat_map['effective']['capex_rate_delta_dec'] + risk_map['effective']['capex_rate_delta_dec']),
+                'wacc_delta_dec': (cat_map['effective']['wacc_delta_dec'] + risk_map['effective']['wacc_delta_dec']),
+            }
+            mapped_result = {
+                'catalyst_contributions': cat_map['contributions'],
+                'risk_contributions': risk_map['contributions'],
+                'effective': eff,
+                'accumulated': {
+                    'growth_pp': cat_map['accumulated']['growth_pp'] + risk_map['accumulated']['growth_pp'],
+                    'margin_bps': cat_map['accumulated']['margin_bps'] + risk_map['accumulated']['margin_bps'],
+                    'capex_rate_bps': cat_map['accumulated']['capex_rate_bps'] + risk_map['accumulated']['capex_rate_bps'],
+                    'wacc_bps': cat_map['accumulated']['wacc_bps'] + risk_map['accumulated']['wacc_bps'],
+                }
+            }
+            # Materiality estimation (trial per parameter) using lean runs
+            price_impact_map = {}
+            if args.materiality_threshold > 0 and base_price:
+                from financial_model_generator import FinancialModelGenerator
+                base_metrics_tmp = extract_base_operating_metrics(model_obj)
+                trial_specs = [
+                    ('growth_delta_dec', 'first_year_growth', eff['growth_delta_dec']),
+                    ('margin_uplift_dec', 'margin_uplift', eff['margin_uplift_dec']),
+                    ('capex_rate_delta_dec', 'capex_rate', eff['capex_rate_delta_dec']),
+                ]
+                for key, ov_name, delta_val in trial_specs:
+                    if abs(delta_val) < 1e-8:
+                        continue
+                    gen_trial = FinancialModelGenerator(ticker, no_llm=True)
+                    tr_over = {}
+                    if ov_name == 'first_year_growth':
+                        tr_over['first_year_growth'] = max(0.0, (base_metrics_tmp.get('first_year_growth') or 0.0) + delta_val)
+                    elif ov_name == 'margin_uplift':
+                        tr_over['margin_uplift'] = delta_val
+                    elif ov_name == 'capex_rate':
+                        tr_over['capex_rate'] = max(0.0, (base_metrics_tmp.get('capex_rate') or 0.0) + delta_val)
+                    gen_trial.overrides = tr_over
+                    model_trial = gen_trial.generate_financial_model(model_type=args.model, projection_years=args.years, term_growth=args.term_growth, override_wacc=None, strategy=args.strategy, peers=None, generate_sensitivities=False, lean=True)
+                    val_trial = model_trial.get('valuation_summary') or {}
+                    tprice = val_trial.get('Implied Price') or val_trial.get('Implied Price (blended)')
+                    if tprice:
+                        price_impact_map[key] = (tprice / base_price) - 1
+                # WACC trial
+                if abs(eff['wacc_delta_dec']) > 1e-8:
+                    gen_trial = FinancialModelGenerator(ticker, no_llm=True)
+                    wacc_override_trial = None
+                    base_metrics_tmp = base_metrics_tmp if 'base_metrics_tmp' in locals() else extract_base_operating_metrics(model_obj)
+                    if base_metrics_tmp.get('wacc'):
+                        wacc_override_trial = max(0.04, min(0.20, base_metrics_tmp['wacc'] + eff['wacc_delta_dec']))
+                        model_trial = gen_trial.generate_financial_model(model_type=args.model, projection_years=args.years, term_growth=args.term_growth, override_wacc=wacc_override_trial, strategy=args.strategy, peers=None, generate_sensitivities=False, lean=True)
+                        val_trial = model_trial.get('valuation_summary') or {}
+                        tprice = val_trial.get('Implied Price') or val_trial.get('Implied Price (blended)')
+                        if tprice:
+                            price_impact_map['wacc_delta_dec'] = (tprice / base_price) - 1
+            mapped_result['estimated_price_impacts'] = price_impact_map
+            # Zero out immaterial deltas
+            for dim_key in list(eff.keys()):
+                impact = price_impact_map.get(dim_key)
+                if impact is not None and abs(impact) < args.materiality_threshold:
+                    eff[dim_key] = 0.0
+            # Build overrides after materiality filtering
+            overrides = {}
+            base_metrics_tmp = extract_base_operating_metrics(model_obj)
+            if abs(eff['growth_delta_dec']) > 1e-6:
+                overrides['first_year_growth'] = max(0.0, (base_metrics_tmp.get('first_year_growth') or 0.0) + eff['growth_delta_dec'])
+            if abs(eff['margin_uplift_dec']) > 1e-6:
+                overrides['margin_uplift'] = eff['margin_uplift_dec']
+            if abs(eff['capex_rate_delta_dec']) > 1e-6:
+                overrides['capex_rate'] = max(0.0, (base_metrics_tmp.get('capex_rate') or 0.0) + eff['capex_rate_delta_dec'])
+            wacc_override = None
+            if abs(eff['wacc_delta_dec']) > 1e-6 and base_metrics_tmp.get('wacc'):
+                wacc_override = max(0.04, min(0.20, base_metrics_tmp['wacc'] + eff['wacc_delta_dec']))
+            if overrides or wacc_override:
+                from financial_model_generator import FinancialModelGenerator
+                gen_map = FinancialModelGenerator(ticker, no_llm=True)
+                gen_map.overrides = overrides
+                model_mapped = gen_map.generate_financial_model(model_type=args.model, projection_years=args.years,
+                                                                term_growth=args.term_growth, override_wacc=wacc_override,
+                                                                strategy=args.strategy, peers=None, generate_sensitivities=False, lean=True)
+                val_map = model_mapped.get('valuation_summary') or {}
+                mapped_model_price = val_map.get('Implied Price') or val_map.get('Implied Price (blended)')
+                mapped_result['applied_overrides'] = overrides
+                mapped_result['wacc_override'] = wacc_override
+                mapped_result['mapped_price'] = mapped_model_price
+                if mapped_model_price and base_price:
+                    mapped_result['mapped_total_change_pct'] = (mapped_model_price / base_price) - 1
+        except Exception as e:  # pragma: no cover
+            mapped_result = {'error': str(e)}
+
+    if mapped_result:
+        output['mapped_parameter_deltas'] = mapped_result
+        if mapped_model_price is not None:
+            output['mapped_adjusted_price'] = mapped_model_price
+
+    # Decide primary adjusted price: mapped deltas if available; else qualitative
+    primary_price = output.get('mapped_adjusted_price') or output.get('adjusted_price')
+    output['primary_adjusted_price'] = primary_price
+
+    # Residual qualitative overlay application if mapped deltas used
+    if mapped_result and mapped_model_price and output.get('adjusted_price'):
+        # Compute pure qualitative adjustment pct (already applied earlier) but restrain residual
+        qual_pct = output.get('adjustment_pct', 0.0)
+        residual_cap = args.residual_overlay_cap
+        residual_pct = max(-residual_cap, min(residual_cap, qual_pct))
+        residual_price = mapped_model_price * (1 + residual_pct)
+        output['residual_overlay_pct'] = residual_pct
+        output['final_price'] = residual_price
+    else:
+        output['final_price'] = primary_price
+
+    # Optional Step 4b: LLM proposes parameter deltas
     llm_delta_result = None
     applied_model_price = None
     applied_valuation = None
@@ -557,6 +783,9 @@ def main():
                             output['llm_guardrail_flag'] = True
                             output['llm_guardrail_reason'] = f"LLM adjusted diverges {rel_vs_qual*100:.2f}% vs qualitative (threshold {args.llm_guardrail_threshold*100:.1f}%)"
                 output['llm_adjusted_valuation_summary'] = applied_valuation
+                # If mapped deltas already set a final price, treat LLM as an exploratory scenario only
+                if mapped_result and output.get('final_price') and applied_model_price:
+                    output['llm_vs_mapped_pct'] = (applied_model_price / output['final_price']) - 1 if output['final_price'] else None
                 if sensitivities_after:
                     output['llm_sensitivities_shapes'] = sensitivities_after
             except Exception as e:  # pragma: no cover
@@ -605,6 +834,12 @@ def main():
             q_adj = output.get('adjusted_price')
             if q_adj:
                 ws.append([ticker,'Qualitative', q_adj, (q_adj/base_price)-1, f"Qual adj (net_score={adj['inputs']['net_score']:.3f})"])
+            # Mapped
+            if output.get('mapped_adjusted_price'):
+                ws.append([ticker,'Mapped Params', output['mapped_adjusted_price'], (output['mapped_adjusted_price']/base_price)-1, 'Deterministic mapped'])
+            # Final
+            if output.get('final_price') and output.get('mapped_adjusted_price'):
+                ws.append([ticker,'Final (Mapped+Residual)', output['final_price'], (output['final_price']/base_price)-1, f"Residual overlay {output.get('residual_overlay_pct',0)*100:.1f}%"])
             # LLM adjusted
             if output.get('llm_adjusted_price'):
                 ws.append([ticker,'LLM Adjusted', output['llm_adjusted_price'], (output['llm_adjusted_price']/base_price)-1, 'Applied LLM deltas'])
@@ -618,6 +853,48 @@ def main():
                     ws2.append([
                         d['param'], d['delta_raw'], d['delta_applied'], ','.join(d['sources']), d['reason']
                     ])
+            # Mapped contributions sheet
+            if output.get('mapped_parameter_deltas'):
+                mres = output['mapped_parameter_deltas']
+                ws3 = wb.create_sheet('Mapped Contributions')
+                ws3.append(['Type','Title','Dimension','Applied','Confidence','Timeline'])
+                for cell in ws3[1]:
+                    cell.font = Font(bold=True)
+                for row in mres.get('catalyst_contributions', []):
+                    ws3.append(['Catalyst', row.get('title'), row.get('dimension'), row.get('applied'), row.get('confidence'), row.get('timeline')])
+                for row in mres.get('risk_contributions', []):
+                    ws3.append(['Risk', row.get('title'), row.get('dimension'), row.get('applied'), row.get('confidence'), row.get('timeline')])
+            # Mitigation Matrix sheet (simple overlap / explicit reference)
+            if args.export_mitigation_matrix and factors.get('mitigations') and factors.get('risks'):
+                ws4 = wb.create_sheet('Mitigation Matrix')
+                ws4.append(['Mitigation ID','Mitigation Title','Method','Linked Risks'])
+                for cell in ws4[1]:
+                    cell.font = Font(bold=True)
+                # build risk token sets
+                risk_tokens = []
+                for r in factors.get('risks'):
+                    title = (r.get('title') or '').lower()
+                    toks = {t for t in re.split(r"[^a-z0-9]+", title) if t}
+                    risk_tokens.append((r.get('id'), toks))
+                for m in factors.get('mitigations'):
+                    rid_matches = []
+                    method = 'n/a'
+                    ra = (m.get('risk_addressed') or '').lower()
+                    if ra:
+                        ids = set(RISK_ID_PATTERN.findall(ra))
+                        if ids:
+                            rid_matches = [f"R{x}" for x in ids]
+                            method = 'explicit'
+                        else:
+                            mtoks = {t for t in re.split(r"[^a-z0-9]+", ra) if t}
+                            overlaps = []
+                            for rid, rtoks in risk_tokens:
+                                if mtoks & rtoks:
+                                    overlaps.append(rid)
+                            if overlaps:
+                                rid_matches = overlaps
+                                method = 'token_overlap'
+                    ws4.append([m.get('id'), m.get('title'), method, ','.join(rid_matches)])
             ts = time.strftime('%Y%m%d_%H%M%S')
             scen_path = Path('data') / ticker / 'models' / f'scenarios_{ticker}_{ts}.xlsx'
             scen_path.parent.mkdir(parents=True, exist_ok=True)
@@ -634,11 +911,24 @@ def main():
             print("Base price unavailable; cannot adjust.")
             return 1
         print(f"Base Implied Price: {base_price:,.2f}")
-        print(f"Adjusted Price:     {output['adjusted_price']:,.2f} (Adj {output['adjustment_pct']*100:+.1f}%)")
+        if mapped_result and mapped_model_price:
+            print(f"Mapped Param Price: {mapped_model_price:,.2f} (Δ {mapped_result.get('mapped_total_change_pct',0)*100:+.1f}% vs base)")
+            if output.get('residual_overlay_pct') is not None:
+                print(f"Residual Overlay:   {output['residual_overlay_pct']*100:+.1f}% (cap {args.residual_overlay_cap*100:.1f}%)")
+            print(f"Final Price:        {output['final_price']:,.2f}")
+        else:
+            print(f"Adjusted Price:     {output['adjusted_price']:,.2f} (Adj {output['adjustment_pct']*100:+.1f}%)")
         print(f"Bull Scenario:      {output['bull_price']:,.2f}")
         print(f"Bear Scenario:      {output['bear_price']:,.2f}")
         print(f"Catalysts Parsed:   {output['qualitative_inputs']['catalyst_count']}  | Risks Parsed: {output['qualitative_inputs']['risk_count']}")
         print(f"Vol Buffer (range): {output['vol_buffer']*100:.1f}%")
+        if mapped_result:
+            print("\nMapped Parameter Deltas (effective):")
+            eff = mapped_result.get('effective', {})
+            print(f"  Growth Δ (pp):      {eff.get('growth_delta_dec',0)*100:+.2f}")
+            print(f"  Margin uplift (pp): {eff.get('margin_uplift_dec',0)*100:+.2f}")
+            print(f"  CapEx rate Δ (pp):  {eff.get('capex_rate_delta_dec',0)*100:+.2f}")
+            print(f"  WACC Δ (pp):        {eff.get('wacc_delta_dec',0)*100:+.2f}")
         print("\nKey Sample Catalysts:")
         for c in factors.get('catalysts')[:3]:
             print(f" - {c.get('title')} (Conf {c.get('confidence')*100:.0f}%, {c.get('timeline')})")

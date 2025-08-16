@@ -444,7 +444,7 @@ Be specific and quantitative when possible; keep each section under ~120 words.
     def generate_financial_model(self, model_type: str = "comprehensive", projection_years: int = 5,
                                  term_growth: float = 0.03, override_wacc: Optional[float] = None,
                                  strategy: Optional[str] = None, peers: Optional[List[str]] = None,
-                                 generate_sensitivities: bool = False) -> Dict[str, Any]:
+                                 generate_sensitivities: bool = False, lean: bool = False) -> Dict[str, Any]:
         wacc_str = 'auto' if override_wacc is None else f"{override_wacc:.3f}"
         self._log("info", f"Generating {model_type} model for {self.ticker} "
                           f"({projection_years}y, g={term_growth:.3f}, wacc={wacc_str})")
@@ -460,13 +460,9 @@ Be specific and quantitative when possible; keep each section under ~120 words.
             strat = self._select_strategy(strategy, metrics)
             chosen_strategy_name = strat.name
             # Caching key
-            # Convert lists to strings for hashing
             hashable_overrides = {}
             for k, v in self.overrides.items():
-                if isinstance(v, list):
-                    hashable_overrides[k] = str(v)
-                else:
-                    hashable_overrides[k] = v
+                hashable_overrides[k] = str(v) if isinstance(v, list) else v
             ov_hash = hash(tuple(sorted(hashable_overrides.items())))
             cache_key = (strat.name, projection_years, round(term_growth,6), override_wacc if override_wacc is None else round(override_wacc,6), ov_hash)
             if cache_key in self._forecast_cache:
@@ -480,18 +476,16 @@ Be specific and quantitative when possible; keep each section under ~120 words.
             valuation_summary["Strategy"] = strat_outputs.get("strategy_name")
             components["dcf_model"] = dcf_df
             components["valuation_summary"] = valuation_summary
-            # Extra components (e.g., FFO/AFFO) from strategy
-            extra = strat_outputs.get("extra_components") or {}
-            for k,v in extra.items():
+            # Extra components (e.g., FFO/AFFO)
+            for k,v in (strat_outputs.get("extra_components") or {}).items():
                 components[k] = v
-            # Sensitivities
-            if generate_sensitivities and strat and valuation_summary.get("WACC"):
+            if (not lean) and generate_sensitivities and strat and valuation_summary.get("WACC"):
                 sens = self._generate_sensitivities(strat, metrics, projection_years,
                                                     valuation_summary.get("WACC"), term_growth, term_growth, override_wacc)
                 for k,v in sens.items():
                     components[k] = v
 
-        if model_type in ("comparable", "comprehensive"):
+        if (not lean) and model_type in ("comparable", "comprehensive"):
             comps_df = self._create_comparable_analysis_dataframe(metrics)
             components["comparable_analysis"] = comps_df
             if peers:
@@ -500,8 +494,8 @@ Be specific and quantitative when possible; keep each section under ~120 words.
                     peer_df = self._create_peer_comps(metrics, peer_list)
                     if peer_df is not None:
                         components["peer_comparables"] = peer_df
-        # LLM used only for narrative if enabled
-        llm_analysis = self._generate_llm_financial_analysis(metrics, model_type)
+
+        llm_analysis = {} if lean else self._generate_llm_financial_analysis(metrics, model_type)
 
         model = {
             "ticker": self.ticker,
@@ -524,6 +518,7 @@ Be specific and quantitative when possible; keep each section under ~120 words.
                 "wacc": valuation_summary.get("WACC"),
                 "strategy": valuation_summary.get("Strategy"),
                 "peers": peers,
+                "lean": lean,
             },
             "validation": self._validation_summary(chosen_strategy_name or "n/a", valuation_summary),
         }
