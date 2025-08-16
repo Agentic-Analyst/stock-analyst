@@ -26,15 +26,15 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
 # Import pipeline modules
 from logger import setup_logger, StockAnalystLogger
 from article_scraper import ArticleScraper
-from filter import ArticleFilter
-from screener import ArticleScreener
+from article_filter import ArticleFilter
+from article_screener import ArticleScreener
 
 # Add src directory to path for imports
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
 
 from article_scraper import ArticleScraper
-from filter import ArticleFilter
-from screener import ArticleScreener
+from article_filter import ArticleFilter
+from article_screener import ArticleScreener
 
 class StockAnalysisPipeline:
     """Integrated pipeline for complete stock analysis workflow."""
