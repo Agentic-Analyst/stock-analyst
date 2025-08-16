@@ -224,7 +224,34 @@ def aggregate_mapped_parameter_deltas(parsed_items, is_risk: bool = False) -> Di
         "capex_rate_delta_dec": accum["capex_rate_bps"] / 10000.0,
         "wacc_delta_dec": accum["wacc_bps"] / 10000.0,
     }
-    return {"accumulated": accum, "effective": effective, "contributions": contributions}
+    # Conversion audit log (raw -> decimal) for transparency & downstream reporting
+    conversion_log = [
+        {
+            "dimension": "growth",
+            "raw_pp": accum["growth_pp"],
+            "converted_decimal": effective["growth_delta_dec"],
+            "formula": "growth_pp / 100"
+        },
+        {
+            "dimension": "margin",
+            "raw_bps": accum["margin_bps"],
+            "converted_decimal": effective["margin_uplift_dec"],
+            "formula": "margin_bps / 10000"
+        },
+        {
+            "dimension": "capex_rate",
+            "raw_bps": accum["capex_rate_bps"],
+            "converted_decimal": effective["capex_rate_delta_dec"],
+            "formula": "capex_rate_bps / 10000"
+        },
+        {
+            "dimension": "wacc",
+            "raw_bps": accum["wacc_bps"],
+            "converted_decimal": effective["wacc_delta_dec"],
+            "formula": "wacc_bps / 10000"
+        },
+    ]
+    return {"accumulated": accum, "effective": effective, "contributions": contributions, "conversion_log": conversion_log}
 
 __all__ = [
     "EVENT_PARAM_TEMPLATES",

@@ -560,6 +560,8 @@ def _parse_args():
     p.add_argument('--llm-deltas', action='store_true', help='Invoke LLM to propose bounded parameter deltas (growth/margin/capex/wacc)')
     p.add_argument('--apply-deltas', action='store_true', help='Apply proposed deltas and recompute model price')
     p.add_argument('--llm-temp', type=float, default=ADJUSTOR_DEFAULTS.DEFAULT_LLM_TEMPERATURE, help='LLM temperature for delta generation')
+    p.add_argument('--llm-scenarios', action='store_true', help='Use LLM to propose scenario multipliers & probabilities within guardrails')
+    p.add_argument('--llm-scenarios-temp', type=float, default=0.1, help='LLM temperature for scenario generation')
     p.add_argument('--sens-after-deltas', action='store_true', help='Generate sensitivities after applying deltas')
     p.add_argument('--delta-log', type=str, default=None, help='Optional path to write LLM delta audit log JSON')
     p.add_argument('--export-excel-scenarios', action='store_true', help='Export scenario comparison to Excel')
@@ -628,7 +630,8 @@ def main():
                     'margin_bps': cat_map['accumulated']['margin_bps'] + risk_map['accumulated']['margin_bps'],
                     'capex_rate_bps': cat_map['accumulated']['capex_rate_bps'] + risk_map['accumulated']['capex_rate_bps'],
                     'wacc_bps': cat_map['accumulated']['wacc_bps'] + risk_map['accumulated']['wacc_bps'],
-                }
+                },
+                'conversion_log': cat_map.get('conversion_log', []) + risk_map.get('conversion_log', []),
             }
             # Materiality estimation (trial per parameter) using lean runs
             price_impact_map = {}
@@ -709,9 +712,169 @@ def main():
         if mapped_model_price is not None:
             output['mapped_adjusted_price'] = mapped_model_price
 
+    # Optional LLM Scenario proposal BEFORE deterministic scenario synthesis
+    if args.llm_scenarios and mapped_result and mapped_result.get('effective') and base_price:
+        try:
+            eff = mapped_result['effective']
+            base_metrics_tmp = extract_base_operating_metrics(model_obj)
+            catalyst_summaries = "; ".join((c.get('title') or '')[:60] for c in factors.get('catalysts', [])[:8])
+            risk_summaries = "; ".join((r.get('title') or '')[:60] for r in factors.get('risks', [])[:8])
+            mitigation_summaries = "; ".join((m.get('title') or '')[:60] for m in factors.get('mitigations', [])[:4])
+            prompt_template = Path('prompts/scenario_proposal.md').read_text(encoding='utf-8')
+            prompt = prompt_template.format(
+                effective_json=json.dumps(eff),
+                base_metrics_json=json.dumps(base_metrics_tmp),
+                catalyst_summaries=catalyst_summaries or 'n/a',
+                risk_summaries=risk_summaries or 'n/a',
+                mitigation_summaries=mitigation_summaries or 'n/a'
+            )
+            raw = _llm_fn([
+                {"role": "system", "content": "You design bounded valuation scenarios only within policy risk guardrails."},
+                {"role": "user", "content": prompt}
+            ], temperature=args.llm_scenarios_temp) if _llm_fn else None
+            if isinstance(raw, tuple): raw = raw[0]
+            scen_obj = None
+            if raw:
+                text = str(raw)
+                m = re.search(r"\{[\s\S]+\}", text)
+                if m:
+                    try:
+                        scen_obj = json.loads(m.group(0))
+                    except Exception:
+                        scen_obj = None
+            guard = ADJUSTOR_DEFAULTS
+            def clamp(v, lo, hi):
+                try:
+                    return max(lo, min(hi, float(v)))
+                except Exception:
+                    return None
+            applied_scenarios = {}
+            probs_sum = 0.0
+            if scen_obj and isinstance(scen_obj.get('scenarios'), dict):
+                for name, sc in scen_obj['scenarios'].items():
+                    gm = clamp(sc.get('growth_mult'), *guard.SCENARIO_GROWTH_MULT_RANGE)
+                    mm = clamp(sc.get('margin_mult'), *guard.SCENARIO_MARGIN_MULT_RANGE)
+                    cm = clamp(sc.get('capex_mult'), *guard.SCENARIO_CAPEX_MULT_RANGE)
+                    wm = clamp(sc.get('wacc_mult'), *guard.SCENARIO_WACC_MULT_RANGE)
+                    pr = clamp(sc.get('prob'), guard.SCENARIO_PROB_MIN, guard.SCENARIO_PROB_MAX)
+                    applied_scenarios[name] = {
+                        'growth_mult': gm, 'margin_mult': mm, 'capex_mult': cm, 'wacc_mult': wm,
+                        'prob_raw': sc.get('prob'), 'prob': pr, 'rationale': sc.get('rationale')
+                    }
+                    if pr: probs_sum += pr
+            # Normalize probabilities
+            if probs_sum > 0:
+                for sc in applied_scenarios.values():
+                    sc['prob_norm'] = sc['prob'] / probs_sum
+            else:
+                for sc in applied_scenarios.values():
+                    sc['prob_norm'] = None
+            output['llm_scenario_raw'] = scen_obj
+            output['llm_scenario_applied'] = applied_scenarios
+        except Exception as e:  # pragma: no cover
+            output['llm_scenario_error'] = str(e)
+
     # Decide primary adjusted price: mapped deltas if available; else qualitative
     primary_price = output.get('mapped_adjusted_price') or output.get('adjusted_price')
     output['primary_adjusted_price'] = primary_price
+
+    # Governance: ensure long-term growth (if derivable) < WACC after any overrides
+    try:
+        if model_obj and isinstance(model_obj, dict):
+            val_sum = (model_obj.get('valuation_summary') or {})
+            g_term = val_sum.get('Terminal Growth Rate') or val_sum.get('Terminal Growth')
+            wacc_val = val_sum.get('WACC')
+            if g_term is not None and wacc_val is not None and g_term >= wacc_val:
+                # Clamp growth just below WACC (basis point cushion)
+                adjusted_g = max(0.0, wacc_val - 0.0005)
+                if 'governance_flags' not in output:
+                    output['governance_flags'] = []
+                output['governance_flags'].append({'type': 'g_lt_wacc_enforced', 'original_g': g_term, 'clamped_g': adjusted_g})
+    except Exception:  # pragma: no cover
+        pass
+
+    # Scenario synthesis (Bull/Base/Bear) using mapped effective deltas if present
+    if mapped_result and mapped_result.get('effective') and base_price and 'scenario_set' not in output:
+        eff = mapped_result['effective']
+        scenarios = {}
+        # Base already represented by mapped_model_price (if computed)
+        # Define simple multipliers (could later migrate to config)
+        mults = {
+            'bull': {'growth': 1.3, 'margin': 1.2, 'capex': 1.0, 'wacc': 0.85},
+            'base': {'growth': 1.0, 'margin': 1.0, 'capex': 1.0, 'wacc': 1.0},
+            'bear': {'growth': 0.6, 'margin': 0.7, 'capex': 1.1, 'wacc': 1.15},
+        }
+        # If LLM scenario multipliers exist and passed guardrails, substitute them
+        if output.get('llm_scenario_applied') and isinstance(output['llm_scenario_applied'], dict):
+            applied = output['llm_scenario_applied']
+            # Build mults from LLM with safe defaults
+            for name in ('bull','base','bear'):
+                sc = applied.get(name)
+                if sc:
+                    mults[name] = {
+                        'growth': sc.get('growth_mult') or mults[name]['growth'],
+                        'margin': sc.get('margin_mult') or mults[name]['margin'],
+                        'capex': sc.get('capex_mult') or mults[name]['capex'],
+                        'wacc': sc.get('wacc_mult') or mults[name]['wacc'],
+                    }
+        # Probabilities: prefer normalized LLM probabilities if available
+        probs = {'bull': 0.25, 'base': 0.50, 'bear': 0.25}
+        if output.get('llm_scenario_applied'):
+            p_accum = 0.0
+            llm_applied = output['llm_scenario_applied']
+            for name in ('bull','base','bear'):
+                sc = llm_applied.get(name)
+                if sc and sc.get('prob_norm') is not None:
+                    probs[name] = sc['prob_norm']
+                    p_accum += sc['prob_norm']
+            # Re-normalize if rounding drift
+            if 0.95 < p_accum < 1.05:
+                for k in probs:
+                    probs[k] = probs[k] / p_accum
+        try:
+            from financial_model_generator import FinancialModelGenerator
+            base_metrics_tmp = extract_base_operating_metrics(model_obj)
+            for scen, m in mults.items():
+                overrides = {}
+                if abs(eff.get('growth_delta_dec', 0)) > 1e-8:
+                    overrides['first_year_growth'] = max(0.0, (base_metrics_tmp.get('first_year_growth') or 0.0) + eff['growth_delta_dec'] * m['growth'])
+                if abs(eff.get('margin_uplift_dec', 0)) > 1e-8:
+                    overrides['margin_uplift'] = eff['margin_uplift_dec'] * m['margin']
+                if abs(eff.get('capex_rate_delta_dec', 0)) > 1e-8:
+                    overrides['capex_rate'] = max(0.0, (base_metrics_tmp.get('capex_rate') or 0.0) + eff['capex_rate_delta_dec'] * m['capex'])
+                wacc_override = None
+                if abs(eff.get('wacc_delta_dec', 0)) > 1e-8 and base_metrics_tmp.get('wacc'):
+                    wacc_override = max(0.04, min(0.20, base_metrics_tmp['wacc'] + eff['wacc_delta_dec'] * m['wacc']))
+                gen_s = FinancialModelGenerator(ticker, no_llm=True)
+                gen_s.overrides = overrides
+                model_s = gen_s.generate_financial_model(model_type=args.model, projection_years=args.years,
+                                                         term_growth=args.term_growth, override_wacc=wacc_override,
+                                                         strategy=args.strategy, peers=None, generate_sensitivities=False, lean=True)
+                val_s = model_s.get('valuation_summary') or {}
+                price_s = val_s.get('Implied Price') or val_s.get('Implied Price (blended)')
+                scenarios[scen] = {
+                    'price': price_s,
+                    'overrides': overrides,
+                    'wacc_override': wacc_override,
+                    'mults': m,
+                    'delta_effective': eff,
+                }
+            # Probability-weighted price (exclude missing scenarios)
+            pw_price = 0.0
+            weight_sum = 0.0
+            for scen, data in scenarios.items():
+                p = probs.get(scen, 0)
+                if data['price'] and p > 0:
+                    pw_price += data['price'] * p
+                    weight_sum += p
+            if weight_sum > 0:
+                pw_price /= weight_sum
+            output['scenario_set'] = scenarios
+            output['scenario_probabilities'] = probs
+            if pw_price:
+                output['probability_weighted_price'] = pw_price
+        except Exception as e:  # pragma: no cover
+            output['scenario_error'] = str(e)
 
     # Residual qualitative overlay application if mapped deltas used
     if mapped_result and mapped_model_price and output.get('adjusted_price'):
@@ -774,6 +937,11 @@ def main():
                 output['llm_applied_overrides'] = overrides
                 output['llm_applied_wacc'] = wacc_override
                 output['llm_adjusted_price'] = applied_model_price
+                # Materiality filter: ignore if below threshold vs base
+                if applied_model_price and base_price and abs(applied_model_price / base_price - 1) < args.materiality_threshold:
+                    output['llm_ignored_non_material'] = True
+                    applied_model_price = None
+                    output['llm_adjusted_price'] = None
                 if applied_model_price and base_price:
                     output['llm_total_change_pct'] = (applied_model_price / base_price) - 1
                     if output.get('adjusted_price'):
@@ -813,6 +981,22 @@ def main():
         except Exception as e:  # pragma: no cover
             output['delta_log_error'] = str(e)
 
+    # Final price selection logic (rerun deltas supersede qualitative unless non-material / guardrail flagged & excluded)
+    if args.apply_deltas and output.get('llm_adjusted_price'):
+        if output.get('final_price') and mapped_result and output.get('residual_overlay_pct') is not None:
+            # If a residual overlay was already applied to mapped result earlier, decide whether to re-overlay
+            resid = max(-args.residual_overlay_cap, min(args.residual_overlay_cap, output.get('adjustment_pct', 0.0)))
+            output['final_price'] = output['llm_adjusted_price'] * (1 + resid)
+            output['residual_overlay_pct_llm'] = resid
+            output['method'] = 'llm_rerun_with_residual'
+        else:
+            output['final_price'] = output['llm_adjusted_price']
+            output['method'] = 'llm_rerun'
+    elif mapped_result and output.get('final_price'):
+        output.setdefault('method', 'mapped_parameters')
+    else:
+        output.setdefault('method', 'qual_overlay')
+
     # Scenario Excel export
     if args.export_excel_scenarios and base_price is not None:
         try:
@@ -825,24 +1009,28 @@ def main():
             wb = Workbook()
             ws = wb.active
             ws.title = 'Scenarios'
-            ws.append(['Ticker','Scenario','Implied Price','Adj % vs Base','Notes'])
+            ws.append(['Ticker','Scenario','Implied Price','Adj % vs Base','Probability','Notes'])
             for cell in ws[1]:
                 cell.font = Font(bold=True)
             # Base
-            ws.append([ticker,'Base', base_price, 0.0, 'Raw DCF output'])
+            ws.append([ticker,'Base', base_price, 0.0, output.get('scenario_probabilities', {}).get('base'), 'Raw DCF output'])
             # Qualitative
             q_adj = output.get('adjusted_price')
             if q_adj:
-                ws.append([ticker,'Qualitative', q_adj, (q_adj/base_price)-1, f"Qual adj (net_score={adj['inputs']['net_score']:.3f})"])
+                ws.append([ticker,'Qualitative', q_adj, (q_adj/base_price)-1, None, f"Qual adj (net_score={adj['inputs']['net_score']:.3f})"])
             # Mapped
             if output.get('mapped_adjusted_price'):
-                ws.append([ticker,'Mapped Params', output['mapped_adjusted_price'], (output['mapped_adjusted_price']/base_price)-1, 'Deterministic mapped'])
+                ws.append([ticker,'Mapped Params', output['mapped_adjusted_price'], (output['mapped_adjusted_price']/base_price)-1, output.get('scenario_probabilities', {}).get('base'), 'Deterministic mapped'])
             # Final
             if output.get('final_price') and output.get('mapped_adjusted_price'):
-                ws.append([ticker,'Final (Mapped+Residual)', output['final_price'], (output['final_price']/base_price)-1, f"Residual overlay {output.get('residual_overlay_pct',0)*100:.1f}%"])
+                ws.append([ticker,'Final (Mapped+Residual)', output['final_price'], (output['final_price']/base_price)-1, output.get('scenario_probabilities', {}).get('base'), f"Residual overlay {output.get('residual_overlay_pct',0)*100:.1f}%"])
             # LLM adjusted
             if output.get('llm_adjusted_price'):
-                ws.append([ticker,'LLM Adjusted', output['llm_adjusted_price'], (output['llm_adjusted_price']/base_price)-1, 'Applied LLM deltas'])
+                ws.append([ticker,'LLM Adjusted', output['llm_adjusted_price'], (output['llm_adjusted_price']/base_price)-1, None, 'Applied LLM deltas'])
+            # Probability-weighted result
+            if output.get('probability_weighted_price'):
+                pw = output['probability_weighted_price']
+                ws.append([ticker,'Prob-Weighted', pw, (pw/base_price)-1, 1.0, 'Weighted by scenario probabilities'])
             # Delta breakdown sheet
             if output.get('llm_deltas'):
                 ws2 = wb.create_sheet('LLM Deltas')
@@ -864,6 +1052,18 @@ def main():
                     ws3.append(['Catalyst', row.get('title'), row.get('dimension'), row.get('applied'), row.get('confidence'), row.get('timeline')])
                 for row in mres.get('risk_contributions', []):
                     ws3.append(['Risk', row.get('title'), row.get('dimension'), row.get('applied'), row.get('confidence'), row.get('timeline')])
+            # LLM Scenario sheet
+            if output.get('llm_scenario_applied'):
+                ws_sc = wb.create_sheet('LLM Scenarios')
+                ws_sc.append(['Scenario','Growth Mult','Margin Mult','Capex Mult','WACC Mult','Prob Raw','Prob Clamped','Prob Norm','Rationale'])
+                for cell in ws_sc[1]:
+                    cell.font = Font(bold=True)
+                for name, sc in output['llm_scenario_applied'].items():
+                    ws_sc.append([
+                        name,
+                        sc.get('growth_mult'), sc.get('margin_mult'), sc.get('capex_mult'), sc.get('wacc_mult'),
+                        sc.get('prob_raw'), sc.get('prob'), sc.get('prob_norm'), sc.get('rationale')
+                    ])
             # Mitigation Matrix sheet (simple overlap / explicit reference)
             if args.export_mitigation_matrix and factors.get('mitigations') and factors.get('risks'):
                 ws4 = wb.create_sheet('Mitigation Matrix')

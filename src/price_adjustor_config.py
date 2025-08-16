@@ -46,6 +46,16 @@ class PriceAdjustorDefaults:
     # Additional CLI defaults
     DEFAULT_RESIDUAL_OVERLAY_CAP: float = 0.05
     DEFAULT_MATERIALITY_THRESHOLD: float = 0.005
+
+    # Scenario multiplier guardrails (applied to mapped effective deltas)
+    SCENARIO_GROWTH_MULT_RANGE = (0.5, 1.5)   # bear to aggressive bull
+    SCENARIO_MARGIN_MULT_RANGE = (0.6, 1.3)
+    SCENARIO_CAPEX_MULT_RANGE = (0.8, 1.2)
+    SCENARIO_WACC_MULT_RANGE = (0.8, 1.2)
+    # Probability guardrails (individual) and epsilon for normalization
+    SCENARIO_PROB_MIN = 0.05
+    SCENARIO_PROB_MAX = 0.80
+    SCENARIO_PROB_EPS = 1e-6
     
     def __post_init__(self):
         if self.TIMELINE_WEIGHTS is None:
