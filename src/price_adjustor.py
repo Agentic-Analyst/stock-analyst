@@ -31,22 +31,15 @@ from typing import List, Dict, Any, Optional, Tuple
 import ast
 import math
 
+# Import configuration
+from price_adjustor_config import ADJUSTOR_DEFAULTS, ADJUSTOR_PROMPTS
+
 try:  # Optional LLM load (same pattern as financial_model_generator)
     from llms import gpt_4o_mini as _llm_fn
 except Exception:  # pragma: no cover
     _llm_fn = None
 
 # --- Parsing Screening Report -------------------------------------------------
-TIMELINE_WEIGHTS = {
-    "immediate": 1.00,
-    "short-term": 0.80,
-    "short term": 0.80,
-    "mid-term": 0.50,
-    "mid term": 0.50,
-    "medium-term": 0.50,
-    "long-term": 0.30,
-    "long term": 0.30,
-}
 
 CATALYST_HEADER = re.compile(r"^### Catalyst \d+: (.+?)$", re.IGNORECASE)
 RISK_HEADER = re.compile(r"^### Risk \d+: (.+?)$", re.IGNORECASE)
@@ -144,7 +137,7 @@ def parse_screening_report(path: Path) -> Dict[str, List[Dict[str, Any]]]:
             mc = CONF_LINE.match(line.strip())
             if mc:
                 try:
-                    current['confidence'] = float(mc.group(1)) / 100.0
+                    current['confidence'] = float(mc.group(1)) / ADJUSTOR_DEFAULTS.PERCENTAGE_DIVISOR
                 except ValueError:
                     current['confidence'] = 0.0
                 continue
@@ -212,8 +205,9 @@ def parse_screening_report(path: Path) -> Dict[str, List[Dict[str, Any]]]:
 # --- Adjustment Engine --------------------------------------------------------
 
 def compute_adjustment(base_price: Optional[float], factors: Dict[str, List[Dict[str, Any]]],
-                       scaling: float = 0.25, cap: float = 0.20,
-                       mitigation_max_relief: float = 0.35,
+                       scaling: float = ADJUSTOR_DEFAULTS.DEFAULT_SCALING, 
+                       cap: float = ADJUSTOR_DEFAULTS.DEFAULT_CAP,
+                       mitigation_max_relief: float = ADJUSTOR_DEFAULTS.DEFAULT_MITIGATION_MAX_RELIEF,
                        sector: Optional[str] = None,
                        now_ts: Optional[float] = None) -> Dict[str, Any]:
     """Convert qualitative screening factors into a price adjustment.
@@ -229,12 +223,12 @@ def compute_adjustment(base_price: Optional[float], factors: Dict[str, List[Dict
     risks = factors.get('risks', [])
     mitigations = factors.get('mitigations', [])
     if base_price is None:
-        return {"base_price": None, "adjusted_price": None, "adjustment_pct": 0.0,
+        return {"base_price": None, "adjusted_price": None, "adjustment_pct": ADJUSTOR_DEFAULTS.DEFAULT_ADJUSTMENT_PCT,
                 "detail": {"reason": "No base price available"}}
 
     # Load external qualitative config (sector scaling, source weights, recency decay)
-    sector_scaling_adj = 1.0
-    sector_cap_adj = 1.0
+    sector_scaling_adj = ADJUSTOR_DEFAULTS.DEFAULT_SECTOR_SCALING
+    sector_cap_adj = ADJUSTOR_DEFAULTS.DEFAULT_SECTOR_CAP
     source_weights = {}
     recency_half_life = None
     try:  # optional import safety
@@ -262,7 +256,7 @@ def compute_adjustment(base_price: Optional[float], factors: Dict[str, List[Dict
         if ts:
             try:
                 dt = datetime.datetime.fromisoformat(ts.replace('Z',''))
-                return (now_ts - dt.timestamp()) / 86400.0
+                return (now_ts - dt.timestamp()) / ADJUSTOR_DEFAULTS.SECONDS_PER_DAY
             except Exception:
                 return None
         # Heuristic: Immediate ~7d, Short-Term ~30d, Mid-Term ~90d, Long-Term ~180d
@@ -278,9 +272,9 @@ def compute_adjustment(base_price: Optional[float], factors: Dict[str, List[Dict
         return None
 
     def weight_item(item: Dict[str, Any]) -> Tuple[float, float]:
-        conf = float(item.get('confidence', 0.0))
+        conf = float(item.get('confidence', ADJUSTOR_DEFAULTS.DEFAULT_ZERO_CONFIDENCE))
         tl = item.get('timeline', '').lower()
-        base_w = TIMELINE_WEIGHTS.get(tl, 0.5)
+        base_w = ADJUSTOR_DEFAULTS.TIMELINE_WEIGHTS.get(tl, ADJUSTOR_DEFAULTS.DEFAULT_TIMELINE_WEIGHT)
         # Source credibility multiplier (if source metadata present)
         src = (item.get('source') or '').lower()
         src_mult = source_weights.get(src, 1.0) if source_weights else 1.0
@@ -459,7 +453,7 @@ def extract_base_operating_metrics(model_obj: Dict[str, Any]) -> Dict[str, float
     return out
 
 def propose_parameter_deltas(factors: Dict[str, List[Dict[str, Any]]], base_metrics: Dict[str, float],
-                             llm_temperature: float = 0.15) -> Dict[str, Any]:
+                             llm_temperature: float = ADJUSTOR_DEFAULTS.DEFAULT_LLM_TEMPERATURE) -> Dict[str, Any]:
     """Use LLM to propose bounded parameter deltas with justification & sources.
 
     Returns dict with 'raw_response', 'deltas' list (after local capping), and 'errors' list.
@@ -489,7 +483,13 @@ def propose_parameter_deltas(factors: Dict[str, List[Dict[str, Any]]], base_metr
             }
         ]
     }
-    prompt = f"""You are an equity valuation assistant. Based ONLY on the events below, propose parameter deltas to refine a DCF model.\n\nBase Metrics: {base_txt or 'n/a'}\nContext: first_year_growth impacts year 1 revenue; margin_uplift is an additive EBITDA margin shift applied across projection years (keep small, only if efficiency / operating leverage is CLEARLY implied by catalysts or mitigations); capex_rate adjusts capital intensity; wacc reflects perceived risk (only reduce if broad de-risking + mitigations).\nAllowed Parameters (caps applied AFTER your response): {caps_txt}.\nReturn ONLY valid JSON per schema. Do not invent sources. Reference catalysts as C#, risks as R#, mitigations as M#. Provide 1-4 high-confidence deltas max. If insufficient evidence, return {{\"deltas\": []}}.\n\nEvents:\n{events_txt}\n\nJSON Schema Example: {json.dumps(schema)}\nReturn JSON now:"""
+    prompt_template = Path(ADJUSTOR_PROMPTS.PARAMETER_DELTAS).read_text(encoding='utf-8')
+    prompt = prompt_template.format(
+        base_txt=base_txt or 'n/a',
+        caps_txt=caps_txt,
+        events_txt=events_txt,
+        schema_json=json.dumps(schema)
+    )
 
     try:
         raw = _llm_fn([
@@ -551,23 +551,23 @@ def _parse_args():
     p.add_argument('--term-growth', type=float, default=0.03)
     p.add_argument('--wacc', type=float, default=None)
     p.add_argument('--no-llm', action='store_true')
-    p.add_argument('--scaling', type=float, default=0.25, help='Base scaling factor applied to net qualitative score (pre sector adj)')
-    p.add_argument('--cap', type=float, default=0.20, help='Base absolute cap on adjustment (fraction) (pre sector adj)')
+    p.add_argument('--scaling', type=float, default=ADJUSTOR_DEFAULTS.DEFAULT_SCALING, help='Base scaling factor applied to net qualitative score (pre sector adj)')
+    p.add_argument('--cap', type=float, default=ADJUSTOR_DEFAULTS.DEFAULT_CAP, help='Base absolute cap on adjustment (fraction) (pre sector adj)')
     p.add_argument('--json', action='store_true', help='Output JSON only')
     p.add_argument('--screen-file', type=str, default=None, help='Explicit screening_report.md path')
     p.add_argument('--sector', type=str, default=None, help='Optional sector name for calibration (affects scaling & cap)')
     # LLM delta options
     p.add_argument('--llm-deltas', action='store_true', help='Invoke LLM to propose bounded parameter deltas (growth/margin/capex/wacc)')
     p.add_argument('--apply-deltas', action='store_true', help='Apply proposed deltas and recompute model price')
-    p.add_argument('--llm-temp', type=float, default=0.15, help='LLM temperature for delta generation')
+    p.add_argument('--llm-temp', type=float, default=ADJUSTOR_DEFAULTS.DEFAULT_LLM_TEMPERATURE, help='LLM temperature for delta generation')
     p.add_argument('--sens-after-deltas', action='store_true', help='Generate sensitivities after applying deltas')
     p.add_argument('--delta-log', type=str, default=None, help='Optional path to write LLM delta audit log JSON')
     p.add_argument('--export-excel-scenarios', action='store_true', help='Export scenario comparison to Excel')
-    p.add_argument('--llm-guardrail-threshold', type=float, default=0.07, help='Max allowed relative divergence between LLM-adjusted and qualitative-adjusted price before flag')
+    p.add_argument('--llm-guardrail-threshold', type=float, default=ADJUSTOR_DEFAULTS.DEFAULT_LLM_GUARDRAIL_THRESHOLD, help='Max allowed relative divergence between LLM-adjusted and qualitative-adjusted price before flag')
     # Mapped deterministic parameter delta engine
     p.add_argument('--use-mapped-deltas', action='store_true', help='Enable deterministic event->parameter mapping pipeline (primary)')
-    p.add_argument('--residual-overlay-cap', type=float, default=0.05, help='Max residual qualitative overlay cap when mapped deltas applied')
-    p.add_argument('--materiality-threshold', type=float, default=0.005, help='Min absolute price impact (fraction) for mapped parameter retention')
+    p.add_argument('--residual-overlay-cap', type=float, default=ADJUSTOR_DEFAULTS.DEFAULT_RESIDUAL_OVERLAY_CAP, help='Max residual qualitative overlay cap when mapped deltas applied')
+    p.add_argument('--materiality-threshold', type=float, default=ADJUSTOR_DEFAULTS.DEFAULT_MATERIALITY_THRESHOLD, help='Min absolute price impact (fraction) for mapped parameter retention')
     p.add_argument('--export-mitigation-matrix', action='store_true', help='Add mitigation matrix sheet to Excel export')
     return p.parse_args()
 

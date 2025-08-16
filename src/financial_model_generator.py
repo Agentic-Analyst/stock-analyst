@@ -20,10 +20,13 @@ financial JSON (e.g., financials_annual_modeling_latest.json). It includes:
 """
 
 from __future__ import annotations
-import os, json, argparse, pathlib, math
+import os, json, argparse, pathlib, math, re
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
+
+# Import configuration
+from model_config import DEFAULTS, BOUNDS, EXCEL_CONFIG, PROMPTS
 
 # Excel manipulation libraries
 try:
@@ -52,38 +55,52 @@ class FinancialModelGenerator:
     """Enhanced, auditable financial model generator for valuation analysis."""
 
     def __init__(self, ticker: str, data_file: Optional[str] = None, no_llm: bool = False):
-        # Core paths
+        """Constructor sets up path references, caches, and optional LLM client.
+
+        Parameters
+        ----------
+        ticker : str
+            Company ticker.
+        data_file : Optional[str]
+            Explicit path to modeling JSON (bypasses probing) if provided.
+        no_llm : bool
+            If True, disables optional LLM features (narrative + param assist).
+        """
+        # --- Core paths ---
         self.ticker = ticker.upper()
         self.company_dir = DATA_ROOT / self.ticker
         self.financials_dir = self.company_dir / "financials"
         self.models_dir = self.company_dir / "models"
 
-        # Logger placeholder
+        # --- Logging ---
         self.logger = None
 
-        # Optional LLM client (now narrative-only)
+        # --- Optional LLM client (narrative + parameter assist) ---
         self.llm_function = None if no_llm else _try_load_llm()
 
-        # Stats
+        # --- Stats ---
         self.models_generated = 0
         self.analysis_sections = 0
         self.data_points_processed = 0
 
-        # Cached data
-        self._financial_data = None
-        self._company_info = None
+        # --- Cached data ---
+        self._financial_data: Optional[Dict[str, Any]] = None
+        self._company_info: Optional[Dict[str, Any]] = None
 
-        # Explicit data file (if provided)
+        # --- Explicit data file (if provided) ---
         self._explicit_data_file = pathlib.Path(data_file) if data_file else None
 
-        # User overrides dictionary
-        self.overrides = {}
+        # --- User overrides dictionary (will be merged with LLM proposals) ---
+        self.overrides: Dict[str, Any] = {}
 
-        # Diagnostics (warnings about missing or defaulted fields)
-        self.diagnostics = []
+        # --- Diagnostics (warnings about missing or defaulted fields) ---
+        self.diagnostics: List[str] = []
 
-        # Forecast cache {(strategy, years, term_growth, wacc_override, overrides_hash): result_dict}
-        self._forecast_cache = {}
+        # --- Forecast result cache ---
+        self._forecast_cache: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+
+        # --- Audit log container for LLM parameter assist ---
+        self.llm_param_audit: Dict[str, Any] = {}
 
     # ---------- Logging helpers ----------
     def set_logger(self, logger):
@@ -199,48 +216,48 @@ class FinancialModelGenerator:
     # ---------- WACC & working capital ----------
     def _infer_tax_rate(self, base_is: Dict[str, Any]) -> float:
         tr = self._num(base_is.get("Tax Rate For Calcs"))
-        if tr and 0 < tr < 0.6:
+        if tr and DEFAULTS.TAX_RATE_BOUNDS[0] < tr < DEFAULTS.TAX_RATE_BOUNDS[1]:
             return tr
-        prov = self._num(base_is.get("Tax Provision"), 0.0)
+        prov = self._num(base_is.get("Tax Provision"), DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE)
         pretax = self._num(base_is.get("Pretax Income"))
         if pretax and pretax != 0:
             cand = prov / pretax
-            if 0 < cand < 0.6:
+            if DEFAULTS.TAX_RATE_BOUNDS[0] < cand < DEFAULTS.TAX_RATE_BOUNDS[1]:
                 return float(cand)
-        return 0.25
+        return DEFAULTS.DEFAULT_TAX_RATE
 
     def _compute_nwc(self, bs_row: Dict[str, Any]) -> float:
-        ar = self._num(bs_row.get("Accounts Receivable"), 0.0)
-        inv = 0.0
+        ar = self._num(bs_row.get("Accounts Receivable"), DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE)
+        inv = DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE
         for k in ["Inventory", "Finished Goods", "Work In Process", "Raw Materials"]:
-            inv += self._num(bs_row.get(k), 0.0) or 0.0
-        ap = self._num(bs_row.get("Accounts Payable"), 0.0)
+            inv += self._num(bs_row.get(k), DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE) or DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE
+        ap = self._num(bs_row.get("Accounts Payable"), DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE)
         return float(ar + inv - ap)
 
     def _get_wacc(self, company_data: Dict[str, Any], override_wacc: Optional[float]) -> float:
-        if isinstance(override_wacc, (int, float)) and 0.0 < override_wacc < 0.5:
+        if isinstance(override_wacc, (int, float)) and DEFAULTS.WACC_OVERRIDE_BOUNDS[0] < override_wacc < DEFAULTS.WACC_OVERRIDE_BOUNDS[1]:
             return float(override_wacc)
 
         cs = (company_data or {}).get("capital_structure", {}) or {}
         md = (company_data or {}).get("market_data", {}) or {}
 
-        beta = self._num(cs.get("beta"), 1.2) or 1.2
-        rf = self._num(cs.get("risk_free_rate"), 0.045) or 0.045
-        erp = self._num(cs.get("equity_risk_premium"), 0.05) or 0.05
+        beta = self._num(cs.get("beta"), DEFAULTS.DEFAULT_BETA) or DEFAULTS.DEFAULT_BETA
+        rf = self._num(cs.get("risk_free_rate"), DEFAULTS.DEFAULT_RISK_FREE_RATE) or DEFAULTS.DEFAULT_RISK_FREE_RATE
+        erp = self._num(cs.get("equity_risk_premium"), DEFAULTS.DEFAULT_EQUITY_RISK_PREMIUM) or DEFAULTS.DEFAULT_EQUITY_RISK_PREMIUM
         ke = rf + beta * erp
 
-        debt = self._num(cs.get("total_debt"), 0.0) or 0.0
-        cash = self._num(cs.get("total_cash"), 0.0) or 0.0
+        debt = self._num(cs.get("total_debt"), DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE) or DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE
+        cash = self._num(cs.get("total_cash"), DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE) or DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE
         net_debt = debt - cash
 
-        E = self._num(md.get("market_cap"), 0.0) or 0.0
+        E = self._num(md.get("market_cap"), DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE) or DEFAULTS.DEFAULT_WORKING_CAPITAL_VALUE
         D = max(net_debt, 0.0) if net_debt is not None else 0.0  # if net cash, treat D~0 for weights
         V = max(E + D, 1.0)
-        kd = max(rf, 0.03)  # conservative floor
-        tax = 0.21
+        kd = max(rf, DEFAULTS.COST_OF_DEBT_FLOOR)  # conservative floor
+        tax = DEFAULTS.DEFAULT_CORPORATE_TAX_RATE
         wacc = (E / V) * ke + (D / V) * kd * (1 - tax)
         self._log("info", f"Computed WACC: {wacc:.4f} (Ke={ke:.4f}, Kd={kd:.4f}, E={E:.2f}, D={D:.2f})")
-        return float(max(0.04, min(wacc, 0.15)))
+        return float(max(DEFAULTS.WACC_MIN_FLOOR, min(wacc, DEFAULTS.WACC_MAX_CEILING)))
 
     # ---------- Strategy selection helpers ----------
     def _select_strategy(self, requested: Optional[str], metrics: Dict[str, Any]):
@@ -393,17 +410,19 @@ class FinancialModelGenerator:
             self.analysis_sections = 0  # Set explicitly when LLM disabled
             return {}
         try:
-            prompt = f"""
-You are a senior equity analyst. Create bullet-point sections for {self.ticker}:
-1) Executive Summary  2) Financial Projections (5y)  3) Valuation (DCF + multiples)
-4) Sensitivities (drivers, bull/base/bear)  5) Investment Recommendation.
-Be specific and quantitative when possible; keep each section under ~120 words.
-"""
+            # Load financial narrative prompt from file
+            prompt_path = pathlib.Path(PROMPTS.FINANCIAL_NARRATIVE)
+            with open(prompt_path, 'r', encoding='utf-8') as f:
+                prompt_template = f.read()
+            
+            # Format the prompt with ticker
+            prompt = prompt_template.format(ticker=self.ticker)
+            
             msgs = [
                 {"role": "system", "content": "You are a senior financial analyst producing concise research-ready notes."},
                 {"role": "user", "content": prompt},
             ]
-            resp = self.llm_function(msgs, temperature=0.2)
+            resp = self.llm_function(msgs, temperature=DEFAULTS.TEMP_NARRATIVE_ANALYSIS)
             # Support either string or (string, cost)
             if isinstance(resp, tuple):
                 content, _ = resp
@@ -442,14 +461,86 @@ Be specific and quantitative when possible; keep each section under ~120 words.
 
     # ---------- Public API ----------
     def generate_financial_model(self, model_type: str = "comprehensive", projection_years: int = 5,
-                                 term_growth: float = 0.03, override_wacc: Optional[float] = None,
+                                 term_growth: Optional[float] = None, override_wacc: Optional[float] = None,
                                  strategy: Optional[str] = None, peers: Optional[List[str]] = None,
                                  generate_sensitivities: bool = False, lean: bool = False) -> Dict[str, Any]:
-        wacc_str = 'auto' if override_wacc is None else f"{override_wacc:.3f}"
-        self._log("info", f"Generating {model_type} model for {self.ticker} "
-                          f"({projection_years}y, g={term_growth:.3f}, wacc={wacc_str})")
         data = self._load_financial_data()
         metrics = self._extract_key_financial_metrics(data)
+        # --- Terminal growth auto-inference (no silent default) ---
+        if term_growth is None:
+            inferred_tg = None; tg_conf = None; tg_reason = None
+            if self.llm_function:
+                try:
+                    prompt_path = pathlib.Path(PROMPTS.PARAMETER_INFERENCE)
+                    with open(prompt_path,'r',encoding='utf-8') as f:
+                        param_prompt = f.read()
+                    fin = metrics.get('historical_financials', {})
+                    def tail_map(m: Dict[str, Any]):
+                        if not isinstance(m, dict): return m
+                        keys = sorted(m.keys())[-3:]
+                        return {k:m[k] for k in keys}
+                    ctx_payload = {
+                        'ticker': self.ticker,
+                        'projection_years': projection_years,
+                        'available_missing_params': ['terminal_growth'],
+                        'income_statement_tail': tail_map(fin.get('income_statement', {})),
+                        'balance_sheet_tail': tail_map(fin.get('balance_sheet', {})),
+                        'cash_flow_tail': tail_map(fin.get('cash_flow', {})),
+                        'company_info': metrics.get('company_info'),
+                    }
+                    llm_resp = self.llm_function([
+                        {"role": "system", "content": param_prompt},
+                        {"role": "user", "content": json.dumps(ctx_payload)}
+                    ], temperature=DEFAULTS.TEMP_TERMINAL_GROWTH)
+                    if isinstance(llm_resp, tuple): llm_resp = llm_resp[0]
+                    txt = str(llm_resp).strip()
+                    mm = re.search(r"\{[\s\S]+\}", txt)
+                    if mm:
+                        inferred_json = json.loads(mm.group(0))
+                        inferred_block = inferred_json.get('inferred', {}) or {}
+                        conf_block = inferred_json.get('confidence', {}) or {}
+                        rationale_block = inferred_json.get('rationale', {}) or {}
+                        if 'terminal_growth' in inferred_block and isinstance(inferred_block['terminal_growth'], (int,float)):
+                            inferred_tg = float(inferred_block['terminal_growth'])
+                            tg_conf = conf_block.get('terminal_growth', 1.0)
+                            tg_reason = rationale_block.get('terminal_growth','')
+                except Exception as e:
+                    self._log('warning', f"LLM terminal growth inference failed: {e}")
+            if inferred_tg is not None and (tg_conf is None or tg_conf >= DEFAULTS.LLM_CONFIDENCE_THRESHOLD):
+                term_growth = max(0.0, min(DEFAULTS.MAX_TERMINAL_GROWTH_LLM, inferred_tg))
+                self.llm_param_audit.setdefault('parameter_inference', {}).setdefault('applied', {})['terminal_growth'] = {
+                    'value': term_growth,
+                    'reason': tg_reason or 'llm_inferred',
+                    'confidence': tg_conf
+                }
+                self.llm_param_audit.setdefault('parameter_inference_meta', {})['confidence_threshold'] = DEFAULTS.LLM_CONFIDENCE_THRESHOLD
+            else:
+                # Deterministic fallback using recent revenue CAGR * 0.3, clipped 0–0.03
+                try:
+                    is_map = metrics.get('historical_financials', {}).get('income_statement', {}) or {}
+                    years_sorted = sorted(is_map.keys())
+                    rev_vals = []
+                    for y in years_sorted[-3:]:
+                        row = is_map.get(y, {}) or {}
+                        rv = row.get('Total Revenue') or row.get('Operating Revenue')
+                        if rv is not None:
+                            rev_vals.append(float(rv))
+                    fallback = 0.02
+                    if len(rev_vals) >= 2 and rev_vals[0] > 0 and rev_vals[-1] > 0:
+                        cagr = (rev_vals[-1]/rev_vals[0]) ** (1/max(len(rev_vals)-1,1)) - 1
+                        fallback = max(0.0, min(DEFAULTS.MAX_TERMINAL_GROWTH_DETERMINISTIC, cagr * DEFAULTS.TERMINAL_GROWTH_CAGR_SCALE))
+                    term_growth = fallback
+                except Exception:
+                    term_growth = DEFAULTS.DEFAULT_TERMINAL_GROWTH_FALLBACK
+                self.llm_param_audit.setdefault('parameter_inference', {}).setdefault('applied', {})['terminal_growth'] = {
+                    'value': term_growth,
+                    'reason': 'deterministic_fallback',
+                    'confidence': 0.0
+                }
+        wacc_str = 'auto' if override_wacc is None else f"{override_wacc:.3f}"
+        tg_str = 'n/a' if term_growth is None else f"{term_growth:.3f}"
+        self._log("info", f"Generating {model_type} model for {self.ticker} ("\
+                          f"{projection_years}y, g={tg_str}, wacc={wacc_str})")
 
         components: Dict[str, Any] = {}
         valuation_summary: Dict[str, Any] = {}
@@ -457,7 +548,37 @@ Be specific and quantitative when possible; keep each section under ~120 words.
         chosen_strategy_name = None
         strat = None
         if model_type in ("dcf", "comprehensive"):
-            strat = self._select_strategy(strategy, metrics)
+            # LLM assisted strategy selection if no explicit strategy passed and LLM available
+            chosen_strategy_text = None
+            if strategy is None and self.llm_function:
+                try:
+                    prompt_path = pathlib.Path(PROMPTS.STRATEGY_SELECTION)
+                    context = {
+                        "company_info": metrics.get('company_info'),
+                        "quick_hist": {
+                            "rev_years": len(metrics.get('historical_financials', {}).get('income_statement', {}) or {}),
+                        },
+                        "available_strategies": []
+                    }
+                    # import strategies list names
+                    from forecast_strategies import STRATEGIES
+                    context['available_strategies'] = [s.name for s in STRATEGIES]
+                    with open(prompt_path, 'r', encoding='utf-8') as f:
+                        base_prompt = f.read()
+                    llm_resp = self.llm_function([
+                        {"role": "system", "content": base_prompt},
+                        {"role": "user", "content": json.dumps(context)}
+                    ], temperature=DEFAULTS.TEMP_STRATEGY_SELECTION)
+                    if isinstance(llm_resp, tuple): llm_resp = llm_resp[0]
+                    txt = str(llm_resp).strip()
+                    m = re.search(r"\{[\s\S]+\}", txt)
+                    if m:
+                        parsed = json.loads(m.group(0))
+                        chosen_strategy_text = parsed.get('strategy')
+                        self.llm_param_audit.setdefault('strategy_selection', parsed)
+                except Exception as e:
+                    self._log('warning', f"LLM strategy selection failed: {e}; falling back to rule-based")
+            strat = self._select_strategy(chosen_strategy_text or strategy, metrics)
             chosen_strategy_name = strat.name
             # Caching key
             hashable_overrides = {}
@@ -469,6 +590,100 @@ Be specific and quantitative when possible; keep each section under ~120 words.
                 strat_outputs = self._forecast_cache[cache_key]
                 self._log("info", f"Cache hit for strategy {strat.name}")
             else:
+                # Before first forecast, perform LLM parameter inference for any unset override fields
+                if self.llm_function:
+                    try:
+                        # Determine which parameters are unset (not provided by user or prior LLM override)
+                        candidate_params = [
+                            'first_year_growth','margin_target','margin_ramp','capex_rate','da_rate',
+                            'nwc_method','nwc_ratio','margin_curve','growth_sequence'
+                        ]  # terminal_growth handled earlier to ensure caching key stability
+                        missing = [p for p in candidate_params if p not in self.overrides]
+                        if missing:
+                            prompt_path = pathlib.Path(PROMPTS.PARAMETER_INFERENCE)
+                            with open(prompt_path,'r',encoding='utf-8') as f:
+                                param_prompt = f.read()
+                            # Build compact context for inference (recent IS/BS rows)
+                            fin = metrics.get('historical_financials', {})
+                            # Limit to last 3 periods per statement to keep prompt size manageable
+                            def tail_map(m: Dict[str, Any]):
+                                if not isinstance(m, dict): return m
+                                keys = sorted(m.keys())[-3:]
+                                return {k:m[k] for k in keys}
+                            ctx_payload = {
+                                'ticker': self.ticker,
+                                'projection_years': projection_years,
+                                'term_growth': term_growth,
+                                'available_missing_params': missing,
+                                'income_statement_tail': tail_map(fin.get('income_statement', {})),
+                                'balance_sheet_tail': tail_map(fin.get('balance_sheet', {})),
+                                'cash_flow_tail': tail_map(fin.get('cash_flow', {})),
+                                'company_info': metrics.get('company_info'),
+                            }
+                            llm_resp = self.llm_function([
+                                {"role": "system", "content": param_prompt},
+                                {"role": "user", "content": json.dumps(ctx_payload)}
+                            ], temperature=DEFAULTS.TEMP_PARAMETER_INFERENCE)
+                            if isinstance(llm_resp, tuple): llm_resp = llm_resp[0]
+                            txt = str(llm_resp).strip()
+                            mm = re.search(r"\{[\s\S]+\}", txt)
+                            if mm:
+                                inferred_json = json.loads(mm.group(0))
+                                inferred = inferred_json.get('inferred', {}) or {}
+                                rationale = inferred_json.get('rationale', {}) or {}
+                                conf = inferred_json.get('confidence', {}) or {}
+                                applied = {}
+                                skipped_low_conf = []
+                                confidence_threshold = DEFAULTS.LLM_CONFIDENCE_THRESHOLD
+                                self.llm_param_audit.setdefault('parameter_inference_meta', {})['confidence_threshold'] = confidence_threshold
+                                bounds = BOUNDS.get_bounds_dict()
+                                for k,v in inferred.items():
+                                    cval = conf.get(k, 1.0)
+                                    if cval < confidence_threshold:
+                                        skipped_low_conf.append({'param': k, 'reason': 'low_confidence', 'confidence': cval})
+                                        continue
+                                    if k == 'growth_sequence' and isinstance(v, list) and k not in self.overrides:
+                                        seq = [float(x) for x in v if isinstance(x,(int,float))]
+                                        if seq:
+                                            # Enforce length; if shorter, extend with last value; if longer, truncate
+                                            if len(seq) < projection_years:
+                                                seq += [seq[-1]] * (projection_years - len(seq))
+                                            if len(seq) > projection_years:
+                                                seq = seq[:projection_years]
+                                            # Clip bounds per element
+                                            seq = [max(0.0, min(0.60, x)) for x in seq]
+                                            self.overrides[k] = seq
+                                            applied[k] = {'value': seq, 'reason': rationale.get(k,''), 'confidence': cval}
+                                    elif k == 'margin_curve' and isinstance(v, list) and k not in self.overrides:
+                                        curve = [float(x) for x in v if isinstance(x,(int,float))]
+                                        if curve:
+                                            if len(curve) < projection_years:
+                                                curve += [curve[-1]] * (projection_years - len(curve))
+                                            if len(curve) > projection_years:
+                                                curve = curve[:projection_years]
+                                            curve = [max(0.0, min(0.90, x)) for x in curve]
+                                            self.overrides[k] = curve
+                                            applied[k] = {'value': curve, 'reason': rationale.get(k,''), 'confidence': cval}
+                                    elif k in candidate_params and k not in self.overrides and isinstance(v,(int,float)):
+                                        lo,hi = bounds.get(k,(None,None))
+                                        fv = float(v)
+                                        if lo is not None:
+                                            fv = max(lo, min(hi, fv))
+                                        self.overrides[k] = fv
+                                        applied[k] = {'value': fv, 'reason': rationale.get(k,''), 'confidence': cval}
+                                    elif k=='nwc_method' and k not in self.overrides and v in ('ratio','delta2pct'):
+                                        if cval >= confidence_threshold:
+                                            self.overrides[k] = v
+                                            applied[k] = {'value': v, 'reason': rationale.get(k,''), 'confidence': cval}
+                                        else:
+                                            skipped_low_conf.append({'param': k, 'reason': 'low_confidence', 'confidence': cval})
+                                if applied:
+                                    self.llm_param_audit.setdefault('parameter_inference', {})['applied'] = applied
+                                    self.llm_param_audit.setdefault('parameter_inference', {})['raw'] = txt[:1500]
+                                if skipped_low_conf:
+                                    self.llm_param_audit.setdefault('parameter_inference', {})['skipped_low_confidence'] = skipped_low_conf
+                    except Exception as e:
+                        self._log('warning', f"LLM parameter inference failed: {e}")
                 strat_outputs = strat.forecast(self, metrics, projection_years, term_growth, override_wacc)
                 self._forecast_cache[cache_key] = strat_outputs
             dcf_df = strat_outputs.get("dcf_model")
@@ -522,8 +737,145 @@ Be specific and quantitative when possible; keep each section under ~120 words.
             },
             "validation": self._validation_summary(chosen_strategy_name or "n/a", valuation_summary),
         }
+        if self.llm_param_audit:
+            model["llm_parameter_overrides"] = self.llm_param_audit
+            # Persist audit to JSON for reproducibility
+            try:
+                self._ensure_dirs()
+                audit_path = self.models_dir / f"llm_audit_{self.ticker}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+                with open(audit_path,'w',encoding='utf-8') as f:
+                    json.dump(self.llm_param_audit, f, indent=2)
+                model['llm_audit_file'] = str(audit_path)
+                self._log('info', f"LLM audit saved: {audit_path}")
+            except Exception as e:
+                self._log('warning', f"Failed to persist LLM audit: {e}")
         self.models_generated += 1
         return model
+
+    # ---------- LLM Assisted Parameter Overrides (bounded & auditable) ----------
+    def propose_llm_parameter_overrides(self, baseline_model: Dict[str, Any], projection_years: int,
+                                        term_growth: float, strategy: Optional[str],
+                                        caps: Optional[Dict[str, Any]] = None, temperature: float = 0.1) -> Dict[str, Any]:
+        """Ask LLM for refined parameter overrides (growth, margin_target, margin_ramp, capex_rate, nwc_ratio, wacc_delta).
+
+        Returns dict of validated overrides (keys match self.overrides / wacc override) without mutating state.
+        Safe if LLM unavailable (returns empty dict).
+        """
+        if not self.llm_function:
+            return {}
+        caps = caps or {
+            "first_year_growth": {"min": 0.0, "max": 0.60},  # absolute value
+            "margin_target": {"min": 0.05, "max": 0.60},
+            "margin_ramp": {"min": 0.0, "max": 0.05},
+            "capex_rate": {"min": 0.0, "max": 0.18},
+            "nwc_ratio": {"min": -0.05, "max": 0.40},
+            "wacc_delta": {"min": -0.01, "max": 0.01},
+        }
+        # Extract baseline metrics from dcf_model
+        dcf_df = (baseline_model.get("model_components") or {}).get("dcf_model")
+        base_growth = None
+        base_margin_first = None
+        base_margin_last = None
+        base_capex_rate = None
+        base_wacc = (baseline_model.get("valuation_summary") or {}).get("WACC")
+        try:
+            if dcf_df is not None and hasattr(dcf_df, 'iloc') and len(dcf_df) >= 2:
+                r0 = float(dcf_df.iloc[0].get("Revenue") or 0)
+                r1 = float(dcf_df.iloc[1].get("Revenue") or 0)
+                if r0 > 0 and r1 > 0:
+                    base_growth = (r1 / r0) - 1
+                e0 = float(dcf_df.iloc[0].get("EBITDA") or 0)
+                e_last = float(dcf_df.iloc[len(dcf_df)-1].get("EBITDA") or 0)
+                r_last = float(dcf_df.iloc[len(dcf_df)-1].get("Revenue") or 0)
+                if r0 > 0 and e0 > 0:
+                    base_margin_first = e0 / r0
+                if r_last > 0 and e_last > 0:
+                    base_margin_last = e_last / r_last
+                capex1 = float(dcf_df.iloc[1].get("CapEx") or 0)
+                if r1 > 0 and capex1 >= 0:
+                    base_capex_rate = capex1 / r1
+        except Exception:
+            pass
+        ctx_lines = []
+        if base_growth is not None: ctx_lines.append(f"base_first_year_growth={base_growth:.4f}")
+        if base_margin_first is not None: ctx_lines.append(f"margin_first={base_margin_first:.4f}")
+        if base_margin_last is not None: ctx_lines.append(f"margin_last={base_margin_last:.4f}")
+        if base_capex_rate is not None: ctx_lines.append(f"capex_rate_first={base_capex_rate:.4f}")
+        if base_wacc is not None: ctx_lines.append(f"wacc={base_wacc:.4f}")
+        ctx_lines.append(f"term_growth={term_growth:.4f}")
+        ctx = ", ".join(ctx_lines)
+        schema = {
+            "overrides": [
+                {"param": "first_year_growth|margin_target|margin_ramp|capex_rate|nwc_ratio|wacc_delta", "value": "numeric", "reason": "short justification"}
+            ]
+        }
+        caps_txt = "; ".join(f"{k}:[{v['min']},{v['max']}]" for k,v in caps.items())
+        # Load parameter overrides prompt from file
+        prompt_path = pathlib.Path(PROMPTS.PARAMETER_OVERRIDES)
+        with open(prompt_path, 'r', encoding='utf-8') as f:
+            prompt_template = f.read()
+        
+        prompt = (
+            prompt_template + f"\n\nContext: {ctx}\nCaps: {caps_txt}\nJSON Schema Example: {json.dumps(schema)}"
+        )
+        try:
+            raw = self.llm_function([
+                {"role": "system", "content": "You return compact JSON with financially realistic parameter overrides."},
+                {"role": "user", "content": prompt}
+            ], temperature=temperature or DEFAULTS.TEMP_PARAMETER_OVERRIDES)
+            if isinstance(raw, tuple): raw = raw[0]
+            text = str(raw).strip()
+        except Exception as e:  # pragma: no cover
+            self.llm_param_audit = {"error": f"LLM call failed: {e}"}
+            return {}
+        json_str = None
+        if text.startswith('{') and text.endswith('}'): json_str = text
+        else:
+            m = re.search(r"\{[\s\S]+\}", text)
+            if m: json_str = m.group(0)
+        overrides: Dict[str, Any] = {}
+        audit = {"raw": text, "parsed": None, "applied": {}, "skipped": []}
+        try:
+            if json_str:
+                parsed = json.loads(json_str)
+                audit["parsed"] = parsed
+                for o in parsed.get("overrides", [])[:12]:
+                    param = str(o.get("param",""))
+                    val = o.get("value")
+                    reason = str(o.get("reason",""))[:300]
+                    if param not in caps:
+                        audit["skipped"].append({"param": param, "reason": "not_allowed"}); continue
+                    try:
+                        fval = float(val)
+                    except Exception:
+                        audit["skipped"].append({"param": param, "reason": "non_numeric"}); continue
+                    bounds = caps[param]
+                    if fval < bounds['min'] or fval > bounds['max']:
+                        fval = min(bounds['max'], max(bounds['min'], fval))  # clip
+                    # basic sanity: margin_target >= margin_first (if known)
+                    if param == 'margin_target' and base_margin_first is not None and fval < base_margin_first:
+                        audit["skipped"].append({"param": param, "reason": "below_base_margin_first"}); continue
+                    overrides[param] = fval
+                    audit["applied"][param] = {"value": fval, "reason": reason}
+            else:
+                audit["error"] = "no_json_detected"
+        except Exception as e:  # pragma: no cover
+            audit["error"] = f"parse_error:{e}"
+        # Translate wacc_delta to direct override if baseline wacc present
+        if 'wacc_delta' in overrides and base_wacc is not None:
+            new_wacc = max(0.04, min(0.20, base_wacc + overrides['wacc_delta']))
+            audit['applied']['override_wacc'] = new_wacc
+            overrides['override_wacc'] = new_wacc
+            del overrides['wacc_delta']
+        self.llm_param_audit = audit
+        # Map parameter names to generator overrides keys
+        mapped = {}
+        for k,v in overrides.items():
+            if k == 'override_wacc':
+                mapped['__override_wacc__'] = v
+            else:
+                mapped[k] = v
+        return mapped
 
     # ---------- Excel / CSV writers ----------
     def _ensure_dirs(self):
@@ -573,21 +925,14 @@ Be specific and quantitative when possible; keep each section under ~120 words.
         # Dynamic DataFrame tabs
         for key, df in model["model_components"].items():
             if isinstance(df, pd.DataFrame):
-                sheet_name = {
-                    "dcf_model": "DCF Model",
-                    "comparable_analysis": "Comparable Analysis",
-                    "peer_comparables": "Peer Comps",
-                    "reit_ffo_affo": "FFO_AFFO",
-                    "sensitivity_wacc_term": "Sens WACC-TG",
-                    "sensitivity_growth_margin": "Sens Growth-Margin",
-                }.get(key, key[:31])
+                sheet_name = EXCEL_CONFIG.SHEET_NAMES.get(key, key[:EXCEL_CONFIG.MAX_SHEET_NAME_LENGTH])
                 wsdf = wb.create_sheet(sheet_name)
                 for ridx, row in enumerate(dataframe_to_rows(df, index=False, header=True), 1):
                     for cidx, value in enumerate(row, 1):
                         cell = wsdf.cell(row=ridx, column=cidx, value=value)
                         if ridx == 1:
                             cell.font = Font(bold=True)
-                            cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+                            cell.fill = PatternFill(start_color=EXCEL_CONFIG.HEADER_FILL_COLOR, end_color=EXCEL_CONFIG.HEADER_FILL_COLOR, fill_type="solid")
 
         # Narrative
         if model.get("llm_analysis"):
@@ -622,7 +967,7 @@ Be specific and quantitative when possible; keep each section under ~120 words.
         mvf = vdata.get("missing_valuation_fields") or []
         row += 1
         if mvf:
-            fill_warn = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")
+            fill_warn = PatternFill(start_color=EXCEL_CONFIG.WARNING_FILL_COLOR, end_color=EXCEL_CONFIG.WARNING_FILL_COLOR, fill_type="solid")
             for fld in mvf:
                 val_ws[f"A{row}"] = fld
                 val_ws[f"A{row}"].fill = fill_warn
@@ -670,7 +1015,7 @@ def _parse_args():
     p.add_argument("--ticker", required=True, help="Stock ticker, e.g., NVDA")
     p.add_argument("--model", choices=["dcf","comparable","comprehensive"], default="comprehensive")
     p.add_argument("--years", type=int, default=5, help="Projection years (default: 5)")
-    p.add_argument("--term-growth", type=float, default=0.03, help="Terminal growth rate (e.g., 0.025)")
+    p.add_argument("--term-growth", type=float, default=None, help="Terminal growth rate (omit to auto-infer)")
     p.add_argument("--wacc", type=float, default=None, help="Override WACC (e.g., 0.095). If omitted, auto-infer.")
     p.add_argument("--data-file", type=str, default=None, help="Path to financials_annual_modeling_latest.json")
     p.add_argument("--no-llm", action="store_true", help="Disable LLM narrative generation")
@@ -695,6 +1040,10 @@ def _parse_args():
     p.add_argument("--nwc-ratio", type=float, default=None, help="Explicit NWC ratio (Working Capital / Revenue) override for ratio method")
     p.add_argument("--margin-curve", type=str, default=None, help="Comma list of EBITDA margin percentages (e.g., 30,32,34) overriding ramp/target")
     p.add_argument("--stats", action="store_true", help="Print generation stats and exit")
+    # LLM parameter assist flags
+    p.add_argument("--llm-params", action="store_true", help="Invoke LLM to propose refined parameter overrides (safe bounded)")
+    p.add_argument("--llm-param-temp", type=float, default=0.1, help="LLM temperature for parameter assist")
+    p.add_argument("--llm-skip-wacc", action="store_true", help="Disallow WACC delta proposal (ignore any wacc_delta)")
     return p.parse_args()
 
 
@@ -709,8 +1058,8 @@ def main():
         return 0
 
     try:
-        # Populate overrides
-        gen.overrides = {k: v for k,v in {
+        # Populate overrides (user-specified)
+        user_overrides = {k: v for k,v in {
             "capex_rate": args.capex_rate,
             "margin_target": args.margin_target,
             "margin_ramp": args.margin_ramp,
@@ -726,12 +1075,39 @@ def main():
             "first_year_growth": args.first_year_growth,
             "margin_uplift": args.margin_uplift,
         }.items() if v is not None}
+        gen.overrides = dict(user_overrides)
         peers = [p.strip().upper() for p in args.peers.split(',')] if args.peers else None
+        baseline_model = None
+        override_wacc_final = args.wacc
+        if args.llm_params and not args.no_llm:
+            # Lean baseline run first for context
+            baseline_model = gen.generate_financial_model(
+                model_type=args.model,
+                projection_years=args.years,
+                term_growth=args.term_growth,
+                override_wacc=args.wacc,
+                strategy=args.strategy,
+                peers=peers,
+                generate_sensitivities=False,
+                lean=True,
+            )
+            llm_prop = gen.propose_llm_parameter_overrides(baseline_model, args.years, args.term_growth, args.strategy, temperature=args.llm_param_temp)
+            if llm_prop:
+                # Apply mapped overrides (excluding special __override_wacc__ key)
+                for k,v in llm_prop.items():
+                    if k == '__override_wacc__':
+                        if not args.llm_skip_wacc:
+                            override_wacc_final = v
+                        continue
+                    # Do not overwrite user explicit overrides unless absent
+                    if k not in gen.overrides:
+                        gen.overrides[k] = v
+        # Final (full) model generation with merged overrides
         model = gen.generate_financial_model(
             model_type=args.model,
             projection_years=args.years,
             term_growth=args.term_growth,
-            override_wacc=args.wacc,
+            override_wacc=override_wacc_final,
             strategy=args.strategy,
             peers=peers,
             generate_sensitivities=args.sensitivities,

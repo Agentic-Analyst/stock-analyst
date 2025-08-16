@@ -54,6 +54,12 @@ class GenericDCFStrategy(ForecastStrategy):
 
     # --- helpers ---
     def _default_growth_seq(self, projection_years: int) -> List[float]:
+        # Allow LLM-inferred growth_sequence override (absolute growth rates)
+        try:
+            ov = getattr(self, 'generator_overrides_proxy', None)  # placeholder, not used
+        except Exception:
+            ov = None
+        # We access through generator passed at forecast time instead; fallback here remains default
         seq = list(DEFAULTS["generic_growth_seq"])  # copy
         if projection_years < len(seq):
             return seq[:projection_years]
@@ -78,7 +84,13 @@ class GenericDCFStrategy(ForecastStrategy):
         tax_rate = generator._infer_tax_rate(base_is)
 
         ov = getattr(generator, 'overrides', {}) or {}
-        growth_seq = self._default_growth_seq(projection_years)
+        # Use LLM-inferred growth_sequence if provided; otherwise default sequence
+        if 'growth_sequence' in ov and isinstance(ov['growth_sequence'], list):
+            growth_seq = [float(x) for x in ov['growth_sequence'][:projection_years]]
+            if len(growth_seq) < projection_years and growth_seq:
+                growth_seq += [growth_seq[-1]] * (projection_years - len(growth_seq))
+        else:
+            growth_seq = self._default_growth_seq(projection_years)
         if 'first_year_growth' in ov and projection_years > 0:
             growth_seq[0] = float(ov['first_year_growth'])
         base_margin = (ebitda0 / rev0) if (rev0 and ebitda0) else 0.30
@@ -224,7 +236,7 @@ class SaaSStrategy(GenericDCFStrategy):
         return ("software" in ind) or ("application" in ind) or (sec == "technology" and "software" in ind)
 
     def _default_growth_seq(self, projection_years: int) -> List[float]:
-        seq = list(DEFAULTS["saas_growth_seq"])  # copy
+        seq = list(DEFAULTS["saas_growth_seq"])  # copy (still fallback if no LLM override)
         if projection_years < len(seq):
             return seq[:projection_years]
         if projection_years > len(seq):
