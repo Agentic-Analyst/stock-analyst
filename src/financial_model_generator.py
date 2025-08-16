@@ -239,6 +239,7 @@ class FinancialModelGenerator:
         kd = max(rf, 0.03)  # conservative floor
         tax = 0.21
         wacc = (E / V) * ke + (D / V) * kd * (1 - tax)
+        self._log("info", f"Computed WACC: {wacc:.4f} (Ke={ke:.4f}, Kd={kd:.4f}, E={E:.2f}, D={D:.2f})")
         return float(max(0.04, min(wacc, 0.15)))
 
     # ---------- Strategy selection helpers ----------

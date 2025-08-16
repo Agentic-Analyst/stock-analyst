@@ -166,6 +166,7 @@ class GenericDCFStrategy(ForecastStrategy):
             generator.diagnostics.append('override:margin_uplift')
 
         wacc = generator._get_wacc(metrics.get("company_data", {}), override_wacc)
+        self._log("info", f"Using WACC: {wacc:.4f} for DCF valuation")
         t_fcf = fcf[-1] * (1 + term_growth)
         denom = max(wacc - term_growth, 1e-6)
         tv = t_fcf / denom
