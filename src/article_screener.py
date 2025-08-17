@@ -981,7 +981,7 @@ def main():
     parser = argparse.ArgumentParser(description="LLM-Powered Stock Screening: Analyze filtered articles for investment insights")
     parser.add_argument("--ticker", required=True, help="Stock ticker, e.g. NVDA")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="Minimum confidence threshold (0.0-1.0)")
-    parser.add_argument("--output-report", action="store_true", help="Generate detailed screening report")
+    # Report generation is now always enabled for production use
     parser.add_argument("--save-data", action="store_true", help="Save structured data as JSON")
     parser.add_argument("--detailed-analysis", action="store_true", help="Include detailed analysis in output")
     
@@ -1042,11 +1042,10 @@ def main():
             llm_note = f" (LLM: {risk.llm_confidence:.1%})" if risk.llm_confidence else ""
             screener._log("info", f"  {i}. [{risk.confidence:.1%}{llm_note}] {risk.type.title()}: {risk.description[:80]}...")
     
-    # Generate reports
-    if args.output_report:
-        report_file = DATA_ROOT / args.ticker / "screening_report.md"
-        screener.generate_screening_report(catalysts, risks, mitigations, analysis_summary, report_file)
-        screener._log("info", f"Screening report saved: {report_file}")
+    # Always generate reports in production use
+    report_file = DATA_ROOT / args.ticker / "screening_report.md"
+    screener.generate_screening_report(catalysts, risks, mitigations, analysis_summary, report_file)
+    screener._log("info", f"Screening report saved: {report_file}")
     
     if args.save_data:
         data_file = DATA_ROOT / args.ticker / "screening_data.json"

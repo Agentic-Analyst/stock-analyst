@@ -14,9 +14,9 @@ financial JSON (e.g., financials_annual_modeling_latest.json). It includes:
 - Clean OOP design preserved; logger supported if provided
 
 ▶ Usage examples:
-    python financial_model_generator.py --ticker NVDA --model dcf --data-file /path/to/financials_annual_modeling_latest.json --save-excel
+    python financial_model_generator.py --ticker NVDA --model dcf --data-file /path/to/financials_annual_modeling_latest.json
     python financial_model_generator.py --ticker AAPL --model comparable --years 5 --save-csv
-    python financial_model_generator.py --ticker TSLA --model comprehensive --save-excel --no-llm --wacc 0.095 --term-growth 0.025
+    python financial_model_generator.py --ticker TSLA --model comprehensive --wacc 0.095 --term-growth 0.025
 """
 
 from __future__ import annotations
@@ -959,7 +959,16 @@ class FinancialModelGenerator:
         row = 4
         for k in sorted(overrides.keys()):
             val_ws[f"A{row}"] = k
-            val_ws[f"B{row}"] = overrides[k]
+            # Handle arrays and other non-Excel-compatible types
+            value = overrides[k]
+            if isinstance(value, (list, tuple)):
+                # Convert arrays to comma-separated strings
+                val_ws[f"B{row}"] = ", ".join(str(x) for x in value)
+            elif isinstance(value, dict):
+                # Convert dicts to string representation
+                val_ws[f"B{row}"] = str(value)
+            else:
+                val_ws[f"B{row}"] = value
             row += 1
         # Missing valuation fields
         row += 1
@@ -1018,9 +1027,9 @@ def _parse_args():
     p.add_argument("--term-growth", type=float, default=None, help="Terminal growth rate (omit to auto-infer)")
     p.add_argument("--wacc", type=float, default=None, help="Override WACC (e.g., 0.095). If omitted, auto-infer.")
     p.add_argument("--data-file", type=str, default=None, help="Path to financials_annual_modeling_latest.json")
-    p.add_argument("--no-llm", action="store_true", help="Disable LLM narrative generation")
-    p.add_argument("--save-excel", action="store_true", help="Save outputs to Excel")
-    p.add_argument("--save-csv", action="store_true", help="Save model components to CSVs")
+    # LLM narrative generation is now always enabled for production use
+    # Output saving is now always enabled - Excel is default, CSV optional  
+    p.add_argument("--save-csv", action="store_true", help="Additionally save model components to CSVs")
     p.add_argument("--strategy", type=str, default=None, help="Force a specific forecast strategy (e.g., saas_dcf, generic_dcf)")
     p.add_argument("--peers", type=str, default=None, help="Comma separated peer tickers for comps")
     p.add_argument("--sensitivities", action="store_true", help="Generate sensitivity matrices (WACC vs TG & Growth vs Margin)")
@@ -1049,7 +1058,7 @@ def _parse_args():
 
 def main():
     args = _parse_args()
-    gen = FinancialModelGenerator(args.ticker, data_file=args.data_file, no_llm=args.no_llm)
+    gen = FinancialModelGenerator(args.ticker, data_file=args.data_file, no_llm=False)  # LLM always enabled
 
     if args.stats:
         gen._log("info", f"Models generated: {gen.models_generated}")
@@ -1079,7 +1088,7 @@ def main():
         peers = [p.strip().upper() for p in args.peers.split(',')] if args.peers else None
         baseline_model = None
         override_wacc_final = args.wacc
-        if args.llm_params and not args.no_llm:
+        if args.llm_params:  # LLM always enabled
             # Lean baseline run first for context
             baseline_model = gen.generate_financial_model(
                 model_type=args.model,
@@ -1113,8 +1122,8 @@ def main():
             generate_sensitivities=args.sensitivities,
         )
         saved = []
-        if args.save_excel:
-            saved.append(gen.save_model_to_excel(model))
+        # Always save to Excel in production use
+        saved.append(gen.save_model_to_excel(model))
         if args.save_csv:
             saved.extend(gen.save_model_to_csv(model))
 

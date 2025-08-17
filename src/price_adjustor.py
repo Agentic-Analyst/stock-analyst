@@ -550,12 +550,12 @@ def _parse_args():
     p.add_argument('--years', type=int, default=5)
     p.add_argument('--term-growth', type=float, default=0.03)
     p.add_argument('--wacc', type=float, default=None)
-    p.add_argument('--no-llm', action='store_true')
+    # LLM functionality is now always enabled for production use
     p.add_argument('--scaling', type=float, default=ADJUSTOR_DEFAULTS.DEFAULT_SCALING, help='Base scaling factor applied to net qualitative score (pre sector adj)')
     p.add_argument('--cap', type=float, default=ADJUSTOR_DEFAULTS.DEFAULT_CAP, help='Base absolute cap on adjustment (fraction) (pre sector adj)')
-    p.add_argument('--json', action='store_true', help='Output JSON only')
     p.add_argument('--screen-file', type=str, default=None, help='Explicit screening_report.md path')
     p.add_argument('--sector', type=str, default=None, help='Optional sector name for calibration (affects scaling & cap)')
+    # JSON-only output removed - always provide human-readable output
     # LLM delta options
     p.add_argument('--llm-deltas', action='store_true', help='Invoke LLM to propose bounded parameter deltas (growth/margin/capex/wacc)')
     p.add_argument('--apply-deltas', action='store_true', help='Apply proposed deltas and recompute model price')
@@ -581,7 +581,7 @@ def main():
 
     # Step 1: base model
     base_price, model_obj = generate_base_model_price(ticker, args.model, args.strategy,
-                                                      args.years, args.term_growth, args.wacc, args.no_llm)
+                                                      args.years, args.term_growth, args.wacc, False)  # LLM always enabled
 
     # Step 2: parse qualitative factors
     factors = parse_screening_report(screen_path)
@@ -1103,9 +1103,7 @@ def main():
         except Exception as e:  # pragma: no cover
             output['scenario_excel_error'] = str(e)
 
-    if args.json:
-        print(json.dumps(output, indent=2))
-    else:
+    # Always provide human-readable output in production use
         print(f"\n=== Qualitative Price Adjustment ({ticker}) ===")
         if base_price is None:
             print("Base price unavailable; cannot adjust.")

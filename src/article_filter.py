@@ -356,8 +356,7 @@ def main():
     parser.add_argument("--ticker", required=True, help="Stock ticker, e.g. NVDA")
     parser.add_argument("--min-score", type=float, default=3.0, help="Minimum relevance score (0.0-10.0)")
     parser.add_argument("--max-articles", type=int, default=10, help="Maximum number of articles to keep")
-    parser.add_argument("--output-report", action="store_true", help="Generate a summary report")
-    parser.add_argument("--save-filtered", action="store_true", help="Save filtered articles to separate directory")
+    # Report generation and saving filtered articles are now always enabled for production use
     
     args = parser.parse_args()
     
@@ -378,17 +377,14 @@ def main():
     for i, (article, score) in enumerate(filtered_articles, 1):
         filter_engine._log("info", f"  {i}. [{score:.2f}] {article['title'][:80]}...")
     
-    # Generate report if requested
-    if args.output_report:
-        report_file = DATA_ROOT / args.ticker / "filtered_report.md"
-        filter_engine.generate_filtered_report(filtered_articles, report_file)
-        filter_engine._log("info", f"Report generated: {report_file}")
+    # Always generate report and save filtered articles in production use
+    report_file = DATA_ROOT / args.ticker / "filtered_report.md"
+    filter_engine.generate_filtered_report(filtered_articles, report_file)
+    filter_engine._log("info", f"Report generated: {report_file}")
     
-    # Save filtered articles if requested
-    if args.save_filtered:
-        filtered_dir = DATA_ROOT / args.ticker / "filtered"
-        filter_engine.save_filtered_articles(filtered_articles, filtered_dir)
-        filter_engine._log("info", f"Filtered articles saved to: {filtered_dir}")
+    filtered_dir = DATA_ROOT / args.ticker / "filtered"
+    filter_engine.save_filtered_articles(filtered_articles, filtered_dir)
+    filter_engine._log("info", f"Filtered articles saved to: {filtered_dir}")
 
 if __name__ == "__main__":
     main()

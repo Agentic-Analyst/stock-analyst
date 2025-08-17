@@ -1163,7 +1163,7 @@ def main():
                        default="all", help="Which statements to scrape ('modeling' for comprehensive financial modeling data)")
     parser.add_argument("--quarterly", action="store_true", help="Get quarterly data instead of annual")
     parser.add_argument("--years", type=int, help="Number of years of historical price data (1-10, only affects 'modeling' mode)")
-    parser.add_argument("--save", action="store_true", help="Save data to JSON files")
+    # Data saving is now always enabled for production use
     parser.add_argument("--stats", action="store_true", help="Show current storage statistics")
     
     args = parser.parse_args()
@@ -1239,7 +1239,7 @@ def main():
             statements_scraped = ["modeling"]
         
         # Save if requested
-        if args.save and financial_data:
+        if financial_data:  # Always save in production use
             file_path = scraper.save_financial_data(financial_data, annual, statements_scraped)
             scraper._log("info", f"Financial data saved to: {file_path}")
         
