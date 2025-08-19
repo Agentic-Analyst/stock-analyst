@@ -185,6 +185,10 @@ class ComprehensiveStockAnalysisPipeline:
             # Scrape comprehensive financial data for modeling
             financial_data = self.financial_scraper.scrape_financial_modeling_data(annual=True)
             
+            # Save the financial data to file for the model generator to use
+            file_path = self.financial_scraper.save_financial_data(financial_data, annual=True, statements_scraped=["modeling"])
+            self.logger.info(f"💾 Financial data saved to: {file_path}")
+            
             # Update statistics
             data_completeness = financial_data.get("data_summary", {}).get("data_completeness", {})
             financial_statements = financial_data.get("financial_statements", {})
