@@ -1145,6 +1145,67 @@ def main():
             if applied_model_price:
                 print(f"\nLLM-Adjusted Price: {applied_model_price:,.2f} (Total Δ {(output.get('llm_total_change_pct',0))*100:+.1f}%)")
         print("==============================================\n")
+    # Generate explanation reports (LLM + deterministic) without cluttering main
+    try:
+        # Deterministic explanation builder (kept local to avoid imports elsewhere)
+        def _fmt_pct(v):
+            try:
+                return f"{v*100:+.1f}%" if v is not None else "n/a"
+            except Exception:
+                return "n/a"
+        def _top(items, n=5):
+            out=[]
+            for it in items[:n]:
+                t=it.get('title') or '(untitled)'
+                conf=it.get('confidence'); tl=it.get('timeline')
+                try:
+                    conf_txt=f"{float(conf)*100:.0f}%" if conf is not None else "n/a"
+                except Exception:
+                    conf_txt="n/a"
+                out.append(f"- {t} (Confidence {conf_txt}, {tl})")
+            return out
+        ts_human = time.strftime('%Y-%m-%d %H:%M:%S')
+        base_price = output.get('base_model_price')
+        mapped_price = output.get('mapped_adjusted_price')
+        qual_adj_price = output.get('adjusted_price')
+        final_price = output.get('final_price') or output.get('primary_adjusted_price')
+        bull = output.get('bull_price'); bear = output.get('bear_price'); volb = output.get('vol_buffer')
+        mapped = output.get('mapped_parameter_deltas') or {}
+        mapped_total_pct = mapped.get('mapped_total_change_pct') if isinstance(mapped, dict) else None
+        qual_pct = output.get('adjustment_pct')
+        residual_pct = output.get('residual_overlay_pct') or output.get('residual_overlay_pct_llm')
+        llm_total_pct = output.get('llm_total_change_pct')
+        lines=[f"# Qualitative Price Adjustment Summary — {ticker}", "", f"Generated on: {ts_human}", f"Method: {output.get('method','qual_overlay')}", "", "## Executive Snapshot"]
+        lines.append(f"- Base implied price: {base_price:,.2f} (from {args.model} model, years={args.years}, g={args.term_growth:.3f})")
+        if mapped_price is not None:
+            ch = mapped_total_pct if mapped_total_pct is not None else ((mapped_price / base_price) - 1 if base_price else None)
+            lines.append(f"- Mapped-parameter price: {mapped_price:,.2f} ({_fmt_pct(ch)} vs base)")
+        if qual_adj_price is not None:
+            lines.append(f"- Qualitative overlay price: {qual_adj_price:,.2f} ({_fmt_pct(qual_pct)} vs base)")
+        if output.get('llm_adjusted_price') is not None:
+            lines.append(f"- LLM-adjusted price: {output['llm_adjusted_price']:,.2f} ({_fmt_pct(llm_total_pct)} vs base)")
+        if residual_pct is not None and final_price is not None and mapped_price is not None:
+            lines.append(f"- Residual overlay applied: {_fmt_pct(residual_pct)}")
+        if final_price is not None:
+            lines.append(f"- Final adjusted price: {final_price:,.2f}")
+        if bull is not None and bear is not None and volb is not None:
+            lines.append(f"- Range: Bear {bear:,.2f} / Bull {bull:,.2f} (volatility buffer ~{volb*100:.1f}%)")
+        lines.append("")
+        lines.append("## Key Catalysts"); lines.extend(_top(factors.get('catalysts',[]),5) or ["- (none)"])
+        lines.append("")
+        lines.append("## Key Risks"); lines.extend(_top(factors.get('risks',[]),5) or ["- (none)"])
+        det_report = "\n".join(lines)
+        # LLM-enhanced narrative
+        try:
+            from reporting import build_llm_explanation, save_explanation_reports
+            llm_md = build_llm_explanation(ticker, output, factors, args)
+            saved = save_explanation_reports(ticker, det_report, llm_md)
+            output['explanation_report'] = saved['path']
+            output['explanation_report_latest'] = saved['latest']
+        except Exception as e:  # pragma: no cover
+            output['explanation_report_error'] = str(e)
+    except Exception:
+        pass
     return 0
 
 

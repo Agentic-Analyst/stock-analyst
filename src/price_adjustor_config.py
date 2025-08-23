@@ -76,6 +76,7 @@ class PromptPaths:
     """File paths for price adjustor prompt templates."""
     
     PARAMETER_DELTAS: str = "prompts/parameter_deltas.md"
+    EXPLANATION_REPORT: str = "prompts/explanation_report.md"
 
 
 # Singleton instances

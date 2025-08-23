@@ -170,6 +170,29 @@ class ComprehensiveStockAnalysisPipeline:
         price_results = self.run_price_adjustment_stage(
             model_results, screening_results, scaling, adjustment_cap, use_mapped_deltas, llm_scenarios
         )
+
+        # Generate analyst explanation report (LLM-enhanced) as part of the main workflow
+        try:
+            if price_results.get("success"):
+                pa = price_results.get("price_analysis", {})
+                def _to_dict(x):
+                    try:
+                        return asdict(x)
+                    except Exception:
+                        return x if isinstance(x, dict) else dict(x.__dict__) if hasattr(x, '__dict__') else {"value": x}
+                factors = {
+                    "catalysts": [_to_dict(c) for c in screening_results.get("catalysts", [])],
+                    "risks": [_to_dict(r) for r in screening_results.get("risks", [])],
+                    "mitigations": [_to_dict(m) for m in screening_results.get("mitigations", [])],
+                }
+                from reporting import build_llm_explanation, save_explanation_reports, build_deterministic_summary
+                meta = {"model": model_type, "years": projection_years, "term_growth": term_growth}
+                det_md = build_deterministic_summary(self.ticker, pa, factors, meta)
+                llm_md = build_llm_explanation(self.ticker, pa, factors, argparse.Namespace(model=model_type, years=projection_years, term_growth=term_growth or 0.0, wacc=None))
+                saved = save_explanation_reports(self.ticker, det_md, llm_md)
+                self.logger.info(f"📝 Explanation report saved: {saved['path']} (latest: {saved['latest']})")
+        except Exception as e:
+            self.logger.warning(f"⚠️ Failed to generate explanation report: {e}")
         
         # Pipeline completion
         duration = (datetime.now() - self.stats["start_time"]).total_seconds()
@@ -492,12 +515,18 @@ class ComprehensiveStockAnalysisPipeline:
                 price_diff = ((base_price / current_price) - 1) * 100
                 self.logger.info(f"📊 vs Current market price: ${current_price:.2f} ({price_diff:+.1f}%)")
             
-            # Parse qualitative factors from screening results
-            # Convert dataclass objects to dictionaries
+            # Parse qualitative factors from screening results with robust conversion
+            def _to_dict(x):
+                try:
+                    return asdict(x)
+                except Exception:
+                    if isinstance(x, dict):
+                        return x
+                    return dict(x.__dict__) if hasattr(x, '__dict__') else {"value": x}
             factors = {
-                "catalysts": [asdict(c) for c in screening_results.get("catalysts", [])],
-                "risks": [asdict(r) for r in screening_results.get("risks", [])],
-                "mitigations": [asdict(m) for m in screening_results.get("mitigations", [])]
+                "catalysts": [_to_dict(c) for c in screening_results.get("catalysts", [])],
+                "risks": [_to_dict(r) for r in screening_results.get("risks", [])],
+                "mitigations": [_to_dict(m) for m in screening_results.get("mitigations", [])]
             }
             # Classify events for mapping if not already classified
             for kind in ("catalysts", "risks"):
