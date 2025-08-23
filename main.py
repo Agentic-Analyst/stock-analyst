@@ -275,6 +275,7 @@ class ComprehensiveStockAnalysisPipeline:
             try:
                 excel_path = self.model_generator.save_model_to_excel(model)
                 self.logger.info(f"📊 Model saved to Excel: {excel_path}")
+                self.logger.info(f"📁 Latest version available as: financial_model_{model_type}_latest.xlsx")
             except Exception as e:
                 self.logger.warning(f"⚠️ Excel export failed: {e}")
                 # Continue without Excel - model is still valid

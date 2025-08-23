@@ -12,6 +12,12 @@ financial JSON (e.g., financials_annual_modeling_latest.json). It includes:
 - Robust handling of missing fields and clearer logging
 - Optional explicit --data-file path (instead of directory probing)
 - Clean OOP design preserved; logger supported if provided
+- Auto-saves both timestamped and "latest" versions of Excel/CSV files
+
+File Outputs:
+- Timestamped: financial_model_comprehensive_TICKER_20250823_153045.xlsx
+- Latest: financial_model_comprehensive_latest.xlsx (overwrites previous)
+- CSV components: dcf_model_latest.csv, comparable_analysis_latest.csv, etc.
 
 ▶ Usage examples:
     python financial_model_generator.py --ticker NVDA --model dcf --data-file /path/to/financials_annual_modeling_latest.json
@@ -1004,6 +1010,13 @@ class FinancialModelGenerator:
 
         wb.save(out)
         self._log("info", f"Excel saved: {out}")
+        
+        # Also save a "latest" version for easy access (similar to financials_annual_modeling_latest.json)
+        latest_filename = f"financial_model_{model['model_type']}_latest.xlsx"
+        latest_path = self.models_dir / latest_filename
+        wb.save(latest_path)
+        self._log("info", f"Latest Excel saved: {latest_path}")
+        
         return out
 
     def save_model_to_csv(self, model: Dict[str, Any]) -> List[pathlib.Path]:
@@ -1012,10 +1025,16 @@ class FinancialModelGenerator:
         saved: List[pathlib.Path] = []
         for name, data in model.get("model_components", {}).items():
             if isinstance(data, pd.DataFrame):
+                # Save timestamped version
                 p = self.models_dir / f"{name}_{model['ticker']}_{ts}.csv"
                 data.to_csv(p, index=False)
                 saved.append(p)
                 self._log("info", f"CSV saved: {p}")
+                
+                # Also save latest version
+                latest_p = self.models_dir / f"{name}_latest.csv"
+                data.to_csv(latest_p, index=False)
+                self._log("info", f"Latest CSV saved: {latest_p}")
         return saved
 
 
