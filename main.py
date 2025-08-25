@@ -107,8 +107,6 @@ class ComprehensiveStockAnalysisPipeline:
                                   # Price adjustment parameters
                                   scaling: float = 0.15,
                                   adjustment_cap: float = 0.20,
-                                  use_mapped_deltas: bool = True,
-                                  llm_scenarios: bool = True,
                                   generate_reports: bool = True) -> Dict:
         """
         Run the complete 6-step analysis pipeline.
@@ -125,9 +123,9 @@ class ComprehensiveStockAnalysisPipeline:
             min_confidence: Minimum confidence for screening insights (0-1)
             scaling: Base scaling factor for qualitative adjustment
             adjustment_cap: Maximum adjustment percentage (±)
-            use_mapped_deltas: Use deterministic event→parameter mapping
-            llm_scenarios: Generate LLM-enhanced scenario analysis
             generate_reports: Whether to generate analysis reports
+            
+        Note: Deterministic event→parameter mapping and LLM scenarios are always enabled.
             
         Returns:
             Dictionary with complete pipeline results
@@ -168,7 +166,7 @@ class ComprehensiveStockAnalysisPipeline:
         # Step 6: Price Adjustment
         self.logger.stage_start("PRICE ADJUSTMENT", "Combining quantitative model with qualitative factors")
         price_results = self.run_price_adjustment_stage(
-            model_results, screening_results, scaling, adjustment_cap, use_mapped_deltas, llm_scenarios
+            model_results, screening_results, scaling, adjustment_cap  # Mapped deltas and LLM scenarios always enabled
         )
 
         # Generate analyst explanation report (LLM-enhanced) as part of the main workflow
@@ -496,8 +494,7 @@ class ComprehensiveStockAnalysisPipeline:
             return {"catalysts": [], "risks": [], "mitigations": [], "error": str(e)}
     
     def run_price_adjustment_stage(self, model_results: Dict, screening_results: Dict,
-                                  scaling: float, adjustment_cap: float,
-                                  use_mapped_deltas: bool, llm_scenarios: bool) -> Dict:
+                                  scaling: float, adjustment_cap: float) -> Dict:
         """Run the price adjustment stage combining quantitative model with qualitative factors."""
         try:
             model = model_results.get("model", {})
@@ -553,57 +550,55 @@ class ComprehensiveStockAnalysisPipeline:
                 'screen_file_present': True,
             }
             
-            # Step 2: Deterministic mapped parameter deltas (enhanced path)
-            if use_mapped_deltas:
-                try:
-                    # Aggregate catalysts (positive) and risks (negative)
-                    cat_map = aggregate_mapped_parameter_deltas(factors.get('catalysts', []), is_risk=False)
-                    risk_map = aggregate_mapped_parameter_deltas(factors.get('risks', []), is_risk=True)
-                    
-                    # Combine effective deltas with conversion audit
-                    mapped_result = {
-                        'catalyst_contributions': cat_map['contributions'],
-                        'risk_contributions': risk_map['contributions'],
-                        'effective': {
-                            'growth_delta_dec': (cat_map['effective']['growth_delta_dec'] + risk_map['effective']['growth_delta_dec']),
-                            'margin_uplift_dec': (cat_map['effective']['margin_uplift_dec'] + risk_map['effective']['margin_uplift_dec']),
-                            'capex_rate_delta_dec': (cat_map['effective']['capex_rate_delta_dec'] + risk_map['effective']['capex_rate_delta_dec']),
-                            'wacc_delta_dec': (cat_map['effective']['wacc_delta_dec'] + risk_map['effective']['wacc_delta_dec']),
-                        },
-                        'conversion_log': cat_map.get('conversion_log', []) + risk_map.get('conversion_log', []),
-                    }
-                    
-                    # Apply parameter deltas and recompute price
-                    effective_values = mapped_result['effective']
-                    if any(abs(v) > 1e-8 for v in effective_values.values()):
-                        # Create model with adjusted parameters
-                        adjusted_model = self._apply_parameter_deltas_to_model(model, mapped_result['effective'])
-                        mapped_price = adjusted_model.get("valuation_summary", {}).get("Implied Price")
-                        if mapped_price:
-                            mapped_result['mapped_total_change_pct'] = (mapped_price / base_price) - 1
-                            output['mapped_result'] = mapped_result
-                            output['mapped_model_price'] = mapped_price
-                            self.logger.info(f"📊 Mapped parameter price: ${mapped_price:,.2f} (Δ {mapped_result['mapped_total_change_pct']*100:+.1f}%)")
-                    else:
-                        self.logger.info("🛈 No qualifying event parameter deltas (all effective deltas = 0.0)")
-                    
-                except Exception as e:
-                    self.logger.warning(f"⚠️ Mapped parameter deltas failed: {e}")
-                    output['mapped_deltas_error'] = str(e)
+            # Step 2: Deterministic mapped parameter deltas (always enabled)
+            try:
+                # Aggregate catalysts (positive) and risks (negative)
+                cat_map = aggregate_mapped_parameter_deltas(factors.get('catalysts', []), is_risk=False)
+                risk_map = aggregate_mapped_parameter_deltas(factors.get('risks', []), is_risk=True)
+                
+                # Combine effective deltas with conversion audit
+                mapped_result = {
+                    'catalyst_contributions': cat_map['contributions'],
+                    'risk_contributions': risk_map['contributions'],
+                    'effective': {
+                        'growth_delta_dec': (cat_map['effective']['growth_delta_dec'] + risk_map['effective']['growth_delta_dec']),
+                        'margin_uplift_dec': (cat_map['effective']['margin_uplift_dec'] + risk_map['effective']['margin_uplift_dec']),
+                        'capex_rate_delta_dec': (cat_map['effective']['capex_rate_delta_dec'] + risk_map['effective']['capex_rate_delta_dec']),
+                        'wacc_delta_dec': (cat_map['effective']['wacc_delta_dec'] + risk_map['effective']['wacc_delta_dec']),
+                    },
+                    'conversion_log': cat_map.get('conversion_log', []) + risk_map.get('conversion_log', []),
+                }
+                
+                # Apply parameter deltas and recompute price
+                effective_values = mapped_result['effective']
+                if any(abs(v) > 1e-8 for v in effective_values.values()):
+                    # Create model with adjusted parameters
+                    adjusted_model = self._apply_parameter_deltas_to_model(model, mapped_result['effective'])
+                    mapped_price = adjusted_model.get("valuation_summary", {}).get("Implied Price")
+                    if mapped_price:
+                        mapped_result['mapped_total_change_pct'] = (mapped_price / base_price) - 1
+                        output['mapped_result'] = mapped_result
+                        output['mapped_model_price'] = mapped_price
+                        self.logger.info(f"📊 Mapped parameter price: ${mapped_price:,.2f} (Δ {mapped_result['mapped_total_change_pct']*100:+.1f}%)")
+                else:
+                    self.logger.info("🛈 No qualifying event parameter deltas (all effective deltas = 0.0)")
+                
+            except Exception as e:
+                self.logger.warning(f"⚠️ Mapped parameter deltas failed: {e}")
+                output['mapped_deltas_error'] = str(e)
             
-            # Step 3: Scenario generation (stub) if enabled
-            if llm_scenarios:
-                try:
-                    scenarios = [
-                        {"name": "Base", "price": base_price},
-                        {"name": "Adjusted", "price": output.get('adjusted_price'), "delta_pct": output.get('adjustment_pct')},
-                        {"name": "Bull", "price": output.get('bull_price')},
-                        {"name": "Bear", "price": output.get('bear_price')},
-                    ]
-                    output['scenarios'] = scenarios
-                    self.logger.info("🗺️  Generated placeholder scenarios (LLM scenario engine TBD)")
-                except Exception as e:
-                    self.logger.warning(f"⚠️ Scenario generation failed: {e}")
+            # Step 3: Scenario generation (always enabled)
+            try:
+                scenarios = [
+                    {"name": "Base", "price": base_price},
+                    {"name": "Adjusted", "price": output.get('adjusted_price'), "delta_pct": output.get('adjustment_pct')},
+                    {"name": "Bull", "price": output.get('bull_price')},
+                    {"name": "Bear", "price": output.get('bear_price')},
+                ]
+                output['scenarios'] = scenarios
+                self.logger.info("🗺️  Generated placeholder scenarios (LLM scenario engine TBD)")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Scenario generation failed: {e}")
 
             # Update statistics
             self.stats["price_adjustment"] = {
@@ -754,8 +749,6 @@ Examples:
     # Price adjustment parameters
     parser.add_argument("--scaling", type=float, default=0.15, help="Base scaling factor for qualitative adjustment")
     parser.add_argument("--adjustment-cap", type=float, default=0.20, help="Maximum adjustment percentage (±)")
-    parser.add_argument("--no-mapped-deltas", action="store_true", help="Disable deterministic event→parameter mapping")
-    parser.add_argument("--no-llm-scenarios", action="store_true", help="Disable LLM scenario analysis")
     
     # Other options
     parser.add_argument("--stats", action="store_true", help="Show current storage statistics")
@@ -802,9 +795,8 @@ Examples:
                 min_confidence=args.min_confidence,
                 # Price adjustment parameters
                 scaling=args.scaling,
-                adjustment_cap=args.adjustment_cap,
-                use_mapped_deltas=not args.no_mapped_deltas,
-                llm_scenarios=not args.no_llm_scenarios
+                adjustment_cap=args.adjustment_cap
+                # Note: Mapped deltas and LLM scenarios are always enabled
             )
             
         elif args.pipeline == "financial-only":
@@ -856,9 +848,8 @@ Examples:
                     pass
                     
                 results = pipeline.run_price_adjustment_stage(
-                    model_results, screening_results, args.scaling, args.adjustment_cap,
-                    not args.no_mapped_deltas, not args.no_llm_scenarios
-                )
+                    model_results, screening_results, args.scaling, args.adjustment_cap
+                )  # Mapped deltas and LLM scenarios always enabled
             else:
                 results = model_results
                 
@@ -877,9 +868,8 @@ Examples:
                     # Implementation would load saved model data
                     
                     results = pipeline.run_price_adjustment_stage(
-                        model_results, screening_results, args.scaling, args.adjustment_cap,
-                        not args.no_mapped_deltas, not args.no_llm_scenarios
-                    )
+                        model_results, screening_results, args.scaling, args.adjustment_cap
+                    )  # Mapped deltas and LLM scenarios always enabled
                 else:
                     results = filtering_results
             else:
