@@ -148,9 +148,9 @@ class ComprehensiveStockAnalysisPipeline:
         if not model_results.get("model"):
             self.logger.error("❌ Financial model generation failed. Cannot continue to price adjustment.")
             return self._get_pipeline_results()
-        
-        # Step 3: News Scraping
-        self.logger.stage_start("NEWS SCRAPING", "Collecting news articles from Google News")
+
+        # Step 3: Article Scraping
+        self.logger.stage_start("ARTICLE SCRAPING", "Collecting news articles from Google News")
         news_results = self.run_news_scraping_stage(max_articles)
         
         # Step 4: Article Filtering
