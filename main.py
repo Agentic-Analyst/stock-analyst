@@ -876,17 +876,20 @@ Examples:
                 results = news_results
         
         # Pipeline execution completed successfully
+        pipeline.logger.program_end()
         return 0
         
     except KeyboardInterrupt:
         if 'pipeline' in locals():
             pipeline.logger.warning("\n⏹️  Pipeline interrupted by user")
+            pipeline.logger.program_end()
         else:
             print("\n⏹️  Pipeline interrupted by user")
         return 1
     except Exception as e:
         if 'pipeline' in locals():
             pipeline.logger.error(f"❌ Pipeline failed: {e}")
+            pipeline.logger.program_end()
         else:
             print(f"❌ Pipeline failed: {e}")
         return 1

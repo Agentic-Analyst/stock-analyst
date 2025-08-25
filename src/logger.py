@@ -41,7 +41,7 @@ class StockAnalystLogger:
         self.logger.handlers.clear()
         
         # File handler - logs everything
-        file_handler = logging.FileHandler(self.log_file, mode='a', encoding='utf-8')
+        file_handler = logging.FileHandler(self.log_file, mode='w+', encoding='utf-8')
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter(
             '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
@@ -132,7 +132,11 @@ class StockAnalystLogger:
         self.logger.info(f"✅ Stages Completed: {', '.join(stages_completed)}")
         self.logger.info(f"📂 All logs saved to: {self.log_file}")
         self.logger.info("=" * 80)
-    
+
+    def program_end(self):
+        """Log program end with summary."""
+        self.logger.info(f"🏁 THE ENTIRE PROGRAM IS COMPLETED - {self.ticker}")
+
     def get_log_file_path(self) -> pathlib.Path:
         """Get the path to the log file."""
         return self.log_file
