@@ -58,11 +58,9 @@ class StockAnalystLogger:
         self.logger.addHandler(console_handler)
         
         # Log session start
-        self.logger.info("=" * 80)
         self.logger.info(f"🚀 Stock Analysis Pipeline Session Started - {self.ticker}")
         self.logger.info(f"📅 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self.logger.info(f"📂 Log file: {self.log_file}")
-        self.logger.info("=" * 80)
     
     def debug(self, message: str, **kwargs):
         """Log debug message."""
@@ -87,12 +85,9 @@ class StockAnalystLogger:
     # Convenience methods for common logging patterns
     def stage_start(self, stage_name: str, description: str = ""):
         """Log the start of a pipeline stage."""
-        separator = "=" * 50
-        self.logger.info(f"\n{separator}")
         self.logger.info(f"🔥 STAGE: {stage_name}")
         if description:
             self.logger.info(f"📋 {description}")
-        self.logger.info(separator)
     
     def stage_end(self, stage_name: str, success: bool = True, stats: Optional[dict] = None):
         """Log the end of a pipeline stage."""
@@ -126,12 +121,10 @@ class StockAnalystLogger:
     
     def session_end(self, total_duration: float, stages_completed: list):
         """Log session end with summary."""
-        self.logger.info("=" * 80)
         self.logger.info(f"🏁 PIPELINE SESSION COMPLETED - {self.ticker}")
         self.logger.info(f"⏱️  Total Duration: {total_duration:.1f} seconds")
         self.logger.info(f"✅ Stages Completed: {', '.join(stages_completed)}")
         self.logger.info(f"📂 All logs saved to: {self.log_file}")
-        self.logger.info("=" * 80)
 
     def program_end(self):
         """Log program end with summary."""
