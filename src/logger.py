@@ -85,6 +85,7 @@ class StockAnalystLogger:
     # Convenience methods for common logging patterns
     def stage_start(self, stage_name: str, description: str = ""):
         """Log the start of a pipeline stage."""
+        self.logger.info("-" * 50)
         self.logger.info(f"🔥 STAGE: {stage_name}")
         if description:
             self.logger.info(f"📋 {description}")

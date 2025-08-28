@@ -31,6 +31,7 @@ from dataclasses import asdict
 from typing import Optional, Dict, List, Any, Tuple
 from datetime import datetime
 import json
+import time
 
 # Add src directory to path for imports
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
@@ -395,7 +396,7 @@ class ComprehensiveStockAnalysisPipeline:
             }
             
             # Log top articles
-            self.logger.info("📄 Top 3 articles:")
+            self.logger.info(f"📄 Top {len(filtered_articles)} articles:")
             for i, (article, score) in enumerate(filtered_articles[:3], 1):
                 self.logger.info(f"   {i}. [{score:.2f}] {article['title'][:60]}...")
             
@@ -877,6 +878,7 @@ Examples:
         
         # Pipeline execution completed successfully
         pipeline.logger.program_end()
+        time.sleep(5)
         return 0
         
     except KeyboardInterrupt:
@@ -885,6 +887,7 @@ Examples:
             pipeline.logger.program_end()
         else:
             print("\n⏹️  Pipeline interrupted by user")
+        time.sleep(5)
         return 1
     except Exception as e:
         if 'pipeline' in locals():
@@ -892,6 +895,7 @@ Examples:
             pipeline.logger.program_end()
         else:
             print(f"❌ Pipeline failed: {e}")
+        time.sleep(5)
         return 1
 
 if __name__ == "__main__":
