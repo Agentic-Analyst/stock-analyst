@@ -85,7 +85,7 @@ class StockAnalystLogger:
     # Convenience methods for common logging patterns
     def stage_start(self, stage_name: str, description: str = ""):
         """Log the start of a pipeline stage."""
-        self.logger.info("-" * 50)
+        self.logger.info("=" * 80)
         self.logger.info(f"🔥 STAGE: {stage_name}")
         if description:
             self.logger.info(f"📋 {description}")
@@ -98,9 +98,8 @@ class StockAnalystLogger:
         if stats:
             for key, value in stats.items():
                 self.logger.info(f"   📊 {key}: {value}")
-        
-        self.logger.info("-" * 50)
-    
+        self.logger.info("=" * 80)
+
     def llm_call(self, operation: str, cost: float, tokens_used: int = None):
         """Log LLM API call information."""
         msg = f"🤖 LLM Call: {operation} | Cost: ${cost:.6f}"
@@ -126,6 +125,7 @@ class StockAnalystLogger:
         self.logger.info(f"⏱️  Total Duration: {total_duration:.1f} seconds")
         self.logger.info(f"✅ Stages Completed: {', '.join(stages_completed)}")
         self.logger.info(f"📂 All logs saved to: {self.log_file}")
+        self.logger.info("=" * 80)
 
     def program_end(self):
         """Log program end with summary."""
