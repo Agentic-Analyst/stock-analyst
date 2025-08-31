@@ -18,26 +18,24 @@ from slugify import slugify
 from serpapi import GoogleSearch
 from newspaper import Article
 
-# Use environment variable for data path, default to local development
-DATA_ROOT = pathlib.Path(os.getenv('DATA_PATH', 'data'))
-
 class ArticleScraper:
     """News article scraper for collecting stock-related news articles."""
     
-    def __init__(self, ticker: str, company_name: str):
+    def __init__(self, ticker: str, company_name: str, base_path: pathlib.Path):
         """
         Initialize the scraper for a specific stock.
         
         Args:
             ticker: Stock ticker symbol (e.g., 'NVDA')
-            company_name: Full company name (e.g., 'NVIDIA')
+            company_name: Full company name (e.g., 'NVIDIA Corporation')
+            base_path: Optional base path for data organization. If None, uses default.
         """
         self.ticker = ticker.upper()
         self.company_name = company_name
-        self.company_dir = DATA_ROOT / self.ticker
+        self.company_dir = base_path
         self.searched_dir = self.company_dir / "searched"
-        self.index_csv = self.company_dir / "articles_index.csv"
-        
+        self.index_csv = self.searched_dir / "articles_index.csv"
+
         # Logger - will be set by pipeline if available
         self.logger = None
         

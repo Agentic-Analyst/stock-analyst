@@ -6,7 +6,9 @@ Generates a professional markdown report that explains the step-by-step
 price adjustment and provides analyst suggestions.
 """
 from __future__ import annotations
+from datetime import datetime
 from pathlib import Path
+import pathlib
 from typing import Dict, Any, List
 import json, time
 
@@ -90,12 +92,13 @@ def build_llm_explanation(ticker: str, output: Dict[str, Any], factors: Dict[str
         return None
 
 
-def save_explanation_reports(ticker: str, det_report: str, llm_report: str | None) -> dict:
-    ts = time.strftime('%Y%m%d_%H%M%S')
-    rdir = Path('data') / ticker / 'models'
+def save_explanation_reports(ticker: str, deterministic_md: str, llm_md: str, base_path: pathlib.Path) -> Dict[str, str]:
+    """Save explanation reports with timestamped and latest versions."""
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    rdir = base_path / 'reports'
     rdir.mkdir(parents=True, exist_ok=True)
-    final_report = det_report + ("\n\n---\n\n" + llm_report if llm_report else "")
-    report_path = rdir / f"price_adjustment_explanation_{ticker}_{ts}.md"
+    final_report = deterministic_md + ("\n\n---\n\n" + llm_md if llm_md else "")
+    report_path = rdir / f"price_adjustment_explanation_{ticker}_{timestamp}.md"
     report_latest = rdir / "price_adjustment_explanation_latest.md"
     report_path.write_text(final_report, encoding='utf-8')
     report_latest.write_text(final_report, encoding='utf-8')

@@ -26,13 +26,14 @@ File Outputs:
 """
 
 from __future__ import annotations
-import os, json, argparse, pathlib, math, re
+import os, json, argparse, pathlib, math, re, shutil
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
 
 # Import configuration
 from model_config import DEFAULTS, BOUNDS, EXCEL_CONFIG, PROMPTS
+from path_utils import get_latest_analysis_path
 
 # Excel manipulation libraries
 try:
@@ -54,13 +55,10 @@ def _try_load_llm():
         return None
 
 
-DATA_ROOT = pathlib.Path(os.getenv('DATA_PATH', 'data'))
-
-
 class FinancialModelGenerator:
     """Enhanced, auditable financial model generator for valuation analysis."""
 
-    def __init__(self, ticker: str, data_file: Optional[str] = None, no_llm: bool = False):
+    def __init__(self, ticker: str, base_path: pathlib.Path, email: str, data_file: Optional[str] = None, no_llm: bool = False):
         """Constructor sets up path references, caches, and optional LLM client.
 
         Parameters
@@ -74,7 +72,8 @@ class FinancialModelGenerator:
         """
         # --- Core paths ---
         self.ticker = ticker.upper()
-        self.company_dir = DATA_ROOT / self.ticker
+        self.company_dir = base_path
+        self.email = email
         self.financials_dir = self.company_dir / "financials"
         self.models_dir = self.company_dir / "models"
 
@@ -327,7 +326,7 @@ class FinancialModelGenerator:
         rows.append(self._create_comparable_analysis_dataframe(base_metrics).iloc[0].to_dict())
         for pt in peers:
             try:
-                peer_dir = DATA_ROOT / pt.upper() / "financials"
+                peer_dir = get_latest_analysis_path(self.email, pt) / "financials"
                 pf = peer_dir / "financials_annual_modeling_latest.json"
                 if not pf.exists():
                     self._log("warning", f"Peer data missing for {pt}; skipping")
@@ -896,6 +895,7 @@ class FinancialModelGenerator:
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         filename = f"financial_model_{model['model_type']}_{model['ticker']}_{ts}.xlsx"
         out = self.models_dir / filename
+        tmp = out.with_suffix(".xlsx.tmp")
 
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
@@ -1008,13 +1008,16 @@ class FinancialModelGenerator:
         row += 1
         val_ws[f"A{row}"] = "Cache Entries"; val_ws[f"B{row}"] = model.get("generation_stats", {}).get("forecast_cache_entries")
 
-        wb.save(out)
+        wb.save(tmp)            # write to temp file
+        wb.close()              # close workbook resources
+        os.replace(tmp, out)    # atomic on POSIX/NTFS
+
         self._log("info", f"Excel saved: {out}")
         
         # Also save a "latest" version for easy access (similar to financials_annual_modeling_latest.json)
         latest_filename = f"financial_model_{model['model_type']}_latest.xlsx"
         latest_path = self.models_dir / latest_filename
-        wb.save(latest_path)
+        shutil.copy2(out, latest_path)
         self._log("info", f"Latest Excel saved: {latest_path}")
         
         return out

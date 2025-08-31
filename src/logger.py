@@ -15,19 +15,16 @@ from typing import Optional
 class StockAnalystLogger:
     """Centralized logger for the stock analysis pipeline."""
     
-    def __init__(self, ticker: str, console_level: str = "INFO"):
+    def __init__(self, ticker: str, base_path: pathlib.Path, console_level: str = "INFO"):
         """
-        Initialize logger for a specific ticker.
+        Initialize stock analyst logger with both console and file output.
         
         Args:
             ticker: Stock ticker symbol (e.g., 'NVDA')
             console_level: Console logging level ('DEBUG', 'INFO', 'WARNING', 'ERROR')
         """
         self.ticker = ticker.upper()
-        
-        # Use environment variable for data path, default to local development
-        data_root = os.getenv('DATA_PATH', 'data')
-        self.data_dir = pathlib.Path(data_root) / self.ticker
+        self.data_dir = base_path
         self.log_file = self.data_dir / "info.log"
         
         # Ensure data directory exists
@@ -163,9 +160,9 @@ def set_logger(logger: StockAnalystLogger):
     global _logger
     _logger = logger
 
-def setup_logger(ticker: str, console_level: str = "INFO") -> StockAnalystLogger:
+def setup_logger(ticker: str, base_path: pathlib.Path = None, console_level: str = "INFO") -> StockAnalystLogger:
     """Setup and return a new logger instance."""
-    logger = StockAnalystLogger(ticker, console_level)
+    logger = StockAnalystLogger(ticker, base_path, console_level)
     set_logger(logger)
     return logger
 

@@ -28,8 +28,6 @@ except ImportError:
     def gpt_4o_mini(*args, **kwargs):
         raise ImportError("LLM functionality not available. Please check llms.py")
 
-# Use environment variable for data path, default to local development  
-DATA_ROOT = pathlib.Path(os.getenv('DATA_PATH', 'data'))
 PROMPTS_ROOT = pathlib.Path("prompts")
 
 def load_prompt(prompt_name: str) -> str:
@@ -89,9 +87,9 @@ class AnalysisSummary:
     total_mitigations: int = 0
 
 class ArticleScreener:
-    def __init__(self, ticker: str):
+    def __init__(self, ticker: str, base_path: pathlib.Path):
         self.ticker = ticker.upper()
-        self.company_dir = DATA_ROOT / self.ticker
+        self.company_dir = base_path
         self.filtered_dir = self.company_dir / "filtered"
         
         # Logger - will be set by pipeline if available
@@ -1043,12 +1041,12 @@ def main():
             screener._log("info", f"  {i}. [{risk.confidence:.1%}{llm_note}] {risk.type.title()}: {risk.description[:80]}...")
     
     # Always generate reports in production use
-    report_file = DATA_ROOT / args.ticker / "screening_report.md"
+    report_file = screener.analysis_path / "screened" / "screening_report.md"
     screener.generate_screening_report(catalysts, risks, mitigations, analysis_summary, report_file)
     screener._log("info", f"Screening report saved: {report_file}")
     
     if args.save_data:
-        data_file = DATA_ROOT / args.ticker / "screening_data.json"
+        data_file = screener.analysis_path / "screened" / "screening_data.json"
         screener.save_structured_data(catalysts, risks, mitigations, analysis_summary, data_file)
         screener._log("info", f"Structured data saved: {data_file}")
     

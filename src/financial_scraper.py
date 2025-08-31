@@ -26,22 +26,20 @@ except ImportError:
     YFINANCE_AVAILABLE = False
     print("Warning: yfinance not installed. Install with: pip install yfinance")
 
-# Use environment variable for data path, default to local development
-DATA_ROOT = pathlib.Path(os.getenv('DATA_PATH', 'data'))
-
 class FinancialScraper:
     """Financial statements scraper for collecting precise financial data."""
     
-    def __init__(self, ticker: str):
+    def __init__(self, ticker: str, base_path: pathlib.Path):
         """
         Initialize the financial scraper for a specific stock.
         
         Args:
             ticker: Stock ticker symbol (e.g., 'NVDA')
+            base_path: Optional base path for data organization. If None, uses default.
         """
         self.ticker = ticker.upper()
-        self.company_dir = DATA_ROOT / self.ticker
-        self.financials_dir = self.company_dir / "financials"
+        self.company_dir = base_path
+        self.financials_dir = base_path / "financials"
         
         # Logger - will be set by pipeline if available
         self.logger = None

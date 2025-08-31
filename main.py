@@ -49,26 +49,33 @@ from event_param_mapping import aggregate_mapped_parameter_deltas, classify_even
 class ComprehensiveStockAnalysisPipeline:
     """Integrated 6-step pipeline for complete stock analysis workflow."""
     
-    def __init__(self, ticker: str, company_name: str):
+    def __init__(self, ticker: str, company_name: str, email: str):
         """
         Initialize the comprehensive analysis pipeline.
         
         Args:
             ticker: Stock ticker symbol (e.g., 'NVDA')
             company_name: Full company name (e.g., 'NVIDIA')
+            email: User's email for data organization
         """
         self.ticker = ticker.upper()
         self.company_name = company_name
+        self.email = email.lower()
         
-        # Setup centralized logging
-        self.logger = setup_logger(self.ticker)
+        # Generate timestamped analysis path
+        from path_utils import get_analysis_path, ensure_analysis_paths
+        self.analysis_path = get_analysis_path(self.email, self.ticker)
+        ensure_analysis_paths(self.analysis_path)
         
-        # Initialize pipeline components
-        self.financial_scraper = FinancialScraper(self.ticker)
+        # Setup centralized logging with analysis path
+        self.logger = setup_logger(self.ticker, base_path=self.analysis_path)
+        
+        # Initialize pipeline components with analysis path
+        self.financial_scraper = FinancialScraper(self.ticker, base_path=self.analysis_path)
         self.model_generator = None  # Initialized when needed with data file
-        self.article_scraper = ArticleScraper(self.ticker, self.company_name)
-        self.article_filter = ArticleFilter(self.ticker)
-        self.article_screener = ArticleScreener(self.ticker)
+        self.article_scraper = ArticleScraper(self.ticker, self.company_name, base_path=self.analysis_path)
+        self.article_filter = ArticleFilter(self.ticker, base_path=self.analysis_path)
+        self.article_screener = ArticleScreener(self.ticker, base_path=self.analysis_path)
         
         # Pass logger to components that support it
         for component in [self.article_scraper, self.article_filter, self.article_screener]:
@@ -188,7 +195,7 @@ class ComprehensiveStockAnalysisPipeline:
                 meta = {"model": model_type, "years": projection_years, "term_growth": term_growth}
                 det_md = build_deterministic_summary(self.ticker, pa, factors, meta)
                 llm_md = build_llm_explanation(self.ticker, pa, factors, argparse.Namespace(model=model_type, years=projection_years, term_growth=term_growth or 0.0, wacc=None))
-                saved = save_explanation_reports(self.ticker, det_md, llm_md)
+                saved = save_explanation_reports(self.ticker, det_md, llm_md, self.analysis_path)
                 self.logger.info(f"📝 Explanation report saved: {saved['path']} (latest: {saved['latest']})")
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to generate explanation report: {e}")
@@ -274,7 +281,7 @@ class ComprehensiveStockAnalysisPipeline:
             # Initialize model generator (allow it to auto-probe latest modeling JSON)
             # NOTE: Previously we passed a path missing the /financials/ subdir which caused a fallback probe.
             # We now omit explicit data_file to avoid confusion and rely on internal probing logic.
-            self.model_generator = FinancialModelGenerator(self.ticker, data_file=None, no_llm=False)
+            self.model_generator = FinancialModelGenerator(self.ticker, data_file=None, base_path=self.analysis_path, email=self.email, no_llm=False)
             # Inject centralized logger for unified output
             if hasattr(self.model_generator, 'set_logger'):
                 self.model_generator.set_logger(self.logger)
@@ -372,11 +379,7 @@ class ComprehensiveStockAnalysisPipeline:
                 return {"filtered_articles": [], "filtered_count": 0}
             
             # Save filtered articles (always enabled in production)
-            from pathlib import Path
-            import os
-            data_root = os.getenv('DATA_PATH', 'data')
-            filtered_dir = Path(data_root) / self.ticker / "filtered"
-            self.article_filter.save_filtered_articles(filtered_articles, filtered_dir)
+            self.article_filter.save_filtered_articles(filtered_articles)
             
             # Update statistics
             filtering_results = {
@@ -455,13 +458,8 @@ class ComprehensiveStockAnalysisPipeline:
             self.stats["stages_completed"].append("article_screening")
             
             # Generate reports (always enabled in production)
-            from pathlib import Path
-            import os
-            data_root = os.getenv('DATA_PATH', 'data')
-            data_dir = Path(data_root) / self.ticker
-            
-            report_file = data_dir / "screening_report.md"
-            data_file = data_dir / "screening_data.json"
+            report_file = self.analysis_path / "screened" / "screening_report.md"
+            data_file = self.analysis_path / "screened" / "screening_data.json"
             if generate_reports:
                 self.article_screener.generate_screening_report(
                     high_conf_catalysts, high_conf_risks, high_conf_mitigations, analysis_summary, report_file
@@ -725,6 +723,7 @@ Examples:
     # Required arguments
     parser.add_argument("--ticker", required=True, help="Stock ticker symbol (e.g., NVDA)")
     parser.add_argument("--company", required=True, help="Company name (e.g., 'NVIDIA')")
+    parser.add_argument("--email", required=True, help="User email for data organization")
     
     # Pipeline control
     parser.add_argument("--pipeline", 
@@ -758,7 +757,7 @@ Examples:
     
     try:
         # Initialize comprehensive pipeline
-        pipeline = ComprehensiveStockAnalysisPipeline(args.ticker, args.company)
+        pipeline = ComprehensiveStockAnalysisPipeline(args.ticker, args.company, args.email)
         
         # Show stats if requested
         if args.stats:
@@ -840,11 +839,14 @@ Examples:
                     # Try to load existing screening data
                     import json
                     from pathlib import Path
-                    screening_file = Path(f"data/{args.ticker}/screening_data.json")
-                    if screening_file.exists():
-                        with open(screening_file) as f:
-                            screening_data = json.load(f)
-                            screening_results = screening_data
+                    from path_utils import get_latest_analysis_path
+                    analysis_path = get_latest_analysis_path(args.email, args.ticker)
+                    if analysis_path:
+                        screening_file = analysis_path / "screened" / "screening_data.json"
+                        if screening_file.exists():
+                            with open(screening_file) as f:
+                                screening_data = json.load(f)
+                                screening_results = screening_data
                 except:
                     pass
                     
@@ -878,7 +880,7 @@ Examples:
         
         # Pipeline execution completed successfully
         pipeline.logger.program_end()
-        time.sleep(5)
+        time.sleep(3)
         return 0
         
     except KeyboardInterrupt:
@@ -887,7 +889,7 @@ Examples:
             pipeline.logger.program_end()
         else:
             print("\n⏹️  Pipeline interrupted by user")
-        time.sleep(5)
+        time.sleep(3)
         return 1
     except Exception as e:
         if 'pipeline' in locals():
@@ -895,7 +897,7 @@ Examples:
             pipeline.logger.program_end()
         else:
             print(f"❌ Pipeline failed: {e}")
-        time.sleep(5)
+        time.sleep(3)
         return 1
 
 if __name__ == "__main__":

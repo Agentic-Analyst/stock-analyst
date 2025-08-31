@@ -12,14 +12,18 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 import yaml
 
-# Use environment variable for data path, default to local development
-DATA_ROOT = pathlib.Path(os.getenv('DATA_PATH', 'data'))
-
 class ArticleFilter:
-    def __init__(self, ticker: str):
-        self.ticker = ticker.upper()
-        self.company_dir = DATA_ROOT / self.ticker
+    def __init__(self, ticker: str, base_path: pathlib.Path):
+        """
+        Initialize article filter.
         
+        Args:
+            ticker: Stock ticker symbol (e.g., 'NVDA')
+            base_path: Optional base path for data organization. If None, uses default.
+        """
+        self.ticker = ticker.upper()
+        self.company_dir = base_path
+        self.filtered_dir = self.company_dir / "filtered"
         # Logger - will be set by pipeline if available
         self.logger = None
         
@@ -300,12 +304,15 @@ class ArticleFilter:
         articles_with_scores.sort(key=lambda x: x[1], reverse=True)
         return articles_with_scores[:max_articles]
     
-    def generate_filtered_report(self, filtered_articles: List[Tuple[Dict, float]], output_file: pathlib.Path):
+    def generate_filtered_report(self, filtered_articles: List[Tuple[Dict, float]]):
         """Generate a report with the filtered articles."""
+        output_file = self.filtered_dir / "filtered_report.md"
+        output_file.parent.mkdir(exist_ok=True)
+
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(f"# Filtered {self.ticker} Stock Analysis Report\n\n")
             f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Total articles analyzed: {len(list(self.company_dir.glob('*.md')))}\n")
+            f.write(f"Total articles analyzed: {len(list(self.filtered_dir.glob('*.md')))}\n")
             f.write(f"Articles meeting criteria: {len(filtered_articles)}\n\n")
             
             for i, (article, score) in enumerate(filtered_articles, 1):
@@ -323,8 +330,9 @@ class ArticleFilter:
                 
                 f.write("---\n\n")
     
-    def save_filtered_articles(self, filtered_articles: List[Tuple[Dict, float]], output_dir: pathlib.Path):
+    def save_filtered_articles(self, filtered_articles: List[Tuple[Dict, float]]):
         """Save filtered articles to a new directory."""
+        output_dir = self.filtered_dir
         output_dir.mkdir(exist_ok=True)
         
         # Create a new index file
@@ -378,13 +386,11 @@ def main():
         filter_engine._log("info", f"  {i}. [{score:.2f}] {article['title'][:80]}...")
     
     # Always generate report and save filtered articles in production use
-    report_file = DATA_ROOT / args.ticker / "filtered_report.md"
-    filter_engine.generate_filtered_report(filtered_articles, report_file)
-    filter_engine._log("info", f"Report generated: {report_file}")
-    
-    filtered_dir = DATA_ROOT / args.ticker / "filtered"
-    filter_engine.save_filtered_articles(filtered_articles, filtered_dir)
-    filter_engine._log("info", f"Filtered articles saved to: {filtered_dir}")
+    filter_engine.generate_filtered_report(filtered_articles)
+    filter_engine._log("info", f"Report generated: {filter_engine.filtered_dir / 'filtered_report.md'}")
+
+    filter_engine.save_filtered_articles(filtered_articles)
+    filter_engine._log("info", f"Filtered articles saved to: {filter_engine.filtered_dir}")
 
 if __name__ == "__main__":
     main()
