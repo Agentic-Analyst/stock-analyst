@@ -45,11 +45,12 @@ from article_filter import ArticleFilter
 from article_screener import ArticleScreener
 from price_adjustor import generate_base_model_price, compute_adjustment, parse_screening_report
 from event_param_mapping import aggregate_mapped_parameter_deltas, classify_event
+from path_utils import get_analysis_path, ensure_analysis_paths
 
 class ComprehensiveStockAnalysisPipeline:
     """Integrated 6-step pipeline for complete stock analysis workflow."""
-    
-    def __init__(self, ticker: str, company_name: str, email: str):
+
+    def __init__(self, ticker: str, company_name: str, email: str, timestamp: str):
         """
         Initialize the comprehensive analysis pipeline.
         
@@ -61,10 +62,10 @@ class ComprehensiveStockAnalysisPipeline:
         self.ticker = ticker.upper()
         self.company_name = company_name
         self.email = email.lower()
+        self.timestamp = timestamp
         
         # Generate timestamped analysis path
-        from path_utils import get_analysis_path, ensure_analysis_paths
-        self.analysis_path = get_analysis_path(self.email, self.ticker)
+        self.analysis_path = get_analysis_path(self.email, self.ticker, self.timestamp)
         ensure_analysis_paths(self.analysis_path)
         
         # Setup centralized logging with analysis path
@@ -724,6 +725,7 @@ Examples:
     parser.add_argument("--ticker", required=True, help="Stock ticker symbol (e.g., NVDA)")
     parser.add_argument("--company", required=True, help="Company name (e.g., 'NVIDIA')")
     parser.add_argument("--email", required=True, help="User email for data organization")
+    parser.add_argument("--timestamp", required=True, help="Custom timestamp for analysis folder (YYYYMMDD_HHMMSS)")
     
     # Pipeline control
     parser.add_argument("--pipeline", 
@@ -757,7 +759,7 @@ Examples:
     
     try:
         # Initialize comprehensive pipeline
-        pipeline = ComprehensiveStockAnalysisPipeline(args.ticker, args.company, args.email)
+        pipeline = ComprehensiveStockAnalysisPipeline(args.ticker, args.company, args.email, args.timestamp)
         
         # Show stats if requested
         if args.stats:
