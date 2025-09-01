@@ -55,6 +55,7 @@ Thumbs.db
 *.log
 temp/
 tmp/
+data/
 
 # API keys (never commit these!)
 .env.local

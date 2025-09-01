@@ -381,6 +381,7 @@ class ComprehensiveStockAnalysisPipeline:
             
             # Save filtered articles (always enabled in production)
             self.article_filter.save_filtered_articles(filtered_articles)
+            self.article_filter.generate_filtered_report(filtered_articles)
             
             # Update statistics
             filtering_results = {

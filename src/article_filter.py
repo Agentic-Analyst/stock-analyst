@@ -309,7 +309,7 @@ class ArticleFilter:
         output_file = self.filtered_dir / "filtered_report.md"
         output_file.parent.mkdir(exist_ok=True)
 
-        with open(output_file, "w", encoding="utf-8") as f:
+        with open(output_file, "w+", encoding="utf-8") as f:
             f.write(f"# Filtered {self.ticker} Stock Analysis Report\n\n")
             f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Total articles analyzed: {len(list(self.filtered_dir.glob('*.md')))}\n")
@@ -337,7 +337,7 @@ class ArticleFilter:
         
         # Create a new index file
         index_file = output_dir / "filtered_articles_index.csv"
-        with open(index_file, "w", newline="", encoding="utf-8") as f:
+        with open(index_file, "w+", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=["score", "title", "source_url", "file", "publish_date"])
             writer.writeheader()
             
