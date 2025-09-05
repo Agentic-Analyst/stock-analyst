@@ -111,6 +111,7 @@ class ComprehensiveStockAnalysisPipeline:
                                   strategy: Optional[str] = None,
                                   # News analysis parameters  
                                   max_articles: int = 20,
+                                  query_override: Optional[str] = None,
                                   min_filter_score: float = 3.0,
                                   max_filtered: int = 10,
                                   min_confidence: float = 0.5,
@@ -128,6 +129,7 @@ class ComprehensiveStockAnalysisPipeline:
             wacc_override: Override WACC (auto-infer if None)  
             strategy: Force specific forecast strategy (auto-select if None)
             max_articles: Maximum articles to scrape
+            query_override: Override default search query for news articles
             min_filter_score: Minimum relevance score for filtering (0-10)
             max_filtered: Maximum filtered articles to keep
             min_confidence: Minimum confidence for screening insights (0-1)
@@ -161,7 +163,7 @@ class ComprehensiveStockAnalysisPipeline:
 
         # Step 3: Article Scraping
         self.logger.stage_start("ARTICLE SCRAPING", "Collecting news articles from Google News")
-        news_results = self.run_news_scraping_stage(max_articles)
+        news_results = self.run_news_scraping_stage(max_articles, query_override)
         
         # Step 4: Article Filtering
         self.logger.stage_start("ARTICLE FILTERING", "Filtering articles for relevance and quality")
@@ -340,7 +342,7 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.error(f"❌ Financial model generation failed: {e}")
             return {"success": False, "error": str(e)}
     
-    def run_news_scraping_stage(self, max_articles: int = 20) -> Dict:
+    def run_news_scraping_stage(self, max_articles: int = 20, query_override: Optional[str] = None) -> Dict:
         """Run the news article scraping stage."""
         try:
             # Check current storage status
@@ -350,7 +352,7 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.info(f"📊 Current articles in storage: {current_count}")
             
             # Perform scraping
-            scraping_results = self.article_scraper.scrape_articles(max_articles)
+            scraping_results = self.article_scraper.scrape_articles(max_articles, query_override)
             # Record pre-existing corpus size for downstream logic (news-only reuse)
             scraping_results['pre_existing'] = current_count
             
@@ -759,6 +761,7 @@ Examples:
     
     # News analysis parameters  
     parser.add_argument("--max-articles", type=int, default=20, help="Maximum articles to scrape")
+    parser.add_argument("--query", help="Override default search query for news articles")
     parser.add_argument("--min-score", type=float, default=3.0, help="Minimum relevance score (0-10)")
     parser.add_argument("--max-filtered", type=int, default=10, help="Maximum filtered articles")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="Minimum confidence for insights (0-1)")
@@ -807,6 +810,7 @@ Examples:
                 strategy=args.strategy,
                 # News analysis parameters
                 max_articles=args.max_articles,
+                query_override=args.query,
                 min_filter_score=args.min_score,
                 max_filtered=args.max_filtered,
                 min_confidence=args.min_confidence,
@@ -831,7 +835,7 @@ Examples:
             )
             
         elif args.pipeline == "news-only":
-            news_results = pipeline.run_news_scraping_stage(args.max_articles)
+            news_results = pipeline.run_news_scraping_stage(args.max_articles, args.query)
             # Proceed to filtering if we either scraped new content OR have a pre-existing corpus
             if news_results.get("scraped_count", 0) > 0 or news_results.get('pre_existing', 0) > 0:
                 filtering_results = pipeline.run_filtering_stage(args.min_score, args.max_filtered)
@@ -874,7 +878,7 @@ Examples:
                 
         elif args.pipeline == "news-to-price":
             # News analysis through price adjustment (requires existing financial model)
-            news_results = pipeline.run_news_scraping_stage(args.max_articles)
+            news_results = pipeline.run_news_scraping_stage(args.max_articles, args.query)
             if news_results.get("scraped_count", 0) > 0:
                 filtering_results = pipeline.run_filtering_stage(args.min_score, args.max_filtered)
                 if filtering_results.get("filtered_articles"):
