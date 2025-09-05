@@ -46,6 +46,7 @@ from article_screener import ArticleScreener
 from price_adjustor import generate_base_model_price, compute_adjustment, parse_screening_report
 from event_param_mapping import aggregate_mapped_parameter_deltas, classify_event
 from path_utils import get_analysis_path, ensure_analysis_paths
+from reporting import build_llm_explanation, save_explanation_reports, build_deterministic_summary
 
 class ComprehensiveStockAnalysisPipeline:
     """Integrated 6-step pipeline for complete stock analysis workflow."""
@@ -192,10 +193,13 @@ class ComprehensiveStockAnalysisPipeline:
                     "risks": [_to_dict(r) for r in screening_results.get("risks", [])],
                     "mitigations": [_to_dict(m) for m in screening_results.get("mitigations", [])],
                 }
-                from reporting import build_llm_explanation, save_explanation_reports, build_deterministic_summary
                 meta = {"model": model_type, "years": projection_years, "term_growth": term_growth}
                 det_md = build_deterministic_summary(self.ticker, pa, factors, meta)
+                self.logger.info(f"📝 Generating deterministic explanation report for {self.ticker}...")
+                self.logger.info(f"📄 Deterministic explanation report content:\n{det_md}")
                 llm_md = build_llm_explanation(self.ticker, pa, factors, argparse.Namespace(model=model_type, years=projection_years, term_growth=term_growth or 0.0, wacc=None))
+                self.logger.info(f"📝 Generating LLM explanation report for {self.ticker}...")
+                self.logger.info(f"📄 LLM explanation report content:\n{llm_md}")
                 saved = save_explanation_reports(self.ticker, det_md, llm_md, self.analysis_path)
                 self.logger.info(f"📝 Explanation report saved: {saved['path']} (latest: {saved['latest']})")
         except Exception as e:
@@ -513,19 +517,29 @@ class ComprehensiveStockAnalysisPipeline:
                 price_diff = ((base_price / current_price) - 1) * 100
                 self.logger.info(f"📊 vs Current market price: ${current_price:.2f} ({price_diff:+.1f}%)")
             
-            # Parse qualitative factors from screening results with robust conversion
-            def _to_dict(x):
-                try:
-                    return asdict(x)
-                except Exception:
-                    if isinstance(x, dict):
-                        return x
-                    return dict(x.__dict__) if hasattr(x, '__dict__') else {"value": x}
-            factors = {
-                "catalysts": [_to_dict(c) for c in screening_results.get("catalysts", [])],
-                "risks": [_to_dict(r) for r in screening_results.get("risks", [])],
-                "mitigations": [_to_dict(m) for m in screening_results.get("mitigations", [])]
-            }
+            # Use proper parse_screening_report function to parse from the markdown file
+            screening_report_path = self.analysis_path / "screened" / "screening_report.md"
+            
+            if screening_report_path.exists():
+                # Parse the screening report using the dedicated function
+                factors = parse_screening_report(screening_report_path)
+                self.logger.info(f"📋 Parsed screening report: {len(factors.get('catalysts', []))} catalysts, {len(factors.get('risks', []))} risks, {len(factors.get('mitigations', []))} mitigations")
+            else:
+                # Fallback: convert screening_results dataclasses to dict format
+                self.logger.warning("⚠️ No screening report file found, using direct screening results")
+                def _to_dict(x):
+                    try:
+                        return asdict(x)
+                    except Exception:
+                        if isinstance(x, dict):
+                            return x
+                        return dict(x.__dict__) if hasattr(x, '__dict__') else {"value": x}
+                
+                factors = {
+                    "catalysts": [_to_dict(c) for c in screening_results.get("catalysts", [])],
+                    "risks": [_to_dict(r) for r in screening_results.get("risks", [])],
+                    "mitigations": [_to_dict(m) for m in screening_results.get("mitigations", [])]
+                }
             # Classify events for mapping if not already classified
             for kind in ("catalysts", "risks"):
                 for item in factors[kind]:
@@ -836,22 +850,21 @@ Examples:
                 args.model, args.years, args.term_growth, args.wacc, args.strategy
             )
             if model_results.get("success"):
-                # Load existing screening results or create empty
+                # Load existing screening results using proper parse function
                 screening_results = {"catalysts": [], "risks": [], "mitigations": []}
                 try:
-                    # Try to load existing screening data
-                    import json
-                    from pathlib import Path
+                    # Try to load existing screening report markdown file
                     from path_utils import get_latest_analysis_path
                     analysis_path = get_latest_analysis_path(args.email, args.ticker)
                     if analysis_path:
-                        screening_file = analysis_path / "screened" / "screening_data.json"
-                        if screening_file.exists():
-                            with open(screening_file) as f:
-                                screening_data = json.load(f)
-                                screening_results = screening_data
-                except:
-                    pass
+                        screening_report_path = analysis_path / "screened" / "screening_report.md"
+                        if screening_report_path.exists():
+                            screening_results = parse_screening_report(screening_report_path)
+                            pipeline.logger.info(f"📋 Loaded existing screening data: {len(screening_results.get('catalysts', []))} catalysts, {len(screening_results.get('risks', []))} risks")
+                        else:
+                            pipeline.logger.warning("⚠️ No existing screening report found for model-to-price pipeline")
+                except Exception as e:
+                    pipeline.logger.warning(f"⚠️ Failed to load existing screening data: {e}")
                     
                 results = pipeline.run_price_adjustment_stage(
                     model_results, screening_results, args.scaling, args.adjustment_cap
