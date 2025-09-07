@@ -126,7 +126,7 @@ class StockAnalystLogger:
 
     def program_end(self):
         """Log program end with summary."""
-        self.logger.info(f"🏁 THE ENTIRE PROGRAM IS COMPLETED - {self.ticker}")
+        self.logger.info(f"THE ENTIRE PROGRAM IS COMPLETED - {self.ticker}")
 
     def get_log_file_path(self) -> pathlib.Path:
         """Get the path to the log file."""
