@@ -43,14 +43,17 @@ def build_llm_explanation(ticker: str, output: Dict[str, Any], factors: Dict[str
         top_cats = []
         for i, c in enumerate(factors.get('catalysts', [])[:5], 1):
             conf = c.get('confidence'); tl = c.get('timeline')
-            top_cats.append(f"  - C{i}: {c.get('title')} | conf={int((conf or 0)*100)}% | {tl}")
+            title = c.get('title') or c.get('description') or c.get('type') or 'untitled'
+            top_cats.append(f"  - C{i}: {title} | conf={int((conf or 0)*100)}% | {tl}")
         top_risks = []
         for i, r in enumerate(factors.get('risks', [])[:5], 1):
             conf = r.get('confidence'); tl = r.get('timeline')
-            top_risks.append(f"  - R{i}: {r.get('title')} | conf={int((conf or 0)*100)}% | {tl}")
+            title = r.get('title') or r.get('description') or r.get('type') or 'untitled'
+            top_risks.append(f"  - R{i}: {title} | conf={int((conf or 0)*100)}% | {tl}")
         top_mits = []
         for i, m in enumerate(factors.get('mitigations', [])[:3], 1):
-            top_mits.append(f"  - M{i}: {m.get('title')} | eff={m.get('effectiveness','n/a')} | addr={m.get('risk_addressed','n/a')}")
+            title = m.get('title') or m.get('strategy') or m.get('risk_addressed') or 'untitled'
+            top_mits.append(f"  - M{i}: {title} | eff={m.get('effectiveness','n/a')} | addr={m.get('risk_addressed','n/a')}")
         eff = (output.get('mapped_parameter_deltas') or {}).get('effective') or {}
         prompt = prompt_tmpl.format(
             ticker=ticker,
@@ -117,7 +120,8 @@ def build_deterministic_summary(ticker: str, output: Dict[str, Any], factors: Di
     def _top(items, n=5):
         out=[]
         for it in items[:n]:
-            t=it.get('title') or '(untitled)'
+            # Try multiple field names for title/description
+            t = it.get('title') or it.get('description') or it.get('type') or '(untitled)'
             conf=it.get('confidence'); tl=it.get('timeline')
             try:
                 conf_txt=f"{float(conf)*100:.0f}%" if conf is not None else "n/a"
