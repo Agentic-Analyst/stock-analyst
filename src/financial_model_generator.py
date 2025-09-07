@@ -34,6 +34,7 @@ import pandas as pd
 # Import configuration
 from model_config import DEFAULTS, BOUNDS, EXCEL_CONFIG, PROMPTS
 from path_utils import get_latest_analysis_path
+from financial_scraper import FinancialScraper
 
 # Excel manipulation libraries
 try:
@@ -324,26 +325,55 @@ class FinancialModelGenerator:
         rows = []
         # include base first
         rows.append(self._create_comparable_analysis_dataframe(base_metrics).iloc[0].to_dict())
+        
+        successful_peers = 0
         for pt in peers:
             try:
-                peer_dir = get_latest_analysis_path(self.email, pt) / "financials"
-                pf = peer_dir / "financials_annual_modeling_latest.json"
-                if not pf.exists():
-                    self._log("warning", f"Peer data missing for {pt}; skipping")
+                self._log("info", f"Scraping fresh financial data for peer: {pt}")
+                
+                # Create a temporary directory for peer data scraping
+                peer_base_path = self.company_dir / f"temp_peer_{pt.upper()}"
+                
+                # Initialize financial scraper for the peer
+                peer_scraper = FinancialScraper(pt.upper(), base_path=peer_base_path)
+                if self.logger:
+                    peer_scraper.set_logger(self.logger)
+                
+                # Scrape fresh comprehensive financial modeling data
+                peer_data = peer_scraper.scrape_financial_modeling_data(annual=True)
+                
+                if not peer_data or not peer_data.get("company_data"):
+                    self._log("warning", f"Failed to scrape data for peer {pt}; skipping")
                     continue
-                with open(pf, "r", encoding="utf-8") as f:
-                    pdata = json.load(f)
-                pmetrics = self._extract_key_financial_metrics(pdata)
+
+                # Extract metrics from the fresh data
+                pmetrics = self._extract_key_financial_metrics(peer_data)
+                
+                # Validate that we have essential data for comparison
+                if not pmetrics.get("company_info", {}).get("market_cap"):
+                    self._log("warning", f"Peer {pt} missing essential market data; skipping")
+                    continue
+                
                 # Adjust ticker context temporarily
                 orig = self.ticker
                 self.ticker = pt.upper()
                 prow = self._create_comparable_analysis_dataframe(pmetrics).iloc[0].to_dict()
                 self.ticker = orig
                 rows.append(prow)
+                successful_peers += 1
+                
+                self._log("info", f"Successfully added peer {pt} to comparison")
+                file_path = peer_scraper.save_financial_data(peer_data, annual=True, statements_scraped=["modeling"])
+                self._log("info", f"💾 Financial data saved to: {file_path}")
+
             except Exception as e:
-                self._log("warning", f"Peer {pt} failed: {e}")
-        if len(rows) < 2:
+                self._log("warning", f"Peer {pt} failed during fresh data scraping: {e}")
+        
+        if successful_peers == 0:
+            self._log("warning", "No peer data could be successfully scraped")
             return None
+        
+        self._log("info", f"Peer comparison table created with {successful_peers} peer(s)")
         return pd.DataFrame(rows)
 
     # Sensitivities

@@ -43,7 +43,7 @@ from financial_model_generator import FinancialModelGenerator
 from article_scraper import ArticleScraper
 from article_filter import ArticleFilter
 from article_screener import ArticleScreener
-from price_adjustor import generate_base_model_price, compute_adjustment, parse_screening_report
+from price_adjustor import compute_adjustment, parse_screening_report
 from event_param_mapping import aggregate_mapped_parameter_deltas, classify_event
 from path_utils import get_analysis_path, ensure_analysis_paths
 from reporting import build_llm_explanation, save_explanation_reports, build_deterministic_summary
@@ -109,6 +109,7 @@ class ComprehensiveStockAnalysisPipeline:
                                   term_growth: Optional[float] = None,
                                   wacc_override: Optional[float] = None,
                                   strategy: Optional[str] = None,
+                                  peers: Optional[str] = None,
                                   # News analysis parameters  
                                   max_articles: int = 20,
                                   query_override: Optional[str] = None,
@@ -128,6 +129,7 @@ class ComprehensiveStockAnalysisPipeline:
             term_growth: Terminal growth rate (auto-infer if None)
             wacc_override: Override WACC (auto-infer if None)  
             strategy: Force specific forecast strategy (auto-select if None)
+            peers: Comma-separated peer tickers for comparable analysis (e.g., 'AAPL,MSFT,GOOGL')
             max_articles: Maximum articles to scrape
             query_override: Override default search query for news articles
             min_filter_score: Minimum relevance score for filtering (0-10)
@@ -154,7 +156,7 @@ class ComprehensiveStockAnalysisPipeline:
         # Step 2: Financial Model Generation
         self.logger.stage_start("FINANCIAL MODEL GENERATION", "Building DCF and comparable models with LLM insights")
         model_results = self.run_model_generation_stage(
-            model_type, projection_years, term_growth, wacc_override, strategy
+            model_type, projection_years, term_growth, wacc_override, strategy, peers
         )
         
         if not model_results.get("model"):
@@ -282,7 +284,7 @@ class ComprehensiveStockAnalysisPipeline:
     
     def run_model_generation_stage(self, model_type: str, projection_years: int,
                                   term_growth: Optional[float], wacc_override: Optional[float],
-                                  strategy: Optional[str]) -> Dict:
+                                  strategy: Optional[str], peers: Optional[str] = None) -> Dict:
         """Run the financial model generation stage."""
         try:
             # Initialize model generator (allow it to auto-probe latest modeling JSON)
@@ -295,6 +297,15 @@ class ComprehensiveStockAnalysisPipeline:
             
             self.logger.info(f"🔢 Generating {model_type} model for {self.ticker}...")
             
+            # Parse peers if provided
+            peer_list = None
+            if peers:
+                peer_list = [p.strip().upper() for p in peers.split(',') if p.strip().upper() != self.ticker]
+                if peer_list:
+                    self.logger.info(f"📊 Including peer comparison with: {', '.join(peer_list)}")
+                else:
+                    self.logger.info("⚠️ No valid peer tickers provided after filtering")
+            
             # Generate comprehensive financial model
             model = self.model_generator.generate_financial_model(
                 model_type=model_type,
@@ -302,7 +313,7 @@ class ComprehensiveStockAnalysisPipeline:
                 term_growth=term_growth,
                 override_wacc=wacc_override,
                 strategy=strategy,
-                peers=None,
+                peers=peer_list,
                 generate_sensitivities=True
             )
             
@@ -322,6 +333,7 @@ class ComprehensiveStockAnalysisPipeline:
                 "projection_years": projection_years,
                 "strategy_used": model.get("strategy_info", {}).get("name", "unknown"),
                 "implied_price": model.get("valuation_summary", {}).get("Implied Price"),
+                "peers_included": peer_list if peer_list else [],
                 "excel_saved": str(excel_path) if excel_path else "Failed"
             }
             self.stats["stages_completed"].append("model_generation")
@@ -334,6 +346,8 @@ class ComprehensiveStockAnalysisPipeline:
                 "WACC used": f"{valuation.get('WACC', 0)*100:.1f}%" if valuation.get('WACC') else "N/A",
                 "Terminal growth": f"{valuation.get('Terminal Growth', 0)*100:.1f}%" if valuation.get('Terminal Growth') else "N/A"
             }
+            if peer_list:
+                stats["Peer comparison"] = f"{len(peer_list)} peers included"
             self.logger.stage_end("FINANCIAL MODEL GENERATION", True, stats)
             
             return {"success": True, "model": model, "excel_path": excel_path}
@@ -730,6 +744,9 @@ Examples:
   # Complete 6-step analysis
   python main.py --ticker NVDA --company "NVIDIA" --pipeline comprehensive
   
+  # Financial analysis with peer comparison
+  python main.py --ticker NVDA --company "NVIDIA" --pipeline financial-only --peers "AMD,INTC,TSM"
+  
   # Financial analysis only  
   python main.py --ticker AAPL --company "Apple Inc" --pipeline financial-only --model dcf --years 5
   
@@ -758,6 +775,7 @@ Examples:
     parser.add_argument("--term-growth", type=float, help="Terminal growth rate (auto-infer if omitted)")
     parser.add_argument("--wacc", type=float, help="Override WACC (auto-infer if omitted)")
     parser.add_argument("--strategy", help="Force specific forecast strategy")
+    parser.add_argument("--peers", help="Comma-separated peer tickers for comparable analysis (e.g., 'AAPL,MSFT,GOOGL')")
     
     # News analysis parameters  
     parser.add_argument("--max-articles", type=int, default=20, help="Maximum articles to scrape")
@@ -808,6 +826,7 @@ Examples:
                 term_growth=args.term_growth,
                 wacc_override=args.wacc,
                 strategy=args.strategy,
+                peers=args.peers,
                 # News analysis parameters
                 max_articles=args.max_articles,
                 query_override=args.query,
@@ -824,14 +843,14 @@ Examples:
             financial_results = pipeline.run_financial_scraping_stage()
             if financial_results.get("success"):
                 results = pipeline.run_model_generation_stage(
-                    args.model, args.years, args.term_growth, args.wacc, args.strategy
+                    args.model, args.years, args.term_growth, args.wacc, args.strategy, args.peers
                 )
             else:
                 results = financial_results
             
         elif args.pipeline == "model-only":
             results = pipeline.run_model_generation_stage(
-                args.model, args.years, args.term_growth, args.wacc, args.strategy
+                args.model, args.years, args.term_growth, args.wacc, args.strategy, args.peers
             )
             
         elif args.pipeline == "news-only":
@@ -851,7 +870,7 @@ Examples:
         elif args.pipeline == "model-to-price":
             # Financial model through price adjustment (requires existing news analysis)
             model_results = pipeline.run_model_generation_stage(
-                args.model, args.years, args.term_growth, args.wacc, args.strategy
+                args.model, args.years, args.term_growth, args.wacc, args.strategy, args.peers
             )
             if model_results.get("success"):
                 # Load existing screening results using proper parse function
