@@ -30,6 +30,13 @@ export OPENAI_API_KEY='your_api_key_here'
 On Windows:
 ```cmd
 set SERPAPI_API_KEY=your_api_key_here
+
+4. Deploy to server:
+
+docker buildx build --platform linux/amd64,linux/arm64 \  -t fuzanwenn/stock-analyst:latest --push .
+
+docker pull fuzanwenn/stock-analyst:latest
+
 ```
 
 ## Usage

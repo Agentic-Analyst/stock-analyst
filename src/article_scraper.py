@@ -133,12 +133,12 @@ class ArticleScraper:
         file_path.write_text(markdown_content, encoding="utf-8")
         return file_path
     
-    def scrape_articles(self, max_articles: int = 20, query_override: Optional[str] = None) -> Dict:
+    def scrape_articles(self, max_searched: int = 20, query_override: Optional[str] = None) -> Dict:
         """
         Scrape news articles for the configured company.
         
         Args:
-            max_articles: Maximum number of articles to scrape
+            max_searched: Maximum number of articles to search/scrape
             query_override: Override the default search query
             
         Returns:
@@ -154,7 +154,7 @@ class ArticleScraper:
         
         # Get URLs from SerpAPI
         self._log("info", f"Searching for news articles: '{query}'")
-        urls = self._serpapi_news_links(query, max_results=max_articles)
+        urls = self._serpapi_news_links(query, max_results=max_searched)
         
         if not urls:
             self._log("warning", "No URLs found from news search")
