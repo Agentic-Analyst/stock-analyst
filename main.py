@@ -76,11 +76,12 @@ class ComprehensiveStockAnalysisPipeline:
         self.financial_scraper = FinancialScraper(self.ticker, base_path=self.analysis_path)
         self.model_generator = None  # Initialized when needed with data file
         self.article_scraper = ArticleScraper(self.ticker, self.company_name, base_path=self.analysis_path)
-        self.article_filter = ArticleFilter(self.ticker, base_path=self.analysis_path)
+        # ArticleFilter will be initialized when needed with specific query
+        self.article_filter = None
         self.article_screener = ArticleScreener(self.ticker, base_path=self.analysis_path)
         
         # Pass logger to components that support it
-        for component in [self.article_scraper, self.article_filter, self.article_screener]:
+        for component in [self.article_scraper, self.article_screener]:
             if hasattr(component, 'set_logger'):
                 component.set_logger(self.logger)
         
@@ -168,8 +169,10 @@ class ComprehensiveStockAnalysisPipeline:
         news_results = self.run_news_scraping_stage(max_articles, query_override)
         
         # Step 4: Article Filtering
-        self.logger.stage_start("ARTICLE FILTERING", "Filtering articles for relevance and quality")
-        filtering_results = self.run_filtering_stage(min_filter_score, max_filtered)
+        self.logger.stage_start("ARTICLE FILTERING", "Filtering articles for relevance and quality using LLM")
+        # Generate default query if none provided
+        filter_query = query_override or f"{self.company_name} financial outlook earnings growth investment analysis"
+        filtering_results = self.run_filtering_stage(filter_query, min_filter_score, max_filtered)
         
         # Step 5: Article Screening
         self.logger.stage_start("ARTICLE SCREENING", "Extracting investment insights using LLM")
@@ -389,49 +392,62 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.error(f"❌ News scraping stage failed: {e}")
             return {"scraped_count": 0, "error": str(e)}
     
-    def run_filtering_stage(self, min_score: float = 3.0, max_articles: int = 10) -> Dict:
-        """Run the article filtering stage."""
+    def run_filtering_stage(self, query: str, min_score: float = 6.0, max_articles: int = 10) -> Dict:
+        """Run the article filtering stage with LLM-powered intelligence."""
         try:
-            # Perform filtering
-            filtered_articles = self.article_filter.filter_articles(min_score, max_articles)
+            # Initialize article filter with query (required for LLM filtering)
+            if not self.article_filter:
+                self.article_filter = ArticleFilter(self.ticker, query, base_path=self.analysis_path)
+                if hasattr(self.article_filter, 'set_logger'):
+                    self.article_filter.set_logger(self.logger)
             
-            if not filtered_articles:
+            # Perform LLM-powered filtering
+            result = self.article_filter.filter_articles(num_articles=max_articles, min_score=min_score)
+            
+            if not result.get("filtered_articles"):
                 self.logger.warning("⚠️  No articles met the filtering criteria")
-                return {"filtered_articles": [], "filtered_count": 0}
+                return {"filtered_articles": [], "filtered_count": 0, "llm_cost": 0.0}
             
-            # Save filtered articles (always enabled in production)
-            self.article_filter.save_filtered_articles(filtered_articles)
-            self.article_filter.generate_filtered_report(filtered_articles)
+            # Generate LLM report
+            report = self.article_filter.generate_llm_report(result["filtered_articles"])
+            report_path = self.article_filter.filtered_dir / "filtered_report.md"
+            report_path.write_text(report, encoding='utf-8')
             
             # Update statistics
             filtering_results = {
-                "filtered_articles": filtered_articles,
-                "filtered_count": len(filtered_articles),
+                "filtered_articles": result["filtered_articles"],
+                "filtered_count": len(result["filtered_articles"]),
                 "min_score_used": min_score,
-                "avg_score": sum(score for _, score in filtered_articles) / len(filtered_articles)
+                "query_used": query,
+                "llm_cost": result.get("llm_cost", 0.0),
+                "llm_calls": result.get("llm_calls", 0),
+                "avg_score": sum(article["llm_score"] for article in result["filtered_articles"]) / len(result["filtered_articles"]) if result["filtered_articles"] else 0
             }
             self.stats["article_filtering"] = filtering_results
             self.stats["stages_completed"].append("article_filtering")
             
             # Log results
             stats = {
-                "Articles meeting criteria": len(filtered_articles),
-                "Average score": f"{filtering_results['avg_score']:.2f}",
-                "Score range": f"{filtered_articles[-1][1]:.2f} - {filtered_articles[0][1]:.2f}"
+                "Articles meeting criteria": len(result["filtered_articles"]),
+                "Average LLM score": f"{filtering_results['avg_score']:.2f}",
+                "LLM cost": f"${result.get('llm_cost', 0):.4f}",
+                "Query used": query[:50] + "..." if len(query) > 50 else query
             }
             
             # Log top articles
-            self.logger.info(f"📄 Top {len(filtered_articles)} articles:")
-            for i, (article, score) in enumerate(filtered_articles[:3], 1):
-                self.logger.info(f"   {i}. [{score:.2f}] {article['title'][:60]}...")
+            self.logger.info(f"📄 Top {len(result['filtered_articles'])} articles:")
+            for i, article in enumerate(result["filtered_articles"][:3], 1):
+                score = article["llm_score"]
+                title = article["title"][:60]
+                self.logger.info(f"   {i}. [{score:.2f}] {title}...")
             
             self.logger.stage_end("ARTICLE FILTERING", True, stats)
             
             return filtering_results
             
         except Exception as e:
-            self.logger.error(f"❌ Filtering stage failed: {e}")
-            return {"filtered_articles": [], "error": str(e)}
+            self.logger.error(f"❌ Article filtering stage failed: {e}")
+            return {"filtered_articles": [], "filtered_count": 0, "error": str(e)}
     
     def run_screening_stage(self, 
                            filtered_articles: List = None, 
@@ -763,10 +779,12 @@ Examples:
     
     # Pipeline control
     parser.add_argument("--pipeline", 
-                       choices=["comprehensive", "financial-only", "model-only", "news-only", 
-                               "model-to-price", "news-to-price"], 
+                       choices=["comprehensive", "financial-statements", "financial-model", "search-news",
+                                "screen-news", "news-to-price"], 
                        default="comprehensive", 
                        help="Pipeline stages to execute")
+    
+    parser.add_argument("--base_price", type=float, help="Base price for adjustment (required for news-to-price)")
     
     # Financial modeling parameters
     parser.add_argument("--model", choices=["dcf", "comparable", "comprehensive"], 
@@ -838,8 +856,11 @@ Examples:
                 adjustment_cap=args.adjustment_cap
                 # Note: Mapped deltas and LLM scenarios are always enabled
             )
-            
-        elif args.pipeline == "financial-only":
+        
+        elif args.pipeline == "financial-statements":
+            results = pipeline.run_financial_statement_stage()
+
+        elif args.pipeline == "financial-model":
             financial_results = pipeline.run_financial_scraping_stage()
             if financial_results.get("success"):
                 results = pipeline.run_model_generation_stage(
@@ -847,17 +868,22 @@ Examples:
                 )
             else:
                 results = financial_results
-            
-        elif args.pipeline == "model-only":
-            results = pipeline.run_model_generation_stage(
-                args.model, args.years, args.term_growth, args.wacc, args.strategy, args.peers
-            )
-            
-        elif args.pipeline == "news-only":
+
+        elif args.pipeline == "search-news":
             news_results = pipeline.run_news_scraping_stage(args.max_articles, args.query)
             # Proceed to filtering if we either scraped new content OR have a pre-existing corpus
             if news_results.get("scraped_count", 0) > 0 or news_results.get('pre_existing', 0) > 0:
-                filtering_results = pipeline.run_filtering_stage(args.min_score, args.max_filtered)
+                # Generate default query if none provided
+                filter_query = args.query or f"{pipeline.company_name} financial outlook earnings growth investment analysis"
+                results = pipeline.run_filtering_stage(filter_query, args.min_score, args.max_filtered)
+
+        elif args.pipeline == "screen-news":
+            news_results = pipeline.run_news_scraping_stage(args.max_articles, args.query)
+            # Proceed to filtering if we either scraped new content OR have a pre-existing corpus
+            if news_results.get("scraped_count", 0) > 0 or news_results.get('pre_existing', 0) > 0:
+                # Generate default query if none provided
+                filter_query = args.query or f"{pipeline.company_name} financial outlook earnings growth investment analysis"
+                filtering_results = pipeline.run_filtering_stage(filter_query, args.min_score, args.max_filtered)
                 if filtering_results.get("filtered_articles"):
                     results = pipeline.run_screening_stage(
                         filtering_results["filtered_articles"], args.min_confidence
@@ -867,45 +893,23 @@ Examples:
             else:
                 results = news_results
                 
-        elif args.pipeline == "model-to-price":
-            # Financial model through price adjustment (requires existing news analysis)
-            model_results = pipeline.run_model_generation_stage(
-                args.model, args.years, args.term_growth, args.wacc, args.strategy, args.peers
-            )
-            if model_results.get("success"):
-                # Load existing screening results using proper parse function
-                screening_results = {"catalysts": [], "risks": [], "mitigations": []}
-                try:
-                    # Try to load existing screening report markdown file
-                    from path_utils import get_latest_analysis_path
-                    analysis_path = get_latest_analysis_path(args.email, args.ticker)
-                    if analysis_path:
-                        screening_report_path = analysis_path / "screened" / "screening_report.md"
-                        if screening_report_path.exists():
-                            screening_results = parse_screening_report(screening_report_path)
-                            pipeline.logger.info(f"📋 Loaded existing screening data: {len(screening_results.get('catalysts', []))} catalysts, {len(screening_results.get('risks', []))} risks")
-                        else:
-                            pipeline.logger.warning("⚠️ No existing screening report found for model-to-price pipeline")
-                except Exception as e:
-                    pipeline.logger.warning(f"⚠️ Failed to load existing screening data: {e}")
-                    
-                results = pipeline.run_price_adjustment_stage(
-                    model_results, screening_results, args.scaling, args.adjustment_cap
-                )  # Mapped deltas and LLM scenarios always enabled
-            else:
-                results = model_results
-                
         elif args.pipeline == "news-to-price":
             # News analysis through price adjustment (requires existing financial model)
             news_results = pipeline.run_news_scraping_stage(args.max_articles, args.query)
             if news_results.get("scraped_count", 0) > 0:
-                filtering_results = pipeline.run_filtering_stage(args.min_score, args.max_filtered)
+                # Generate default query if none provided
+                filter_query = args.query or f"{pipeline.company_name} financial outlook earnings growth investment analysis"
+                filtering_results = pipeline.run_filtering_stage(filter_query, args.min_score, args.max_filtered)
                 if filtering_results.get("filtered_articles"):
                     screening_results = pipeline.run_screening_stage(
                         filtering_results["filtered_articles"], args.min_confidence
                     )
+                    if not args.base_price:
+                        pipeline.logger.error("❌ No base price available from financial model")
+                        return 1
+
                     # Load existing model results or create basic model
-                    model_results = {"success": True, "model": {"valuation_summary": {"Implied Price": None}}}
+                    model_results = {"success": True, "model": {"valuation_summary": {"Implied Price": args.base_price}}}
                     # Try to load existing financial model
                     # Implementation would load saved model data
                     

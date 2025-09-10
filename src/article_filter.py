@@ -1,396 +1,474 @@
 #!/usr/bin/env python3
 """
-filter.py - Filter scraped articles to keep only the most relevant ones.
+article_filter.py - LLM-powered intelligent article filter for stock analysis.
+
+This module filters scraped articles using LLM intelligence to identify articles
+most relevant to the search query and investment analysis objectives.
+
+Features:
+- LLM-based relevance assessment using search query context
+- Efficient batch processing for large-scale news filtering
+- Intelligent report generation with investment insights
+- Configurable filtering thresholds and article limits
 
 ▶ Usage:
-    python filter.py --ticker NVDA --min-score 5.0 --max-articles 5
+    python article_filter.py --ticker NVDA --query "nvidia ai data center growth" --min-score 6.0 --max-articles 8
 """
 
 from __future__ import annotations
-import os, csv, argparse, pathlib, re, json
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
-import yaml
+import os, csv, argparse, pathlib, re, json, logging
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+from llms import gpt_4o_mini
 
 class ArticleFilter:
-    def __init__(self, ticker: str, base_path: pathlib.Path):
+    def __init__(self, ticker: str, query: str, base_path: pathlib.Path):
         """
-        Initialize article filter.
+        Initialize LLM-powered article filter.
         
         Args:
             ticker: Stock ticker symbol (e.g., 'NVDA')
-            base_path: Optional base path for data organization. If None, uses default.
+            query: Investment query for LLM-based relevance assessment (required)
+            base_path: Base path for data organization
         """
         self.ticker = ticker.upper()
+        self.query = query
         self.company_dir = base_path
         self.filtered_dir = self.company_dir / "filtered"
+        
         # Logger - will be set by pipeline if available
         self.logger = None
         
-        # Define relevance keywords and their weights
-        self.relevance_keywords = {
-            # High relevance - core investment topics
-            "high": {
-                "stock price": 3.0,
-                "price target": 3.0,
-                "analyst rating": 3.0,
-                "buy rating": 3.0,
-                "sell rating": 3.0,
-                "earnings": 2.8,
-                "revenue": 2.8,
-                "profit": 2.5,
-                "financial results": 2.5,
-                "quarterly results": 2.5,
-                "guidance": 2.5,
-                "forecast": 2.3,
-                "outlook": 2.3,
-                "valuation": 2.3,
-                "market cap": 2.0,
-                "dividend": 2.0,
-                "investment": 2.0,
-            },
-            # Medium relevance - business and market topics
-            "medium": {
-                "data center": 1.8,
-                "artificial intelligence": 1.8,
-                "ai": 1.8,
-                "gpu": 1.5,
-                "semiconductor": 1.5,
-                "chip": 1.5,
-                "competition": 1.5,
-                "market share": 1.5,
-                "partnership": 1.3,
-                "acquisition": 1.3,
-                "merger": 1.3,
-                "expansion": 1.3,
-                "growth": 1.3,
-                "innovation": 1.0,
-                "technology": 1.0,
-            },
-            # Low relevance - general mentions
-            "low": {
-                "announcement": 0.8,
-                "news": 0.5,
-                "update": 0.5,
-                "report": 0.5,
-            }
-        }
+        # LLM tracking
+        self.total_llm_cost = 0.0
+        self.llm_call_count = 0
         
-        # Negative keywords that reduce relevance
-        self.negative_keywords = {
-            "advertisement": -2.0,
-            "sponsored": -2.0,
-            "cookie": -1.5,
-            "privacy policy": -1.5,
-            "terms of service": -1.5,
-            "subscribe": -1.0,
-            "newsletter": -1.0,
-        }
+        # Batch processing configuration
+        self.batch_size = 5  # Process articles in batches for efficiency
         
-        # Quality indicators
-        self.quality_indicators = {
-            "analyst": 1.0,
-            "wall street": 1.0,
-            "morgan stanley": 0.8,
-            "goldman sachs": 0.8,
-            "jpmorgan": 0.8,
-            "bank of america": 0.8,
-            "credit suisse": 0.8,
-            "financial": 0.5,
-        }
+        # Load prompts from files
+        self.prompts_dir = pathlib.Path(__file__).parent.parent / "prompts"
+        self._load_prompts()
+
+    def _load_prompts(self):
+        """Load prompt templates from markdown files."""
+        try:
+            # Load article relevance scoring prompt
+            relevance_path = self.prompts_dir / "article_relevance_scoring.md"
+            self.relevance_prompt_template = relevance_path.read_text(encoding='utf-8')
+            
+            # Load investment report generation prompt
+            report_path = self.prompts_dir / "investment_report_generation.md"
+            self.report_prompt_template = report_path.read_text(encoding='utf-8')
+            
+        except Exception as e:
+            self._log(f"Error loading prompt templates: {e}", "error")
+            # Fallback to simple prompts
+            self.relevance_prompt_template = "Rate the relevance of these articles to: {query}\n{articles_summary}\nProvide scores as: 1:X 2:Y etc."
+            self.report_prompt_template = "Generate an investment report for {ticker} based on:\n{articles_content}"
     
     def set_logger(self, logger):
         """Set the logger instance."""
         self.logger = logger
     
-    def _log(self, level: str, message: str):
+    def _log(self, message: str, level: str = "info"):
         """Log message using logger if available, otherwise print."""
         if self.logger:
             getattr(self.logger, level)(message)
         else:
             print(f"[{level.upper()}] {message}")
-    
-    def load_article(self, file_path: pathlib.Path) -> Dict | None:
-        """Load and parse a markdown article file."""
-        try:
-            content = file_path.read_text(encoding="utf-8")
+
+    def filter_articles(self, num_articles: int = 10, min_score: float = 6.0) -> dict:
+        """
+        Filter articles using LLM intelligence based on the query.
+        
+        Args:
+            num_articles: Maximum number of articles to filter
+            min_score: Minimum LLM score threshold for article inclusion (1-10 scale)
             
-            # Split frontmatter and content
-            if content.startswith("---"):
-                parts = content.split("---", 2)
-                if len(parts) >= 3:
-                    frontmatter = yaml.safe_load(parts[1]) or {}
-                    text_content = parts[2].strip()
-                else:
-                    frontmatter = {}
-                    text_content = content
-            else:
-                frontmatter = {}
-                text_content = content
-            
-            return {
-                "file_path": file_path,
-                "title": frontmatter.get("title", ""),
-                "source_url": frontmatter.get("source_url", ""),
-                "publish_date": frontmatter.get("publish_date", ""),
-                "text": text_content,
-                "word_count": len(text_content.split()),
-            }
-        except Exception as e:
-            self._log("warning", f"Could not load {file_path}: {e}")
-            return None
-    
-    def calculate_relevance_score(self, article: Dict) -> float:
-        """Calculate relevance score based on content analysis (0.0 to 1.0 scale)."""
-        full_text = f"{article['title']} {article['text']}".lower()
-        word_count = article["word_count"]
+        Returns:
+            Dictionary with filtering results and metadata
+        """
+        self._log(f"Starting LLM-powered filtering for {self.ticker}")
+        self._log(f"Query: {self.query}, Target articles: {num_articles}, Min score: {min_score}")
         
-        # Base score components
-        raw_score = 0.0
-        total_possible_score = 0.0
-        
-        # 1. Ticker symbol mentions (highest priority)
-        ticker_mentions = len(re.findall(rf'\b{self.ticker.lower()}\b', full_text))
-        ticker_score = min(ticker_mentions * 0.15, 0.3)  # Cap at 30% of total
-        raw_score += ticker_score
-        
-        # 2. Relevance keywords with diminishing returns
-        keyword_score = 0.0
-        for category, keywords in self.relevance_keywords.items():
-            for keyword, base_weight in keywords.items():
-                mentions = len(re.findall(rf'\b{re.escape(keyword.lower())}\b', full_text))
-                if mentions > 0:
-                    # Diminishing returns: first mention = full weight, subsequent = 50%
-                    weight = base_weight * 0.02  # Scale down base weights
-                    contribution = weight + (mentions - 1) * weight * 0.5
-                    keyword_score += min(contribution, weight * 2)  # Cap per keyword
-        
-        keyword_score = min(keyword_score, 0.4)  # Cap at 40% of total
-        raw_score += keyword_score
-        
-        # 3. Quality indicators
-        quality_score = 0.0
-        for keyword, base_weight in self.quality_indicators.items():
-            mentions = len(re.findall(rf'\b{re.escape(keyword.lower())}\b', full_text))
-            if mentions > 0:
-                quality_score += base_weight * 0.02
-        
-        quality_score = min(quality_score, 0.2)  # Cap at 20% of total
-        raw_score += quality_score
-        
-        # 4. Apply negative keywords (penalties)
-        penalty = 0.0
-        for keyword, base_weight in self.negative_keywords.items():
-            mentions = len(re.findall(rf'\b{re.escape(keyword.lower())}\b', full_text))
-            if mentions > 0:
-                penalty += abs(base_weight) * 0.05 * mentions
-        
-        penalty = min(penalty, 0.3)  # Cap penalty at 30%
-        raw_score = max(0.0, raw_score - penalty)
-        
-        # 5. Content length adjustment
-        if word_count > 1000:
-            length_multiplier = 1.1  # Bonus for very long articles
-        elif word_count > 500:
-            length_multiplier = 1.05  # Small bonus for substantial articles
-        elif word_count < 100:
-            length_multiplier = 0.7   # Penalty for very short articles
-        elif word_count < 200:
-            length_multiplier = 0.85  # Small penalty for short articles
-        else:
-            length_multiplier = 1.0   # Neutral for medium articles
-        
-        final_score = raw_score * length_multiplier
-        
-        # Ensure score is between 0.0 and 1.0
-        return max(0.0, min(1.0, final_score))
-    
-    def calculate_freshness_score(self, article: Dict) -> float:
-        """Calculate freshness score based on publication date."""
-        if not article["publish_date"]:
-            return 0.5  # Default score for articles without date
-        
-        try:
-            # Parse ISO format date
-            pub_date = datetime.fromisoformat(article["publish_date"].replace("Z", "+00:00"))
-            now = datetime.now(pub_date.tzinfo) if pub_date.tzinfo else datetime.now()
-            
-            days_old = (now - pub_date).days
-            
-            # Fresher articles get higher scores
-            if days_old <= 1:
-                return 1.0
-            elif days_old <= 3:
-                return 0.8
-            elif days_old <= 7:
-                return 0.6
-            elif days_old <= 30:
-                return 0.4
-            else:
-                return 0.2
-        except:
-            return 0.5
-    
-    def calculate_source_quality_score(self, article: Dict) -> float:
-        """Calculate source quality score based on the source URL."""
-        url = article["source_url"].lower()
-        
-        # High-quality financial sources
-        high_quality_sources = [
-            "fool.com", "finance.yahoo.com", "bloomberg.com", "reuters.com",
-            "cnbc.com", "marketwatch.com", "wsj.com", "ft.com", "barrons.com",
-            "seekingalpha.com", "investorplace.com", "zacks.com", "tipranks.com"
-        ]
-        
-        # Medium-quality sources
-        medium_quality_sources = [
-            "nasdaq.com", "investing.com", "benzinga.com", "thestreet.com",
-            "investors.com", "morningstar.com"
-        ]
-        
-        for source in high_quality_sources:
-            if source in url:
-                return 1.0
-        
-        for source in medium_quality_sources:
-            if source in url:
-                return 0.7
-        
-        return 0.5  # Default for unknown sources
-    
-    def calculate_overall_score(self, article: Dict) -> float:
-        """Calculate overall score combining all factors (0.0 to 10.0 scale for user-friendly display)."""
-        relevance = self.calculate_relevance_score(article)  # 0.0 to 1.0
-        freshness = self.calculate_freshness_score(article)  # 0.0 to 1.0
-        source_quality = self.calculate_source_quality_score(article)  # 0.0 to 1.0
-        
-        # Weighted combination (still 0.0 to 1.0)
-        normalized_score = (
-            relevance * 0.6 +      # Relevance is most important
-            freshness * 0.2 +      # Freshness matters
-            source_quality * 0.2   # Source quality matters
-        )
-        
-        # Scale to 0-10 for user-friendly display
-        return normalized_score * 10.0
-    
-    def filter_articles(self, min_score: float = 3.0, max_articles: int = 10) -> List[Tuple[Dict, float]]:
-        """Filter articles and return the best ones with their scores."""
-        if not self.company_dir.exists():
-            self._log("error", f"Directory {self.company_dir} does not exist")
-            return []
-        
-        articles_with_scores = []
-        
-        # Load all markdown files
+        # Load and prepare articles
         searched_dir = self.company_dir / "searched"
+        articles_data = self._load_articles_metadata(searched_dir)
+        
+        if not articles_data:
+            self._log("No articles found to filter")
+            return {"filtered_articles": [], "total_processed": 0, "llm_cost": 0.0}
+        
+        self._log(f"Found {len(articles_data)} articles to process")
+        
+        # Process all articles with LLM scoring
+        scored_articles = self._score_articles_with_llm(articles_data)
+        
+        # Filter by minimum score and limit count
+        filtered_articles = self._select_final_articles(scored_articles, num_articles, min_score)
+        
+        # Copy filtered articles and generate index
+        result = self._finalize_filtering(filtered_articles)
+        
+        # Add metadata
+        result.update({
+            "query": self.query,
+            "total_processed": len(articles_data),
+            "llm_cost": self.total_llm_cost,
+            "llm_calls": self.llm_call_count
+        })
+        
+        self._log(f"Filtering complete: {len(result['filtered_articles'])} articles selected")
+        self._log(f"Total LLM cost: ${self.total_llm_cost:.4f} ({self.llm_call_count} calls)")
+        
+        return result
+
+    def _load_articles_metadata(self, searched_dir: pathlib.Path) -> list:
+        """Load article metadata from searched directory."""
+        articles = []
+        
         if not searched_dir.exists():
-            self._log("error", f"Searched directory {searched_dir} does not exist")
-            return []
+            return articles
+            
+        for article_file in searched_dir.glob("*.md"):
+            try:
+                content = article_file.read_text(encoding='utf-8')
+                
+                # Extract metadata from content
+                metadata = self._extract_article_metadata(content, article_file.name)
+                if metadata:
+                    articles.append(metadata)
+                    
+            except Exception as e:
+                self._log(f"Error reading {article_file}: {e}")
+                
+        return articles
 
-        for md_file in searched_dir.glob("*.md"):
-            if md_file.name == "README.md":  # Skip README files
-                continue
-            
-            article = self.load_article(md_file)
-            if not article:
-                continue
-            
-            score = self.calculate_overall_score(article)
-            if score >= min_score:
-                articles_with_scores.append((article, score))
+    def _extract_article_metadata(self, content: str, filename: str) -> dict:
+        """Extract key metadata from article content."""
+        lines = content.split('\n')
+        metadata = {
+            'filename': filename,
+            'title': '',
+            'url': '',
+            'content': content,
+            'word_count': len(content.split()),
+            'llm_score': 0.0
+        }
         
-        # Sort by score (descending) and limit results
-        articles_with_scores.sort(key=lambda x: x[1], reverse=True)
-        return articles_with_scores[:max_articles]
-    
-    def generate_filtered_report(self, filtered_articles: List[Tuple[Dict, float]]):
-        """Generate a report with the filtered articles."""
-        output_file = self.filtered_dir / "filtered_report.md"
-        output_file.parent.mkdir(exist_ok=True)
+        # Extract title and URL from markdown headers
+        for line in lines[:20]:  # Check first 20 lines
+            line = line.strip()
+            if line.startswith('# ') and not metadata['title']:
+                metadata['title'] = line[2:].strip()
+            elif line.startswith('**URL:**') or line.startswith('URL:'):
+                metadata['url'] = line.split(':', 1)[1].strip()
+                break
+                
+        return metadata
 
-        with open(output_file, "w+", encoding="utf-8") as f:
-            f.write(f"# Filtered {self.ticker} Stock Analysis Report\n\n")
-            f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Total articles analyzed: {len(list(self.filtered_dir.glob('*.md')))}\n")
-            f.write(f"Articles meeting criteria: {len(filtered_articles)}\n\n")
-            
-            for i, (article, score) in enumerate(filtered_articles, 1):
-                f.write(f"## Article {i}: {article['title']}\n\n")
-                f.write(f"**Relevance Score:** {score:.2f}\n")
-                f.write(f"**Source:** {article['source_url']}\n")
-                f.write(f"**Published:** {article['publish_date']}\n")
-                f.write(f"**Word Count:** {article['word_count']}\n\n")
-                
-                # Include first paragraph or summary
-                text_lines = article['text'].split('\n')
-                first_paragraph = next((line.strip() for line in text_lines if line.strip() and not line.startswith('#')), "")
-                if first_paragraph and len(first_paragraph) > 50:
-                    f.write(f"**Summary:** {first_paragraph[:300]}{'...' if len(first_paragraph) > 300 else ''}\n\n")
-                
-                f.write("---\n\n")
-    
-    def save_filtered_articles(self, filtered_articles: List[Tuple[Dict, float]]):
-        """Save filtered articles to a new directory."""
-        output_dir = self.filtered_dir
-        output_dir.mkdir(exist_ok=True)
+    def _score_articles_with_llm(self, articles: list) -> list:
+        """Score all articles using LLM intelligence."""
+        self._log(f"Scoring {len(articles)} articles with LLM")
         
-        # Create a new index file
-        index_file = output_dir / "filtered_articles_index.csv"
-        with open(index_file, "w+", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["score", "title", "source_url", "file", "publish_date"])
-            writer.writeheader()
+        # Process in batches to optimize API usage
+        scored_articles = []
+        for i in range(0, len(articles), self.batch_size):
+            batch = articles[i:i + self.batch_size]
+            batch_results = self._process_llm_batch(batch)
+            scored_articles.extend(batch_results)
             
-            for i, (article, score) in enumerate(filtered_articles, 1):
-                # Create new filename with score prefix
-                original_name = article["file_path"].name
-                new_name = f"filtered_{i:02d}_score_{score:.1f}_{original_name}"
-                new_path = output_dir / new_name
+        # Sort by LLM score
+        return sorted(scored_articles, key=lambda x: x['llm_score'], reverse=True)
+
+    def _process_llm_batch(self, batch: list) -> list:
+        """Process a batch of articles with LLM for relevance scoring."""
+        try:
+            # Prepare prompt with article summaries
+            prompt = self._build_relevance_prompt(batch)
+            
+            # Call LLM with proper message format
+            messages = [
+                {"role": "system", "content": "You are a senior financial analyst filtering investment articles."},
+                {"role": "user", "content": prompt},
+            ]
+            response, cost = gpt_4o_mini(messages, temperature=0.1)
+            self.llm_call_count += 1
+            
+            # Track actual cost from LLM call
+            self.total_llm_cost += cost
+            
+            # Parse LLM response
+            scores = self._parse_llm_scores(response, len(batch))
+            
+            # Apply scores to articles
+            for i, article in enumerate(batch):
+                llm_score = scores[i] if i < len(scores) else 5.0
+                article['llm_score'] = llm_score
                 
+        except Exception as e:
+            self._log(f"LLM scoring failed: {e}", "warning")
+            # Fallback to default scores
+            for article in batch:
+                article['llm_score'] = 5.0
+                
+        return batch
+
+    def _build_relevance_prompt(self, articles: list) -> str:
+        """Build prompt for LLM relevance assessment using template."""
+        # Prepare articles summary
+        articles_summary = ""
+        for i, article in enumerate(articles, 1):
+            title = article['title'][:100]
+            content_preview = article['content'][:300].replace('\n', ' ')
+            articles_summary += f"\n{i}. Title: {title}\nPreview: {content_preview}...\n"
+        
+        # Use template
+        return self.relevance_prompt_template.format(
+            query=self.query,
+            articles_summary=articles_summary
+        )
+
+    def _parse_llm_scores(self, response: str, expected_count: int) -> list:
+        """Parse LLM response to extract numerical scores."""
+        scores = []
+        
+        # Look for pattern like "1:8 2:6 3:9"
+        pattern = r'(\d+):(\d+(?:\.\d+)?)'
+        matches = re.findall(pattern, response)
+        
+        # Convert to scores array
+        score_dict = {int(match[0]): float(match[1]) for match in matches}
+        
+        for i in range(1, expected_count + 1):
+            scores.append(score_dict.get(i, 5.0))  # Default to 5.0 if not found
+            
+        return scores
+
+    def _select_final_articles(self, articles: list, num_articles: int, min_score: float) -> list:
+        """Select final articles based on LLM score criteria."""
+        # Filter by minimum score
+        qualified_articles = [
+            article for article in articles 
+            if article['llm_score'] >= min_score
+        ]
+        
+        # Take top N articles
+        return qualified_articles[:num_articles]
+
+    def _finalize_filtering(self, filtered_articles: list) -> dict:
+        """Copy filtered articles to filtered directory and create index."""
+        # Create filtered directory
+        self.filtered_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Clear existing filtered articles
+        for existing_file in self.filtered_dir.glob("filtered_*.md"):
+            existing_file.unlink()
+            
+        # Copy filtered articles with new naming
+        final_articles = []
+        for i, article in enumerate(filtered_articles, 1):
+            score = article['llm_score']
+            original_name = article['filename']
+            
+            # Create new filename with ranking and score
+            new_filename = f"filtered_{i:02d}_score_{score:.1f}_{original_name}"
+            new_path = self.filtered_dir / new_filename
+            
+            try:
                 # Copy the article content
-                new_path.write_text(article["file_path"].read_text(encoding="utf-8"), encoding="utf-8")
+                searched_dir = self.company_dir / "searched"
+                source_path = searched_dir / original_name
                 
-                # Write to index
-                writer.writerow({
-                    "score": f"{score:.2f}",
-                    "title": article["title"],
-                    "source_url": article["source_url"],
-                    "file": new_name,
-                    "publish_date": article["publish_date"]
-                })
+                if source_path.exists():
+                    new_path.write_text(
+                        source_path.read_text(encoding='utf-8'),
+                        encoding='utf-8'
+                    )
+                    
+                    final_articles.append({
+                        "rank": i,
+                        "filename": new_filename,
+                        "original_filename": original_name,
+                        "llm_score": score,
+                        "title": article['title']
+                    })
+                    
+                    self._log(f"Filtered #{i}: {new_filename} (score: {score:.1f})")
+                    
+            except Exception as e:
+                self._log(f"Error copying {original_name}: {e}", "error")
+                continue
+        
+        # Create articles index
+        self._create_articles_index(final_articles)
+        
+        return {"filtered_articles": final_articles}
+
+    def _create_articles_index(self, articles: list):
+        """Create CSV index with LLM scoring information."""
+        index_path = self.filtered_dir / "filtered_articles_index.csv"
+        
+        try:
+            with open(index_path, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['rank', 'filename', 'original_filename', 'title', 'llm_score']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                for article in articles:
+                    writer.writerow(article)
+                    
+            self._log(f"Created articles index at {index_path}")
+            
+        except Exception as e:
+            self._log(f"Error creating articles index: {e}", "error")
+    
+    def generate_llm_report(self, filtered_articles: list) -> str:
+        """
+        Generate an intelligent investment report using LLM analysis of filtered articles.
+        
+        Args:
+            filtered_articles: List of filtered article metadata
+            
+        Returns:
+            Generated report as markdown string
+        """
+        if not filtered_articles:
+            return "# Investment Analysis Report\n\nNo relevant articles found for analysis."
+            
+        self._log(f"Generating LLM report for {len(filtered_articles)} articles")
+        
+        try:
+            # Build comprehensive prompt for report generation
+            prompt = self._build_report_prompt(filtered_articles)
+            
+            # Generate report using LLM with proper message format
+            messages = [
+                {"role": "system", "content": "You are a senior financial analyst generating concise research-ready notes."},
+                {"role": "user", "content": prompt},
+            ]
+            report, cost = gpt_4o_mini(messages, temperature=0.3)
+            self.llm_call_count += 1
+            
+            # Track actual cost from LLM call
+            self.total_llm_cost += cost
+            
+            # Add metadata footer
+            report += f"\n\n---\n*Report generated using AI analysis of {len(filtered_articles)} filtered articles*\n"
+            report += f"*Query: {self.query}*\n"
+            report += f"*LLM calls: {self.llm_call_count}, Total cost: ${self.total_llm_cost:.4f}*"
+            
+            return report
+            
+        except Exception as e:
+            self._log(f"LLM report generation failed: {e}", "error")
+            return self._generate_fallback_report(filtered_articles)
+
+    def _build_report_prompt(self, articles: list) -> str:
+        """Build comprehensive prompt for investment report generation using template."""
+        # Prepare articles content
+        articles_content = ""
+        for i, article in enumerate(articles[:8], 1):  # Limit to top 8 for token management
+            title = article['title']
+            score = article['llm_score']
+            
+            # Read article content for analysis
+            try:
+                searched_dir = self.company_dir / "searched"
+                source_path = searched_dir / article['original_filename']
+                if source_path.exists():
+                    content = source_path.read_text(encoding='utf-8')
+                    # Extract key sections (first 500 words)
+                    content_preview = ' '.join(content.split()[:500])
+                else:
+                    content_preview = "Content not available"
+            except:
+                content_preview = "Content not available"
+                
+            articles_content += f"\n--- Article {i} (Score: {score:.1f}) ---\n"
+            articles_content += f"Title: {title}\n"
+            articles_content += f"Content: {content_preview}\n"
+        
+        # Use template
+        return self.report_prompt_template.format(
+            ticker=self.ticker,
+            query=self.query,
+            articles_content=articles_content
+        )
+
+    def _generate_fallback_report(self, articles: list) -> str:
+        """Generate basic report without LLM when LLM fails."""
+        report = f"# Investment Analysis Report - {self.ticker}\n\n"
+        report += f"**Query:** {self.query}\n\n"
+        report += f"**Analysis Date:** {datetime.now().strftime('%Y-%m-%d')}\n\n"
+        
+        report += "## Executive Summary\n\n"
+        report += f"Analyzed {len(articles)} relevant articles for {self.ticker} investment insights.\n\n"
+        
+        report += "## Key Articles\n\n"
+        for i, article in enumerate(articles[:5], 1):
+            score = article['llm_score']
+            report += f"{i}. **{article['title']}** (Score: {score:.1f})\n"
+            
+        report += "\n*Note: Detailed analysis unavailable due to LLM service issues.*\n"
+        
+        return report
 
 def main():
-    parser = argparse.ArgumentParser(description="Filter scraped articles for relevance")
-    parser.add_argument("--ticker", required=True, help="Stock ticker, e.g. NVDA")
-    parser.add_argument("--min-score", type=float, default=3.0, help="Minimum relevance score (0.0-10.0)")
-    parser.add_argument("--max-articles", type=int, default=10, help="Maximum number of articles to keep")
-    # Report generation and saving filtered articles are now always enabled for production use
+    """
+    Command-line interface for LLM-powered article filtering.
+    """
+    parser = argparse.ArgumentParser(description="Filter articles using LLM intelligence")
+    parser.add_argument("--ticker", required=True, help="Stock ticker symbol (e.g., NVDA)")
+    parser.add_argument("--query", required=True, help="Investment query for LLM-based relevance assessment")
+    parser.add_argument("--num-articles", type=int, default=10, help="Maximum articles to filter")
+    parser.add_argument("--min-score", type=float, default=6.0, help="Minimum LLM relevance score (1-10)")
     
     args = parser.parse_args()
     
-    # Initialize filter
-    filter_engine = ArticleFilter(args.ticker)
+    # Initialize filter with data path and query
+    base_path = pathlib.Path("data") / args.ticker
+    filter_engine = ArticleFilter(args.ticker, args.query, base_path)
     
-    # Filter articles
-    filter_engine._log("info", f"Filtering articles for {args.ticker} with min score {args.min_score}")
-    filtered_articles = filter_engine.filter_articles(args.min_score, args.max_articles)
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+    filter_engine.set_logger(logger)
     
-    if not filtered_articles:
-        filter_engine._log("warning", "No articles met the filtering criteria")
+    # Run LLM-powered filtering
+    logger.info(f"Starting LLM-powered filtering for {args.ticker}")
+    logger.info(f"Investment query: {args.query}")
+    
+    result = filter_engine.filter_articles(
+        num_articles=args.num_articles,
+        min_score=args.min_score
+    )
+    
+    if not result['filtered_articles']:
+        logger.warning("No articles met the filtering criteria")
         return
     
-    filter_engine._log("info", f"Found {len(filtered_articles)} relevant articles:")
+    logger.info(f"Successfully filtered {len(result['filtered_articles'])} articles")
+    logger.info(f"LLM cost: ${result['llm_cost']:.4f} ({result['llm_calls']} calls)")
     
     # Display results
-    for i, (article, score) in enumerate(filtered_articles, 1):
-        filter_engine._log("info", f"  {i}. [{score:.2f}] {article['title'][:80]}...")
+    for article in result['filtered_articles']:
+        score = article['llm_score']
+        title = article['title'][:80]
+        logger.info(f"  [{score:.1f}] {title}...")
     
-    # Always generate report and save filtered articles in production use
-    filter_engine.generate_filtered_report(filtered_articles)
-    filter_engine._log("info", f"Report generated: {filter_engine.filtered_dir / 'filtered_report.md'}")
-
-    filter_engine.save_filtered_articles(filtered_articles)
-    filter_engine._log("info", f"Filtered articles saved to: {filter_engine.filtered_dir}")
+    # Generate LLM report if requested
+    if result['filtered_articles']:
+        logger.info("Generating LLM-powered investment report...")
+        report = filter_engine.generate_llm_report(result['filtered_articles'])
+        
+        # Save report
+        report_path = filter_engine.filtered_dir / "filtered_report.md"
+        report_path.write_text(report, encoding='utf-8')
+        logger.info(f"Investment report saved: {report_path}")
+    
+    logger.info("Article filtering complete!")
 
 if __name__ == "__main__":
     main()
