@@ -228,105 +228,6 @@ class GenericDCFStrategy(ForecastStrategy):
         }
         return {"dcf_model": dcf_df, "valuation_summary": valuation, "strategy_name": self.name}
 
-        years = list(range(1, projection_years + 1))
-        rev=[]; ebitda=[]; da=[]; ebit=[]; nopat=[]; capex=[]; dNWC=[]; fcf=[]
-        for i in range(projection_years):
-            g = growth_seq[i]
-            r = rev0 * (1 + g) if i == 0 else rev[-1] * (1 + g)
-            m = margin_seq[i]
-            ebd = r * m
-            d_a = r * da_rate
-            ebt = ebd - d_a
-            npat = ebt * (1 - tax_rate)
-            # NWC change
-            nwc_method = ov.get('nwc_method')
-            if nwc_method == 'delta2pct':
-                prev_r = rev[i - 1] if i > 0 else rev0
-                dnwc = 0.02 * (r - prev_r)
-            else:  # ratio method
-                if explicit_nwc_ratio is not None and rev0 > 0:
-                    nwc_ratio = explicit_nwc_ratio
-                    if i == 0:
-                        generator.diagnostics.append('using_explicit_nwc_ratio')
-                    prev_nwc = (rev[i - 1] * nwc_ratio) if i > 0 and rev[i - 1] else nwc0
-                    prev_nwc = prev_nwc if prev_nwc is not None else 0.0
-                    dnwc = r * nwc_ratio - prev_nwc
-                elif rev0 > 0 and nwc0 is not None:
-                    nwc_ratio = nwc0 / rev0
-                    prev_nwc = (rev[i - 1] * nwc_ratio) if i > 0 else nwc0
-                    prev_nwc = prev_nwc if prev_nwc is not None else 0.0
-                    dnwc = r * nwc_ratio - prev_nwc
-                else:
-                    prev_r = rev[i - 1] if i > 0 else rev0
-                    dnwc = 0.02 * (r - prev_r)
-            cpx = r * capex_rate
-            fc = npat + d_a - cpx - dnwc
-            rev.append(r); ebitda.append(ebd); da.append(d_a); ebit.append(ebt)
-            nopat.append(npat); capex.append(cpx); dNWC.append(dnwc); fcf.append(fc)
-        if 'first_year_growth' in ov:
-            generator.diagnostics.append('override:first_year_growth')
-        if audit:
-            # Store lightweight json serializable snapshot
-            try:
-                generator.diagnostics.append('override_audit:' + json.dumps(audit['override_audit'])[:300])
-            except Exception:
-                pass
-        if 'margin_target' in ov:
-            generator.diagnostics.append('override:margin_target')
-        if 'margin_ramp' in ov:
-            generator.diagnostics.append('override:margin_ramp')
-        if 'margin_uplift' in ov:
-            generator.diagnostics.append('override:margin_uplift')
-
-        wacc = generator._get_wacc(metrics.get("company_data", {}), override_wacc)
-        generator._log("info", f"Using WACC: {wacc:.4f} for DCF valuation")
-        t_fcf = fcf[-1] * (1 + term_growth)
-        denom = max(wacc - term_growth, 1e-6)
-        tv = t_fcf / denom
-        dfs = [(1 / ((1 + wacc) ** t)) for t in years]
-        pv_fcfs = [fcf[t - 1] * dfs[t - 1] for t in years]
-        pv_tv = tv * dfs[-1]
-        ev = sum(pv_fcfs) + pv_tv
-        cd = metrics.get("company_data", {})
-        cs = (cd.get("capital_structure", {}) or {})
-        md = (cd.get("market_data", {}) or {})
-        net_debt = generator._num(cs.get("net_debt"))
-        if net_debt is None:
-            debt = generator._num(cs.get("total_debt"), 0.0) or 0.0
-            cash = generator._num(cs.get("total_cash"), 0.0) or 0.0
-            net_debt = debt - cash
-        equity_value = ev - net_debt
-        shares = generator._num(md.get("shares_outstanding_basic")) or 0.0
-        implied_price = (equity_value / shares) if shares else None
-
-        dcf_df = pd.DataFrame({
-            "Year": years,
-            "Revenue": rev,
-            "EBITDA": ebitda,
-            "D&A": da,
-            "EBIT": ebit,
-            "NOPAT": nopat,
-            "CapEx": capex,
-            "ΔNWC": dNWC,
-            "FCFF": fcf,
-            "Discount Factor": dfs,
-            "PV FCFF": pv_fcfs,
-        })
-        valuation = {
-            "Strategy": self.name,
-            "WACC": wacc,
-            "Terminal Growth": term_growth,
-            "Terminal Value (undiscounted)": tv,
-            "PV of FCFF": sum(pv_fcfs),
-            "PV of TV": pv_tv,
-            "Enterprise Value": ev,
-            "Net Debt": net_debt,
-            "Equity Value": equity_value,
-            "Shares (basic)": shares,
-            "Implied Price": implied_price,
-        }
-        return {"dcf_model": dcf_df, "valuation_summary": valuation, "strategy_name": self.name}
-
 
 class SaaSStrategy(GenericDCFStrategy):
     name = "saas_dcf"
@@ -549,13 +450,112 @@ class EnergyStrategy(GenericDCFStrategy):
         return base
 
 
+# --- Additional sector-specific strategies (analyst-like selection) ---
+class HardwareDCFStrategy(GenericDCFStrategy):
+    name = "hardware_dcf"
+    description = "Semiconductor/Hardware FCFF DCF with higher CapEx & D&A"
+
+    def applies_to(self, sector: Optional[str], industry: Optional[str]) -> bool:
+        ind = (industry or "").lower(); sec = (sector or "").lower()
+        tokens = ["semiconductor", "semis", "chip", "hardware", "electronics", "computer"]
+        return any(t in ind for t in tokens) or (sec == "technology" and any(t in ind for t in tokens))
+
+    def _default_growth_seq(self, projection_years: int) -> List[float]:
+        seq = [0.18, 0.14, 0.10, 0.07, 0.05]
+        if projection_years < len(seq):
+            return seq[:projection_years]
+        if projection_years > len(seq):
+            seq += [max(seq[-1] - 0.01, 0.03)] * (projection_years - len(seq))
+        return seq
+
+    def forecast(self, generator, metrics: Dict[str, Any], projection_years: int,
+                 term_growth: float, override_wacc: Optional[float]) -> Dict[str, Any]:
+        # Apply sector defaults only where user/LLM hasn't set overrides
+        ov = dict(getattr(generator, 'overrides', {}) or {})
+        if 'capex_rate' not in ov: ov['capex_rate'] = 0.08
+        if 'da_rate' not in ov: ov['da_rate'] = 0.06
+        # Temporarily swap overrides
+        original = generator.overrides
+        try:
+            generator.overrides = ov
+            return super().forecast(generator, metrics, projection_years, term_growth, override_wacc)
+        finally:
+            generator.overrides = original
+
+
+class MarketplaceDCFStrategy(GenericDCFStrategy):
+    name = "marketplace_dcf"
+    description = "Marketplace/platform DCF with negative NWC and high early growth"
+
+    def applies_to(self, sector: Optional[str], industry: Optional[str]) -> bool:
+        ind = (industry or "").lower(); sec = (sector or "").lower()
+        tokens = ["marketplace", "e-commerce", "rideshare", "delivery", "platform", "gig"]
+        return any(t in ind for t in tokens) or (sec == "technology" and any(t in ind for t in tokens))
+
+    def _default_growth_seq(self, projection_years: int) -> List[float]:
+        seq = [0.30, 0.25, 0.20, 0.15, 0.12]
+        if projection_years < len(seq):
+            return seq[:projection_years]
+        if projection_years > len(seq):
+            seq += [max(seq[-1] - 0.02, 0.08)] * (projection_years - len(seq))
+        return seq
+
+    def forecast(self, generator, metrics: Dict[str, Any], projection_years: int,
+                 term_growth: float, override_wacc: Optional[float]) -> Dict[str, Any]:
+        ov = dict(getattr(generator, 'overrides', {}) or {})
+        if 'capex_rate' not in ov: ov['capex_rate'] = 0.03
+        if 'da_rate' not in ov: ov['da_rate'] = 0.03
+        if 'nwc_ratio' not in ov: ov['nwc_ratio'] = -0.03  # negative working capital typical
+        if 'margin_target' not in ov: ov['margin_target'] = 0.25
+        if 'margin_ramp' not in ov: ov['margin_ramp'] = 0.02
+        original = generator.overrides
+        try:
+            generator.overrides = ov
+            return super().forecast(generator, metrics, projection_years, term_growth, override_wacc)
+        finally:
+            generator.overrides = original
+
+
+class TelecomDCFStrategy(GenericDCFStrategy):
+    name = "telecom_dcf"
+    description = "Telecom/cable DCF with low growth and heavy CapEx"
+
+    def applies_to(self, sector: Optional[str], industry: Optional[str]) -> bool:
+        ind = (industry or "").lower()
+        tokens = ["telecom", "telecommunications", "wireless", "broadband", "cable"]
+        return any(t in ind for t in tokens)
+
+    def _default_growth_seq(self, projection_years: int) -> List[float]:
+        seq = [0.03, 0.03, 0.025, 0.02, 0.02]
+        if projection_years < len(seq):
+            return seq[:projection_years]
+        if projection_years > len(seq):
+            seq += [seq[-1]] * (projection_years - len(seq))
+        return seq
+
+    def forecast(self, generator, metrics: Dict[str, Any], projection_years: int,
+                 term_growth: float, override_wacc: Optional[float]) -> Dict[str, Any]:
+        ov = dict(getattr(generator, 'overrides', {}) or {})
+        if 'capex_rate' not in ov: ov['capex_rate'] = 0.12
+        if 'da_rate' not in ov: ov['da_rate'] = 0.08
+        if 'margin_target' not in ov: ov['margin_target'] = 0.35
+        original = generator.overrides
+        try:
+            generator.overrides = ov
+            return super().forecast(generator, metrics, projection_years, term_growth, override_wacc)
+        finally:
+            generator.overrides = original
+
 # Strategy registry in priority order (generic last as fallback)
 STRATEGIES: List[ForecastStrategy] = [
     REITStrategy(),
     BankStrategy(),
     UtilityStrategy(),
+    TelecomDCFStrategy(),
     EnergyStrategy(),
     SaaSStrategy(),
+    HardwareDCFStrategy(),
+    MarketplaceDCFStrategy(),
     GenericDCFStrategy(),
 ]
 

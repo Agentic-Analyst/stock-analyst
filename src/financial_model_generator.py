@@ -26,9 +26,10 @@ File Outputs:
 """
 
 from __future__ import annotations
-import os, json, argparse, pathlib, math, re, shutil
+import os, json, argparse, pathlib, math, re, shutil, sys, csv
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
+import pandas as pd
 import pandas as pd
 
 # Import configuration
@@ -268,10 +269,44 @@ class FinancialModelGenerator:
     # ---------- Strategy selection helpers ----------
     def _select_strategy(self, requested: Optional[str], metrics: Dict[str, Any]):
         from forecast_strategies import STRATEGIES, get_strategy_by_name
+        def _normalize(name: Optional[str]) -> Optional[str]:
+            if not name:
+                return None
+            n = str(name).strip().lower()
+            mapping = {
+                # Generic
+                'generic': 'generic_dcf', 'generic_dcf': 'generic_dcf',
+                # SaaS / Software
+                'saas': 'saas_dcf', 'saas_dcf': 'saas_dcf', 'software': 'saas_dcf',
+                # REIT
+                'reit': 'reit_dcf', 'real estate': 'reit_dcf', 'reit_dcf': 'reit_dcf',
+                # Bank / Financials
+                'bank': 'bank_excess_returns', 'residual': 'bank_excess_returns', 'excess returns': 'bank_excess_returns', 'bank_excess_returns': 'bank_excess_returns',
+                # Utility
+                'utility': 'utility_dcf', 'utilities': 'utility_dcf', 'utility_dcf': 'utility_dcf',
+                # Energy
+                'energy': 'energy_nav_dcf', 'oil': 'energy_nav_dcf', 'gas': 'energy_nav_dcf', 'o&g': 'energy_nav_dcf', 'energy_nav_dcf': 'energy_nav_dcf',
+                # Hardware / Semis
+                'hardware': 'hardware_dcf', 'semiconductor': 'hardware_dcf', 'semiconductors': 'hardware_dcf', 'chip': 'hardware_dcf', 'hardware_dcf': 'hardware_dcf',
+                # Marketplace / Platform / E-comm
+                'marketplace': 'marketplace_dcf', 'ecommerce': 'marketplace_dcf', 'e-commerce': 'marketplace_dcf', 'platform': 'marketplace_dcf', 'marketplace_dcf': 'marketplace_dcf',
+                # Telecom
+                'telecom': 'telecom_dcf', 'telecommunications': 'telecom_dcf', 'wireless': 'telecom_dcf', 'cable': 'telecom_dcf', 'telecom_dcf': 'telecom_dcf',
+            }
+            if n in mapping:
+                return mapping[n]
+            # fuzzy: contains registry name
+            names = [s.name for s in STRATEGIES]
+            for nm in names:
+                if n in nm:
+                    return nm
+            return None
+
         if requested:
-            strat = get_strategy_by_name(requested)
+            norm = _normalize(requested)
+            strat = get_strategy_by_name(requested) or (get_strategy_by_name(norm) if norm else None)
             if strat:
-                self._log("info", f"Using requested strategy: {requested}")
+                self._log("info", f"Using requested strategy: {strat.name}")
                 return strat
             self._log("warning", f"Requested strategy '{requested}' not found. Falling back to auto selection.")
         sector = metrics.get("company_info", {}).get("sector")
@@ -401,10 +436,14 @@ class FinancialModelGenerator:
             first_run = strategy.forecast(self, metrics, projection_years, term_growth, override_wacc)
             # not storing growth sequence; we'll assume ~ first revenue growth from DCF model
             df = first_run.get("dcf_model")
-            if df is not None and len(df) > 1:
-                r0, r1 = df.loc[0, "Revenue"], df.loc[1, "Revenue"] if 1 in df.index else (None, None)
-                if r0 and r1:
-                    first_year_growth = (r1 / r0) - 1
+            if isinstance(df, pd.DataFrame) and "Revenue" in df.columns and len(df) >= 2:
+                try:
+                    r0 = float(df.iloc[0]["Revenue"])
+                    r1 = float(df.iloc[1]["Revenue"])
+                    if r0:
+                        first_year_growth = (r1 / r0) - 1
+                except Exception:
+                    pass
             growth_deltas = [-0.02, 0.0, 0.02]
             margin_uplifts = [-0.05, 0.0, 0.05]
             mgrid = []
@@ -501,7 +540,46 @@ class FinancialModelGenerator:
                                  generate_sensitivities: bool = False, lean: bool = False) -> Dict[str, Any]:
         data = self._load_financial_data()
         metrics = self._extract_key_financial_metrics(data)
-        # --- Terminal growth auto-inference (no silent default) ---
+        
+        # --- AGENTIC PARAMETER CALCULATION ---
+        # Instead of using defaults, let LLM calculate optimal parameters based on company analysis
+        if self.llm_function and not self.overrides:  # Only if no manual overrides provided
+            self._log("info", "🤖 Generating agentic parameter recommendations using LLM analysis...")
+            
+            # Create a baseline model for context (using minimal defaults)
+            temp_term_growth = term_growth or 0.025  # Temporary for baseline
+            baseline_model = {"valuation_summary": {"WACC": 0.1}}  # Minimal baseline
+            
+            try:
+                agentic_params = self.propose_llm_parameter_overrides(
+                    baseline_model, projection_years, temp_term_growth, strategy
+                )
+                
+                if agentic_params:
+                    # Apply agentic parameters as overrides
+                    for param, value in agentic_params.items():
+                        if param not in ['confidence_level', 'analysis_summary', 'reasoning']:
+                            self.overrides[param] = value
+                            
+                    self._log("info", f"Applied agentic parameters: {list(agentic_params.keys())}")
+                    
+                    # Use agentic terminal growth if provided and not manually set
+                    if term_growth is None and 'terminal_growth' in agentic_params:
+                        term_growth = agentic_params['terminal_growth']
+                        self._log("info", f"Using agentic terminal growth: {term_growth:.3f}")
+                        
+                    # Use agentic WACC if provided and not manually set
+                    if override_wacc is None and 'wacc' in agentic_params:
+                        override_wacc = agentic_params['wacc']
+                        self._log("info", f"Using agentic WACC: {override_wacc:.3f}")
+                        
+                else:
+                    self._log("warning", "Agentic parameter generation returned no parameters")
+                    
+            except Exception as e:
+                self._log("error", f"Agentic parameter generation failed: {e}")
+        
+        # --- Terminal growth auto-inference (fallback if not set by agentic system) ---
         if term_growth is None:
             inferred_tg = None; tg_conf = None; tg_reason = None
             if self.llm_function:
@@ -610,6 +688,14 @@ class FinancialModelGenerator:
                     if m:
                         parsed = json.loads(m.group(0))
                         chosen_strategy_text = parsed.get('strategy')
+                        # Allow LLM to suggest a projection horizon
+                        try:
+                            pj = parsed.get('projection_years')
+                            if isinstance(pj, int) and 3 <= pj <= 10:
+                                self._log('info', f"LLM suggested projection_years={pj}; applying")
+                                projection_years = pj
+                        except Exception:
+                            pass
                         self.llm_param_audit.setdefault('strategy_selection', parsed)
                 except Exception as e:
                     self._log('warning', f"LLM strategy selection failed: {e}; falling back to rule-based")
@@ -791,126 +877,331 @@ class FinancialModelGenerator:
     def propose_llm_parameter_overrides(self, baseline_model: Dict[str, Any], projection_years: int,
                                         term_growth: float, strategy: Optional[str],
                                         caps: Optional[Dict[str, Any]] = None, temperature: float = 0.1) -> Dict[str, Any]:
-        """Ask LLM for refined parameter overrides (growth, margin_target, margin_ramp, capex_rate, nwc_ratio, wacc_delta).
+        """Ask LLM for refined parameter overrides using comprehensive agentic analysis.
 
-        Returns dict of validated overrides (keys match self.overrides / wacc override) without mutating state.
+        Returns dict of validated overrides without mutating state.
         Safe if LLM unavailable (returns empty dict).
         """
         if not self.llm_function:
+            self._log("warning", "LLM unavailable - using default parameter calculation")
             return {}
-        caps = caps or {
-            "first_year_growth": {"min": 0.0, "max": 0.60},  # absolute value
-            "margin_target": {"min": 0.05, "max": 0.60},
-            "margin_ramp": {"min": 0.0, "max": 0.05},
-            "capex_rate": {"min": 0.0, "max": 0.18},
-            "nwc_ratio": {"min": -0.05, "max": 0.40},
-            "wacc_delta": {"min": -0.01, "max": 0.01},
-        }
-        # Extract baseline metrics from dcf_model
-        dcf_df = (baseline_model.get("model_components") or {}).get("dcf_model")
-        base_growth = None
-        base_margin_first = None
-        base_margin_last = None
-        base_capex_rate = None
-        base_wacc = (baseline_model.get("valuation_summary") or {}).get("WACC")
+            
+        # Load financial data for comprehensive analysis
         try:
-            if dcf_df is not None and hasattr(dcf_df, 'iloc') and len(dcf_df) >= 2:
-                r0 = float(dcf_df.iloc[0].get("Revenue") or 0)
-                r1 = float(dcf_df.iloc[1].get("Revenue") or 0)
-                if r0 > 0 and r1 > 0:
-                    base_growth = (r1 / r0) - 1
-                e0 = float(dcf_df.iloc[0].get("EBITDA") or 0)
-                e_last = float(dcf_df.iloc[len(dcf_df)-1].get("EBITDA") or 0)
-                r_last = float(dcf_df.iloc[len(dcf_df)-1].get("Revenue") or 0)
-                if r0 > 0 and e0 > 0:
-                    base_margin_first = e0 / r0
-                if r_last > 0 and e_last > 0:
-                    base_margin_last = e_last / r_last
-                capex1 = float(dcf_df.iloc[1].get("CapEx") or 0)
-                if r1 > 0 and capex1 >= 0:
-                    base_capex_rate = capex1 / r1
-        except Exception:
-            pass
-        ctx_lines = []
-        if base_growth is not None: ctx_lines.append(f"base_first_year_growth={base_growth:.4f}")
-        if base_margin_first is not None: ctx_lines.append(f"margin_first={base_margin_first:.4f}")
-        if base_margin_last is not None: ctx_lines.append(f"margin_last={base_margin_last:.4f}")
-        if base_capex_rate is not None: ctx_lines.append(f"capex_rate_first={base_capex_rate:.4f}")
-        if base_wacc is not None: ctx_lines.append(f"wacc={base_wacc:.4f}")
-        ctx_lines.append(f"term_growth={term_growth:.4f}")
-        ctx = ", ".join(ctx_lines)
-        schema = {
-            "overrides": [
-                {"param": "first_year_growth|margin_target|margin_ramp|capex_rate|nwc_ratio|wacc_delta", "value": "numeric", "reason": "short justification"}
-            ]
-        }
-        caps_txt = "; ".join(f"{k}:[{v['min']},{v['max']}]" for k,v in caps.items())
-        # Load parameter overrides prompt from file
-        prompt_path = pathlib.Path(PROMPTS.PARAMETER_OVERRIDES)
-        with open(prompt_path, 'r', encoding='utf-8') as f:
-            prompt_template = f.read()
+            financial_data = self._load_financial_data()
+            return self._generate_agentic_parameters(financial_data, baseline_model, projection_years, 
+                                                   term_growth, strategy, temperature)
+        except Exception as e:
+            self._log("error", f"Agentic parameter calculation failed: {e}")
+            return {}
+
+    def _generate_agentic_parameters(self, financial_data: Dict[str, Any], baseline_model: Dict[str, Any],
+                                   projection_years: int, term_growth: float, 
+                                   strategy: Optional[str], temperature: float) -> Dict[str, Any]:
+        """Generate comprehensive parameter recommendations using agentic LLM analysis."""
         
+        # Extract comprehensive company context
+        context = self._build_company_context(financial_data)
+        
+        # Get peer analysis if available
+        peer_analysis = self._get_peer_context(financial_data)
+        
+        # Build strategy-specific guidance
+        strategy_guidance = self._get_strategy_guidance(strategy, context)
+        
+        # Load agentic parameter calculator prompt
+        prompt_path = pathlib.Path(__file__).parent.parent / "prompts" / "agentic_parameter_calculator.md"
+        
+        try:
+            with open(prompt_path, 'r', encoding='utf-8') as f:
+                prompt_template = f.read()
+        except Exception:
+            self._log("warning", "Could not load agentic parameter prompt - using fallback")
+            return self._fallback_parameter_calculation(context)
+        
+        # Build a safe prompt: prepend structured JSON context, then include the template as-is (no .format on template)
+        context_payload = {
+            'ticker': self.ticker,
+            'company_name': context.get('company_name', self.ticker),
+            'sector': context.get('sector', 'Unknown'),
+            'industry': context.get('industry', 'Unknown'),
+            'market_cap': context.get('market_cap', 0),
+            'enterprise_value': context.get('enterprise_value', 0),
+            'current_price': context.get('current_price', 0),
+            'latest_revenue': context.get('latest_revenue', 0),
+            'latest_ebitda': context.get('latest_ebitda', 0),
+            'ebitda_margin': context.get('ebitda_margin', 0),
+            'historical_growth': context.get('historical_growth', 0),
+            'historical_summary': context.get('historical_summary', 'No historical data available'),
+            'peer_analysis': peer_analysis,
+            'risk_free_rate': context.get('risk_free_rate', 0.04),
+            'market_risk_premium': context.get('market_risk_premium', 0.06),
+            'beta': context.get('beta', 1.0),
+            'economic_context': context.get('economic_context', 'Current market conditions'),
+            'strategy_specific_guidance': strategy_guidance,
+            'projection_years': projection_years,
+            'term_growth': term_growth,
+        }
+        try:
+            context_json = json.dumps(context_payload, indent=2)
+        except Exception:
+            # As a fallback, stringify keys one-by-one
+            context_json = str(context_payload)
         prompt = (
-            prompt_template + f"\n\nContext: {ctx}\nCaps: {caps_txt}\nJSON Schema Example: {json.dumps(schema)}"
+            "You are provided with company context below in JSON. Use it along with the instructions to propose modeling parameters.\n" 
+            + context_json + "\n\n" + prompt_template
         )
+        
+        # Make LLM call with comprehensive context
         try:
-            raw = self.llm_function([
-                {"role": "system", "content": "You return compact JSON with financially realistic parameter overrides."},
+            messages = [
+                {"role": "system", "content": "You are a senior financial analyst specializing in DCF modeling and valuation parameters. Provide realistic, defensible parameter recommendations."},
                 {"role": "user", "content": prompt}
-            ], temperature=temperature or DEFAULTS.TEMP_PARAMETER_OVERRIDES)
-            if isinstance(raw, tuple): raw = raw[0]
-            text = str(raw).strip()
-        except Exception as e:  # pragma: no cover
-            self.llm_param_audit = {"error": f"LLM call failed: {e}"}
-            return {}
-        json_str = None
-        if text.startswith('{') and text.endswith('}'): json_str = text
+            ]
+            
+            response, cost = self.llm_function(messages, temperature=temperature)
+            
+            # Track LLM usage
+            if hasattr(self, 'total_llm_cost'):
+                self.total_llm_cost += cost
+            if hasattr(self, 'llm_call_count'):
+                self.llm_call_count += 1
+                
+            # Parse and validate LLM response
+            parameters = self._parse_agentic_response(response, context)
+            
+            # Store audit trail
+            self.llm_param_audit = {
+                "method": "agentic_comprehensive",
+                "context_used": list(context.keys()),
+                "llm_cost": cost,
+                "parameters_generated": list(parameters.keys()),
+                "confidence": parameters.get('confidence_level', 'Unknown')
+            }
+            
+            return parameters
+            
+        except Exception as e:
+            self._log("error", f"Agentic LLM parameter generation failed: {e}")
+            return self._fallback_parameter_calculation(context)
+
+    def _build_company_context(self, financial_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Build comprehensive company context for agentic analysis."""
+        
+        cd = financial_data.get("company_data", {})
+        basic = cd.get("basic_info", {})
+        md = cd.get("market_data", {})
+        vm = cd.get("valuation_metrics", {})
+        cs = cd.get("capital_structure", {})
+        
+        # Financial statements
+        fs = financial_data.get("financial_statements", {})
+        is_map = fs.get("income_statement", {})
+        
+        # Latest financials
+        latest_year = max(is_map.keys()) if is_map else None
+        latest_is = is_map.get(latest_year, {}) if latest_year else {}
+        
+        latest_revenue = self._num(latest_is.get("Total Revenue")) or 0
+        latest_ebitda = self._num(latest_is.get("EBITDA")) or 0
+        ebitda_margin = (latest_ebitda / latest_revenue) if latest_revenue else 0
+        
+        # Historical growth calculation
+        historical_growth = self._calculate_historical_growth(is_map)
+        historical_summary = self._generate_historical_summary(is_map)
+        
+        return {
+            'company_name': basic.get('long_name', self.ticker),
+            'sector': basic.get('sector', 'Unknown'),
+            'industry': basic.get('industry', 'Unknown'),
+            'market_cap': self._num(md.get('market_cap'), 0),
+            'enterprise_value': self._num(md.get('enterprise_value'), 0),
+            'current_price': self._num(md.get('current_price'), 0),
+            'latest_revenue': latest_revenue,
+            'latest_ebitda': latest_ebitda,
+            'ebitda_margin': ebitda_margin,
+            'historical_growth': historical_growth,
+            'historical_summary': historical_summary,
+            'risk_free_rate': self._num(cs.get('risk_free_rate'), 0.04),
+            'market_risk_premium': self._num(cs.get('equity_risk_premium'), 0.06),
+            'beta': self._num(cs.get('beta'), 1.0),
+            'economic_context': self._assess_economic_context(cd)
+        }
+
+    def _calculate_historical_growth(self, is_map: Dict[str, Any]) -> float:
+        """Calculate compound annual revenue growth from historical data."""
+        if len(is_map) < 2:
+            return 0.0
+            
+        years = sorted(is_map.keys())
+        revenues = []
+        
+        for year in years[-3:]:  # Last 3 years
+            revenue = self._num(is_map[year].get("Total Revenue"))
+            if revenue:
+                revenues.append(revenue)
+        
+        if len(revenues) < 2:
+            return 0.0
+            
+        # Calculate CAGR
+        n_years = len(revenues) - 1
+        cagr = (revenues[-1] / revenues[0]) ** (1/n_years) - 1
+        return cagr
+
+    def _generate_historical_summary(self, is_map: Dict[str, Any]) -> str:
+        """Generate summary of historical financial performance."""
+        if not is_map:
+            return "No historical financial data available"
+            
+        years = sorted(is_map.keys())[-3:]  # Last 3 years
+        summary_lines = []
+        
+        for year in years:
+            data = is_map[year]
+            revenue = self._num(data.get("Total Revenue"))
+            ebitda = self._num(data.get("EBITDA"))
+            margin = (ebitda / revenue * 100) if (revenue and ebitda) else 0
+            
+            summary_lines.append(f"{year}: Revenue ${revenue/1e6:.0f}M, EBITDA ${ebitda/1e6:.0f}M ({margin:.1f}%)")
+        
+        return "\n".join(summary_lines)
+
+    def _get_peer_context(self, financial_data: Dict[str, Any]) -> str:
+        """Get peer company analysis context."""
+        # This would integrate with peer comparison data if available
+        return "Peer analysis: Industry benchmarks suggest similar companies trade at 15-25x EBITDA with 10-20% revenue growth"
+
+    def _get_strategy_guidance(self, strategy: Optional[str], context: Dict[str, Any]) -> str:
+        """Get strategy-specific parameter guidance."""
+        sector = context.get('sector', '').lower()
+        industry = context.get('industry', '').lower()
+        
+        if strategy == 'saas_dcf' or 'software' in industry:
+            return """
+SaaS/Software Strategy Considerations:
+- Growth: Typically 15-40% revenue growth, declining over time
+- Margins: Should improve due to operating leverage (target 25-40% EBITDA)
+- CapEx: Low (2-5% of revenue) - mainly technology infrastructure
+- Working Capital: Often negative due to deferred revenue
+- WACC: Typically 8-12% depending on growth stage and profitability
+"""
+        elif strategy == 'reit_dcf' or 'reit' in industry:
+            return """
+REIT Strategy Considerations:
+- Growth: Modest 2-6% revenue growth from rent increases and acquisitions
+- Margins: Focus on FFO/AFFO rather than EBITDA
+- CapEx: Split between maintenance (50-80% of D&A) and growth capex
+- Working Capital: Minimal impact
+- WACC: Lower due to real estate backing (6-9%)
+"""
         else:
-            m = re.search(r"\{[\s\S]+\}", text)
-            if m: json_str = m.group(0)
-        overrides: Dict[str, Any] = {}
-        audit = {"raw": text, "parsed": None, "applied": {}, "skipped": []}
+            return """
+Generic Strategy Considerations:
+- Growth: Analyze competitive position and market dynamics
+- Margins: Consider scale economies and competitive pressures
+- CapEx: Asset-intensive vs asset-light business models
+- Working Capital: Industry-specific patterns
+- WACC: Risk-adjusted cost of capital based on business model
+"""
+
+    def _assess_economic_context(self, company_data: Dict[str, Any]) -> str:
+        """Assess current economic environment for modeling."""
+        return "Current environment: Moderate growth, elevated interest rates, focus on profitability over growth"
+
+    def _parse_agentic_response(self, response: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse and validate LLM agentic parameter response."""
+        
         try:
-            if json_str:
-                parsed = json.loads(json_str)
-                audit["parsed"] = parsed
-                for o in parsed.get("overrides", [])[:12]:
-                    param = str(o.get("param",""))
-                    val = o.get("value")
-                    reason = str(o.get("reason",""))[:300]
-                    if param not in caps:
-                        audit["skipped"].append({"param": param, "reason": "not_allowed"}); continue
-                    try:
-                        fval = float(val)
-                    except Exception:
-                        audit["skipped"].append({"param": param, "reason": "non_numeric"}); continue
-                    bounds = caps[param]
-                    if fval < bounds['min'] or fval > bounds['max']:
-                        fval = min(bounds['max'], max(bounds['min'], fval))  # clip
-                    # basic sanity: margin_target >= margin_first (if known)
-                    if param == 'margin_target' and base_margin_first is not None and fval < base_margin_first:
-                        audit["skipped"].append({"param": param, "reason": "below_base_margin_first"}); continue
-                    overrides[param] = fval
-                    audit["applied"][param] = {"value": fval, "reason": reason}
-            else:
-                audit["error"] = "no_json_detected"
-        except Exception as e:  # pragma: no cover
-            audit["error"] = f"parse_error:{e}"
-        # Translate wacc_delta to direct override if baseline wacc present
-        if 'wacc_delta' in overrides and base_wacc is not None:
-            new_wacc = max(0.04, min(0.20, base_wacc + overrides['wacc_delta']))
-            audit['applied']['override_wacc'] = new_wacc
-            overrides['override_wacc'] = new_wacc
-            del overrides['wacc_delta']
-        self.llm_param_audit = audit
-        # Map parameter names to generator overrides keys
-        mapped = {}
-        for k,v in overrides.items():
-            if k == 'override_wacc':
-                mapped['__override_wacc__'] = v
-            else:
-                mapped[k] = v
-        return mapped
+            # Extract JSON from response
+            import re
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if not json_match:
+                raise ValueError("No JSON found in response")
+            
+            import json
+            parsed = json.loads(json_match.group())
+            
+            # Extract parameters with validation
+            parameters = parsed.get('parameters', {})
+            validated_params = {}
+            
+            # Validate and bound parameters
+            bounds = {
+                'first_year_growth': (0.0, 0.6),
+                'terminal_growth': (0.0, 0.04),
+                'margin_target': (0.05, 0.6),
+                'margin_ramp': (0.0, 0.05),
+                'capex_rate': (0.0, 0.2),
+                'da_rate': (0.0, 0.15),
+                'nwc_ratio': (-0.1, 0.4),
+                'wacc': (0.04, 0.2)
+            }
+            
+            for param, value in parameters.items():
+                if param in bounds:
+                    min_val, max_val = bounds[param]
+                    bounded_value = max(min_val, min(max_val, float(value)))
+                    validated_params[param] = bounded_value
+            
+            # Add growth sequence if provided
+            if 'growth_sequence' in parameters:
+                growth_seq = parameters['growth_sequence']
+                if isinstance(growth_seq, list) and len(growth_seq) >= 5:
+                    validated_params['growth_sequence'] = [max(0.0, min(0.6, float(g))) for g in growth_seq[:5]]
+            
+            # Store additional analysis
+            validated_params['confidence_level'] = parsed.get('confidence_level', 'Medium')
+            validated_params['analysis_summary'] = parsed.get('analysis_summary', '')
+            validated_params['reasoning'] = parsed.get('reasoning', {})
+            
+            self._log("info", f"Agentic parameters generated: {list(validated_params.keys())}")
+            return validated_params
+            
+        except Exception as e:
+            self._log("error", f"Failed to parse agentic response: {e}")
+            return self._fallback_parameter_calculation(context)
+
+    def _fallback_parameter_calculation(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback parameter calculation when LLM fails."""
+        
+        # Use intelligent defaults based on company context
+        market_cap = context.get('market_cap', 0)
+        sector = context.get('sector', '').lower()
+        historical_growth = context.get('historical_growth', 0)
+        ebitda_margin = context.get('ebitda_margin', 0)
+        
+        # Size-based adjustments
+        if market_cap > 100e9:  # Large cap
+            growth_mult = 0.7
+            margin_target = min(0.35, max(0.2, ebitda_margin * 1.1))
+        elif market_cap > 10e9:  # Mid cap
+            growth_mult = 1.0
+            margin_target = min(0.4, max(0.15, ebitda_margin * 1.15))
+        else:  # Small cap
+            growth_mult = 1.3
+            margin_target = min(0.45, max(0.1, ebitda_margin * 1.2))
+        
+        # Sector-based adjustments
+        if 'technology' in sector or 'software' in sector:
+            base_growth = max(0.15, historical_growth * growth_mult)
+            capex_rate = 0.03
+        elif 'utility' in sector or 'infrastructure' in sector:
+            base_growth = max(0.03, historical_growth * 0.5)
+            capex_rate = 0.08
+        else:
+            base_growth = max(0.08, historical_growth * growth_mult)
+            capex_rate = 0.05
+        
+        return {
+            'first_year_growth': min(0.4, base_growth),
+            'margin_target': margin_target,
+            'margin_ramp': 0.01,
+            'capex_rate': capex_rate,
+            'da_rate': 0.04,
+            'nwc_ratio': 0.05,
+            'confidence_level': 'Low - Fallback calculation'
+        }
 
     # ---------- Excel / CSV writers ----------
     def _ensure_dirs(self):
