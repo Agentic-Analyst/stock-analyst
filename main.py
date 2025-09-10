@@ -464,12 +464,46 @@ class ComprehensiveStockAnalysisPipeline:
             else:
                 # Convert filtered articles to format expected by screener
                 articles_data = []
-                for article, score in filtered_articles:
-                    # Ensure article has file_name key that screener expects
-                    article_copy = article.copy()
-                    if 'file_path' in article_copy and 'file_name' not in article_copy:
-                        article_copy['file_name'] = article_copy['file_path'].name
-                    articles_data.append(article_copy)
+                for article_info in filtered_articles:
+                    # article_info is a dict with metadata about the filtered article
+                    # We need to load the actual article content for screening
+                    filename = article_info.get('filename') or article_info.get('original_filename')
+                    if filename:
+                        # Load article content from the filtered directory
+                        article_path = self.article_filter.filtered_dir / filename
+                        if article_path.exists():
+                            content = article_path.read_text(encoding='utf-8')
+                            
+                            # Parse frontmatter if present (to match screener's load_filtered_articles format)
+                            if content.startswith("---"):
+                                parts = content.split("---", 2)
+                                if len(parts) >= 3:
+                                    try:
+                                        import yaml
+                                        frontmatter = yaml.safe_load(parts[1]) or {}
+                                        text_content = parts[2].strip()
+                                    except:
+                                        frontmatter = {}
+                                        text_content = content
+                                else:
+                                    frontmatter = {}
+                                    text_content = content
+                            else:
+                                frontmatter = {}
+                                text_content = content
+                            
+                            # Create article data in the format screener expects
+                            article_data = {
+                                'file_path': article_path,
+                                'file_name': filename,  # screener expects this key
+                                'title': frontmatter.get('title', article_info.get('title', '')),
+                                'source_url': frontmatter.get('source_url', ''),
+                                'publish_date': frontmatter.get('publish_date', ''),
+                                'text': text_content,  # screener expects 'text', not 'content'
+                                'word_count': len(text_content.split()),
+                                'llm_score': article_info.get('llm_score', 0.0)
+                            }
+                            articles_data.append(article_data)
             
             self.logger.info(f"🔍 Analyzing {len(articles_data)} articles with LLM...")
             
