@@ -351,7 +351,7 @@ class ComprehensiveStockAnalysisPipeline:
             self.stats["model_generation"] = {
                 "model_type": model_type,
                 "projection_years": projection_years,
-                "strategy_used": model.get("strategy_info", {}).get("name", "unknown"),
+                "strategy_used": model.get("valuation_summary", {}).get("Strategy") or model.get("parameters", {}).get("strategy", "unknown"),
                 "implied_price": model.get("valuation_summary", {}).get("Implied Price"),
                 "peers_included": peer_list if peer_list else [],
                 "excel_saved": str(excel_path) if excel_path else "Failed"
@@ -361,7 +361,7 @@ class ComprehensiveStockAnalysisPipeline:
             # Log results
             valuation = model.get("valuation_summary", {})
             stats = {
-                "Model strategy": model.get("strategy_info", {}).get("name", "N/A"),
+                "Model strategy": model.get("valuation_summary", {}).get("Strategy") or model.get("parameters", {}).get("strategy", "N/A"),
                 "Implied price": f"${valuation.get('Implied Price', 0):,.2f}" if valuation.get('Implied Price') else "N/A",
                 "WACC used": f"{valuation.get('WACC', 0)*100:.1f}%" if valuation.get('WACC') else "N/A",
                 "Terminal growth": f"{valuation.get('Terminal Growth', 0)*100:.1f}%" if valuation.get('Terminal Growth') else "N/A"
