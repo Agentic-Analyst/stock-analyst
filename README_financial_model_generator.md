@@ -54,7 +54,7 @@ python src/financial_model_generator.py --ticker AAPL --model dcf --strategy saa
 python src/financial_model_generator.py --ticker O --model dcf --strategy reit_dcf --cap-rate 0.065 --maint-capex-pct-da 0.45 --save-excel
 python src/financial_model_generator.py --ticker JPM --strategy bank_excess_returns --payout-ratio 0.35 --roe-target 0.14 --save-csv
 python src/financial_model_generator.py --ticker XOM --strategy energy_nav_dcf --energy-ebitda-multiple 5.5 --sensitivities --save-excel
-python src/financial_model_generator.py --ticker NVDA --model comprehensive --peers AAPL,MSFT,AMD --sensitivities --save-excel --no-llm
+python src/financial_model_generator.py --ticker NVDA --model comprehensive --peers AAPL,MSFT,AMD --sensitivities --save-excel
 ```
 
 Key flags:
@@ -66,7 +66,6 @@ Flag | Purpose
 `--term-growth` | Terminal FCFF growth (g)
 `--wacc` | Override WACC (else auto-inferred)
 `--data-file` | Explicit JSON path override
-`--no-llm` | Disable LLM narrative
 `--save-excel` / `--save-csv` | Persist outputs
 `--peers` | Comma list of peer tickers for multi-row comps
 `--sensitivities` | Generate 2 sensitivity matrices
@@ -144,7 +143,7 @@ Keep math deterministic; avoid network / LLM calls inside strategies.
 
 ---
 ## 12. LLM Integration (Optional)
-If an LLM function (`llms.gpt_4o_mini`) is importable and `--no-llm` is **not** passed a concise research-style narrative is produced (Executive Summary, Projections, Valuation, Sensitivities, Recommendation) and written to the `LLM Analysis` sheet. Classification has been removed; all valuation math & assumptions remain deterministic. Failures are non-fatal and logged as warnings.
+research-style narrative is produced (Executive Summary, Projections, Valuation, Sensitivities, Recommendation) and written to the `LLM Analysis` sheet. Classification has been removed; all valuation math & assumptions remain deterministic. Failures are non-fatal and logged as warnings.
 
 ---
 ## 13. Troubleshooting
@@ -167,7 +166,7 @@ python src/financial_model_generator.py \
   --term-growth 0.03 \
   --sensitivities \
   --peers AAPL,MSFT,AMD \
-  --save-excel --save-csv --no-llm
+  --save-excel --save-csv
 ```
 
 ---
@@ -188,7 +187,7 @@ This generator is deterministic and designed for transparent analytical workflow
 ## 17. Quick Reference (Cheat Sheet)
 Action | Command
 ------ | -------
-Generic DCF CSV | `python src/financial_model_generator.py --ticker NVDA --model dcf --no-llm --save-csv`
+Generic DCF CSV | `python src/financial_model_generator.py --ticker NVDA --model dcf --save-csv`
 SaaS Strategy | `python src/financial_model_generator.py --ticker CRM --strategy saas_dcf --save-excel`
 REIT with NAV | `python src/financial_model_generator.py --ticker O --strategy reit_dcf --cap-rate 0.065 --save-excel`
 Bank Residual | `python src/financial_model_generator.py --ticker JPM --strategy bank_excess_returns --payout-ratio 0.35 --roe-target 0.14`

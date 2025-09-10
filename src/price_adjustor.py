@@ -390,13 +390,13 @@ def compute_adjustment(base_price: Optional[float], factors: Dict[str, List[Dict
 # --- Financial Model Integration ---------------------------------------------
 
 def generate_base_model_price(ticker: str, model: str, strategy: Optional[str], years: int,
-                              term_growth: float, wacc: Optional[float], no_llm: bool) -> Tuple[Optional[float], Dict[str, Any]]:
+                              term_growth: float, wacc: Optional[float]) -> Tuple[Optional[float], Dict[str, Any]]:
     try:
         from financial_model_generator import FinancialModelGenerator
     except ImportError:
         print("[ERROR] Cannot import FinancialModelGenerator. Ensure path is correct.", file=sys.stderr)
         return None, {}
-    gen = FinancialModelGenerator(ticker, no_llm=no_llm)
+    gen = FinancialModelGenerator(ticker)
     m = gen.generate_financial_model(model_type=model, projection_years=years,
                                      term_growth=term_growth, override_wacc=wacc,
                                      strategy=strategy, peers=None, generate_sensitivities=False)
@@ -646,7 +646,7 @@ def main():
                 for key, ov_name, delta_val in trial_specs:
                     if abs(delta_val) < 1e-8:
                         continue
-                    gen_trial = FinancialModelGenerator(ticker, no_llm=True)
+                    gen_trial = FinancialModelGenerator(ticker)
                     tr_over = {}
                     if ov_name == 'first_year_growth':
                         tr_over['first_year_growth'] = max(0.0, (base_metrics_tmp.get('first_year_growth') or 0.0) + delta_val)
@@ -662,7 +662,7 @@ def main():
                         price_impact_map[key] = (tprice / base_price) - 1
                 # WACC trial
                 if abs(eff['wacc_delta_dec']) > 1e-8:
-                    gen_trial = FinancialModelGenerator(ticker, no_llm=True)
+                    gen_trial = FinancialModelGenerator(ticker)
                     wacc_override_trial = None
                     base_metrics_tmp = base_metrics_tmp if 'base_metrics_tmp' in locals() else extract_base_operating_metrics(model_obj)
                     if base_metrics_tmp.get('wacc'):
@@ -692,7 +692,7 @@ def main():
                 wacc_override = max(0.04, min(0.20, base_metrics_tmp['wacc'] + eff['wacc_delta_dec']))
             if overrides or wacc_override:
                 from financial_model_generator import FinancialModelGenerator
-                gen_map = FinancialModelGenerator(ticker, no_llm=True)
+                gen_map = FinancialModelGenerator(ticker)
                 gen_map.overrides = overrides
                 model_mapped = gen_map.generate_financial_model(model_type=args.model, projection_years=args.years,
                                                                 term_growth=args.term_growth, override_wacc=wacc_override,
@@ -845,7 +845,7 @@ def main():
                 wacc_override = None
                 if abs(eff.get('wacc_delta_dec', 0)) > 1e-8 and base_metrics_tmp.get('wacc'):
                     wacc_override = max(0.04, min(0.20, base_metrics_tmp['wacc'] + eff['wacc_delta_dec'] * m['wacc']))
-                gen_s = FinancialModelGenerator(ticker, no_llm=True)
+                gen_s = FinancialModelGenerator(ticker)
                 gen_s.overrides = overrides
                 model_s = gen_s.generate_financial_model(model_type=args.model, projection_years=args.years,
                                                          term_growth=args.term_growth, override_wacc=wacc_override,
@@ -917,7 +917,7 @@ def main():
             # Re-run model with overrides (and potential WACC override)
             try:
                 from financial_model_generator import FinancialModelGenerator
-                gen2 = FinancialModelGenerator(ticker, no_llm=True)
+                gen2 = FinancialModelGenerator(ticker)
                 gen2.overrides = overrides
                 # Apply WACC delta if present
                 wacc_override = None

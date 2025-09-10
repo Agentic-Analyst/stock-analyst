@@ -60,7 +60,7 @@ def _try_load_llm():
 class FinancialModelGenerator:
     """Enhanced, auditable financial model generator for valuation analysis."""
 
-    def __init__(self, ticker: str, base_path: pathlib.Path, email: str, data_file: Optional[str] = None, no_llm: bool = False):
+    def __init__(self, ticker: str, base_path: pathlib.Path, email: str, data_file: Optional[str] = None):
         """Constructor sets up path references, caches, and optional LLM client.
 
         Parameters
@@ -69,8 +69,6 @@ class FinancialModelGenerator:
             Company ticker.
         data_file : Optional[str]
             Explicit path to modeling JSON (bypasses probing) if provided.
-        no_llm : bool
-            If True, disables optional LLM features (narrative + param assist).
         """
         # --- Core paths ---
         self.ticker = ticker.upper()
@@ -83,7 +81,7 @@ class FinancialModelGenerator:
         self.logger = None
 
         # --- Optional LLM client (narrative + parameter assist) ---
-        self.llm_function = None if no_llm else _try_load_llm()
+        self.llm_function =_try_load_llm()
 
         # --- Stats ---
         self.models_generated = 0
@@ -1401,7 +1399,7 @@ def _parse_args():
 
 def main():
     args = _parse_args()
-    gen = FinancialModelGenerator(args.ticker, data_file=args.data_file, no_llm=False)  # LLM always enabled
+    gen = FinancialModelGenerator(args.ticker, data_file=args.data_file)  # LLM always enabled
 
     if args.stats:
         gen._log("info", f"Models generated: {gen.models_generated}")

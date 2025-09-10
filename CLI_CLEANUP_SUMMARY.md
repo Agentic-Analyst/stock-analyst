@@ -49,7 +49,7 @@ This document summarizes the CLI arguments that were cleaned up across the codeb
 ### Before Cleanup
 ```bash
 # Required explicit save flags
-python financial_model_generator.py --ticker NVDA --save-excel --no-llm
+python financial_model_generator.py --ticker NVDA --save-excel
 python article_filter.py --ticker NVDA --save-filtered --output-report
 ```
 

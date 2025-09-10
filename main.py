@@ -4,23 +4,32 @@ main.py - Comprehensive Stock Analysis Pipeline
 
 This module orchestrates the complete 6-step stock analysis workflow:
 1. Financial Scraping - Collect financial statements and company data  
-2. Financial Model Generation - Build DCF and comparable models with LLM insights
+2. Financial Model Generation - Build DCF models with LLM-powered strategy selection and parameter optimization
 3. News Scraping - Collect recent news articles from Google News
 4. Article Filtering - Filter for relevance and quality  
 5. Article Screening - Extract investment insights using LLM
 6. Price Adjustment - Combine quantitative model with qualitative factors
 
 Enhanced Features:
+- LLM-powered automatic DCF strategy selection (saas_dcf, reit_dcf, bank_excess_returns, etc.)
+- Agentic parameter generation with AI-optimized WACC, terminal growth, and modeling assumptions
 - Deterministic event→parameter mapping with audit logging
-- LLM-enhanced parameter proposals and scenario analysis
-- Configuration-driven defaults and guardrails
+- Configuration-driven defaults and guardrails with manual override options
 - Comprehensive audit trail for conversions and overrides
 - Integrated Excel/CSV export with scenario comparison
 
 ▶ Usage Examples:
-    python main.py --ticker NVDA --company "NVIDIA" --pipeline full
-    python main.py --ticker AAPL --company "Apple Inc" --pipeline financial-only --years 5
-    python main.py --ticker TSLA --company "Tesla" --pipeline model-to-price --wacc 0.095
+    # Full LLM-powered analysis (AI selects strategy and optimizes parameters)
+    python main.py --ticker NVDA --company "NVIDIA" --pipeline comprehensive
+    
+    # LLM analysis with manual strategy override
+    python main.py --ticker AAPL --company "Apple Inc" --pipeline comprehensive --strategy hardware_dcf
+    
+    # Traditional analysis without LLM (deterministic defaults)
+    python main.py --ticker TSLA --company "Tesla" --pipeline comprehensive --wacc 0.095
+
+    # Force manual overrides even with LLM enabled
+    python main.py --ticker MSFT --company "Microsoft" --pipeline comprehensive --term-growth 0.025
 """
 
 from __future__ import annotations
@@ -290,16 +299,24 @@ class ComprehensiveStockAnalysisPipeline:
                                   strategy: Optional[str], peers: Optional[str] = None) -> Dict:
         """Run the financial model generation stage."""
         try:
-            # Initialize model generator (allow it to auto-probe latest modeling JSON)
-            # NOTE: Previously we passed a path missing the /financials/ subdir which caused a fallback probe.
-            # We now omit explicit data_file to avoid confusion and rely on internal probing logic.
-            self.model_generator = FinancialModelGenerator(self.ticker, data_file=None, base_path=self.analysis_path, email=self.email, no_llm=False)
+            # Initialize model generator with LLM control
+            self.model_generator = FinancialModelGenerator(
+                self.ticker, 
+                data_file=None, 
+                base_path=self.analysis_path, 
+                email=self.email
+            )
             # Inject centralized logger for unified output
             if hasattr(self.model_generator, 'set_logger'):
                 self.model_generator.set_logger(self.logger)
             
-            self.logger.info(f"🔢 Generating {model_type} model for {self.ticker}...")
+            # Handle force overrides - if enabled, pre-populate overrides to bypass LLM agentic system
+            if term_growth is not None:
+                self.model_generator.overrides['terminal_growth'] = term_growth
+            if wacc_override is not None:
+                self.model_generator.overrides['wacc'] = wacc_override
             
+            self.logger.info(f"🔢 Generating {model_type} model for {self.ticker}...")            
             # Parse peers if provided
             peer_list = None
             if peers:
@@ -791,17 +808,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Complete 6-step analysis
+  # Full LLM-powered analysis (AI selects optimal DCF strategy and parameters)
   python main.py --ticker NVDA --company "NVIDIA" --pipeline comprehensive
   
-  # Financial analysis with peer comparison
-  python main.py --ticker NVDA --company "NVIDIA" --pipeline financial-only --peers "AMD,INTC,TSM"
+  # LLM analysis with manual strategy override (force specific DCF approach)
+  python main.py --ticker AAPL --company "Apple Inc" --pipeline comprehensive --strategy hardware_dcf
   
-  # Financial analysis only  
-  python main.py --ticker AAPL --company "Apple Inc" --pipeline financial-only --model dcf --years 5
+  # Traditional analysis without LLM (deterministic parameters)
+  python main.py --ticker TSLA --company "Tesla" --pipeline comprehensive --wacc 0.095
   
-  # Model generation through price adjustment
-  python main.py --ticker TSLA --company "Tesla" --pipeline model-to-price --wacc 0.095
+  # LLM analysis with forced manual overrides
+  python main.py --ticker MSFT --company "Microsoft" --pipeline comprehensive --term-growth 0.025
+
+  # Financial model only with LLM optimization
+  python main.py --ticker REIT --company "Realty Income" --pipeline financial-model --strategy reit_dcf
+  
+  # SaaS company with peer comparison
+  python main.py --ticker CRM --company "Salesforce" --pipeline comprehensive --peers "MSFT,ORCL,ADBE"
         """
     )
     
@@ -822,11 +845,11 @@ Examples:
     
     # Financial modeling parameters
     parser.add_argument("--model", choices=["dcf", "comparable", "comprehensive"], 
-                       default="comprehensive", help="Financial model type")
-    parser.add_argument("--years", type=int, default=5, help="Projection years")
-    parser.add_argument("--term-growth", type=float, help="Terminal growth rate (auto-infer if omitted)")
-    parser.add_argument("--wacc", type=float, help="Override WACC (auto-infer if omitted)")
-    parser.add_argument("--strategy", help="Force specific forecast strategy")
+                       default="comprehensive", help="Financial model type (LLM will auto-select optimal DCF strategy)")
+    parser.add_argument("--years", type=int, default=5, help="Projection years (LLM can suggest optimal range 3-10)")
+    parser.add_argument("--term-growth", type=float, help="Terminal growth rate override (LLM auto-infers if omitted)")
+    parser.add_argument("--wacc", type=float, help="WACC override (LLM auto-infers if omitted)")
+    parser.add_argument("--strategy", help="Force specific DCF strategy (e.g., 'saas_dcf', 'reit_dcf', 'bank_excess_returns', 'hardware_dcf') - LLM auto-selects if omitted")
     parser.add_argument("--peers", help="Comma-separated peer tickers for comparable analysis (e.g., 'AAPL,MSFT,GOOGL')")
     
     # News analysis parameters  

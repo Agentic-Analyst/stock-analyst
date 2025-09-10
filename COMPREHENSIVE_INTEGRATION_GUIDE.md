@@ -133,7 +133,6 @@ Step 2: Financial model generation only (requires existing financial data).
 - Event mapping transparency: Full catalyst/risk→parameter delta audit
 
 ### 3. **Production-Ready Defaults**
-- LLM always enabled (no `--no-llm` flags)
 - Reports always generated (no optional flags)
 - Data always saved (Excel/CSV/JSON outputs automatic)
 - Sensible defaults for all parameters
@@ -188,6 +187,5 @@ Financial Scraping → Model Generation → News Scraping → Filtering → Scre
 - `--scaling`: Qualitative adjustment scaling factor
 - `--adjustment-cap`: Maximum adjustment percentage
 - `--no-mapped-deltas`: Disable event→parameter mapping
-- `--no-llm-scenarios`: Disable LLM scenario analysis
 
 The comprehensive integration provides a production-ready, auditable, and highly configurable stock analysis pipeline that systematically combines quantitative financial modeling with qualitative news analysis to produce well-supported investment recommendations.
