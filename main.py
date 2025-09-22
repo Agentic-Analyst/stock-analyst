@@ -863,34 +863,11 @@ Examples:
     parser.add_argument("--scaling", type=float, default=0.15, help="Base scaling factor for qualitative adjustment")
     parser.add_argument("--adjustment-cap", type=float, default=0.20, help="Maximum adjustment percentage (±)")
     
-    # Other options
-    parser.add_argument("--stats", action="store_true", help="Show current storage statistics")
-    
     args = parser.parse_args()
     
     try:
         # Initialize comprehensive pipeline
         pipeline = ComprehensiveStockAnalysisPipeline(args.ticker, args.company, args.email, args.timestamp)
-        
-        # Show stats if requested
-        if args.stats:
-            # Show financial scraper stats
-            try:
-                financial_storage = pipeline.financial_scraper.get_current_data_status()
-                pipeline.logger.info(f"📊 Financial data status for {args.ticker}:")
-                pipeline.logger.info(f"   Available statements: {financial_storage.get('available_statements', 'Unknown')}")
-            except:
-                pass
-            
-            # Show news scraper stats  
-            try:
-                storage_info = pipeline.article_scraper.get_storage_info()
-                pipeline.logger.info(f"📰 News articles status for {args.ticker}:")
-                pipeline.logger.info(f"   Directory: {storage_info['company_dir']}")
-                pipeline.logger.info(f"   Total articles: {storage_info['total_articles']}")
-            except:
-                pass
-            return 0
         
         # Run selected pipeline
         if args.pipeline == "comprehensive":
@@ -915,7 +892,7 @@ Examples:
             )
         
         elif args.pipeline == "financial-statements":
-            results = pipeline.run_financial_statement_stage()
+            results = pipeline.run_financial_scraping_stage()
 
         elif args.pipeline == "financial-model":
             financial_results = pipeline.run_financial_scraping_stage()

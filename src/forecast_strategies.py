@@ -30,7 +30,7 @@ import json
 DEFAULTS = {
     "generic_growth_seq": [0.15, 0.12, 0.10, 0.08, 0.06],
     "saas_growth_seq":    [0.25, 0.20, 0.18, 0.15, 0.12],
-    "utility_growth_seq": [0.05, 0.04, 0.035, 0.03, 0.025],
+    "utility_growth_seq": [0.05, 0.04, 0.035, 0.03, 0.12],
 }
 
 
@@ -118,7 +118,7 @@ class GenericDCFStrategy(ForecastStrategy):
                         curve += [curve[-1]] * (projection_years - len(curve))
                     margin_seq = [min(0.90, max(0.0, v)) for v in curve[:projection_years]]
                     generator.diagnostics.append('override:margin_curve')
-                    audit['margin_curve_applied'] = curve[:projection_years]
+                    audit['margin_curve_applied'] = {"curve": curve[:projection_years]}
             except Exception:
                 generator.diagnostics.append('invalid:margin_curve')
         nwc0 = generator._compute_nwc(base_bs)
@@ -526,7 +526,7 @@ class TelecomDCFStrategy(GenericDCFStrategy):
         return any(t in ind for t in tokens)
 
     def _default_growth_seq(self, projection_years: int) -> List[float]:
-        seq = [0.03, 0.03, 0.025, 0.02, 0.02]
+        seq = [0.03, 0.03, 0.025, 0.02, 0.12]
         if projection_years < len(seq):
             return seq[:projection_years]
         if projection_years > len(seq):

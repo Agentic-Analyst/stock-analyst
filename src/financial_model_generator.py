@@ -545,7 +545,7 @@ class FinancialModelGenerator:
             self._log("info", "🤖 Generating agentic parameter recommendations using LLM analysis...")
             
             # Create a baseline model for context (using minimal defaults)
-            temp_term_growth = term_growth or 0.025  # Temporary for baseline
+            temp_term_growth = term_growth or 0.1  # Temporary for baseline
             baseline_model = {"valuation_summary": {"WACC": 0.1}}  # Minimal baseline
             
             try:
