@@ -157,14 +157,42 @@ class ArticleFilter:
             'llm_score': 0.0
         }
         
-        # Extract title and URL from markdown headers
-        for line in lines[:20]:  # Check first 20 lines
-            line = line.strip()
-            if line.startswith('# ') and not metadata['title']:
-                metadata['title'] = line[2:].strip()
-            elif line.startswith('**URL:**') or line.startswith('URL:'):
-                metadata['url'] = line.split(':', 1)[1].strip()
-                break
+        # Check if content starts with YAML frontmatter
+        if content.startswith('---'):
+            try:
+                # Find the end of YAML frontmatter
+                yaml_end = content.find('---', 3)
+                if yaml_end != -1:
+                    frontmatter = content[3:yaml_end].strip()
+                    for line in frontmatter.split('\n'):
+                        line = line.strip()
+                        if line.startswith('title:'):
+                            # Extract title, removing quotes if present
+                            title_value = line.split(':', 1)[1].strip()
+                            if title_value.startswith('"') and title_value.endswith('"'):
+                                title_value = title_value[1:-1]
+                            elif title_value.startswith("'") and title_value.endswith("'"):
+                                title_value = title_value[1:-1]
+                            metadata['title'] = title_value
+                        elif line.startswith('source_url:'):
+                            url_value = line.split(':', 1)[1].strip()
+                            if url_value.startswith('"') and url_value.endswith('"'):
+                                url_value = url_value[1:-1]
+                            elif url_value.startswith("'") and url_value.endswith("'"):
+                                url_value = url_value[1:-1]
+                            metadata['url'] = url_value
+            except Exception as e:
+                self._log(f"Error parsing YAML frontmatter in {filename}: {e}", "warning")
+        
+        # Fallback: Extract title and URL from markdown headers if not found in frontmatter
+        if not metadata['title']:
+            for line in lines[:20]:  # Check first 20 lines
+                line = line.strip()
+                if line.startswith('# ') and not metadata['title']:
+                    metadata['title'] = line[2:].strip()
+                elif line.startswith('**URL:**') or line.startswith('URL:'):
+                    metadata['url'] = line.split(':', 1)[1].strip()
+                    break
                 
         return metadata
 
@@ -294,8 +322,6 @@ class ArticleFilter:
                         "llm_score": score,
                         "title": article['title']
                     })
-                    
-                    self._log(f"Filtered #{i}: {new_filename} (score: {score:.1f})")
                     
             except Exception as e:
                 self._log(f"Error copying {original_name}: {e}", "error")

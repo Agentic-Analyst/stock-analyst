@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""reporting.py
+"""report_agent.py
 
 LLM-assisted reporting utilities for price_adjustor.
 Generates a professional markdown report that explains the step-by-step

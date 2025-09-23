@@ -55,7 +55,7 @@ from article_screener import ArticleScreener
 from price_adjustor import compute_adjustment, parse_screening_report
 from event_param_mapping import aggregate_mapped_parameter_deltas, classify_event
 from path_utils import get_analysis_path, ensure_analysis_paths
-from reporting import build_llm_explanation, save_explanation_reports, build_deterministic_summary
+from report_agent import build_llm_explanation, save_explanation_reports, build_deterministic_summary
 
 class ComprehensiveStockAnalysisPipeline:
     """Integrated 6-step pipeline for complete stock analysis workflow."""
@@ -450,13 +450,12 @@ class ComprehensiveStockAnalysisPipeline:
                 "LLM cost": f"${result.get('llm_cost', 0):.4f}",
                 "Query used": query[:50] + "..." if len(query) > 50 else query
             }
-            
-            # Log top articles
-            self.logger.info(f"📄 Top {len(result['filtered_articles'])} articles:")
-            for i, article in enumerate(result["filtered_articles"][:3], 1):
-                score = article["llm_score"]
-                title = article["title"][:60]
-                self.logger.info(f"   {i}. [{score:.2f}] {title}...")
+
+            # Log filtered articles
+            self.logger.info(f"📄 Filtered {len(result['filtered_articles'])} articles:")
+            for i, article in enumerate(result["filtered_articles"], 1):
+                title = article["title"]
+                self.logger.info(f"   {i}. {title}")
             
             self.logger.stage_end("ARTICLE FILTERING", True, stats)
             
@@ -853,10 +852,10 @@ Examples:
     parser.add_argument("--peers", help="Comma-separated peer tickers for comparable analysis (e.g., 'AAPL,MSFT,GOOGL')")
     
     # News analysis parameters  
-    parser.add_argument("--max-searched", type=int, default=20, help="Maximum articles to search/scrape")
+    parser.add_argument("--max-searched", type=int, default=30, help="Maximum articles to search/scrape")
     parser.add_argument("--query", help="Override default search query for news articles")
     parser.add_argument("--min-score", type=float, default=3.0, help="Minimum relevance score (0-10)")
-    parser.add_argument("--max-filtered", type=int, default=10, help="Maximum filtered articles")
+    parser.add_argument("--max-filtered", type=int, default=15, help="Maximum filtered articles")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="Minimum confidence for insights (0-1)")
     
     # Price adjustment parameters

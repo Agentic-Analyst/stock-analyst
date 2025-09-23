@@ -1197,7 +1197,7 @@ def main():
         det_report = "\n".join(lines)
         # LLM-enhanced narrative
         try:
-            from reporting import build_llm_explanation, save_explanation_reports
+            from report_agent import build_llm_explanation, save_explanation_reports
             llm_md = build_llm_explanation(ticker, output, factors, args)
             saved = save_explanation_reports(ticker, det_report, llm_md)
             output['explanation_report'] = saved['path']
