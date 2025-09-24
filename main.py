@@ -423,8 +423,8 @@ class ComprehensiveStockAnalysisPipeline:
                     self.article_filter.set_logger(self.logger)
             
             # Perform LLM-powered filtering
-            result = self.article_filter.filter_articles(num_articles=max_filtered, min_score=min_score)
-            
+            result = self.article_filter.filter_articles(max_filtered=max_filtered, min_score=min_score)
+
             if not result.get("filtered_articles"):
                 self.logger.warning("⚠️  No articles met the filtering criteria")
                 return {"filtered_articles": [], "filtered_count": 0, "llm_cost": 0.0}
