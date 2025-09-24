@@ -229,13 +229,13 @@ def build_deterministic_summary(ticker: str, output: Dict[str, Any], factors: Di
         lines.append(f"- **Price Range:** ${bear:,.2f} (Bear) — ${bull:,.2f} (Bull) | Buffer: {volb*100:.1f}%")
     
     # Extract LLM deltas and reasoning
-    llm_deltas = output.get('llm_parameter_deltas', {}).get('deltas', [])
+    llm_deltas = output.get('llm_deltas', [])
     if llm_deltas:
         lines.append("**AI Parameter Adjustments with Reasoning:**")
         lines.append("")
         for delta in llm_deltas:
             param = delta.get('param', 'Unknown')
-            delta_val = delta.get('delta', 0)
+            delta_val = delta.get('delta_applied', 0)
             reason = delta.get('reason', 'No reasoning provided')
             sources = delta.get('sources', [])
             
