@@ -2,13 +2,14 @@
 """
 main.py - Comprehensive Stock Analysis Pipeline
 
-This module orchestrates the complete 6-step stock analysis workflow:
+This module orchestrates the complete 7-step stock analysis workflow:
 1. Financial Scraping - Collect financial statements and company data  
 2. Financial Model Generation - Build DCF models with LLM-powered strategy selection and parameter optimization
 3. News Scraping - Collect recent news articles from Google News
 4. Article Filtering - Filter for relevance and quality  
 5. Article Screening - Extract investment insights using LLM
 6. Price Adjustment - Combine quantitative model with qualitative factors
+7. Professional Report Generation - Generate analyst-style research report with LLM synthesis
 
 Enhanced Features:
 - LLM-powered automatic DCF strategy selection (saas_dcf, reit_dcf, bank_excess_returns, etc.)
@@ -55,10 +56,10 @@ from article_screener import ArticleScreener
 from price_adjustor import compute_adjustment, parse_screening_report, propose_parameter_deltas, extract_base_operating_metrics
 from event_param_mapping import aggregate_mapped_parameter_deltas, classify_event
 from path_utils import get_analysis_path, ensure_analysis_paths
-from report_agent import save_explanation_reports, build_deterministic_summary
+from report_agent import save_explanation_reports, build_deterministic_summary, generate_professional_analyst_report
 
 class ComprehensiveStockAnalysisPipeline:
-    """Integrated 6-step pipeline for complete stock analysis workflow."""
+    """Integrated 7-step pipeline for complete stock analysis workflow."""
 
     def __init__(self, ticker: str, company_name: str, email: str, timestamp: str):
         """
@@ -131,7 +132,7 @@ class ComprehensiveStockAnalysisPipeline:
                                   adjustment_cap: float = 0.20,
                                   generate_reports: bool = True) -> Dict:
         """
-        Run the complete 6-step analysis pipeline.
+        Run the complete 7-step analysis pipeline.
         
         Args:
             model_type: Financial model type ('dcf', 'comparable', 'comprehensive')
@@ -156,7 +157,7 @@ class ComprehensiveStockAnalysisPipeline:
         """
         self.logger.stage_start(
             "COMPREHENSIVE PIPELINE", 
-            f"Analyzing {self.company_name} ({self.ticker}) with 6-step workflow"
+            f"Analyzing {self.company_name} ({self.ticker}) with 7-step workflow"
         )
         
         # Step 1: Financial Scraping
@@ -194,8 +195,8 @@ class ComprehensiveStockAnalysisPipeline:
         price_results = self.run_price_adjustment_stage(
             model_results, screening_results, scaling, adjustment_cap  # Mapped deltas and LLM scenarios always enabled
         )
-
-        # Generate analyst explanation report (LLM-enhanced) as part of the main workflow
+        
+        # Generate technical analysis report (deterministic summary) as part of the main workflow
         try:
             if price_results.get("success"):
                 pa = price_results.get("price_analysis", {})
@@ -211,13 +212,19 @@ class ComprehensiveStockAnalysisPipeline:
                 }
                 meta = {"model": model_type, "years": projection_years, "term_growth": term_growth}
                 det_md = build_deterministic_summary(self.ticker, pa, factors, meta)
-                self.logger.info(f"📝 Generating comprehensive analysis report for {self.ticker}...")
-                self.logger.info(f"📄 Analysis report generated successfully with {len(det_md)} characters")
+                self.logger.info(f"📝 Generating financial analysis summary for {self.ticker}")
+                self.logger.info(f"📄 Financial analysis summary generated successfully:\n{det_md}")
                 saved = save_explanation_reports(self.ticker, det_md, self.analysis_path)
-                self.logger.info(f"📝 Analysis report saved: {saved['path']} (latest: {saved['latest']})")
+                self.logger.info(f"📝 Financial analysis summary saved: {saved['path']} (latest: {saved['latest']})")
+                # Step 7: Professional Analyst Report Generation
+                self.logger.stage_start("PROFESSIONAL REPORT GENERATION", "Generating comprehensive analyst-style research report")
+                report_results = self.run_professional_report_stage(
+                    model_results, screening_results, price_results
+                )
+                self.logger.info(f"📄 Professional analyst report generated successfully:\n{report_results['professional_report']}")
         except Exception as e:
-            self.logger.warning(f"⚠️ Failed to generate explanation report: {e}")
-        
+            self.logger.warning(f"⚠️ Failed to generate financial analysis summary: {e}")
+
         # Pipeline completion
         duration = (datetime.now() - self.stats["start_time"]).total_seconds()
         self.logger.session_end(duration, self.stats["stages_completed"])
@@ -840,6 +847,67 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.warning(f"⚠️ Re-forecast with parameter deltas failed: {e}")
             return base_model
     
+    def run_professional_report_stage(self, model_results: Dict, screening_results: Dict, price_results: Dict) -> Dict:
+        """Generate a professional analyst-style research report using LLM synthesis."""
+        try:
+            self.logger.info(f"🎯 Generating professional analyst report for {self.company_name}...")
+            
+            # Extract key data for report generation
+            financial_model = model_results.get("model", {})
+            price_analysis = price_results.get("price_analysis", {})
+            
+            # Generate professional analyst report
+            professional_report = generate_professional_analyst_report(
+                ticker=self.ticker,
+                company_name=self.company_name,
+                financial_model=financial_model,
+                screening_results=screening_results,
+                price_analysis=price_analysis,
+                company_data=self.company_data
+            )
+            
+            # Save professional report
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_dir = self.analysis_path / 'reports'
+            report_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save with timestamp and latest versions
+            professional_report_path = report_dir / f"professional_analyst_report_{self.ticker}_{timestamp}.md"
+            professional_report_latest = report_dir / "professional_analyst_report_latest.md"
+            
+            professional_report_path.write_text(professional_report, encoding='utf-8')
+            professional_report_latest.write_text(professional_report, encoding='utf-8')
+            
+            # Update statistics
+            self.stats["professional_report"] = {
+                "success": True,
+                "report_length": len(professional_report),
+                "saved_path": str(professional_report_path),
+                "latest_path": str(professional_report_latest)
+            }
+            self.stats["stages_completed"].append("professional_report")
+            
+            # Log results
+            stats = {
+                "Report length": f"{len(professional_report):,} characters",
+                "Professional report": "✓ Generated",
+                "Saved to": f"reports/professional_analyst_report_latest.md"
+            }
+            self.logger.stage_end("PROFESSIONAL REPORT GENERATION", True, stats)
+            
+            self.logger.info(f"📄 Professional analyst report saved to: {professional_report_latest}")
+            
+            return {
+                "success": True, 
+                "professional_report": professional_report,
+                "report_path": str(professional_report_path),
+                "latest_path": str(professional_report_latest)
+            }
+            
+        except Exception as e:
+            self.logger.error(f"❌ Professional report generation failed: {e}")
+            return {"success": False, "error": str(e)}
+    
     def _get_comprehensive_pipeline_results(self) -> Dict:
         """Get complete comprehensive pipeline results."""
         self.stats["end_time"] = datetime.now()
@@ -847,7 +915,7 @@ class ComprehensiveStockAnalysisPipeline:
         return {
             "ticker": self.ticker,
             "company_name": self.company_name,
-            "pipeline_type": "comprehensive_6_step",
+            "pipeline_type": "comprehensive_7_step",
             "statistics": self.stats
         }
     
@@ -864,7 +932,7 @@ class ComprehensiveStockAnalysisPipeline:
 def main():
     """Main entry point for the comprehensive stock analysis pipeline."""
     parser = argparse.ArgumentParser(
-        description="Comprehensive 6-Step Stock Analysis Pipeline",
+        description="Comprehensive 7-Step Stock Analysis Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

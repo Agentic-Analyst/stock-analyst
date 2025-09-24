@@ -12,25 +12,69 @@ from pathlib import Path
 import pathlib
 from typing import Dict, Any, List
 import json, time
-
-from price_adjustor_config import ADJUSTOR_PROMPTS, ADJUSTOR_DEFAULTS
 from llms import gpt_4o_mini as _llm_fn
 
 
-def _fmt_pct(x: float | None) -> str:
-    try:
-        return f"{x*100:+.1f}%" if x is not None else "n/a"
-    except Exception:
-        return "n/a"
-
-
-def save_explanation_reports(ticker: str, deterministic_md: str, base_path: pathlib.Path = None) -> Dict[str, str]:
-    """Save explanation reports with timestamped and latest versions.
+def generate_professional_analyst_report(ticker: str, company_name: str, 
+                                        financial_model: Dict[str, Any],
+                                        screening_results: Dict[str, Any],
+                                        price_analysis: Dict[str, Any],
+                                        company_data: Dict[str, Any] = None) -> str:
+    """Generate a professional financial analyst report using LLM synthesis of all analysis components.
     
     Args:
         ticker: Stock ticker symbol
-        deterministic_md: The comprehensive deterministic report content
-        llm_md: Optional LLM explanation content (deprecated, can be None)
+        company_name: Full company name
+        financial_model: Complete financial model results with valuation
+        screening_results: Article screening results (catalysts, risks, mitigations)
+        price_analysis: Price adjustment analysis with LLM reasoning
+        company_data: Optional company context data
+    
+    Returns:
+        Professional analyst report in markdown format
+    """
+    
+    # Extract key financial metrics for context
+    valuation_summary = financial_model.get("valuation_summary", {})
+    base_price = valuation_summary.get("Implied Price", 0)
+    final_price = price_analysis.get("final_price") or price_analysis.get("adjusted_price", base_price)
+    
+    # Load prompt template from prompts folder
+
+    prompt_path = Path(__file__).parent.parent / "prompts" / "professional_analyst_report.md"
+    prompt_template = prompt_path.read_text(encoding='utf-8')
+    # Format the prompt with actual data
+    formatted_prompt = prompt_template.format(
+        ticker=ticker,
+        company_name=company_name,
+        financial_model=json.dumps(financial_model, indent=2, default=str),
+        screening_results=json.dumps(screening_results, indent=2, default=str),
+        price_analysis=json.dumps(price_analysis, indent=2, default=str),
+        company_data=json.dumps(company_data or {}, indent=2, default=str),
+        base_price=base_price,
+        final_price=final_price,
+        num_catalysts=len(screening_results.get('catalysts', [])),
+        num_risks=len(screening_results.get('risks', [])),
+        num_mitigations=len(screening_results.get('mitigations', []))
+    )
+    
+    # Prepare messages for LLM call
+    messages = [
+        {"role": "user", "content": formatted_prompt}
+    ]
+    
+    # Generate professional report using LLM with correct signature
+    response, cost = _llm_fn(messages, temperature=0.3)
+    
+    return response.strip()
+
+
+def save_explanation_reports(ticker: str, deterministic_md: str, base_path: pathlib.Path = None) -> Dict[str, str]:
+    """Save technical analysis reports with timestamped and latest versions.
+    
+    Args:
+        ticker: Stock ticker symbol
+        deterministic_md: The comprehensive technical analysis report content
         base_path: Base path for saving reports
     
     Returns:
@@ -40,11 +84,11 @@ def save_explanation_reports(ticker: str, deterministic_md: str, base_path: path
     rdir = base_path / 'reports'
     rdir.mkdir(parents=True, exist_ok=True)
     
-    # Use only the deterministic markdown (comprehensive report)
+    # Save technical analysis report
     final_report = deterministic_md
     
-    report_path = rdir / f"price_adjustment_analysis_{ticker}_{timestamp}.md"
-    report_latest = rdir / "price_adjustment_analysis_latest.md"
+    report_path = rdir / f"technical_analysis_{ticker}_{timestamp}.md"
+    report_latest = rdir / "technical_analysis_latest.md"
     report_path.write_text(final_report, encoding='utf-8')
     report_latest.write_text(final_report, encoding='utf-8')
     return {"path": str(report_path), "latest": str(report_latest)}
