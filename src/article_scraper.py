@@ -133,7 +133,7 @@ class ArticleScraper:
         file_path.write_text(markdown_content, encoding="utf-8")
         return file_path
     
-    def scrape_articles(self, max_searched: int = 20, query_override: Optional[str] = None) -> Dict:
+    def scrape_articles(self, max_searched: int = 30, query_override: Optional[str] = None) -> Dict:
         """
         Scrape news articles for the configured company.
         

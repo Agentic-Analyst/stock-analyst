@@ -122,10 +122,10 @@ class ComprehensiveStockAnalysisPipeline:
                                   strategy: Optional[str] = None,
                                   peers: Optional[str] = None,
                                   # News analysis parameters  
-                                  max_searched: int = 20,
+                                  max_searched: int = 30,
                                   query_override: Optional[str] = None,
                                   min_filter_score: float = 3.0,
-                                  max_filtered: int = 10,
+                                  max_filtered: int = 15,
                                   min_confidence: float = 0.5,
                                   # Price adjustment parameters
                                   scaling: float = 0.15,
@@ -380,7 +380,7 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.error(f"❌ Financial model generation failed: {e}")
             return {"success": False, "error": str(e)}
     
-    def run_news_scraping_stage(self, max_searched: int = 20, query_override: Optional[str] = None) -> Dict:
+    def run_news_scraping_stage(self, max_searched: int = 30, query_override: Optional[str] = None) -> Dict:
         """Run the news article scraping stage."""
         try:
             # Check current storage status
@@ -413,7 +413,7 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.error(f"❌ News scraping stage failed: {e}")
             return {"scraped_count": 0, "error": str(e)}
     
-    def run_filtering_stage(self, query: str, min_score: float = 6.0, max_searched: int = 10) -> Dict:
+    def run_filtering_stage(self, query: str, min_score: float = 6.0, max_filtered: int = 15) -> Dict:
         """Run the article filtering stage with LLM-powered intelligence."""
         try:
             # Initialize article filter with query (required for LLM filtering)
@@ -423,7 +423,7 @@ class ComprehensiveStockAnalysisPipeline:
                     self.article_filter.set_logger(self.logger)
             
             # Perform LLM-powered filtering
-            result = self.article_filter.filter_articles(num_articles=max_searched, min_score=min_score)
+            result = self.article_filter.filter_articles(num_articles=max_filtered, min_score=min_score)
             
             if not result.get("filtered_articles"):
                 self.logger.warning("⚠️  No articles met the filtering criteria")

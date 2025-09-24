@@ -78,19 +78,19 @@ class ArticleFilter:
         else:
             print(f"[{level.upper()}] {message}")
 
-    def filter_articles(self, num_articles: int = 10, min_score: float = 6.0) -> dict:
+    def filter_articles(self, max_filtered: int = 15, min_score: float = 6.0) -> dict:
         """
         Filter articles using LLM intelligence based on the query.
         
         Args:
-            num_articles: Maximum number of articles to filter
+            max_filtered: Maximum number of articles to filter
             min_score: Minimum LLM score threshold for article inclusion (1-10 scale)
             
         Returns:
             Dictionary with filtering results and metadata
         """
         self._log(f"Starting LLM-powered filtering for {self.ticker}")
-        self._log(f"Query: {self.query}, Target articles: {num_articles}, Min score: {min_score}")
+        self._log(f"Query: {self.query}, Target articles: {max_filtered}, Min score: {min_score}")
         
         # Load and prepare articles
         searched_dir = self.company_dir / "searched"
@@ -106,8 +106,8 @@ class ArticleFilter:
         scored_articles = self._score_articles_with_llm(articles_data)
         
         # Filter by minimum score and limit count
-        filtered_articles = self._select_final_articles(scored_articles, num_articles, min_score)
-        
+        filtered_articles = self._select_final_articles(scored_articles, max_filtered, min_score)
+
         # Copy filtered articles and generate index
         result = self._finalize_filtering(filtered_articles)
         
@@ -274,7 +274,7 @@ class ArticleFilter:
             
         return scores
 
-    def _select_final_articles(self, articles: list, num_articles: int, min_score: float) -> list:
+    def _select_final_articles(self, articles: list, max_filtered: int, min_score: float) -> list:
         """Select final articles based on LLM score criteria."""
         # Filter by minimum score
         qualified_articles = [
@@ -283,7 +283,7 @@ class ArticleFilter:
         ]
         
         # Take top N articles
-        return qualified_articles[:num_articles]
+        return qualified_articles[:max_filtered]
 
     def _finalize_filtering(self, filtered_articles: list) -> dict:
         """Copy filtered articles to filtered directory and create index."""
