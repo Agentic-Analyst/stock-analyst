@@ -24,8 +24,11 @@ Please analyze the following {batch_size} articles for **{company_ticker}** to i
 
 For every catalyst, risk, and mitigation:
 - Provide the exact quote that supports your analysis
-- Specify which article the quote comes from
+- Specify which article the quote comes from using the **article title** and **source URL** provided in the batch
 - Explain your reasoning for why this matters
 - Include your confidence assessment
+- Use the article titles and URLs from the batch content, not the filename references
+
+**Important**: When referencing articles, always use the actual article titles and source URLs provided in the batch content above, not the filename or article numbers.
 
 Please respond with the complete JSON structure as specified in the system prompt.

@@ -42,11 +42,17 @@ You must respond with valid JSON in this exact structure:
       "direct_quotes": [
         {
           "quote": "Exact text from article",
-          "source_article": "Article filename or number",
+          "source_article": "Article title from the batch",
+          "source_url": "Article source URL from the batch",
           "context": "Brief context around the quote"
         }
       ],
-      "source_articles": ["article1.md", "article2.md"],
+      "source_articles": [
+        {
+          "title": "Article title from the batch",
+          "url": "Article source URL from the batch"
+        }
+      ],
       "potential_impact": "Description of expected impact on stock"
     }
   ],
@@ -61,11 +67,17 @@ You must respond with valid JSON in this exact structure:
       "direct_quotes": [
         {
           "quote": "Exact text from article",
-          "source_article": "Article filename or number", 
+          "source_article": "Article title from the batch",
+          "source_url": "Article source URL from the batch",
           "context": "Brief context around the quote"
         }
       ],
-      "source_articles": ["article1.md", "article2.md"],
+      "source_articles": [
+        {
+          "title": "Article title from the batch",
+          "url": "Article source URL from the batch"
+        }
+      ],
       "potential_impact": "Description of potential negative impact",
       "likelihood": "low|medium|high"
     }
@@ -81,11 +93,17 @@ You must respond with valid JSON in this exact structure:
       "direct_quotes": [
         {
           "quote": "Exact text from article",
-          "source_article": "Article filename or number",
+          "source_article": "Article title from the batch",
+          "source_url": "Article source URL from the batch",
           "context": "Brief context around the quote"
         }
       ],
-      "source_articles": ["article1.md", "article2.md"],
+      "source_articles": [
+        {
+          "title": "Article title from the batch",
+          "url": "Article source URL from the batch"
+        }
+      ],
       "company_action": "What the company is doing/planning",
       "implementation_timeline": "When this mitigation is expected"
     }

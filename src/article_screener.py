@@ -43,7 +43,14 @@ class DirectQuote:
     """Represents a direct quote from an article with context."""
     quote: str
     source_article: str
+    source_url: str
     context: str
+
+@dataclass  
+class ArticleReference:
+    """Represents a reference to a source article."""
+    title: str
+    url: str
 
 @dataclass
 class Catalyst:
@@ -58,7 +65,7 @@ class Catalyst:
     llm_confidence: Optional[float] = None  # LLM-provided confidence score
     reasoning: Optional[str] = None  # Detailed explanation from LLM
     direct_quotes: List[DirectQuote] = None  # Direct quotes supporting this catalyst
-    source_articles: List[str] = None  # Source articles for this catalyst
+    source_articles: List[ArticleReference] = None  # Source articles for this catalyst
     potential_impact: Optional[str] = None  # Expected impact description
     
     def __post_init__(self):
@@ -81,7 +88,7 @@ class Risk:
     llm_confidence: Optional[float] = None  # LLM-provided confidence score
     reasoning: Optional[str] = None  # Detailed explanation from LLM
     direct_quotes: List[DirectQuote] = None  # Direct quotes supporting this risk
-    source_articles: List[str] = None  # Source articles for this risk
+    source_articles: List[ArticleReference] = None  # Source articles for this risk
     likelihood: Optional[str] = None  # Likelihood assessment: low|medium|high
     
     def __post_init__(self):
@@ -104,7 +111,7 @@ class Mitigation:
     llm_confidence: Optional[float] = None  # LLM-provided confidence score
     reasoning: Optional[str] = None  # Detailed explanation from LLM
     direct_quotes: List[DirectQuote] = None  # Direct quotes supporting this mitigation
-    source_articles: List[str] = None  # Source articles for this mitigation
+    source_articles: List[ArticleReference] = None  # Source articles for this mitigation
     implementation_timeline: Optional[str] = None  # When mitigation is expected
     
     def __post_init__(self):
@@ -234,8 +241,21 @@ class ArticleScreener:
                     direct_quotes.append(DirectQuote(
                         quote=quote_data.get("quote", ""),
                         source_article=quote_data.get("source_article", ""),
+                        source_url=quote_data.get("source_url", ""),
                         context=quote_data.get("context", "")
                     ))
+                
+                # Parse source articles
+                source_articles = []
+                for source_data in cat_data.get("source_articles", []):
+                    if isinstance(source_data, dict):
+                        source_articles.append(ArticleReference(
+                            title=source_data.get("title", ""),
+                            url=source_data.get("url", "")
+                        ))
+                    else:
+                        # Handle legacy string format
+                        source_articles.append(ArticleReference(title=str(source_data), url=""))
                 
                 catalyst = Catalyst(
                     type=cat_data.get("type", "unknown").lower(),
@@ -248,7 +268,7 @@ class ArticleScreener:
                     llm_confidence=cat_data.get("confidence", 0.5),
                     reasoning=cat_data.get("reasoning", ""),
                     direct_quotes=direct_quotes,
-                    source_articles=cat_data.get("source_articles", []),
+                    source_articles=source_articles,
                     potential_impact=cat_data.get("potential_impact", "")
                 )
                 catalysts.append(catalyst)
@@ -261,8 +281,21 @@ class ArticleScreener:
                     direct_quotes.append(DirectQuote(
                         quote=quote_data.get("quote", ""),
                         source_article=quote_data.get("source_article", ""),
+                        source_url=quote_data.get("source_url", ""),
                         context=quote_data.get("context", "")
                     ))
+                
+                # Parse source articles
+                source_articles = []
+                for source_data in risk_data.get("source_articles", []):
+                    if isinstance(source_data, dict):
+                        source_articles.append(ArticleReference(
+                            title=source_data.get("title", ""),
+                            url=source_data.get("url", "")
+                        ))
+                    else:
+                        # Handle legacy string format
+                        source_articles.append(ArticleReference(title=str(source_data), url=""))
                 
                 risk = Risk(
                     type=risk_data.get("type", "unknown").lower(),
@@ -276,7 +309,7 @@ class ArticleScreener:
                     llm_confidence=risk_data.get("confidence", 0.5),
                     reasoning=risk_data.get("reasoning", ""),
                     direct_quotes=direct_quotes,
-                    source_articles=risk_data.get("source_articles", []),
+                    source_articles=source_articles,
                     likelihood=risk_data.get("likelihood", "medium")
                 )
                 risks.append(risk)
@@ -289,8 +322,21 @@ class ArticleScreener:
                     direct_quotes.append(DirectQuote(
                         quote=quote_data.get("quote", ""),
                         source_article=quote_data.get("source_article", ""),
+                        source_url=quote_data.get("source_url", ""),
                         context=quote_data.get("context", "")
                     ))
+                
+                # Parse source articles
+                source_articles = []
+                for source_data in mit_data.get("source_articles", []):
+                    if isinstance(source_data, dict):
+                        source_articles.append(ArticleReference(
+                            title=source_data.get("title", ""),
+                            url=source_data.get("url", "")
+                        ))
+                    else:
+                        # Handle legacy string format
+                        source_articles.append(ArticleReference(title=str(source_data), url=""))
                 
                 mitigation = Mitigation(
                     risk_addressed=mit_data.get("risk_addressed", ""),
@@ -304,7 +350,7 @@ class ArticleScreener:
                     llm_confidence=mit_data.get("confidence", 0.5),
                     reasoning=mit_data.get("reasoning", ""),
                     direct_quotes=direct_quotes,
-                    source_articles=mit_data.get("source_articles", []),
+                    source_articles=source_articles,
                     implementation_timeline=mit_data.get("implementation_timeline", "")
                 )
                 mitigations.append(mitigation)
@@ -724,7 +770,13 @@ class ArticleScreener:
             if catalyst.direct_quotes:
                 quotes = [q.quote for q in catalyst.direct_quotes]
                 catalysts_text += f"- Quotes: {'; '.join(quotes)}\n"
-            catalysts_text += f"- Sources: {', '.join(catalyst.source_articles or catalyst.articles_mentioned)}\n\n"
+            # Format source articles properly
+            if catalyst.source_articles:
+                sources = [f"{ref.title} ({ref.url})" if ref.url else ref.title for ref in catalyst.source_articles]
+                catalysts_text += f"- Sources: {', '.join(sources)}\n"
+            elif catalyst.articles_mentioned:
+                catalysts_text += f"- Sources: {', '.join(catalyst.articles_mentioned)}\n"
+            catalysts_text += "\n"
         
         # Format risks
         risks_text = ""
@@ -741,7 +793,13 @@ class ArticleScreener:
             if risk.direct_quotes:
                 quotes = [q.quote for q in risk.direct_quotes]
                 risks_text += f"- Quotes: {'; '.join(quotes)}\n"
-            risks_text += f"- Sources: {', '.join(risk.source_articles or risk.articles_mentioned)}\n\n"
+            # Format source articles properly
+            if risk.source_articles:
+                sources = [f"{ref.title} ({ref.url})" if ref.url else ref.title for ref in risk.source_articles]
+                risks_text += f"- Sources: {', '.join(sources)}\n"
+            elif risk.articles_mentioned:
+                risks_text += f"- Sources: {', '.join(risk.articles_mentioned)}\n"
+            risks_text += "\n"
         
         # Format mitigations
         mitigations_text = ""
@@ -758,7 +816,13 @@ class ArticleScreener:
             if mitigation.direct_quotes:
                 quotes = [q.quote for q in mitigation.direct_quotes]
                 mitigations_text += f"- Quotes: {'; '.join(quotes)}\n"
-            mitigations_text += f"- Sources: {', '.join(mitigation.source_articles or mitigation.articles_mentioned)}\n\n"
+            # Format source articles properly
+            if mitigation.source_articles:
+                sources = [f"{ref.title} ({ref.url})" if ref.url else ref.title for ref in mitigation.source_articles]
+                mitigations_text += f"- Sources: {', '.join(sources)}\n"
+            elif mitigation.articles_mentioned:
+                mitigations_text += f"- Sources: {', '.join(mitigation.articles_mentioned)}\n"
+            mitigations_text += "\n"
         
         return {
             "catalyst_count": len(catalysts),
@@ -779,21 +843,34 @@ class ArticleScreener:
                 direct_quotes.append(DirectQuote(
                     quote=quote_data.get("quote", ""),
                     source_article=quote_data.get("source_article", ""),
+                    source_url=quote_data.get("source_url", ""),
                     context=quote_data.get("context", "")
                 ))
+            
+            # Parse source articles
+            source_articles = []
+            for source_data in cat_data.get("source_articles", []):
+                if isinstance(source_data, dict):
+                    source_articles.append(ArticleReference(
+                        title=source_data.get("title", ""),
+                        url=source_data.get("url", "")
+                    ))
+                else:
+                    # Handle legacy string format
+                    source_articles.append(ArticleReference(title=str(source_data), url=""))
             
             catalyst = Catalyst(
                 type=cat_data.get("type", "unknown").lower(),
                 description=cat_data.get("description", ""),
                 confidence=cat_data.get("confidence", 0.5),
                 supporting_evidence=cat_data.get("supporting_evidence", []),
-                articles_mentioned=cat_data.get("source_articles", []),
+                articles_mentioned=cat_data.get("source_articles", []) if isinstance(cat_data.get("source_articles", []), list) and all(isinstance(x, str) for x in cat_data.get("source_articles", [])) else [],
                 timeline=cat_data.get("timeline", "medium-term").lower().replace("_", "-"),
                 llm_reasoning=cat_data.get("reasoning", ""),
                 llm_confidence=cat_data.get("confidence", 0.5),
                 reasoning=cat_data.get("reasoning", ""),
                 direct_quotes=direct_quotes,
-                source_articles=cat_data.get("source_articles", []),
+                source_articles=source_articles,
                 potential_impact=cat_data.get("potential_impact", "")
             )
             catalysts.append(catalyst)
@@ -810,8 +887,21 @@ class ArticleScreener:
                 direct_quotes.append(DirectQuote(
                     quote=quote_data.get("quote", ""),
                     source_article=quote_data.get("source_article", ""),
+                    source_url=quote_data.get("source_url", ""),
                     context=quote_data.get("context", "")
                 ))
+            
+            # Parse source articles
+            source_articles = []
+            for source_data in risk_data.get("source_articles", []):
+                if isinstance(source_data, dict):
+                    source_articles.append(ArticleReference(
+                        title=source_data.get("title", ""),
+                        url=source_data.get("url", "")
+                    ))
+                else:
+                    # Handle legacy string format
+                    source_articles.append(ArticleReference(title=str(source_data), url=""))
             
             risk = Risk(
                 type=risk_data.get("type", "unknown").lower(),
@@ -819,13 +909,13 @@ class ArticleScreener:
                 severity=risk_data.get("severity", "medium").lower(),
                 confidence=risk_data.get("confidence", 0.5),
                 supporting_evidence=risk_data.get("supporting_evidence", []),
-                articles_mentioned=risk_data.get("source_articles", []),
+                articles_mentioned=risk_data.get("source_articles", []) if isinstance(risk_data.get("source_articles", []), list) and all(isinstance(x, str) for x in risk_data.get("source_articles", [])) else [],
                 potential_impact=risk_data.get("potential_impact", ""),
                 llm_reasoning=risk_data.get("reasoning", ""),
                 llm_confidence=risk_data.get("confidence", 0.5),
                 reasoning=risk_data.get("reasoning", ""),
                 direct_quotes=direct_quotes,
-                source_articles=risk_data.get("source_articles", []),
+                source_articles=source_articles,
                 likelihood=risk_data.get("likelihood", "medium")
             )
             risks.append(risk)
@@ -842,22 +932,35 @@ class ArticleScreener:
                 direct_quotes.append(DirectQuote(
                     quote=quote_data.get("quote", ""),
                     source_article=quote_data.get("source_article", ""),
+                    source_url=quote_data.get("source_url", ""),
                     context=quote_data.get("context", "")
                 ))
+            
+            # Parse source articles
+            source_articles = []
+            for source_data in mit_data.get("source_articles", []):
+                if isinstance(source_data, dict):
+                    source_articles.append(ArticleReference(
+                        title=source_data.get("title", ""),
+                        url=source_data.get("url", "")
+                    ))
+                else:
+                    # Handle legacy string format
+                    source_articles.append(ArticleReference(title=str(source_data), url=""))
             
             mitigation = Mitigation(
                 risk_addressed=mit_data.get("risk_addressed", ""),
                 strategy=mit_data.get("strategy", ""),
                 confidence=mit_data.get("confidence", 0.5),
                 supporting_evidence=mit_data.get("supporting_evidence", []),
-                articles_mentioned=mit_data.get("source_articles", []),
+                articles_mentioned=mit_data.get("source_articles", []) if isinstance(mit_data.get("source_articles", []), list) and all(isinstance(x, str) for x in mit_data.get("source_articles", [])) else [],
                 effectiveness=mit_data.get("effectiveness", "medium").lower(),
                 company_action=mit_data.get("company_action", ""),
                 llm_reasoning=mit_data.get("reasoning", ""),
                 llm_confidence=mit_data.get("confidence", 0.5),
                 reasoning=mit_data.get("reasoning", ""),
                 direct_quotes=direct_quotes,
-                source_articles=mit_data.get("source_articles", []),
+                source_articles=source_articles,
                 implementation_timeline=mit_data.get("implementation_timeline", "")
             )
             mitigations.append(mitigation)
@@ -1061,7 +1164,17 @@ class ArticleScreener:
                         f.write(f"- {evidence}\n")
                     f.write("\n")
                     
-                    f.write(f"**Source Articles:** {', '.join(catalyst.articles_mentioned)}\n\n")
+                    # Display source articles with proper titles and URLs
+                    if catalyst.source_articles:
+                        f.write("**Source Articles:**\n")
+                        for source in catalyst.source_articles:
+                            if source.url:
+                                f.write(f"- [{source.title}]({source.url})\n")
+                            else:
+                                f.write(f"- {source.title}\n")
+                    elif catalyst.articles_mentioned:
+                        f.write(f"**Source Articles:** {', '.join(catalyst.articles_mentioned)}\n")
+                    f.write("\n")
                     f.write("---\n\n")
             else:
                 f.write("No specific growth catalysts identified in the analyzed articles.\n\n")
@@ -1088,7 +1201,17 @@ class ArticleScreener:
                         f.write(f"- {evidence}\n")
                     f.write("\n")
                     
-                    f.write(f"**Source Articles:** {', '.join(risk.articles_mentioned)}\n\n")
+                    # Display source articles with proper titles and URLs
+                    if risk.source_articles:
+                        f.write("**Source Articles:**\n")
+                        for source in risk.source_articles:
+                            if source.url:
+                                f.write(f"- [{source.title}]({source.url})\n")
+                            else:
+                                f.write(f"- {source.title}\n")
+                    elif risk.articles_mentioned:
+                        f.write(f"**Source Articles:** {', '.join(risk.articles_mentioned)}\n")
+                    f.write("\n")
                     f.write("---\n\n")
             else:
                 f.write("No specific risks identified in the analyzed articles.\n\n")
@@ -1119,7 +1242,17 @@ class ArticleScreener:
                         f.write(f"- {evidence}\n")
                     f.write("\n")
                     
-                    f.write(f"**Source Articles:** {', '.join(mitigation.articles_mentioned)}\n\n")
+                    # Display source articles with proper titles and URLs
+                    if mitigation.source_articles:
+                        f.write("**Source Articles:**\n")
+                        for source in mitigation.source_articles:
+                            if source.url:
+                                f.write(f"- [{source.title}]({source.url})\n")
+                            else:
+                                f.write(f"- {source.title}\n")
+                    elif mitigation.articles_mentioned:
+                        f.write(f"**Source Articles:** {', '.join(mitigation.articles_mentioned)}\n")
+                    f.write("\n")
                     f.write("---\n\n")
             else:
                 f.write("No specific mitigation strategies identified in the analyzed articles.\n\n")

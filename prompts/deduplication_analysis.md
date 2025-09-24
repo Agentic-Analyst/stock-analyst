@@ -51,11 +51,17 @@ You are an expert financial analyst specializing in intelligently merging and de
       "direct_quotes": [
         {
           "quote": "<exact quote>",
-          "source_article": "<source file>",
+          "source_article": "<article title from original batch>",
+          "source_url": "<article source URL from original batch>",
           "context": "<surrounding context>"
         }
       ],
-      "source_articles": ["<all source articles>"],
+      "source_articles": [
+        {
+          "title": "<article title from original batch>",
+          "url": "<article source URL from original batch>"
+        }
+      ],
       "timeline": "<most likely timeline>",
       "potential_impact": "<expected impact>",
       "merge_notes": "<explanation if this was created by merging multiple insights>"
@@ -72,11 +78,17 @@ You are an expert financial analyst specializing in intelligently merging and de
       "direct_quotes": [
         {
           "quote": "<exact quote>",
-          "source_article": "<source file>", 
+          "source_article": "<article title from original batch>",
+          "source_url": "<article source URL from original batch>",
           "context": "<context>"
         }
       ],
-      "source_articles": ["<all sources>"],
+      "source_articles": [
+        {
+          "title": "<article title from original batch>",
+          "url": "<article source URL from original batch>"
+        }
+      ],
       "potential_impact": "<impact description>",
       "likelihood": "<likelihood assessment>",
       "merge_notes": "<merge explanation if applicable>"
@@ -92,11 +104,17 @@ You are an expert financial analyst specializing in intelligently merging and de
       "direct_quotes": [
         {
           "quote": "<quote>",
-          "source_article": "<source>",
+          "source_article": "<article title from original batch>",
+          "source_url": "<article source URL from original batch>",
           "context": "<context>"
         }
       ],
-      "source_articles": ["<sources>"],
+      "source_articles": [
+        {
+          "title": "<article title from original batch>",
+          "url": "<article source URL from original batch>"
+        }
+      ],
       "effectiveness": "<effectiveness level>",
       "company_action": "<company actions>",
       "implementation_timeline": "<timeline>",
