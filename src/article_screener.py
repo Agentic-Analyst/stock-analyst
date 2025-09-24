@@ -363,7 +363,7 @@ class ArticleScreener:
             
             # Show key themes if available
             if themes:
-                themes_str = ", ".join(themes[:2])  # Show top 2 themes
+                themes_str = ", ".join(themes[:5])  # Show top 5 themes
                 self._log("info", f"   🎯 Key Themes: {themes_str}")
             
             # Show top catalyst if found
@@ -625,9 +625,9 @@ class ArticleScreener:
         risk_types = Counter(r.type for r in risks)
         for risk_type, count in risk_types.most_common(2):
             themes.append(f"{risk_type.title()} Risk ({count} risks)")
-        
-        return themes[:5]  # Limit to top 5 themes
-    
+
+        return themes[:10]  # Limit to top 10 themes
+
     def _calculate_overall_confidence(self, catalysts: List[Catalyst], risks: List[Risk], mitigations: List[Mitigation]) -> float:
         """Calculate overall confidence score based on all insights."""
         if not any([catalysts, risks, mitigations]):
@@ -720,9 +720,9 @@ class ArticleScreener:
             if catalyst.reasoning:
                 catalysts_text += f"- Reasoning: {catalyst.reasoning}\n"
             if catalyst.supporting_evidence:
-                catalysts_text += f"- Evidence: {'; '.join(catalyst.supporting_evidence[:3])}\n"
+                catalysts_text += f"- Evidence: {'; '.join(catalyst.supporting_evidence)}\n"
             if catalyst.direct_quotes:
-                quotes = [q.quote[:100] + "..." if len(q.quote) > 100 else q.quote for q in catalyst.direct_quotes[:2]]
+                quotes = [q.quote for q in catalyst.direct_quotes]
                 catalysts_text += f"- Quotes: {'; '.join(quotes)}\n"
             catalysts_text += f"- Sources: {', '.join(catalyst.source_articles or catalyst.articles_mentioned)}\n\n"
         
@@ -737,9 +737,9 @@ class ArticleScreener:
             if risk.reasoning:
                 risks_text += f"- Reasoning: {risk.reasoning}\n"
             if risk.supporting_evidence:
-                risks_text += f"- Evidence: {'; '.join(risk.supporting_evidence[:3])}\n"
+                risks_text += f"- Evidence: {'; '.join(risk.supporting_evidence)}\n"
             if risk.direct_quotes:
-                quotes = [q.quote[:100] + "..." if len(q.quote) > 100 else q.quote for q in risk.direct_quotes[:2]]
+                quotes = [q.quote for q in risk.direct_quotes]
                 risks_text += f"- Quotes: {'; '.join(quotes)}\n"
             risks_text += f"- Sources: {', '.join(risk.source_articles or risk.articles_mentioned)}\n\n"
         
@@ -754,9 +754,9 @@ class ArticleScreener:
             if mitigation.reasoning:
                 mitigations_text += f"- Reasoning: {mitigation.reasoning}\n"
             if mitigation.supporting_evidence:
-                mitigations_text += f"- Evidence: {'; '.join(mitigation.supporting_evidence[:3])}\n"
+                mitigations_text += f"- Evidence: {'; '.join(mitigation.supporting_evidence)}\n"
             if mitigation.direct_quotes:
-                quotes = [q.quote[:100] + "..." if len(q.quote) > 100 else q.quote for q in mitigation.direct_quotes[:2]]
+                quotes = [q.quote for q in mitigation.direct_quotes]
                 mitigations_text += f"- Quotes: {'; '.join(quotes)}\n"
             mitigations_text += f"- Sources: {', '.join(mitigation.source_articles or mitigation.articles_mentioned)}\n\n"
         
@@ -972,7 +972,7 @@ class ArticleScreener:
             type=base_catalyst.type,
             description=base_catalyst.description,
             confidence=min(1.0, total_confidence / len(catalysts) + 0.1),  # Boost merged confidence
-            supporting_evidence=list(set(all_evidence))[:5],  # Unique evidence, max 5
+            supporting_evidence=list(set(all_evidence)),
             articles_mentioned=list(set(all_articles)),
             timeline=base_catalyst.timeline
         )
@@ -994,7 +994,7 @@ class ArticleScreener:
             description=base_risk.description,
             severity=base_risk.severity,
             confidence=min(1.0, total_confidence / len(risks) + 0.1),
-            supporting_evidence=list(set(all_evidence))[:5],
+            supporting_evidence=list(set(all_evidence)),
             articles_mentioned=list(set(all_articles)),
             potential_impact=base_risk.potential_impact
         )
@@ -1032,12 +1032,12 @@ class ArticleScreener:
                 # Top catalyst by confidence
                 if catalysts:
                     top_catalyst = max(catalysts, key=lambda x: x.confidence)
-                    f.write(f"**Strongest Growth Driver:** {top_catalyst.type.title()} - {top_catalyst.description[:100]}...\n")
+                    f.write(f"**Strongest Growth Driver:** {top_catalyst.type.title()} - {top_catalyst.description}...\n")
                 
                 # Highest risk by severity/confidence
                 if risks:
                     top_risk = max(risks, key=lambda x: (x.severity == 'critical', x.severity == 'high', x.confidence))
-                    f.write(f"**Primary Risk Factor:** {top_risk.type.title()} - {top_risk.description[:100]}...\n")
+                    f.write(f"**Primary Risk Factor:** {top_risk.type.title()} - {top_risk.description}...\n")
                 
                 f.write("\n")
             
@@ -1099,7 +1099,7 @@ class ArticleScreener:
                 for i, mitigation in enumerate(sorted(mitigations, key=lambda x: x.confidence, reverse=True), 1):
                     effectiveness_emoji = {'high': '✅', 'medium': '⚡', 'low': '❓'}
                     f.write(f"### Mitigation {i}: {effectiveness_emoji.get(mitigation.effectiveness, '⚡')} Strategy\n\n")
-                    f.write(f"**Risk Addressed:** {mitigation.risk_addressed[:100]}...\n")
+                    f.write(f"**Risk Addressed:** {mitigation.risk_addressed}...\n")
                     f.write(f"**Strategy:** {mitigation.strategy}\n")
                     f.write(f"**Effectiveness:** {mitigation.effectiveness.title()}\n")
                     f.write(f"**Confidence:** {mitigation.confidence:.1%}")

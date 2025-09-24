@@ -33,11 +33,10 @@ import math
 
 # Import configuration
 from price_adjustor_config import ADJUSTOR_DEFAULTS, ADJUSTOR_PROMPTS
-
-try:  # Optional LLM load (same pattern as financial_model_generator)
-    from llms import gpt_4o_mini as _llm_fn
-except Exception:  # pragma: no cover
-    _llm_fn = None
+from llms import gpt_4o_mini as _llm_fn
+from event_param_mapping import classify_event
+from qualitative_config import sector_adjustments, SOURCE_WEIGHTS, RECENCY_HALF_LIFE_DAYS
+from financial_model_generator import FinancialModelGenerator
 
 # --- Parsing Screening Report -------------------------------------------------
 
@@ -190,10 +189,6 @@ def parse_screening_report(path: Path) -> Dict[str, List[Dict[str, Any]]]:
             item.setdefault('timeline', 'Mid-Term')
             item.setdefault('description', '')
     # Event classification (deterministic heuristics)
-    try:
-        from event_param_mapping import classify_event
-    except Exception:  # pragma: no cover
-        classify_event = None
     if classify_event:
         for c in catalysts:
             c['event_type'] = classify_event(c.get('title'), c.get('description'))
@@ -231,18 +226,15 @@ def compute_adjustment(base_price: Optional[float], factors: Dict[str, List[Dict
     sector_cap_adj = ADJUSTOR_DEFAULTS.DEFAULT_SECTOR_CAP
     source_weights = {}
     recency_half_life = None
-    try:  # optional import safety
-        from qualitative_config import sector_adjustments, SOURCE_WEIGHTS, RECENCY_HALF_LIFE_DAYS
-        source_weights = SOURCE_WEIGHTS
-        recency_half_life = RECENCY_HALF_LIFE_DAYS
-        if sector:
-            s_adj = sector_adjustments(sector)
-            if s_adj.get('scaling'):
-                sector_scaling_adj = s_adj['scaling'] / scaling if scaling else 1.0
-            if s_adj.get('cap'):
-                sector_cap_adj = s_adj['cap'] / cap if cap else 1.0
-    except Exception:  # pragma: no cover
-        pass
+
+    source_weights = SOURCE_WEIGHTS
+    recency_half_life = RECENCY_HALF_LIFE_DAYS
+    if sector:
+        s_adj = sector_adjustments(sector)
+        if s_adj.get('scaling'):
+            sector_scaling_adj = s_adj['scaling'] / scaling if scaling else 1.0
+        if s_adj.get('cap'):
+            sector_cap_adj = s_adj['cap'] / cap if cap else 1.0
 
     # Adjust scaling & cap per sector
     eff_scaling = scaling * sector_scaling_adj
@@ -391,11 +383,6 @@ def compute_adjustment(base_price: Optional[float], factors: Dict[str, List[Dict
 
 def generate_base_model_price(ticker: str, model: str, strategy: Optional[str], years: int,
                               term_growth: float, wacc: Optional[float]) -> Tuple[Optional[float], Dict[str, Any]]:
-    try:
-        from financial_model_generator import FinancialModelGenerator
-    except ImportError:
-        print("[ERROR] Cannot import FinancialModelGenerator. Ensure path is correct.", file=sys.stderr)
-        return None, {}
     gen = FinancialModelGenerator(ticker)
     m = gen.generate_financial_model(model_type=model, projection_years=years,
                                      term_growth=term_growth, override_wacc=wacc,
@@ -427,25 +414,22 @@ def extract_base_operating_metrics(model_obj: Dict[str, Any]) -> Dict[str, float
     out = {"first_year_growth": None, "margin_uplift": 0.0, "capex_rate": None, "wacc": None, "ebitda_margin_first": None, "ebitda_margin_last": None}
     dcf = (model_obj.get("model_components") or {}).get("dcf_model")
     # dcf may be a DataFrame; handle both serialized or actual DataFrame
-    try:
-        import pandas as pd  # noqa
-        if dcf is not None and hasattr(dcf, 'iloc') and len(dcf) >= 2:
-            r0 = _safe_num(dcf.iloc[0].get("Revenue"))
-            r1 = _safe_num(dcf.iloc[1].get("Revenue"))
-            if r0 > 0 and r1:
-                out["first_year_growth"] = (r1 / r0) - 1
-            c1 = _safe_num(dcf.iloc[1].get("CapEx"))
-            if r1 > 0 and c1:
-                out["capex_rate"] = c1 / r1
-            e0 = _safe_num(dcf.iloc[0].get("EBITDA"))
-            e_last = _safe_num(dcf.iloc[len(dcf)-1].get("EBITDA"))
-            r_last = _safe_num(dcf.iloc[len(dcf)-1].get("Revenue"))
-            if r0 > 0 and e0:
-                out["ebitda_margin_first"] = e0 / r0
-            if r_last > 0 and e_last:
-                out["ebitda_margin_last"] = e_last / r_last
-    except Exception:
-        pass
+    if dcf is not None and hasattr(dcf, 'iloc') and len(dcf) >= 2:
+        r0 = _safe_num(dcf.iloc[0].get("Revenue"))
+        r1 = _safe_num(dcf.iloc[1].get("Revenue"))
+        if r0 > 0 and r1:
+            out["first_year_growth"] = (r1 / r0) - 1
+        c1 = _safe_num(dcf.iloc[1].get("CapEx"))
+        if r1 > 0 and c1:
+            out["capex_rate"] = c1 / r1
+        e0 = _safe_num(dcf.iloc[0].get("EBITDA"))
+        e_last = _safe_num(dcf.iloc[len(dcf)-1].get("EBITDA"))
+        r_last = _safe_num(dcf.iloc[len(dcf)-1].get("Revenue"))
+        if r0 > 0 and e0:
+            out["ebitda_margin_first"] = e0 / r0
+        if r_last > 0 and e_last:
+            out["ebitda_margin_last"] = e_last / r_last
+
     val = model_obj.get("valuation_summary") or {}
     wacc = val.get("WACC")
     if wacc:
@@ -459,9 +443,6 @@ def propose_parameter_deltas(factors: Dict[str, List[Dict[str, Any]]], base_metr
     Returns dict with 'raw_response', 'deltas' list (after local capping), and 'errors' list.
     Safe if LLM unavailable (returns empty deltas).
     """
-    if _llm_fn is None:
-        return {"deltas": [], "errors": ["LLM unavailable"], "raw_response": None}
-
     # Compact event summary for prompt
     def short(item: Dict[str, Any]):
         return f"{item.get('title','')[:60]} (conf {int(item.get('confidence',0)*100)}% {item.get('timeline','')})"
@@ -478,7 +459,7 @@ def propose_parameter_deltas(factors: Dict[str, List[Dict[str, Any]]], base_metr
             {
                 "param": "first_year_growth | margin_uplift | capex_rate | wacc",
                 "delta": "numeric (can be negative) within caps",
-                "reason": "succinct justification linking events to adjustment",
+                "reason": "comprehensive justification linking events to adjustment",
                 "sources": ["C1","R2","M1"],
             }
         ]
@@ -731,7 +712,7 @@ def main():
             raw = _llm_fn([
                 {"role": "system", "content": "You design bounded valuation scenarios only within policy risk guardrails."},
                 {"role": "user", "content": prompt}
-            ], temperature=args.llm_scenarios_temp) if _llm_fn else None
+            ], temperature=args.llm_scenarios_temp)
             if isinstance(raw, tuple): raw = raw[0]
             scen_obj = None
             if raw:

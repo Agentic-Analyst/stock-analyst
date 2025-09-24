@@ -13,11 +13,7 @@ from typing import Dict, Any, List
 import json, time
 
 from price_adjustor_config import ADJUSTOR_PROMPTS, ADJUSTOR_DEFAULTS
-
-try:
-    from llms import gpt_4o_mini as _llm_fn
-except Exception:  # pragma: no cover
-    _llm_fn = None
+from llms import gpt_4o_mini as _llm_fn
 
 
 def _fmt_pct(x: float | None) -> str:
@@ -35,23 +31,21 @@ def build_llm_explanation(ticker: str, output: Dict[str, Any], factors: Dict[str
     """Build LLM narrative using the explanation_report prompt.
     Returns markdown or None if LLM unavailable.
     """
-    if _llm_fn is None:
-        return None
     try:
         prompt_tmpl = Path(ADJUSTOR_PROMPTS.EXPLANATION_REPORT).read_text(encoding='utf-8')
         # Prepare inputs
         top_cats = []
-        for i, c in enumerate(factors.get('catalysts', [])[:5], 1):
+        for i, c in enumerate(factors.get('catalysts', []), 1):
             conf = c.get('confidence'); tl = c.get('timeline')
             title = c.get('title') or c.get('description') or c.get('type') or 'untitled'
             top_cats.append(f"  - C{i}: {title} | conf={int((conf or 0)*100)}% | {tl}")
         top_risks = []
-        for i, r in enumerate(factors.get('risks', [])[:5], 1):
+        for i, r in enumerate(factors.get('risks', []), 1):
             conf = r.get('confidence'); tl = r.get('timeline')
             title = r.get('title') or r.get('description') or r.get('type') or 'untitled'
             top_risks.append(f"  - R{i}: {title} | conf={int((conf or 0)*100)}% | {tl}")
         top_mits = []
-        for i, m in enumerate(factors.get('mitigations', [])[:3], 1):
+        for i, m in enumerate(factors.get('mitigations', []), 1):
             title = m.get('title') or m.get('strategy') or m.get('risk_addressed') or 'untitled'
             top_mits.append(f"  - M{i}: {title} | eff={m.get('effectiveness','n/a')} | addr={m.get('risk_addressed','n/a')}")
         eff = (output.get('mapped_parameter_deltas') or {}).get('effective') or {}
@@ -117,7 +111,7 @@ def build_deterministic_summary(ticker: str, output: Dict[str, Any], factors: Di
             return f"{v*100:+.1f}%" if v is not None else "n/a"
         except Exception:
             return "n/a"
-    def _top(items, n=5):
+    def _top(items, n=10):
         out=[]
         for it in items[:n]:
             # Try multiple field names for title/description
@@ -163,7 +157,9 @@ def build_deterministic_summary(ticker: str, output: Dict[str, Any], factors: Di
     if bull is not None and bear is not None and volb is not None:
         lines.append(f"- Range: Bear {bear:,.2f} / Bull {bull:,.2f} (volatility buffer ~{volb*100:.1f}%)")
     lines.append("")
-    lines.append("## Key Catalysts"); lines.extend(_top(factors.get('catalysts',[]),5) or ["- (none)"])
+    lines.append("## Key Catalysts"); lines.extend(_top(factors.get('catalysts',[]),10) or ["- (none)"])
     lines.append("")
-    lines.append("## Key Risks"); lines.extend(_top(factors.get('risks',[]),5) or ["- (none)"])
+    lines.append("## Key Risks"); lines.extend(_top(factors.get('risks',[]),10) or ["- (none)"])
+    lines.append("")
+    lines.append("## Key Mitigations"); lines.extend(_top(factors.get('mitigations',[]),10) or ["- (none)"])
     return "\n".join(lines)

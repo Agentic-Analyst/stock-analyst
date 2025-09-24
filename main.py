@@ -52,7 +52,7 @@ from financial_model_generator import FinancialModelGenerator
 from article_scraper import ArticleScraper
 from article_filter import ArticleFilter
 from article_screener import ArticleScreener
-from price_adjustor import compute_adjustment, parse_screening_report
+from price_adjustor import compute_adjustment, parse_screening_report, propose_parameter_deltas, extract_base_operating_metrics
 from event_param_mapping import aggregate_mapped_parameter_deltas, classify_event
 from path_utils import get_analysis_path, ensure_analysis_paths
 from report_agent import build_llm_explanation, save_explanation_reports, build_deterministic_summary
@@ -582,7 +582,7 @@ class ComprehensiveStockAnalysisPipeline:
     
     def run_price_adjustment_stage(self, model_results: Dict, screening_results: Dict,
                                   scaling: float, adjustment_cap: float) -> Dict:
-        """Run the price adjustment stage combining quantitative model with qualitative factors."""
+        """Run the price adjustment stage combining quantitative model with qualitative factors using LLM intelligence."""
         try:
             model = model_results.get("model", {})
             base_price = model.get("valuation_summary", {}).get("Implied Price")
@@ -599,11 +599,10 @@ class ComprehensiveStockAnalysisPipeline:
                 price_diff = ((base_price / current_price) - 1) * 100
                 self.logger.info(f"📊 vs Current market price: ${current_price:.2f} ({price_diff:+.1f}%)")
             
-            # Use proper parse_screening_report function to parse from the markdown file
+            # Parse screening report to extract factors
             screening_report_path = self.analysis_path / "screened" / "screening_report.md"
             
             if screening_report_path.exists():
-                # Parse the screening report using the dedicated function
                 factors = parse_screening_report(screening_report_path)
                 self.logger.info(f"📋 Parsed screening report: {len(factors.get('catalysts', []))} catalysts, {len(factors.get('risks', []))} risks, {len(factors.get('mitigations', []))} mitigations")
             else:
@@ -622,6 +621,7 @@ class ComprehensiveStockAnalysisPipeline:
                     "risks": [_to_dict(r) for r in screening_results.get("risks", [])],
                     "mitigations": [_to_dict(m) for m in screening_results.get("mitigations", [])]
                 }
+            
             # Classify events for mapping if not already classified
             for kind in ("catalysts", "risks"):
                 for item in factors[kind]:
@@ -631,96 +631,120 @@ class ComprehensiveStockAnalysisPipeline:
                         except Exception:
                             pass
             
-            # Step 1: Compute qualitative adjustment (legacy scalar overlay)
-            # Use company sector if available for better adjustment calibration
-            sector = self.company_data.get("basic_info", {}).get("sector")
-            adj = compute_adjustment(base_price, factors, scaling=scaling, cap=adjustment_cap, sector=sector)
-            
             output = {
                 'ticker': self.ticker,
                 'base_model_price': base_price,
-                'adjusted_price': adj.get('adjusted_price'),
-                'adjustment_pct': adj.get('adjustment_pct'),
-                'bull_price': adj.get('bull_price'),
-                'bear_price': adj.get('bear_price'),
-                'qualitative_inputs': adj.get('inputs'),
-                'screen_file_present': True,
+                'screen_file_present': screening_report_path.exists(),
             }
             
-            # Step 2: Deterministic mapped parameter deltas (always enabled)
-            try:
-                # Aggregate catalysts (positive) and risks (negative)
-                cat_map = aggregate_mapped_parameter_deltas(factors.get('catalysts', []), is_risk=False)
-                risk_map = aggregate_mapped_parameter_deltas(factors.get('risks', []), is_risk=True)
+            # *** CORE CHANGE: Use LLM to propose intelligent parameter deltas instead of hardcoded calculations ***
+            self.logger.info("🤖 Using LLM to intelligently propose parameter adjustments based on screening factors...")
+            
+            # Extract base metrics from the financial model
+            base_metrics = extract_base_operating_metrics(model)
+            self.logger.info(f"📊 Base model metrics: {', '.join(f'{k}={v:.4f}' if v is not None else f'{k}=None' for k, v in base_metrics.items())}")
+            
+            # Use LLM to propose parameter deltas based on screening factors
+            llm_deltas_result = propose_parameter_deltas(factors, base_metrics)
+            
+            if llm_deltas_result.get("errors"):
+                self.logger.warning(f"⚠️ LLM parameter delta proposal had errors: {'; '.join(llm_deltas_result['errors'])}")
+            
+            proposed_deltas = llm_deltas_result.get("deltas", [])
+            
+            if proposed_deltas:
+                self.logger.info(f"🧠 LLM proposed {len(proposed_deltas)} parameter adjustments:")
+                for delta in proposed_deltas:
+                    param = delta['param']
+                    value = delta['delta_applied']
+                    reason = delta['reason'][:100] + "..." if len(delta['reason']) > 100 else delta['reason']
+                    sources = ', '.join(delta['sources'][:3])  # Show first 3 sources
+                    self.logger.info(f"   • {param}: {value:+.4f} | Reason: {reason} | Sources: {sources}")
                 
-                # Combine effective deltas with conversion audit
-                mapped_result = {
-                    'catalyst_contributions': cat_map['contributions'],
-                    'risk_contributions': risk_map['contributions'],
-                    'effective': {
-                        'growth_delta_dec': (cat_map['effective']['growth_delta_dec'] + risk_map['effective']['growth_delta_dec']),
-                        'margin_uplift_dec': (cat_map['effective']['margin_uplift_dec'] + risk_map['effective']['margin_uplift_dec']),
-                        'capex_rate_delta_dec': (cat_map['effective']['capex_rate_delta_dec'] + risk_map['effective']['capex_rate_delta_dec']),
-                        'wacc_delta_dec': (cat_map['effective']['wacc_delta_dec'] + risk_map['effective']['wacc_delta_dec']),
-                    },
-                    'conversion_log': cat_map.get('conversion_log', []) + risk_map.get('conversion_log', []),
+                # Apply LLM-proposed deltas to create adjusted model
+                llm_adjusted_deltas = {
+                    delta['param']: delta['delta_applied'] 
+                    for delta in proposed_deltas
                 }
                 
-                # Apply parameter deltas and recompute price
-                effective_values = mapped_result['effective']
-                if any(abs(v) > 1e-8 for v in effective_values.values()):
-                    # Create model with adjusted parameters
-                    adjusted_model = self._apply_parameter_deltas_to_model(model, mapped_result['effective'])
-                    mapped_price = adjusted_model.get("valuation_summary", {}).get("Implied Price")
-                    if mapped_price:
-                        mapped_result['mapped_total_change_pct'] = (mapped_price / base_price) - 1
-                        output['mapped_result'] = mapped_result
-                        output['mapped_model_price'] = mapped_price
-                        self.logger.info(f"📊 Mapped parameter price: ${mapped_price:,.2f} (Δ {mapped_result['mapped_total_change_pct']*100:+.1f}%)")
-                else:
-                    self.logger.info("🛈 No qualifying event parameter deltas (all effective deltas = 0.0)")
+                # Create model with LLM-adjusted parameters
+                llm_adjusted_model = self._apply_parameter_deltas_to_model(model, llm_adjusted_deltas)
+                llm_adjusted_price = llm_adjusted_model.get("valuation_summary", {}).get("Implied Price")
                 
-            except Exception as e:
-                self.logger.warning(f"⚠️ Mapped parameter deltas failed: {e}")
-                output['mapped_deltas_error'] = str(e)
+                if llm_adjusted_price:
+                    llm_adjustment_pct = (llm_adjusted_price / base_price) - 1
+                    output['llm_adjusted_price'] = llm_adjusted_price
+                    output['llm_adjustment_pct'] = llm_adjustment_pct
+                    output['llm_deltas'] = proposed_deltas
+                    output['llm_raw_response'] = llm_deltas_result.get('raw_response', '')
+                    
+                    self.logger.info(f"🎯 LLM-adjusted price: ${llm_adjusted_price:,.2f} (Δ {llm_adjustment_pct*100:+.1f}%)")
+                    
+                    # Use LLM-adjusted price as our primary adjusted price
+                    output['adjusted_price'] = llm_adjusted_price
+                    output['adjustment_pct'] = llm_adjustment_pct
+                else:
+                    self.logger.warning("⚠️ LLM-adjusted model failed to produce a price, using base price")
+                    output['adjusted_price'] = base_price
+                    output['adjustment_pct'] = 0.0
+            else:
+                self.logger.info("🛈 LLM did not propose any parameter adjustments - using base price")
+                output['adjusted_price'] = base_price
+                output['adjustment_pct'] = 0.0
             
-            # Step 3: Scenario generation (always enabled)
-            try:
-                scenarios = [
-                    {"name": "Base", "price": base_price},
-                    {"name": "Adjusted", "price": output.get('adjusted_price'), "delta_pct": output.get('adjustment_pct')},
-                    {"name": "Bull", "price": output.get('bull_price')},
-                    {"name": "Bear", "price": output.get('bear_price')},
-                ]
-                output['scenarios'] = scenarios
-                self.logger.info("🗺️  Generated placeholder scenarios (LLM scenario engine TBD)")
-            except Exception as e:
-                self.logger.warning(f"⚠️ Scenario generation failed: {e}")
+            # Generate intelligent bull/bear scenarios using volatility estimation
+            # Use LLM-informed volatility based on the dispersion of screening factors
+            catalyst_confidences = [float(c.get('confidence', 0.5)) for c in factors.get('catalysts', [])]
+            risk_confidences = [float(r.get('confidence', 0.5)) for r in factors.get('risks', [])]
+            all_confidences = catalyst_confidences + risk_confidences
+            
+            if len(all_confidences) >= 2:
+                confidence_variance = sum((c - sum(all_confidences)/len(all_confidences))**2 for c in all_confidences) / len(all_confidences)
+                vol_buffer = min(0.05 + confidence_variance * 0.5, 0.20)  # 5% base + confidence dispersion, max 20%
+            else:
+                vol_buffer = 0.10  # Default 10% buffer
+            
+            adjusted_price = output['adjusted_price']
+            output['bull_price'] = adjusted_price * (1 + vol_buffer)
+            output['bear_price'] = adjusted_price * (1 - vol_buffer)
+            output['vol_buffer'] = vol_buffer
+            
+            self.logger.info(f"📊 Intelligent price range: ${output['bear_price']:,.2f} (Bear) - ${output['bull_price']:,.2f} (Bull)")
+            
+            # Generate scenario summary
+            scenarios = [
+                {"name": "Base (Model Only)", "price": base_price, "delta_pct": 0.0},
+                {"name": "LLM-Adjusted", "price": adjusted_price, "delta_pct": output['adjustment_pct']},
+                {"name": "Bull Case", "price": output['bull_price'], "delta_pct": (output['bull_price']/base_price) - 1},
+                {"name": "Bear Case", "price": output['bear_price'], "delta_pct": (output['bear_price']/base_price) - 1},
+            ]
+            output['scenarios'] = scenarios
 
             # Update statistics
             self.stats["price_adjustment"] = {
                 "base_price": base_price,
-                "adjusted_price": output.get('adjusted_price'),
-                "adjustment_pct": output.get('adjustment_pct'),
-                "mapped_price": output.get('mapped_model_price'),
+                "llm_adjusted_price": output.get('llm_adjusted_price'),
+                "llm_adjustment_pct": output.get('llm_adjustment_pct'),
+                "final_adjusted_price": adjusted_price,
+                "llm_deltas_count": len(proposed_deltas),
                 "factors_processed": {
                     "catalysts": len(factors['catalysts']),
                     "risks": len(factors['risks']),
                     "mitigations": len(factors['mitigations'])
                 },
-                "scenarios_generated": bool(output.get('scenarios'))
+                "vol_buffer": vol_buffer,
+                "llm_errors": llm_deltas_result.get("errors", [])
             }
             self.stats["stages_completed"].append("price_adjustment")
             
             # Log results
             stats = {
                 "Base price": f"${base_price:,.2f}",
-                "Adjusted price": f"${output.get('adjusted_price', 0):,.2f}",
-                "Adjustment": f"{output.get('adjustment_pct', 0)*100:+.1f}%",
-                "Bull/Bear range": f"${output.get('bear_price', 0):,.2f} - ${output.get('bull_price', 0):,.2f}"
+                "LLM-adjusted price": f"${adjusted_price:,.2f}",
+                "LLM adjustment": f"{output['adjustment_pct']*100:+.1f}%",
+                "Bull/Bear range": f"${output['bear_price']:,.2f} - ${output['bull_price']:,.2f}",
+                "Parameter deltas": f"{len(proposed_deltas)} LLM-proposed"
             }
-            if output.get('mapped_model_price'):
-                stats["Mapped price"] = f"${output['mapped_model_price']:,.2f}"
             
             self.logger.stage_end("PRICE ADJUSTMENT", True, stats)
             
@@ -731,31 +755,71 @@ class ComprehensiveStockAnalysisPipeline:
             return {"success": False, "error": str(e)}
     
     def _apply_parameter_deltas_to_model(self, base_model: Dict, deltas: Dict) -> Dict:
-        """Apply parameter deltas to base model and recompute valuation."""
+        """Apply parameter deltas to base model and recompute valuation.
+        
+        Supports both LLM parameter format (first_year_growth, margin_uplift, capex_rate, wacc)
+        and legacy format (growth_delta_dec, margin_uplift_dec, etc.)
+        """
         try:
             if not self.model_generator:
                 return base_model
+                
             # Capture original overrides
             original_overrides = dict(self.model_generator.overrides)
             new_overrides = dict(original_overrides)
-            # Map deltas to model overrides
-            gd = deltas.get('growth_delta_dec')
-            if gd and abs(gd) > 1e-8:
-                base_g = original_overrides.get('first_year_growth') or 0.0
-                new_overrides['first_year_growth'] = max(0.0, base_g + gd)
-            mu = deltas.get('margin_uplift_dec')
-            if mu and abs(mu) > 1e-8:
-                base_mu = original_overrides.get('margin_uplift') or 0.0
-                new_overrides['margin_uplift'] = base_mu + mu
-            capx = deltas.get('capex_rate_delta_dec')
-            if capx and abs(capx) > 1e-8:
-                base_capex = original_overrides.get('capex_rate') or 0.0
-                new_overrides['capex_rate'] = max(0.0, base_capex + capx)
-            wacc_d = deltas.get('wacc_delta_dec')
-            if wacc_d and abs(wacc_d) > 1e-8:
-                base_wacc = base_model.get('valuation_summary', {}).get('WACC')
-                if base_wacc:
-                    new_overrides['override_wacc'] = max(0.01, base_wacc + wacc_d)
+            
+            # Handle LLM parameter format (preferred)
+            if 'first_year_growth' in deltas:
+                delta = deltas['first_year_growth']
+                if abs(delta) > 1e-8:
+                    base_g = original_overrides.get('first_year_growth') or 0.0
+                    new_overrides['first_year_growth'] = max(0.0, base_g + delta)
+            
+            if 'margin_uplift' in deltas:
+                delta = deltas['margin_uplift']
+                if abs(delta) > 1e-8:
+                    base_mu = original_overrides.get('margin_uplift') or 0.0
+                    new_overrides['margin_uplift'] = base_mu + delta
+            
+            if 'capex_rate' in deltas:
+                delta = deltas['capex_rate']
+                if abs(delta) > 1e-8:
+                    base_capex = original_overrides.get('capex_rate') or 0.0
+                    new_overrides['capex_rate'] = max(0.0, base_capex + delta)
+            
+            if 'wacc' in deltas:
+                delta = deltas['wacc']
+                if abs(delta) > 1e-8:
+                    base_wacc = base_model.get('valuation_summary', {}).get('WACC')
+                    if base_wacc:
+                        new_overrides['override_wacc'] = max(0.01, base_wacc + delta)  # Minimum 1% WACC
+            
+            # Handle legacy parameter format for backward compatibility
+            elif 'growth_delta_dec' in deltas:
+                gd = deltas.get('growth_delta_dec')
+                if gd and abs(gd) > 1e-8:
+                    base_g = original_overrides.get('first_year_growth') or 0.0
+                    new_overrides['first_year_growth'] = max(0.0, base_g + gd)
+            
+            if 'margin_uplift_dec' in deltas:
+                mu = deltas.get('margin_uplift_dec')
+                if mu and abs(mu) > 1e-8:
+                    base_mu = original_overrides.get('margin_uplift') or 0.0
+                    new_overrides['margin_uplift'] = base_mu + mu
+            
+            if 'capex_rate_delta_dec' in deltas:
+                capx = deltas.get('capex_rate_delta_dec')
+                if capx and abs(capx) > 1e-8:
+                    base_capex = original_overrides.get('capex_rate') or 0.0
+                    new_overrides['capex_rate'] = max(0.0, base_capex + capx)
+                    
+            if 'wacc_delta_dec' in deltas:
+                wacc_d = deltas.get('wacc_delta_dec')
+                if wacc_d and abs(wacc_d) > 1e-8:
+                    base_wacc = base_model.get('valuation_summary', {}).get('WACC')
+                    if base_wacc:
+                        new_overrides['override_wacc'] = max(0.01, base_wacc + wacc_d)  # Minimum 1% WACC
+            
             # Apply and regenerate model (reuse original model generation parameters from stats)
             self.model_generator.overrides = new_overrides
             gen_stats = self.stats.get('model_generation', {})
