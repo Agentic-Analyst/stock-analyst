@@ -6,6 +6,7 @@ Generates a professional markdown report that explains the step-by-step
 price adjustment and provides analyst suggestions.
 """
 from __future__ import annotations
+import time
 from datetime import datetime
 from pathlib import Path
 import pathlib
@@ -23,143 +24,392 @@ def _fmt_pct(x: float | None) -> str:
         return "n/a"
 
 
-def _list_lines(items: List[str]) -> str:
-    return "\n".join(items) if items else "  - (none)"
-
-
-def build_llm_explanation(ticker: str, output: Dict[str, Any], factors: Dict[str, Any], args) -> str | None:
-    """Build LLM narrative using the explanation_report prompt.
-    Returns markdown or None if LLM unavailable.
+def save_explanation_reports(ticker: str, deterministic_md: str, base_path: pathlib.Path = None) -> Dict[str, str]:
+    """Save explanation reports with timestamped and latest versions.
+    
+    Args:
+        ticker: Stock ticker symbol
+        deterministic_md: The comprehensive deterministic report content
+        llm_md: Optional LLM explanation content (deprecated, can be None)
+        base_path: Base path for saving reports
+    
+    Returns:
+        Dictionary with saved file paths
     """
-    try:
-        prompt_tmpl = Path(ADJUSTOR_PROMPTS.EXPLANATION_REPORT).read_text(encoding='utf-8')
-        # Prepare inputs
-        top_cats = []
-        for i, c in enumerate(factors.get('catalysts', []), 1):
-            conf = c.get('confidence'); tl = c.get('timeline')
-            title = c.get('title') or c.get('description') or c.get('type') or 'untitled'
-            top_cats.append(f"  - C{i}: {title} | conf={int((conf or 0)*100)}% | {tl}")
-        top_risks = []
-        for i, r in enumerate(factors.get('risks', []), 1):
-            conf = r.get('confidence'); tl = r.get('timeline')
-            title = r.get('title') or r.get('description') or r.get('type') or 'untitled'
-            top_risks.append(f"  - R{i}: {title} | conf={int((conf or 0)*100)}% | {tl}")
-        top_mits = []
-        for i, m in enumerate(factors.get('mitigations', []), 1):
-            title = m.get('title') or m.get('strategy') or m.get('risk_addressed') or 'untitled'
-            top_mits.append(f"  - M{i}: {title} | eff={m.get('effectiveness','n/a')} | addr={m.get('risk_addressed','n/a')}")
-        eff = (output.get('mapped_parameter_deltas') or {}).get('effective') or {}
-        prompt = prompt_tmpl.format(
-            ticker=ticker,
-            model=args.model,
-            years=args.years,
-            term_growth=f"{args.term_growth:.3f}",
-            wacc_override=(f"{args.wacc:.3f}" if args.wacc is not None else "n/a"),
-            base_price=f"{(output.get('base_model_price') or 0):,.2f}",
-            net_score=f"{(output.get('qualitative_inputs') or {}).get('net_score', 0):.3f}",
-            raw_adjustment=f"{(output.get('qualitative_inputs') or {}).get('raw_adjustment', 0):.3f}",
-            cap=f"{(output.get('qualitative_inputs') or {}).get('cap', 0):.3f}",
-            scaling=f"{(output.get('qualitative_inputs') or {}).get('scaling', 0):.3f}",
-            adjustment_pct=_fmt_pct(output.get('adjustment_pct')),
-            qual_adjusted_price=f"{(output.get('adjusted_price') or 0):,.2f}",
-            growth_pp=f"{eff.get('growth_delta_dec',0)*100:+.2f}",
-            margin_pp=f"{eff.get('margin_uplift_dec',0)*100:+.2f}",
-            capex_pp=f"{eff.get('capex_rate_delta_dec',0)*100:+.2f}",
-            wacc_pp=f"{eff.get('wacc_delta_dec',0)*100:+.2f}",
-            mapped_price=f"{(output.get('mapped_adjusted_price') or 0):,.2f}",
-            mapped_total_pct=_fmt_pct((output.get('mapped_parameter_deltas') or {}).get('mapped_total_change_pct')),
-            residual_overlay_pct=_fmt_pct(output.get('residual_overlay_pct') or output.get('residual_overlay_pct_llm')),
-            final_price=f"{(output.get('final_price') or output.get('primary_adjusted_price') or 0):,.2f}",
-            bull_price=f"{(output.get('bull_price') or 0):,.2f}",
-            bear_price=f"{(output.get('bear_price') or 0):,.2f}",
-            pw_price=f"{(output.get('probability_weighted_price') or 0):,.2f}",
-            governance_flags=json.dumps(output.get('governance_flags') or []),
-            top_catalysts=_list_lines(top_cats),
-            top_risks=_list_lines(top_risks),
-            top_mitigations=_list_lines(top_mits),
-        )
-        raw = _llm_fn([
-            {"role": "system", "content": "You are a concise, rigorous sell-side analyst."},
-            {"role": "user", "content": prompt}
-        ], temperature=ADJUSTOR_DEFAULTS.DEFAULT_LLM_TEMPERATURE)
-        if isinstance(raw, tuple):
-            raw = raw[0]
-        return str(raw).strip()
-    except Exception:  # pragma: no cover
-        return None
-
-
-def save_explanation_reports(ticker: str, deterministic_md: str, llm_md: str, base_path: pathlib.Path) -> Dict[str, str]:
-    """Save explanation reports with timestamped and latest versions."""
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     rdir = base_path / 'reports'
     rdir.mkdir(parents=True, exist_ok=True)
-    final_report = deterministic_md + ("\n\n---\n\n" + llm_md if llm_md else "")
-    report_path = rdir / f"price_adjustment_explanation_{ticker}_{timestamp}.md"
-    report_latest = rdir / "price_adjustment_explanation_latest.md"
+    
+    # Use only the deterministic markdown (comprehensive report)
+    final_report = deterministic_md
+    
+    report_path = rdir / f"price_adjustment_analysis_{ticker}_{timestamp}.md"
+    report_latest = rdir / "price_adjustment_analysis_latest.md"
     report_path.write_text(final_report, encoding='utf-8')
     report_latest.write_text(final_report, encoding='utf-8')
     return {"path": str(report_path), "latest": str(report_latest)}
 
 
 def build_deterministic_summary(ticker: str, output: Dict[str, Any], factors: Dict[str, Any], meta: Dict[str, Any] | None = None) -> str:
-    """Build a concise deterministic markdown summary using computed outputs.
-    meta may include keys like model, years, term_growth; all optional.
+    """Build a comprehensive deterministic markdown summary with LLM reasoning and detailed screening data.
+    
+    Args:
+        ticker: Stock ticker symbol
+        output: Price adjustment output with LLM reasoning
+        factors: Screening factors (catalysts, risks, mitigations) with enhanced data
+        meta: Optional metadata (model, years, term_growth, etc.)
+    
+    Returns:
+        Comprehensive markdown report with executive summary, LLM reasoning, and detailed insights
     """
     def _p(v):
         try:
             return f"{v*100:+.1f}%" if v is not None else "n/a"
         except Exception:
             return "n/a"
-    def _top(items, n=10):
-        out=[]
-        for it in items[:n]:
-            # Try multiple field names for title/description
-            t = it.get('title') or it.get('description') or it.get('type') or '(untitled)'
-            conf=it.get('confidence'); tl=it.get('timeline')
-            try:
-                conf_txt=f"{float(conf)*100:.0f}%" if conf is not None else "n/a"
-            except Exception:
-                conf_txt="n/a"
-            out.append(f"- {t} (Confidence {conf_txt}, {tl})")
-        return out
+    
+    def _format_source_articles(source_articles):
+        """Format source articles with proper titles and URLs."""
+        if not source_articles:
+            return ["- (no sources)"]
+        
+        sources = []
+        for source in source_articles:
+            if hasattr(source, 'title') and hasattr(source, 'url'):
+                # ArticleReference object
+                if source.url:
+                    sources.append(f"- [{source.title}]({source.url})")
+                else:
+                    sources.append(f"- {source.title}")
+            elif isinstance(source, dict):
+                # Dictionary format
+                title = source.get('title', 'Unknown Article')
+                url = source.get('url', '')
+                if url:
+                    sources.append(f"- [{title}]({url})")
+                else:
+                    sources.append(f"- {title}")
+            else:
+                # Legacy string format
+                sources.append(f"- {str(source)}")
+        
+        return sources
+    
+    def _format_quotes(direct_quotes):
+        """Format direct quotes with proper attribution."""
+        if not direct_quotes:
+            return []
+        
+        quotes = []
+        for quote in direct_quotes:
+            if hasattr(quote, 'quote') and hasattr(quote, 'source_article'):
+                # DirectQuote object
+                quote_text = f'> "{quote.quote}"'
+                if hasattr(quote, 'source_url') and quote.source_url:
+                    quote_text += f" — [{quote.source_article}]({quote.source_url})"
+                else:
+                    quote_text += f" — {quote.source_article}"
+                quotes.append(quote_text)
+            elif isinstance(quote, dict):
+                # Dictionary format
+                quote_text = f'> "{quote.get("quote", "")}"'
+                source = quote.get("source_article", "Unknown Source")
+                url = quote.get("source_url", "")
+                if url:
+                    quote_text += f" — [{source}]({url})"
+                else:
+                    quote_text += f" — {source}"
+                quotes.append(quote_text)
+        
+        return quotes
+    
+    # Initialize report
     ts_human = time.strftime('%Y-%m-%d %H:%M:%S')
+    lines = [
+        f"# Price Adjustment Analysis Report — {ticker}",
+        "",
+        f"**Generated:** {ts_human}",
+        f"**Method:** {output.get('method', 'qual_overlay')}",
+        "",
+        "## Executive Summary"
+    ]
+    
+    # Price analysis section
     base_price = output.get('base_model_price')
     mapped_price = output.get('mapped_model_price') or output.get('mapped_adjusted_price')
     qual_adj_price = output.get('adjusted_price')
     final_price = output.get('final_price') or output.get('primary_adjusted_price') or output.get('adjusted_price')
-    bull = output.get('bull_price'); bear = output.get('bear_price'); volb = output.get('vol_buffer')
+    bull = output.get('bull_price')
+    bear = output.get('bear_price')
+    volb = output.get('vol_buffer')
+    
+    # Extract percentage changes
     mapped_total_pct = None
     mr = output.get('mapped_result') or output.get('mapped_parameter_deltas')
     if isinstance(mr, dict):
         mapped_total_pct = mr.get('mapped_total_change_pct')
+    
     qual_pct = output.get('adjustment_pct')
     residual_pct = output.get('residual_overlay_pct') or output.get('residual_overlay_pct_llm')
     llm_total_pct = output.get('llm_total_change_pct')
-    lines=[f"# Qualitative Price Adjustment Summary — {ticker}", "", f"Generated on: {ts_human}", f"Method: {output.get('method','qual_overlay')}", "", "## Executive Snapshot"]
+    
+    # Base model information
     if meta and meta.get('model'):
-        years = meta.get('years', 'n/a'); tg = meta.get('term_growth', 'n/a')
-        if isinstance(tg, (int,float)): tg = f"{tg:.3f}"
-        lines.append(f"- Base implied price: {base_price:,.2f} (from {meta['model']} model, years={years}, g={tg})")
+        years = meta.get('years', 'n/a')
+        tg = meta.get('term_growth', 'n/a')
+        if isinstance(tg, (int, float)):
+            tg = f"{tg:.3f}"
+        lines.append(f"- **Base Model Price:** ${base_price:,.2f} ({meta['model']} model, {years} years, terminal growth={tg})")
     else:
-        lines.append(f"- Base implied price: {base_price:,.2f}")
+        lines.append(f"- **Base Model Price:** ${base_price:,.2f}")
+    
+    # Price progression
     if mapped_price is not None:
         ch = mapped_total_pct if mapped_total_pct is not None else ((mapped_price / base_price) - 1 if base_price else None)
-        lines.append(f"- Mapped-parameter price: {mapped_price:,.2f} ({_p(ch)} vs base)")
+        lines.append(f"- **Mapped Parameter Price:** ${mapped_price:,.2f} ({_p(ch)} vs base)")
+    
     if qual_adj_price is not None:
-        lines.append(f"- Qualitative overlay price: {qual_adj_price:,.2f} ({_p(qual_pct)} vs base)")
+        lines.append(f"- **Qualitative Overlay Price:** ${qual_adj_price:,.2f} ({_p(qual_pct)} vs base)")
+    
     if output.get('llm_adjusted_price') is not None:
-        lines.append(f"- LLM-adjusted price: {output['llm_adjusted_price']:,.2f} ({_p(llm_total_pct)} vs base)")
+        lines.append(f"- **LLM-Adjusted Price:** ${output['llm_adjusted_price']:,.2f} ({_p(llm_total_pct)} vs base)")
+    
     if residual_pct is not None and final_price is not None and mapped_price is not None:
-        lines.append(f"- Residual overlay applied: {_p(residual_pct)}")
+        lines.append(f"- **Residual Overlay:** {_p(residual_pct)}")
+    
     if final_price is not None:
-        lines.append(f"- Final adjusted price: {final_price:,.2f}")
+        lines.append(f"- **Final Target Price:** ${final_price:,.2f}")
+    
+    # Price range
     if bull is not None and bear is not None and volb is not None:
-        lines.append(f"- Range: Bear {bear:,.2f} / Bull {bull:,.2f} (volatility buffer ~{volb*100:.1f}%)")
+        lines.append(f"- **Price Range:** ${bear:,.2f} (Bear) — ${bull:,.2f} (Bull) | Buffer: {volb*100:.1f}%")
+    
+    # LLM Reasoning Section
+    lines.extend(["", "## LLM Price Adjustment Reasoning", ""])
+    
+    # Extract LLM deltas and reasoning
+    llm_deltas = output.get('llm_parameter_deltas', {}).get('deltas', [])
+    if llm_deltas:
+        lines.append("**AI Parameter Adjustments with Reasoning:**")
+        lines.append("")
+        for delta in llm_deltas:
+            param = delta.get('param', 'Unknown')
+            delta_val = delta.get('delta', 0)
+            reason = delta.get('reason', 'No reasoning provided')
+            sources = delta.get('sources', [])
+            
+            # Format parameter change
+            if 'growth' in param.lower():
+                delta_str = f"{delta_val*100:+.1f} percentage points"
+            elif 'wacc' in param.lower():
+                delta_str = f"{delta_val*100:+.1f} basis points"  
+            elif 'margin' in param.lower():
+                delta_str = f"{delta_val*100:+.1f} percentage points"
+            else:
+                delta_str = f"{delta_val:+.4f}"
+            
+            lines.append(f"**{param.replace('_', ' ').title()}:** {delta_str}")
+            lines.append(f"- **Reasoning:** {reason}")
+            if sources:
+                source_list = ', '.join(sources)
+                lines.append(f"- **Sources:** {source_list}")
+            lines.append("")
+    else:
+        lines.append("*No LLM parameter adjustments were applied.*")
+        lines.append("")
+    
+    # Detailed Analysis Sections
+    lines.extend(["", "---", "", "## Detailed Investment Analysis", ""])
+    
+    # Growth Catalysts Section
+    catalysts = factors.get('catalysts', [])
+    lines.append("### 🚀 Growth Catalysts")
     lines.append("")
-    lines.append("## Key Catalysts"); lines.extend(_top(factors.get('catalysts',[]),10) or ["- (none)"])
+    
+    if catalysts:
+        for i, catalyst in enumerate(catalysts[:10], 1):  # Limit to top 10
+            # Basic information
+            title = catalyst.get('description') or catalyst.get('type') or f'Catalyst {i}'
+            conf = catalyst.get('confidence', 0)
+            timeline = catalyst.get('timeline', 'n/a')
+            potential_impact = catalyst.get('potential_impact', '')
+            
+            lines.append(f"#### Catalyst {i}: {title}")
+            lines.append(f"**Confidence:** {conf*100:.0f}% | **Timeline:** {timeline.title()}")
+            
+            # AI Analysis/Reasoning
+            reasoning = catalyst.get('llm_reasoning') or catalyst.get('reasoning')
+            if reasoning:
+                lines.append(f"**AI Analysis:** {reasoning}")
+            
+            # Potential Impact
+            if potential_impact:
+                lines.append(f"**Potential Impact:** {potential_impact}")
+            
+            # Supporting Evidence
+            evidence = catalyst.get('supporting_evidence', [])
+            if evidence:
+                lines.append("**Supporting Evidence:**")
+                for ev in evidence:
+                    lines.append(f"- {ev}")
+            
+            # Direct Quotes
+            quotes = _format_quotes(catalyst.get('direct_quotes', []))
+            if quotes:
+                lines.append("**Key Quotes:**")
+                lines.extend(quotes)
+            
+            # Source Articles
+            sources = _format_source_articles(catalyst.get('source_articles', []))
+            lines.append("**Source Articles:**")
+            lines.extend(sources)
+            lines.append("")
+    else:
+        lines.append("*No growth catalysts identified.*")
+        lines.append("")
+    
+    # Investment Risks Section  
+    risks = factors.get('risks', [])
+    lines.append("### ⚠️ Investment Risks")
     lines.append("")
-    lines.append("## Key Risks"); lines.extend(_top(factors.get('risks',[]),10) or ["- (none)"])
+    
+    if risks:
+        for i, risk in enumerate(risks[:10], 1):  # Limit to top 10
+            # Basic information
+            title = risk.get('description') or risk.get('type') or f'Risk {i}'
+            conf = risk.get('confidence', 0)
+            severity = risk.get('severity', 'medium')
+            potential_impact = risk.get('potential_impact', '')
+            likelihood = risk.get('likelihood', 'n/a')
+            
+            severity_emoji = {'critical': '🚨', 'high': '⚠️', 'medium': '⚡', 'low': '💭'}
+            risk_emoji = severity_emoji.get(severity.lower(), '⚠️')
+            
+            lines.append(f"#### Risk {i}: {title} {risk_emoji}")
+            lines.append(f"**Confidence:** {conf*100:.0f}% | **Severity:** {severity.title()} | **Likelihood:** {likelihood.title()}")
+            
+            # AI Analysis/Reasoning
+            reasoning = risk.get('llm_reasoning') or risk.get('reasoning')
+            if reasoning:
+                lines.append(f"**AI Analysis:** {reasoning}")
+            
+            # Potential Impact
+            if potential_impact:
+                lines.append(f"**Potential Impact:** {potential_impact}")
+            
+            # Supporting Evidence
+            evidence = risk.get('supporting_evidence', [])
+            if evidence:
+                lines.append("**Supporting Evidence:**")
+                for ev in evidence:
+                    lines.append(f"- {ev}")
+            
+            # Direct Quotes
+            quotes = _format_quotes(risk.get('direct_quotes', []))
+            if quotes:
+                lines.append("**Key Quotes:**")
+                lines.extend(quotes)
+            
+            # Source Articles
+            sources = _format_source_articles(risk.get('source_articles', []))
+            lines.append("**Source Articles:**")
+            lines.extend(sources)
+            lines.append("")
+    else:
+        lines.append("*No investment risks identified.*")
+        lines.append("")
+    
+    # Risk Mitigation Section
+    mitigations = factors.get('mitigations', [])
+    lines.append("### 🛡️ Risk Mitigation Strategies")
     lines.append("")
-    lines.append("## Key Mitigations"); lines.extend(_top(factors.get('mitigations',[]),10) or ["- (none)"])
+    
+    if mitigations:
+        for i, mitigation in enumerate(mitigations[:10], 1):  # Limit to top 10
+            # Basic information
+            strategy = mitigation.get('strategy', f'Mitigation {i}')
+            risk_addressed = mitigation.get('risk_addressed', 'Various risks')
+            conf = mitigation.get('confidence', 0)
+            effectiveness = mitigation.get('effectiveness', 'medium')
+            company_action = mitigation.get('company_action', '')
+            timeline = mitigation.get('implementation_timeline', 'n/a')
+            
+            effectiveness_emoji = {'high': '✅', 'medium': '⚡', 'low': '❓'}
+            mit_emoji = effectiveness_emoji.get(effectiveness.lower(), '⚡')
+            
+            lines.append(f"#### Mitigation {i}: {strategy} {mit_emoji}")
+            lines.append(f"**Confidence:** {conf*100:.0f}% | **Effectiveness:** {effectiveness.title()}")
+            lines.append(f"**Addresses:** {risk_addressed}")
+            
+            if timeline != 'n/a':
+                lines.append(f"**Timeline:** {timeline}")
+            
+            # AI Analysis/Reasoning
+            reasoning = mitigation.get('llm_reasoning') or mitigation.get('reasoning')
+            if reasoning:
+                lines.append(f"**AI Analysis:** {reasoning}")
+            
+            # Company Action
+            if company_action:
+                lines.append(f"**Company Action:** {company_action}")
+            
+            # Supporting Evidence
+            evidence = mitigation.get('supporting_evidence', [])
+            if evidence:
+                lines.append("**Supporting Evidence:**")
+                for ev in evidence:
+                    lines.append(f"- {ev}")
+            
+            # Direct Quotes
+            quotes = _format_quotes(mitigation.get('direct_quotes', []))
+            if quotes:
+                lines.append("**Key Quotes:**")
+                lines.extend(quotes)
+            
+            # Source Articles
+            sources = _format_source_articles(mitigation.get('source_articles', []))
+            lines.append("**Source Articles:**")
+            lines.extend(sources)
+            lines.append("")
+    else:
+        lines.append("*No risk mitigation strategies identified.*")
+        lines.append("")
+    
+    # Summary Statistics
+    lines.extend([
+        "---",
+        "",
+        "## Analysis Summary",
+        "",
+        f"**Total Insights Analyzed:** {len(catalysts)} catalysts, {len(risks)} risks, {len(mitigations)} mitigations",
+    ])
+    
+    if catalysts:
+        avg_catalyst_conf = sum(c.get('confidence', 0) for c in catalysts) / len(catalysts)
+        lines.append(f"**Average Catalyst Confidence:** {avg_catalyst_conf*100:.0f}%")
+    
+    if risks:
+        avg_risk_conf = sum(r.get('confidence', 0) for r in risks) / len(risks)
+        lines.append(f"**Average Risk Confidence:** {avg_risk_conf*100:.0f}%")
+        
+        # Risk severity distribution
+        severity_counts = {}
+        for risk in risks:
+            sev = risk.get('severity', 'medium').lower()
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
+        
+        if severity_counts:
+            sev_text = ', '.join(f"{count} {sev}" for sev, count in severity_counts.items())
+            lines.append(f"**Risk Distribution:** {sev_text}")
+    
+    if mitigations:
+        avg_mit_conf = sum(m.get('confidence', 0) for m in mitigations) / len(mitigations)
+        lines.append(f"**Average Mitigation Confidence:** {avg_mit_conf*100:.0f}%")
+    
+    lines.extend([
+        "",
+        "*This report combines quantitative financial modeling with AI-powered qualitative analysis*",
+        "*for comprehensive investment decision support.*"
+    ])
+    
     return "\n".join(lines)

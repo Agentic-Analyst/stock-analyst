@@ -55,7 +55,7 @@ from article_screener import ArticleScreener
 from price_adjustor import compute_adjustment, parse_screening_report, propose_parameter_deltas, extract_base_operating_metrics
 from event_param_mapping import aggregate_mapped_parameter_deltas, classify_event
 from path_utils import get_analysis_path, ensure_analysis_paths
-from report_agent import build_llm_explanation, save_explanation_reports, build_deterministic_summary
+from report_agent import save_explanation_reports, build_deterministic_summary
 
 class ComprehensiveStockAnalysisPipeline:
     """Integrated 6-step pipeline for complete stock analysis workflow."""
@@ -211,13 +211,10 @@ class ComprehensiveStockAnalysisPipeline:
                 }
                 meta = {"model": model_type, "years": projection_years, "term_growth": term_growth}
                 det_md = build_deterministic_summary(self.ticker, pa, factors, meta)
-                self.logger.info(f"📝 Generating deterministic explanation report for {self.ticker}...")
-                self.logger.info(f"📄 Deterministic explanation report content:\n{det_md}")
-                llm_md = build_llm_explanation(self.ticker, pa, factors, argparse.Namespace(model=model_type, years=projection_years, term_growth=term_growth or 0.0, wacc=None))
-                self.logger.info(f"📝 Generating LLM explanation report for {self.ticker}...")
-                self.logger.info(f"📄 LLM explanation report content:\n{llm_md}")
-                saved = save_explanation_reports(self.ticker, det_md, llm_md, self.analysis_path)
-                self.logger.info(f"📝 Explanation report saved: {saved['path']} (latest: {saved['latest']})")
+                self.logger.info(f"📝 Generating comprehensive analysis report for {self.ticker}...")
+                self.logger.info(f"📄 Analysis report generated successfully with {len(det_md)} characters")
+                saved = save_explanation_reports(self.ticker, det_md, self.analysis_path)
+                self.logger.info(f"📝 Analysis report saved: {saved['path']} (latest: {saved['latest']})")
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to generate explanation report: {e}")
         
