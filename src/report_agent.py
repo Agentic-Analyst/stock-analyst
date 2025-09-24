@@ -228,9 +228,6 @@ def build_deterministic_summary(ticker: str, output: Dict[str, Any], factors: Di
     if bull is not None and bear is not None and volb is not None:
         lines.append(f"- **Price Range:** ${bear:,.2f} (Bear) — ${bull:,.2f} (Bull) | Buffer: {volb*100:.1f}%")
     
-    # LLM Reasoning Section
-    lines.extend(["", "## LLM Price Adjustment Reasoning", ""])
-    
     # Extract LLM deltas and reasoning
     llm_deltas = output.get('llm_parameter_deltas', {}).get('deltas', [])
     if llm_deltas:
@@ -279,35 +276,31 @@ def build_deterministic_summary(ticker: str, output: Dict[str, Any], factors: Di
             potential_impact = catalyst.get('potential_impact', '')
             
             lines.append(f"#### Catalyst {i}: {title}")
-            lines.append(f"**Confidence:** {conf*100:.0f}% | **Timeline:** {timeline.title()}")
+            lines.append(f"**Confidence:** {conf*100:.0f}% | **Timeline:** {timeline.title()}\n")
             
             # AI Analysis/Reasoning
             reasoning = catalyst.get('llm_reasoning') or catalyst.get('reasoning')
             if reasoning:
-                lines.append(f"**AI Analysis:** {reasoning}")
+                lines.append(f"**AI Analysis:**\n {reasoning}\n")
             
             # Potential Impact
             if potential_impact:
-                lines.append(f"**Potential Impact:** {potential_impact}")
+                lines.append(f"**Potential Impact:**\n {potential_impact}\n")
             
             # Supporting Evidence
             evidence = catalyst.get('supporting_evidence', [])
             if evidence:
-                lines.append("**Supporting Evidence:**")
+                lines.append("**Supporting Evidence:**\n")
                 for ev in evidence:
                     lines.append(f"- {ev}")
+                lines.append("\n")
             
             # Direct Quotes
             quotes = _format_quotes(catalyst.get('direct_quotes', []))
             if quotes:
-                lines.append("**Key Quotes:**")
+                lines.append("**Key Quotes:**\n")
                 lines.extend(quotes)
             
-            # Source Articles
-            sources = _format_source_articles(catalyst.get('source_articles', []))
-            lines.append("**Source Articles:**")
-            lines.extend(sources)
-            lines.append("")
     else:
         lines.append("*No growth catalysts identified.*")
         lines.append("")
