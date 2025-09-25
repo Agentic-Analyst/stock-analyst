@@ -249,7 +249,7 @@ class ArticleFilter:
         articles_summary = ""
         for i, article in enumerate(articles, 1):
             title = article['title'][:100]
-            content_preview = article['content'][:300].replace('\n', ' ')
+            content_preview = article['content'][:500].replace('\n', ' ')
             articles_summary += f"\n{i}. Title: {title}\nPreview: {content_preview}...\n"
         
         # Use template

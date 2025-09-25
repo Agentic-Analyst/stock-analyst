@@ -1,22 +1,40 @@
 #!/usr/bin/env python3
 """
-article_scraper.py - News article scraper and collector for stock analysis.
+article_scraper.py - Comprehensive news article scraper for stock analysis.
 
 This module provides the ArticleScraper class for collecting and storing news articles
-from Google News via SerpAPI. Compatible with filter.py and screener.py modules.
+from multiple perspectives using AI-generated search queries. Supports comprehensive
+multi-aspect analysis including company news, financial activities, management updates,
+and industry trends.
+
+Features:
+- AI-powered industry classification
+- Dynamic search query generation
+- Multi-category article collection (overview, financial, management, industry)
+- Intelligent duplicate detection
+- Rich metadata and categorization
+- Compatible with filter.py and screener.py modules
 
 ▶ Usage:
-    python src/article_scraper.py --company "NVIDIA" --ticker NVDA --max 15
+    # Comprehensive scraping (always enabled)
+    python src/article_scraper.py --company "NVIDIA Corporation" --ticker NVDA --max 80
+    
+    # Comprehensive scraping with additional custom query
+    python src/article_scraper.py --company "Tesla" --ticker TSLA --max 80 --query "Tesla earnings Q3 2024"
+    
+    # View statistics for existing articles
+    python src/article_scraper.py --company "NVIDIA" --ticker NVDA --stats
 """
 
 from __future__ import annotations
-import os, csv, time, argparse, pathlib, json
+import os, csv, time, argparse, pathlib, json, re
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 from slugify import slugify
 
 from serpapi import GoogleSearch
 from newspaper import Article
+from llms import gpt_4o_mini
 
 class ArticleScraper:
     """News article scraper for collecting stock-related news articles."""
@@ -48,6 +66,10 @@ class ArticleScraper:
         self.api_key = os.getenv("SERPAPI_API_KEY")
         if not self.api_key:
             raise RuntimeError("SERPAPI_API_KEY environment variable must be set")
+        
+        # Cache for industry classification and search queries
+        self.industry_info = None
+        self.search_queries = None
     
     def set_logger(self, logger):
         """Set the logger instance."""
@@ -59,6 +81,108 @@ class ArticleScraper:
             getattr(self.logger, level)(message)
         else:
             print(f"[{level.upper()}] {message}")
+    
+    def _load_prompt_template(self, filename: str) -> str:
+        """Load prompt template from prompts folder."""
+        prompt_path = pathlib.Path(__file__).parent.parent / "prompts" / filename
+        if not prompt_path.exists():
+            raise FileNotFoundError(f"Prompt template not found: {prompt_path}")
+        return prompt_path.read_text(encoding='utf-8')
+    
+    def _classify_industry(self) -> Dict:
+        """Use LLM to classify the company's industry."""
+        if self.industry_info:
+            return self.industry_info
+            
+        self._log("info", f"🏭 Classifying industry for {self.company_name}")
+        
+        try:
+            prompt_template = self._load_prompt_template("industry_classification.md")
+            prompt = prompt_template.format(
+                company_name=self.company_name,
+                ticker=self.ticker
+            )
+            
+            messages = [
+                {"role": "system", "content": "You are a business and industry classification expert."},
+                {"role": "user", "content": prompt}
+            ]
+            
+            response, cost = gpt_4o_mini(messages, temperature=0.1)
+            
+            # Extract JSON from response
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if json_match:
+                industry_data = json.loads(json_match.group(0))
+                self.industry_info = industry_data
+                self._log("info", f"📊 Industry classified: {industry_data.get('primary_industry', 'Unknown')}")
+                return industry_data
+            else:
+                self._log("warning", "Could not parse industry classification response")
+                return self._get_fallback_industry()
+                
+        except Exception as e:
+            self._log("error", f"Industry classification failed: {e}")
+            return self._get_fallback_industry()
+    
+    def _get_fallback_industry(self) -> Dict:
+        """Provide fallback industry classification."""
+        return {
+            "primary_industry": "unknown",
+            "broad_sector": "general",
+            "description": f"Industry classification unavailable for {self.company_name}"
+        }
+    
+    def _generate_comprehensive_queries(self) -> Dict[str, str]:
+        """Use LLM to generate comprehensive search queries."""
+        if self.search_queries:
+            return self.search_queries
+            
+        self._log("info", f"🔍 Generating comprehensive search queries for {self.company_name}")
+        
+        # Get industry classification first
+        industry_info = self._classify_industry()
+        
+        try:
+            prompt_template = self._load_prompt_template("comprehensive_news_queries.md")
+            industry_str = f"{industry_info.get('primary_industry', '')} ({industry_info.get('broad_sector', '')})"
+            
+            prompt = prompt_template.format(
+                company_name=self.company_name,
+                ticker=self.ticker,
+                industry=industry_str
+            )
+            
+            messages = [
+                {"role": "system", "content": "You are an expert financial analyst and news researcher."},
+                {"role": "user", "content": prompt}
+            ]
+            
+            response, cost = gpt_4o_mini(messages, temperature=0.2)
+            
+            # Extract JSON from response
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if json_match:
+                queries = json.loads(json_match.group(0))
+                self.search_queries = queries
+                self._log("info", f"📝 Generated {len(queries)} search query categories")
+                return queries
+            else:
+                self._log("warning", "Could not parse search queries response")
+                return self._get_fallback_queries()
+                
+        except Exception as e:
+            self._log("error", f"Query generation failed: {e}")
+            return self._get_fallback_queries()
+    
+    def _get_fallback_queries(self) -> Dict[str, str]:
+        """Provide fallback search queries."""
+        return {
+            "company_overview": f"{self.company_name} {self.ticker} news",
+            "financial_activities": f"{self.company_name} earnings revenue financial",
+            "management_leadership": f"{self.company_name} CEO management leadership",
+            "industry_trends": f"{self.company_name} industry market trends"
+        }
     
     def _serpapi_news_links(self, query: str, max_results: int = 20) -> List[str]:
         """Return up to `max_results` news URLs from Google News via SerpAPI."""
@@ -119,13 +243,17 @@ class ArticleScraper:
         file_path = self.searched_dir / filename
         
         # Create markdown content with YAML frontmatter
+        search_category = article_data.get('search_category', 'general')
         markdown_content = (
             f"---\n"
             f"title: \"{article_data['title']}\"\n"
             f"source_url: {article_data['url']}\n"
             f"publish_date: {article_data['publish_date']}\n"
             f"word_count: {article_data['word_count']}\n"
+            f"search_category: {search_category}\n"
             f"scraped_at: {datetime.utcnow().isoformat()}Z\n"
+            f"ticker: {self.ticker}\n"
+            f"company: {self.company_name}\n"
             f"---\n\n"
             f"{article_data['text']}\n"
         )
@@ -133,13 +261,13 @@ class ArticleScraper:
         file_path.write_text(markdown_content, encoding="utf-8")
         return file_path
     
-    def scrape_articles(self, max_searched: int = 30, query_override: Optional[str] = None) -> Dict:
+    def scrape_articles(self, max_searched: int = 60, query_override: Optional[str] = None) -> Dict:
         """
-        Scrape news articles for the configured company.
+        Scrape news articles for the configured company using comprehensive multi-aspect searching.
         
         Args:
-            max_searched: Maximum number of articles to search/scrape
-            query_override: Override the default search query
+            max_searched: Maximum number of articles to search/scrape (distributed across query types)
+            query_override: Additional custom query to include alongside comprehensive search
             
         Returns:
             Dictionary with scraping statistics and results
@@ -149,24 +277,55 @@ class ArticleScraper:
         self.duplicate_count = 0
         self.failed_count = 0
         
-        # Build search query
-        query = query_override or f"{self.company_name} stock news"
+        scraped_files = []
+        all_urls = []
         
-        # Get URLs from SerpAPI
-        self._log("info", f"Searching for news articles: '{query}'")
-        urls = self._serpapi_news_links(query, max_results=max_searched)
+        # Always run comprehensive multi-aspect searching
+        self._log("info", f"🚀 Starting comprehensive news search for {self.company_name}")
         
-        if not urls:
+        # Generate comprehensive queries
+        queries = self._generate_comprehensive_queries()
+        industry_info = self._classify_industry()
+        
+        # If query override is provided, add it as an additional category
+        if query_override:
+            queries["custom_query"] = query_override
+            self._log("info", f"➕ Added custom query: '{query_override}'")
+        
+        # Distribute max_searched across all query types (including custom if present)
+        queries_per_type = max_searched // len(queries)
+        remainder = max_searched % len(queries)
+        
+        self._log("info", f"📊 Company Industry: {industry_info.get('primary_industry', 'Unknown')}")
+        self._log("info", f"🔍 Searching {queries_per_type}-{queries_per_type + (1 if remainder > 0 else 0)} articles per category")
+        
+        for i, (category, query) in enumerate(queries.items()):
+            # Add remainder to first categories
+            current_max = queries_per_type + (1 if i < remainder else 0)
+            
+            self._log("info", f"📰 {category.replace('_', ' ').title()}: '{query}'")
+            category_urls = self._serpapi_news_links(query, max_results=current_max)
+            all_urls.extend([(url, category) for url in category_urls])
+            
+            # Brief pause between different query types
+            time.sleep(0.5)
+        
+        if not all_urls:
             self._log("warning", "No URLs found from news search")
             return self._get_scraping_results()
         
+        # Remove duplicates while preserving category information
+        unique_urls = {}
+        for url, category in all_urls:
+            if url not in unique_urls:
+                unique_urls[url] = category
+        
         # Load previously seen URLs
         seen_urls = self._load_seen_urls()
-        self._log("info", f"Found {len(urls)} candidate URLs, {len(seen_urls)} already seen")
+        self._log("info", f"Found {len(unique_urls)} unique URLs across all searches, {len(seen_urls)} already seen")
         
         # Scrape each URL
-        scraped_files = []
-        for url in urls:
+        for url, category in unique_urls.items():
             if url in seen_urls:
                 self.duplicate_count += 1
                 continue
@@ -174,12 +333,15 @@ class ArticleScraper:
             if self.logger:
                 self.logger.scraping_progress(url, "in progress")
             else:
-                self._log("info", f"Scraping: {url}")
+                self._log("info", f"Scraping [{category}]: {url}")
             
             article_data = self._scrape_article(url)
             
             if not article_data:
                 continue  # Failed scraping already counted in _scrape_article
+            
+            # Add category information to article metadata
+            article_data['search_category'] = category
             
             # Save article
             try:
@@ -201,6 +363,8 @@ class ArticleScraper:
         
         results = self._get_scraping_results()
         results["scraped_files"] = scraped_files
+        results["industry_info"] = self.industry_info
+        results["search_queries"] = self.search_queries
         return results
     
     def _get_scraping_results(self) -> Dict:
@@ -214,6 +378,76 @@ class ArticleScraper:
             "total_processed": self.scraped_count + self.duplicate_count + self.failed_count,
             "success_rate": self.scraped_count / max(1, self.scraped_count + self.failed_count)
         }
+    
+    def get_comprehensive_stats(self) -> Dict:
+        """Get comprehensive statistics including category breakdown."""
+        if not self.searched_dir.exists():
+            return {"error": "No scraped articles directory found"}
+        
+        category_stats = {}
+        total_articles = 0
+        
+        # Analyze all markdown files for category distribution
+        for md_file in self.searched_dir.glob("*.md"):
+            try:
+                content = md_file.read_text(encoding='utf-8')
+                # Extract search_category from YAML frontmatter
+                if 'search_category:' in content:
+                    category_line = [line for line in content.split('\n') if 'search_category:' in line][0]
+                    category = category_line.split('search_category:')[1].strip()
+                    category_stats[category] = category_stats.get(category, 0) + 1
+                    total_articles += 1
+            except Exception as e:
+                self._log("warning", f"Could not analyze file {md_file}: {e}")
+        
+        return {
+            "total_articles": total_articles,
+            "category_breakdown": category_stats,
+            "industry_info": self.industry_info,
+            "search_queries_used": self.search_queries,
+            "storage_info": self.get_storage_info()
+        }
+    
+    def run_comprehensive_scraping(self, max_articles: int = 80, query_override: Optional[str] = None) -> Dict:
+        """
+        Run comprehensive multi-aspect news scraping with detailed reporting.
+        
+        Args:
+            max_articles: Maximum total articles to scrape across all categories
+            query_override: Additional custom query to include alongside comprehensive search
+            
+        Returns:
+            Comprehensive results including statistics and analysis
+        """
+        self._log("info", f"🚀 Starting comprehensive news analysis for {self.company_name} ({self.ticker})")
+        
+        # Run comprehensive scraping
+        results = self.scrape_articles(max_searched=max_articles, query_override=query_override)
+        
+        # Get comprehensive statistics
+        stats = self.get_comprehensive_stats()
+        
+        # Combine results
+        comprehensive_results = {
+            **results,
+            **stats,
+            "scraping_mode": "comprehensive",
+            "max_articles_requested": max_articles
+        }
+        
+        # Log summary
+        self._log("info", f"📊 Comprehensive scraping completed:")
+        self._log("info", f"   • Total articles scraped: {results['scraped_count']}")
+        self._log("info", f"   • Duplicates skipped: {results['duplicate_count']}")
+        self._log("info", f"   • Failed scrapes: {results['failed_count']}")
+        self._log("info", f"   • Success rate: {results['success_rate']:.1%}")
+        
+        if stats.get('category_breakdown'):
+            self._log("info", f"   • Category distribution:")
+            for category, count in stats['category_breakdown'].items():
+                self._log("info", f"     - {category.replace('_', ' ').title()}: {count} articles")
+        
+        return comprehensive_results
     
     def get_scraped_articles_count(self) -> int:
         """Get total number of articles scraped for this ticker."""
@@ -234,5 +468,91 @@ class ArticleScraper:
                 "index_file": self.index_csv.exists()
             }
         }
+
+
+def main():
+    """Command-line interface for article scraping."""
+    parser = argparse.ArgumentParser(description="Comprehensive news article scraper for stock analysis")
+    parser.add_argument("--company", required=True, help="Company name (e.g., 'NVIDIA Corporation')")
+    parser.add_argument("--ticker", required=True, help="Stock ticker symbol (e.g., 'NVDA')")
+    parser.add_argument("--max", type=int, default=80, help="Maximum articles to scrape (default: 80)")
+    parser.add_argument("--data-dir", default="data", help="Base data directory (default: 'data')")
+    parser.add_argument("--simple", action="store_true", help="Deprecated: Comprehensive search is always used")
+    parser.add_argument("--query", help="Custom search query override")
+    parser.add_argument("--stats", action="store_true", help="Show comprehensive statistics for existing articles")
+    
+    args = parser.parse_args()
+    
+    # Setup paths
+    base_path = pathlib.Path(args.data_dir) / args.ticker.upper()
+    
+    # Initialize scraper
+    scraper = ArticleScraper(args.ticker, args.company, base_path)
+    
+    try:
+        if args.stats:
+            # Show statistics only
+            print(f"\n📊 Comprehensive Statistics for {args.company} ({args.ticker})")
+            print("=" * 80)
+            stats = scraper.get_comprehensive_stats()
+            
+            if "error" in stats:
+                print(f"❌ {stats['error']}")
+                return
+            
+            print(f"Total Articles: {stats['total_articles']}")
+            
+            if stats.get('category_breakdown'):
+                print("\nCategory Distribution:")
+                for category, count in stats['category_breakdown'].items():
+                    print(f"  • {category.replace('_', ' ').title()}: {count} articles")
+            
+            if stats.get('industry_info'):
+                print(f"\nIndustry Classification:")
+                print(f"  • Primary: {stats['industry_info'].get('primary_industry', 'Unknown')}")
+                print(f"  • Sector: {stats['industry_info'].get('broad_sector', 'Unknown')}")
+            
+            storage = stats.get('storage_info', {})
+            print(f"\nStorage Location: {storage.get('searched_dir', 'Unknown')}")
+            
+        else:
+            # Run scraping - always comprehensive
+            if args.simple:
+                print(f"\n⚠️  Note: --simple flag is deprecated. Always using comprehensive search.")
+            
+            print(f"\n🚀 Running comprehensive scraping for {args.company} ({args.ticker})")
+            if args.query:
+                print(f"   📝 Including custom query: '{args.query}'")
+            
+            results = scraper.run_comprehensive_scraping(max_articles=args.max, query_override=args.query)
+            
+            # Display results
+            print("\n" + "=" * 80)
+            print("SCRAPING RESULTS")
+            print("=" * 80)
+            print(f"Articles scraped: {results['scraped_count']}")
+            print(f"Duplicates skipped: {results['duplicate_count']}")
+            print(f"Failed scrapes: {results['failed_count']}")
+            print(f"Success rate: {results['success_rate']:.1%}")
+            
+            if results.get('industry_info'):
+                print(f"\nIndustry: {results['industry_info'].get('primary_industry', 'Unknown')}")
+            
+            if results.get('category_breakdown'):
+                print("\nArticles by Category:")
+                for category, count in results['category_breakdown'].items():
+                    print(f"  • {category.replace('_', ' ').title()}: {count}")
+            
+            print(f"\nArticles saved to: {results.get('storage_info', {}).get('searched_dir', 'Unknown')}")
+    
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Scraping interrupted by user")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        raise
+
+
+if __name__ == "__main__":
+    main()
 
 

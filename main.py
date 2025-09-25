@@ -389,8 +389,8 @@ class ComprehensiveStockAnalysisPipeline:
             
             self.logger.info(f"📊 Current articles in storage: {current_count}")
             
-            # Perform scraping
-            scraping_results = self.article_scraper.scrape_articles(max_searched, query_override)
+            # Perform comprehensive scraping
+            scraping_results = self.article_scraper.run_comprehensive_scraping(max_articles=max_searched, query_override=query_override)
             # Record pre-existing corpus size for downstream logic (news-only reuse)
             scraping_results['pre_existing'] = current_count
             
