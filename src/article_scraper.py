@@ -34,7 +34,7 @@ from slugify import slugify
 
 from serpapi import GoogleSearch
 from newspaper import Article
-from llms import gpt_4o_mini
+from llms.config import get_llm
 
 class ArticleScraper:
     """News article scraper for collecting stock-related news articles."""
@@ -108,7 +108,7 @@ class ArticleScraper:
                 {"role": "user", "content": prompt}
             ]
             
-            response, cost = gpt_4o_mini(messages, temperature=0.1)
+            response, cost = get_llm()(messages, temperature=0.1)
             
             # Extract JSON from response
             json_match = re.search(r'\{[\s\S]*\}', response)
@@ -158,7 +158,7 @@ class ArticleScraper:
                 {"role": "user", "content": prompt}
             ]
             
-            response, cost = gpt_4o_mini(messages, temperature=0.2)
+            response, cost = get_llm()(messages, temperature=0.2)
             
             # Extract JSON from response
             json_match = re.search(r'\{[\s\S]*\}', response)

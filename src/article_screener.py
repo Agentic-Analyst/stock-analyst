@@ -19,15 +19,7 @@ from dataclasses import dataclass, asdict
 from collections import defaultdict, Counter
 import yaml
 import tiktoken
-
-# Conditionally import LLM functionality
-try:
-    from llms import gpt_4o_mini
-    LLM_AVAILABLE = True
-except ImportError:
-    LLM_AVAILABLE = False
-    def gpt_4o_mini(*args, **kwargs):
-        raise ImportError("LLM functionality not available. Please check llms.py")
+from llms.config import get_llm
 
 PROMPTS_ROOT = pathlib.Path("prompts")
 
@@ -199,9 +191,6 @@ class ArticleScreener:
         """
         Analyze a batch of articles using LLM for comprehensive insights.
         """
-        if not LLM_AVAILABLE:
-            return [], [], []
-        
         batch_size = len(articles)
         self._log("info", f"🔍 Analyzing batch {batch_num} with {batch_size} articles...")
         
@@ -226,7 +215,7 @@ class ArticleScreener:
             
             # Make LLM call
             self._log("info", f"🤖 Processing batch {batch_num} - extracting insights across {batch_size} articles...")
-            response, cost = gpt_4o_mini(batch_prompt)
+            response, cost = get_llm()(batch_prompt)
             self.total_llm_cost += cost
             self.llm_call_count += 1
             
@@ -592,10 +581,6 @@ class ArticleScreener:
         Analyze all articles using batch processing to send multiple articles to LLM at once.
         Articles are processed in batches of the specified size (default 10) for efficiency.
         """
-        if not LLM_AVAILABLE:
-            self._log("error", "[error] LLM functionality required for analysis but not available")
-            return [], [], [], AnalysisSummary("neutral", [], 0.5)
-            
         all_catalysts = []
         all_risks = []
         all_mitigations = []
@@ -692,11 +677,7 @@ class ArticleScreener:
         """
         Use LLM to intelligently deduplicate and merge similar insights across all batches.
         This replaces simple string matching with semantic understanding.
-        """
-        if not LLM_AVAILABLE:
-            self._log("warning", "LLM not available for deduplication, using simple merging")
-            return self._merge_similar_catalysts(catalysts), self._merge_similar_risks(risks), self._merge_similar_mitigations(mitigations)
-        
+        """        
         if not any([catalysts, risks, mitigations]):
             return [], [], []
         
@@ -710,7 +691,7 @@ class ArticleScreener:
             dedup_prompt = self._create_deduplication_prompt(insights_content)
             
             # Make LLM call for deduplication
-            response, cost = gpt_4o_mini(dedup_prompt)
+            response, cost = get_llm()(dedup_prompt)
             self.total_llm_cost += cost
             self.llm_call_count += 1
             

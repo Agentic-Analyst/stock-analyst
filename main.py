@@ -58,6 +58,9 @@ from event_param_mapping import aggregate_mapped_parameter_deltas, classify_even
 from path_utils import get_analysis_path, ensure_analysis_paths
 from report_agent import save_explanation_reports, build_deterministic_summary, generate_professional_analyst_report
 
+# Import LLM system
+from llms.config import init_llm, list_models
+
 class ComprehensiveStockAnalysisPipeline:
     """Integrated 7-step pipeline for complete stock analysis workflow."""
 
@@ -936,23 +939,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Full LLM-powered analysis (AI selects optimal DCF strategy and parameters)
-  python main.py --ticker NVDA --company "NVIDIA" --pipeline comprehensive
+  # Full analysis with default model
+  python main.py --ticker NVDA --company "NVIDIA" --email user@example.com --timestamp 20250929_120000
   
-  # LLM analysis with manual strategy override (force specific DCF approach)
-  python main.py --ticker AAPL --company "Apple Inc" --pipeline comprehensive --strategy hardware_dcf
+  # Use Claude Sonnet
+  python main.py --ticker AAPL --company "Apple" --email user@example.com --timestamp 20250929_120000 --llm claude-3.5-sonnet
   
-  # Traditional analysis without LLM (deterministic parameters)
-  python main.py --ticker TSLA --company "Tesla" --pipeline comprehensive --wacc 0.095
-  
-  # LLM analysis with forced manual overrides
-  python main.py --ticker MSFT --company "Microsoft" --pipeline comprehensive --term-growth 0.025
-
-  # Financial model only with LLM optimization
-  python main.py --ticker REIT --company "Realty Income" --pipeline financial-model --strategy reit_dcf
-  
-  # SaaS company with peer comparison
-  python main.py --ticker CRM --company "Salesforce" --pipeline comprehensive --peers "MSFT,ORCL,ADBE"
+  # List available models
+  python main.py --list-llms
         """
     )
     
@@ -991,9 +985,25 @@ Examples:
     parser.add_argument("--scaling", type=float, default=0.15, help="Base scaling factor for qualitative adjustment")
     parser.add_argument("--adjustment-cap", type=float, default=0.20, help="Maximum adjustment percentage (±)")
     
+    # LLM selection parameters
+    parser.add_argument("--llm", choices=["gpt-4o-mini", "claude-3.5-sonnet", "claude-3.5-haiku", "claude-3-opus"], 
+                       default="gpt-4o-mini", help="LLM model to use for analysis")
+    parser.add_argument("--list-llms", action="store_true", help="List available LLM models and exit")
+    
     args = parser.parse_args()
     
+    # Handle --list-llms flag
+    if args.list_llms:
+        models = list_models()
+        print("Available LLM models:")
+        for model in models:
+            print(f"  - {model}")
+        return 0
+        
     try:
+        # Initialize LLM model
+        init_llm(args.llm)
+        
         # Initialize comprehensive pipeline
         pipeline = ComprehensiveStockAnalysisPipeline(args.ticker, args.company, args.email, args.timestamp)
         

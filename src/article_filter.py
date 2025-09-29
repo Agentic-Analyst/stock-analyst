@@ -19,7 +19,7 @@ from __future__ import annotations
 import os, csv, argparse, pathlib, re, json, logging
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
-from llms import gpt_4o_mini
+from llms.config import get_llm
 
 class ArticleFilter:
     def __init__(self, ticker: str, query: str, base_path: pathlib.Path):
@@ -221,7 +221,7 @@ class ArticleFilter:
                 {"role": "system", "content": "You are a senior financial analyst filtering investment articles."},
                 {"role": "user", "content": prompt},
             ]
-            response, cost = gpt_4o_mini(messages, temperature=0.1)
+            response, cost = get_llm()(messages, temperature=0.1)
             self.llm_call_count += 1
             
             # Track actual cost from LLM call
@@ -374,7 +374,7 @@ class ArticleFilter:
                 {"role": "system", "content": "You are a senior financial analyst generating concise research-ready notes."},
                 {"role": "user", "content": prompt},
             ]
-            report, cost = gpt_4o_mini(messages, temperature=0.3)
+            report, cost = get_llm()(messages, temperature=0.3)
             self.llm_call_count += 1
             
             # Track actual cost from LLM call

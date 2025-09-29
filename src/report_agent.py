@@ -12,7 +12,7 @@ from pathlib import Path
 import pathlib
 from typing import Dict, Any, List
 import json, time
-from llms import gpt_4o_mini as _llm_fn
+from llms.config import get_llm
 
 
 def generate_professional_analyst_report(ticker: str, company_name: str, 
@@ -64,7 +64,7 @@ def generate_professional_analyst_report(ticker: str, company_name: str,
     ]
     
     # Generate professional report using LLM with correct signature
-    response, cost = _llm_fn(messages, temperature=0.3)
+    response, cost = get_llm()(messages, temperature=0.3)
     
     return response.strip()
 

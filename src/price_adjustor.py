@@ -33,7 +33,7 @@ import math
 
 # Import configuration
 from price_adjustor_config import ADJUSTOR_DEFAULTS, ADJUSTOR_PROMPTS
-from llms import gpt_4o_mini as _llm_fn
+from llms.config import get_llm
 from event_param_mapping import classify_event
 from qualitative_config import sector_adjustments, SOURCE_WEIGHTS, RECENCY_HALF_LIFE_DAYS
 from financial_model_generator import FinancialModelGenerator
@@ -473,7 +473,7 @@ def propose_parameter_deltas(factors: Dict[str, List[Dict[str, Any]]], base_metr
     )
 
     try:
-        raw = _llm_fn([
+        raw = get_llm()([
             {"role": "system", "content": "You propose bounded, explainable valuation parameter deltas."},
             {"role": "user", "content": prompt}
         ], temperature=llm_temperature)

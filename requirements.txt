@@ -9,6 +9,7 @@ lxml_html_clean>=0.4.2
 
 # AI/LLM functionality  
 openai>=1.30.0
+anthropic>=3.0.0
 tiktoken>=0.9.0
 
 # Financial data scraping

@@ -36,26 +36,10 @@ import pandas as pd
 from model_config import DEFAULTS, BOUNDS, EXCEL_CONFIG, PROMPTS
 from path_utils import get_latest_analysis_path
 from financial_scraper import FinancialScraper
-
-# Excel manipulation libraries
-try:
-    import openpyxl
-    from openpyxl.styles import Font, PatternFill
-    from openpyxl.utils.dataframe import dataframe_to_rows
-    EXCEL_AVAILABLE = True
-except ImportError:
-    EXCEL_AVAILABLE = False
-
-# Optional LLM integration (guarded import)
-def _try_load_llm():
-    try:
-        import sys
-        sys.path.insert(0, str(pathlib.Path(__file__).parent))
-        from llms import gpt_4o_mini
-        return gpt_4o_mini
-    except Exception:
-        return None
-
+import openpyxl
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils.dataframe import dataframe_to_rows
+from llms.config import get_llm
 
 class FinancialModelGenerator:
     """Enhanced, auditable financial model generator for valuation analysis."""
@@ -81,7 +65,7 @@ class FinancialModelGenerator:
         self.logger = None
 
         # --- Optional LLM client (narrative + parameter assist) ---
-        self.llm_function =_try_load_llm()
+        self.llm_function = get_llm()
 
         # --- Stats ---
         self.models_generated = 0
@@ -1207,9 +1191,6 @@ Generic Strategy Considerations:
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
     def save_model_to_excel(self, model: Dict[str, Any]) -> pathlib.Path:
-        if not EXCEL_AVAILABLE:
-            raise ImportError("openpyxl required. Install with: pip install openpyxl")
-
         self._ensure_dirs()
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         filename = f"financial_model_{model['model_type']}_{model['ticker']}_{ts}.xlsx"
