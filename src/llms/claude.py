@@ -45,10 +45,6 @@ def claude_3_5_sonnet(messages: List[Dict], temperature: float = 0.3) -> Tuple[s
     Raises:
         Exception: If all retry attempts fail
     """
-    # Check API key first
-    if not os.getenv('ANTHROPIC_API_KEY'):
-        raise Exception("ANTHROPIC_API_KEY environment variable is not set")
-    
     max_retries = 3
     logger = get_logger()
     last_error = None
@@ -75,6 +71,7 @@ def claude_3_5_sonnet(messages: List[Dict], temperature: float = 0.3) -> Tuple[s
                 "model": "claude-3-5-sonnet-20241022",
                 "messages": user_messages,
                 "temperature": temperature,
+                "max_tokens": 4096,
                 "timeout": 60
             }
             
@@ -145,10 +142,6 @@ def claude_3_5_haiku(messages: List[Dict], temperature: float = 0.3) -> Tuple[st
     Raises:
         Exception: If all retry attempts fail
     """
-    # Check API key first
-    if not os.getenv('ANTHROPIC_API_KEY'):
-        raise Exception("ANTHROPIC_API_KEY environment variable is not set")
-    
     max_retries = 3
     logger = get_logger()
     last_error = None
@@ -175,6 +168,7 @@ def claude_3_5_haiku(messages: List[Dict], temperature: float = 0.3) -> Tuple[st
                 "model": "claude-3-5-haiku-20241022",
                 "messages": user_messages,
                 "temperature": temperature,
+                "max_tokens": 4096,
                 "timeout": 60
             }
             
@@ -245,10 +239,6 @@ def claude_3_opus(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, 
     Raises:
         Exception: If all retry attempts fail
     """
-    # Check API key first
-    if not os.getenv('ANTHROPIC_API_KEY'):
-        raise Exception("ANTHROPIC_API_KEY environment variable is not set")
-    
     max_retries = 3
     logger = get_logger()
     last_error = None
@@ -275,6 +265,7 @@ def claude_3_opus(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, 
                 "model": "claude-3-opus-20240229",
                 "messages": user_messages,
                 "temperature": temperature,
+                "max_tokens": 4096,
                 "timeout": 60
             }
             

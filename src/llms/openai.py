@@ -44,10 +44,6 @@ def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, fl
     Raises:
         Exception: If all retry attempts fail
     """
-    # Check API key first
-    if not os.getenv('OPENAI_API_KEY'):
-        raise Exception("OPENAI_API_KEY environment variable is not set")
-    
     max_retries = 3
     logger = get_logger()
     last_error = None
@@ -55,10 +51,6 @@ def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, fl
     for attempt in range(max_retries):
         try:
             client = OpenAI()
-            
-            # Dynamic timeout based on message length
-            # total_chars = sum(len(msg.get('content', '')) for msg in messages)
-            # timeout = min(60, max(30, total_chars // 1000))  # 30-60 seconds based on content
             
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -83,7 +75,6 @@ def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, fl
                 logger.error(f"Rate limit exceeded (attempt {attempt + 1}/{max_retries}): {e}")
             else:
                 print(f"[llm] Rate limit exceeded (attempt {attempt + 1}/{max_retries}): {e}")
-            # wait_time = 2 ** (attempt + 2)  # Longer wait for rate limits: 8s, 16s, 32s
             
         except (APITimeoutError, APIConnectionError) as e:
             last_error = e
@@ -91,7 +82,6 @@ def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, fl
                 logger.error(f"Connection/timeout error (attempt {attempt + 1}/{max_retries}): {e}")
             else:
                 print(f"[llm] Connection/timeout error (attempt {attempt + 1}/{max_retries}): {e}")
-            # wait_time = 2 ** (attempt + 1)  # Standard backoff: 2s, 4s, 8s
             
         except Exception as e:
             last_error = e
@@ -100,19 +90,19 @@ def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, fl
                 logger.error(f"Unexpected error (attempt {attempt + 1}/{max_retries}): {error_type}: {e}")
             else:
                 print(f"[llm] Unexpected error (attempt {attempt + 1}/{max_retries}): {error_type}: {e}")
-            # wait_time = 2 ** (attempt + 1)  # Standard backoff: 2s, 4s, 8s
 
         if attempt < max_retries - 1:
             if logger:
                 logger.info(f"Retrying in 1 seconds...")
             else:
                 print(f"[llm] Retrying in 1 seconds...")
-            # time.sleep(wait_time)
+            time.sleep(1)
         else:
             error_msg = f"OpenAI API call failed after {max_retries} attempts. Last error: {type(last_error).__name__}: {last_error}"
             if logger:
                 logger.error(f"All {max_retries} attempts failed")
+                logger.error(error_msg)
             else:
                 print(f"[llm] All {max_retries} attempts failed")
-            logger.error(error_msg)
+            raise Exception(error_msg)
 

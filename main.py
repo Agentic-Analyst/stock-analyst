@@ -59,7 +59,7 @@ from path_utils import get_analysis_path, ensure_analysis_paths
 from report_agent import save_explanation_reports, build_deterministic_summary, generate_professional_analyst_report
 
 # Import LLM system
-from llms.config import init_llm, list_models
+from llms.config import init_llm, list_models, list_available_models
 
 class ComprehensiveStockAnalysisPipeline:
     """Integrated 7-step pipeline for complete stock analysis workflow."""
@@ -992,13 +992,26 @@ Examples:
     
     args = parser.parse_args()
     
-    # Handle --list-llms flag
+    # Handle --list-llms flag first
     if args.list_llms:
-        models = list_models()
+        all_models = list_models()
+        available_models = list_available_models()
+        
         print("Available LLM models:")
-        for model in models:
-            print(f"  - {model}")
+        for model in all_models:
+            if model in available_models:
+                print(f"  ✅ {model}")
+            else:
+                print(f"  ❌ {model} (API key missing)")
+        
+        if not available_models:
+            print("\nNo models available. Set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variables.")
+        
         return 0
+    
+    # Check required arguments for normal operation
+    if not all([args.ticker, args.company, args.email, args.timestamp]):
+        parser.error("--ticker, --company, --email, and --timestamp are required for analysis operations")
         
     try:
         # Initialize LLM model
