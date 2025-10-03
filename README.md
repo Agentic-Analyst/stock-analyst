@@ -33,14 +33,15 @@ On Windows:
 set SERPAPI_API_KEY=your_api_key_here
 set OPENAI_API_KEY=your_openai_key_here
 set ANTHROPIC_API_KEY=your_anthropic_key_here
+```
 
-4. Deploy to server:
+4. **Deploy to server:**
 
+```sh
 docker buildx build --platform linux/amd64,linux/arm64 \
 -t fuzanwenn/stock-analyst:latest --push .
 
 docker pull fuzanwenn/stock-analyst:latest
-
 ```
 
 ## Usage
@@ -78,14 +79,11 @@ python src/financial_model_generator.py --ticker NVDA --model comprehensive --sa
 6. **Complete pipeline with LLM selection:**
 
 ```sh
-# Default model (auto-selected)
-python main.py --ticker NVDA --company "NVIDIA"
+# Default model
+python main.py --ticker NVDA --company "NVIDIA" --email user@example.com --timestamp 20241003_120000
 
 # Use specific model
-python main.py --ticker NVDA --company "NVIDIA" --llm claude-3.5-sonnet
-
-# Use category alias
-python main.py --ticker NVDA --company "NVIDIA" --llm premium
+python main.py --ticker NVDA --company "NVIDIA" --email user@example.com --timestamp 20241003_120000 --llm claude-3.5-sonnet
 
 # List available models
 python main.py --list-llms
