@@ -184,17 +184,72 @@ class ArticleScraper:
             "industry_trends": f"{self.company_name} industry market trends"
         }
     
-    def _serpapi_news_links(self, query: str, max_results: int = 20) -> List[str]:
-        """Return up to `max_results` news URLs from Google News via SerpAPI."""
-        search = GoogleSearch({
-            "q": query,
-            "tbm": "nws",
-            "num": max_results,
-            "api_key": self.api_key
-        })
-        result = search.get_dict()
-        news = result.get("news_results", [])
-        return [item["link"] for item in news][:max_results]
+    def _serpapi_news_links(self, query: str, max_results: int = 20) -> List[Dict]:
+        """
+        Return up to `max_results` news metadata from Google News via SerpAPI.
+        
+        Returns list of dictionaries containing:
+        - url: Article URL
+        - title: Article title from SerpAPI
+        - source_name: Source publication name
+        - authors: List of author names  
+        - published_date: Publication date
+        - snippet: Article snippet/summary
+        - thumbnail: Article image URL
+        """
+        try:
+            search = GoogleSearch({
+                "q": query,
+                "tbm": "nws",
+                "num": max_results,
+                "api_key": self.api_key
+            })
+            result = search.get_dict()
+            
+            if not isinstance(result, dict):
+                self._log("warning", f"Unexpected SerpAPI response type: {type(result)}")
+                return []
+                
+            news_results = result.get("news_results", [])
+            
+            if not news_results:
+                self._log("warning", f"No news results found for query: {query}")
+                return []
+            
+            enhanced_results = []
+            for item in news_results[:max_results]:
+                if not isinstance(item, dict):
+                    self._log("warning", f"Unexpected news item type: {type(item)}")
+                    continue
+                    
+                # Extract comprehensive metadata from SerpAPI response
+                news_metadata = {
+                    "url": item.get("link", ""),
+                    "title": item.get("title", ""),
+                    "snippet": item.get("snippet", ""),
+                    "thumbnail": item.get("thumbnail", ""),
+                    "published_date": item.get("date", ""),
+                    "source_name": "",
+                    "authors": [],
+                    "source_icon": ""
+                }
+                
+                # Extract source information
+                source = item.get("source", {})
+                if source and isinstance(source, dict):
+                    news_metadata["source_name"] = source.get("name", "")
+                    news_metadata["source_icon"] = source.get("icon", "")
+                    news_metadata["authors"] = source.get("authors", [])
+                
+                # Only include if we have a valid URL
+                if news_metadata["url"]:
+                    enhanced_results.append(news_metadata)
+                    
+            return enhanced_results
+            
+        except Exception as e:
+            self._log("error", f"SerpAPI search failed for query '{query}': {e}")
+            return []
     
     def _scrape_article(self, url: str) -> Optional[Dict]:
         """Download & parse an article. Returns dict or None on failure."""
@@ -231,32 +286,51 @@ class ArticleScraper:
             writer.writerow({"url": url, "file": filename})
     
     def _save_article_markdown(self, article_data: Dict) -> pathlib.Path:
-        """Save article as markdown file with frontmatter."""
+        """Save article as markdown file with enhanced frontmatter including SerpAPI metadata."""
         # Ensure directories exist
         self.company_dir.mkdir(parents=True, exist_ok=True)
         self.searched_dir.mkdir(parents=True, exist_ok=True)
         
         # Generate filename with timestamp and title slug
         timestamp = datetime.utcnow().strftime("%Y-%m-%d-%H%M%S")
-        title_slug = slugify(article_data['title'][:60])
+        # Use SerpAPI title if available, fallback to scraped title
+        title_for_filename = article_data.get('serpapi_title') or article_data.get('title', 'untitled')
+        title_slug = slugify(title_for_filename[:60])
         filename = f"{timestamp}_{title_slug}.md"
         file_path = self.searched_dir / filename
         
-        # Create markdown content with YAML frontmatter
+        # Prepare enhanced frontmatter with SerpAPI metadata
         search_category = article_data.get('search_category', 'general')
-        markdown_content = (
-            f"---\n"
-            f"title: \"{article_data['title']}\"\n"
-            f"source_url: {article_data['url']}\n"
-            f"publish_date: {article_data['publish_date']}\n"
-            f"word_count: {article_data['word_count']}\n"
-            f"search_category: {search_category}\n"
-            f"scraped_at: {datetime.utcnow().isoformat()}Z\n"
-            f"ticker: {self.ticker}\n"
-            f"company: {self.company_name}\n"
-            f"---\n\n"
-            f"{article_data['text']}\n"
-        )
+        
+        # Use SerpAPI published date if available, fallback to scraped date
+        publish_date = article_data.get('serpapi_published_date') or article_data.get('publish_date', '')
+        
+        # Use SerpAPI title if available, fallback to scraped title
+        title = article_data.get('serpapi_title') or article_data.get('title', 'Untitled Article')
+        
+        # Clean snippet text for YAML (escape quotes)
+        snippet = article_data.get('serpapi_snippet', '').replace('"', '\\"')
+        
+        # Create markdown content with enhanced YAML frontmatter
+        markdown_content = f"""---
+title: "{title}"
+source_url: {article_data['url']}
+publish_date: {publish_date}
+word_count: {article_data['word_count']}
+search_category: {search_category}
+scraped_at: {datetime.utcnow().isoformat()}Z
+ticker: {self.ticker}
+company: {self.company_name}
+# SerpAPI Enhanced Metadata
+serpapi_source: "{article_data.get('serpapi_source', '')}"
+serpapi_authors: {article_data.get('serpapi_authors', [])}
+serpapi_snippet: "{snippet}"
+serpapi_thumbnail: "{article_data.get('serpapi_thumbnail', '')}"
+serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
+---
+
+{article_data['text']}
+"""
         
         file_path.write_text(markdown_content, encoding="utf-8")
         return file_path
@@ -304,8 +378,10 @@ class ArticleScraper:
             current_max = queries_per_type + (1 if i < remainder else 0)
             
             self._log("info", f"📰 {category.replace('_', ' ').title()}: '{query}'")
-            category_urls = self._serpapi_news_links(query, max_results=current_max)
-            all_urls.extend([(url, category) for url in category_urls])
+            category_metadata = self._serpapi_news_links(query, max_results=current_max)
+            # Store both metadata and category info
+            for metadata in category_metadata:
+                all_urls.append((metadata, category))
             
             # Brief pause between different query types
             time.sleep(0.5)
@@ -314,18 +390,20 @@ class ArticleScraper:
             self._log("warning", "No URLs found from news search")
             return self._get_scraping_results()
         
-        # Remove duplicates while preserving category information
-        unique_urls = {}
-        for url, category in all_urls:
-            if url not in unique_urls:
-                unique_urls[url] = category
+        # Remove duplicates while preserving metadata and category information
+        unique_articles = {}
+        for metadata, category in all_urls:
+            url = metadata["url"]
+            if url not in unique_articles:
+                metadata["search_category"] = category
+                unique_articles[url] = metadata
         
         # Load previously seen URLs
         seen_urls = self._load_seen_urls()
-        self._log("info", f"Found {len(unique_urls)} unique URLs across all searches, {len(seen_urls)} already seen")
+        self._log("info", f"Found {len(unique_articles)} unique URLs across all searches, {len(seen_urls)} already seen")
         
-        # Scrape each URL
-        for url, category in unique_urls.items():
+        # Scrape each article
+        for url, metadata in unique_articles.items():
             if url in seen_urls:
                 self.duplicate_count += 1
                 continue
@@ -333,15 +411,24 @@ class ArticleScraper:
             if self.logger:
                 self.logger.scraping_progress(url, "in progress")
             else:
-                self._log("info", f"Scraping [{category}]: {url}")
+                self._log("info", f"🌐 Scraping in progress: {url}")
             
             article_data = self._scrape_article(url)
             
             if not article_data:
                 continue  # Failed scraping already counted in _scrape_article
             
-            # Add category information to article metadata
-            article_data['search_category'] = category
+            # Merge SerpAPI metadata with scraped content
+            article_data.update({
+                'serpapi_title': metadata.get('title', ''),
+                'serpapi_source': metadata.get('source_name', ''),
+                'serpapi_authors': metadata.get('authors', []),
+                'serpapi_published_date': metadata.get('published_date', ''),
+                'serpapi_snippet': metadata.get('snippet', ''),
+                'serpapi_thumbnail': metadata.get('thumbnail', ''),
+                'serpapi_source_icon': metadata.get('source_icon', ''),
+                'search_category': metadata.get('search_category', '')
+            })
             
             # Save article
             try:
@@ -353,7 +440,7 @@ class ArticleScraper:
                 if self.logger:
                     self.logger.file_operation("Article saved", file_path)
                 else:
-                    self._log("info", f"Saved: {file_path}")
+                    self._log("info", f"📁 Article saved: {file_path}")
                 
                 time.sleep(1)  # Be polite to servers
                 
