@@ -20,6 +20,8 @@ import os, csv, argparse, pathlib, re, json, logging
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from llms.config import get_llm
+from dotenv import load_dotenv
+load_dotenv()
 
 # Import vynn_core for MongoDB integration
 try:

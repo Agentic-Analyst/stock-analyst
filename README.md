@@ -35,6 +35,11 @@ set OPENAI_API_KEY=your_openai_key_here
 set ANTHROPIC_API_KEY=your_anthropic_key_here
 ```
 
+## Update of `vynn_core`
+```sh
+pip install --upgrade --force-reinstall git+https://github.com/Agentic-Analyst/vynn-core.git
+```
+
 4. **Deploy to server:**
 
 ```sh
