@@ -300,7 +300,7 @@ class ArticleScraper:
         file_path = self.searched_dir / filename
         
         # Prepare enhanced frontmatter with SerpAPI metadata
-        search_category = article_data.get('search_category', 'general')
+        search_category = article_data.get('search_category', 'general').replace('_', ' ')
         
         # Use SerpAPI published date if available, fallback to scraped date
         publish_date = article_data.get('serpapi_published_date') or article_data.get('publish_date', '')
@@ -395,7 +395,7 @@ serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
         for metadata, category in all_urls:
             url = metadata["url"]
             if url not in unique_articles:
-                metadata["search_category"] = category
+                metadata["search_category"] = category.replace('_', ' ')
                 unique_articles[url] = metadata
         
         # Load previously seen URLs
@@ -481,7 +481,7 @@ serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
                 # Extract search_category from YAML frontmatter
                 if 'search_category:' in content:
                     category_line = [line for line in content.split('\n') if 'search_category:' in line][0]
-                    category = category_line.split('search_category:')[1].strip()
+                    category = category_line.split('search_category:')[1].strip().replace('_', ' ')
                     category_stats[category] = category_stats.get(category, 0) + 1
                     total_articles += 1
             except Exception as e:
