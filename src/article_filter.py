@@ -16,7 +16,7 @@ Features:
 """
 
 from __future__ import annotations
-import os, csv, argparse, pathlib, re, json, logging
+import os, argparse, pathlib, re, json, logging
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from llms.config import get_llm
@@ -56,7 +56,7 @@ class ArticleFilter:
         self.llm_call_count = 0
         
         # Batch processing configuration
-        self.batch_size = 5  # Process articles in batches for efficiency
+        self.batch_size = 10  # Process articles in batches for efficiency
         
         # MongoDB integration - Initialize database if available
         self.db_enabled = VYNN_CORE_AVAILABLE
@@ -98,15 +98,12 @@ class ArticleFilter:
             relevance_path = self.prompts_dir / "article_relevance_scoring.md"
             self.relevance_prompt_template = relevance_path.read_text(encoding='utf-8')
             
-            # Load investment report generation prompt
-            report_path = self.prompts_dir / "investment_report_generation.md"
-            self.report_prompt_template = report_path.read_text(encoding='utf-8')
+            # Report generation removed for cost optimization
             
         except Exception as e:
             self._log(f"Error loading prompt templates: {e}", "error")
-            # Fallback to simple prompts
+            # Fallback to simple prompt
             self.relevance_prompt_template = "Rate the relevance of these articles to: {query}\n{articles_summary}\nProvide scores as: 1:X 2:Y etc."
-            self.report_prompt_template = "Generate an investment report for {ticker} based on:\n{articles_content}"
     
     def set_logger(self, logger):
         """Set the logger instance."""
@@ -341,13 +338,21 @@ class ArticleFilter:
         return batch
 
     def _build_relevance_prompt(self, articles: list) -> str:
-        """Build prompt for LLM relevance assessment using template."""
-        # Prepare articles summary
+        """Build prompt for LLM relevance assessment using template.
+        
+        Cost-optimized: Uses only title and serpapi_snippet instead of full content.
+        """
+        # Prepare articles summary using only title and snippet (cost-effective)
         articles_summary = ""
         for i, article in enumerate(articles, 1):
-            title = article['title'][:100]
-            content_preview = article['content'][:500].replace('\n', ' ')
-            articles_summary += f"\n{i}. Title: {title}\nPreview: {content_preview}...\n"
+            title = article.get('title', 'Untitled')[:100]
+            # Use serpapi_snippet if available, otherwise fallback to short content preview
+            snippet = article.get('serpapi_snippet', '')
+            if not snippet:
+                # Fallback to first 200 chars of content if snippet not available
+                snippet = article.get('content', '')[:200].replace('\n', ' ')
+            
+            articles_summary += f"\n{i}. Title: {title}\nSnippet: {snippet}\n"
         
         # Use template
         return self.relevance_prompt_template.format(
@@ -435,9 +440,6 @@ class ArticleFilter:
         # Save to MongoDB
         db_result = self._save_to_mongodb(db_articles)
         
-        # Create articles index
-        self._create_articles_index(final_articles)
-        
         result = {"filtered_articles": final_articles}
         if db_result:
             result["mongodb_result"] = db_result
@@ -477,116 +479,11 @@ class ArticleFilter:
             import traceback
             self._log(f"Full traceback: {traceback.format_exc()}", "error")
             return None
-
-    def _create_articles_index(self, articles: list):
-        """Create CSV index with LLM scoring information."""
-        index_path = self.filtered_dir / "filtered_articles_index.csv"
-        
-        try:
-            with open(index_path, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['rank', 'filename', 'original_filename', 'title', 'llm_score']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                
-                for article in articles:
-                    writer.writerow(article)
-                    
-            self._log(f"Created articles index at {index_path}")
-            
-        except Exception as e:
-            self._log(f"Error creating articles index: {e}", "error")
     
-    def generate_llm_report(self, filtered_articles: list) -> str:
-        """
-        Generate an intelligent investment report using LLM analysis of filtered articles.
-        
-        Args:
-            filtered_articles: List of filtered article metadata
-            
-        Returns:
-            Generated report as markdown string
-        """
-        if not filtered_articles:
-            return "# Investment Analysis Report\n\nNo relevant articles found for analysis."
-            
-        self._log(f"Generating LLM report for {len(filtered_articles)} articles")
-        
-        try:
-            # Build comprehensive prompt for report generation
-            prompt = self._build_report_prompt(filtered_articles)
-            
-            # Generate report using LLM with proper message format
-            messages = [
-                {"role": "system", "content": "You are a senior financial analyst generating concise research-ready notes."},
-                {"role": "user", "content": prompt},
-            ]
-            report, cost = get_llm()(messages, temperature=0.3)
-            self.llm_call_count += 1
-            
-            # Track actual cost from LLM call
-            self.total_llm_cost += cost
-            
-            # Add metadata footer
-            report += f"\n\n---\n*Report generated using AI analysis of {len(filtered_articles)} filtered articles*\n"
-            report += f"*Query: {self.query}*\n"
-            report += f"*LLM calls: {self.llm_call_count}, Total cost: ${self.total_llm_cost:.4f}*"
-            
-            return report
-            
-        except Exception as e:
-            self._log(f"LLM report generation failed: {e}", "error")
-            return self._generate_fallback_report(filtered_articles)
-
-    def _build_report_prompt(self, articles: list) -> str:
-        """Build comprehensive prompt for investment report generation using template."""
-        # Prepare articles content
-        articles_content = ""
-        for i, article in enumerate(articles[:8], 1):  # Limit to top 8 for token management
-            title = article['title']
-            score = article['llm_score']
-            
-            # Read article content for analysis
-            try:
-                searched_dir = self.company_dir / "searched"
-                source_path = searched_dir / article['original_filename']
-                if source_path.exists():
-                    content = source_path.read_text(encoding='utf-8')
-                    # Extract key sections (first 500 words)
-                    content_preview = ' '.join(content.split()[:500])
-                else:
-                    content_preview = "Content not available"
-            except:
-                content_preview = "Content not available"
-                
-            articles_content += f"\n--- Article {i} (Score: {score:.1f}) ---\n"
-            articles_content += f"Title: {title}\n"
-            articles_content += f"Content: {content_preview}\n"
-        
-        # Use template
-        return self.report_prompt_template.format(
-            ticker=self.ticker,
-            query=self.query,
-            articles_content=articles_content
-        )
-
-    def _generate_fallback_report(self, articles: list) -> str:
-        """Generate basic report without LLM when LLM fails."""
-        report = f"# Investment Analysis Report - {self.ticker}\n\n"
-        report += f"**Query:** {self.query}\n\n"
-        report += f"**Analysis Date:** {datetime.now().strftime('%Y-%m-%d')}\n\n"
-        
-        report += "## Executive Summary\n\n"
-        report += f"Analyzed {len(articles)} relevant articles for {self.ticker} investment insights.\n\n"
-        
-        report += "## Key Articles\n\n"
-        for i, article in enumerate(articles[:5], 1):
-            score = article['llm_score']
-            report += f"{i}. **{article['title']}** (Score: {score:.1f})\n"
-            
-        report += "\n*Note: Detailed analysis unavailable due to LLM service issues.*\n"
-        
-        return report
-
+    # REMOVED: generate_llm_report(), _build_report_prompt(), _generate_fallback_report()
+    # Reason: Cost optimization - report generation is expensive and not essential
+    # Filtered articles with rankings are available in filtered/ directory
+    
     # News Feed System Methods
 
     def get_recent_articles_from_db(self, limit: int = 50, min_score: float = 5.0) -> list:

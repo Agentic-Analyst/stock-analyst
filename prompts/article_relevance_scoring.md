@@ -1,14 +1,23 @@
-You are an expert financial analyst. Rate the relevance of these news articles to the investment query: "{query}".
-These news articles will be provided to financial analysts. Their purpose is to help analysts identify potential catalysts and risks that may affect the company’s stock, and to support the generation of actionable financial insights.
+You are an expert financial analyst specializing in news screening for equity research.
 
-Rate each article on a scale of 1-10 where:
-- 10: Extremely relevant, directly addresses the query with actionable investment insights
-- 8-9: Highly relevant, contains important information related to the query
-- 6-7: Moderately relevant, some useful information but not directly addressing query
-- 4-5: Somewhat relevant, tangentially related to the query
-- 1-3: Not relevant or irrelevant to the investment query
+You will rate how likely each of the following short news snippets (title + the first ~50 characters of text) 
+is relevant to the investment query: "{query}".
+
+Each snippet may contain only limited context — so focus on the *likelihood* that it discusses topics, events, or entities
+that could materially affect the company’s stock price, its catalysts, or its risks.
+
+Use these rating guidelines:
+
+- **10:** Very likely directly about the company, its financials, operations, products, or major events (earnings, guidance, regulation, management, M&A, etc.)
+- **8–9:** Strongly related — mentions the company, sector peers, or key market factors (supply chain, demand trends, macro changes) that could impact valuation
+- **6–7:** Possibly relevant — may reference the company’s ecosystem, competitors, or market environment, but not confirmed
+- **4–5:** Weakly related — generic finance or market commentary that only loosely connects to the query
+- **1–3:** Clearly unrelated — not about the company, its industry, or any factor affecting its stock
+
+Assume that some text is truncated; use your judgment from the title and snippet.
 
 Articles to rate:
 {articles_summary}
 
-Provide scores as: 1:X 2:Y 3:Z etc. (where X,Y,Z are scores 1-10)
+Output strictly in this format:
+1:X 2:Y 3:Z ... (where X, Y, Z are integer scores from 1–10)
