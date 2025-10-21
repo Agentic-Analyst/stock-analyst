@@ -49,12 +49,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
 # Import all pipeline modules
 from logger import setup_logger, StockAnalystLogger
 from financial_scraper import FinancialScraper
-from financial_model_generator import FinancialModelGenerator  
+# NEW: Use the rewritten financial model builder from agents/fm
+from agents.fm import create_financial_model
 from article_scraper import ArticleScraper
 from article_filter import ArticleFilter
 from article_screener import ArticleScreener
-from price_adjustor import compute_adjustment, parse_screening_report, propose_parameter_deltas, extract_base_operating_metrics
-from event_param_mapping import aggregate_mapped_parameter_deltas, classify_event
+# Price adjustor functions removed - not compatible with NEW Excel-only model
 from path_utils import get_analysis_path, ensure_analysis_paths
 from report_agent import save_explanation_reports, build_deterministic_summary, generate_professional_analyst_report
 
@@ -117,43 +117,35 @@ class ComprehensiveStockAnalysisPipeline:
         self.logger.info(f"📊 All logs will be saved to: {self.logger.get_log_file_path()}")
     
     def run_comprehensive_pipeline(self,
-                                  # Financial modeling parameters
-                                  model_type: str = "comprehensive",
-                                  projection_years: int = 5,
-                                  term_growth: Optional[float] = None,
-                                  wacc_override: Optional[float] = None,
-                                  strategy: Optional[str] = None,
-                                  peers: Optional[str] = None,
                                   # News analysis parameters  
                                   max_searched: int = 30,
                                   query_override: Optional[str] = None,
                                   min_filter_score: float = 3.0,
                                   max_filtered: int = 15,
-                                  min_confidence: float = 0.5,
-                                  # Price adjustment parameters
-                                  scaling: float = 0.15,
-                                  adjustment_cap: float = 0.20,
-                                  generate_reports: bool = True) -> Dict:
+                                  min_confidence: float = 0.5) -> Dict:
         """
-        Run the complete 7-step analysis pipeline.
+        Run the complete analysis pipeline.
+        
+        Pipeline Stages:
+        1. Financial Scraping - Collect financial statements
+        2. Financial Model Generation - Build banker-grade DCF model (LLM-powered)
+        3. News Scraping - Collect recent news articles
+        4. Article Filtering - Filter for relevance using LLM
+        5. Article Screening - Extract investment insights using LLM
+        6. Report Generation - Generate professional analyst report
+        
+        Note: The NEW financial model builder automatically:
+        - Generates comprehensive 9-tab DCF model
+        - Infers assumptions using LLM (WACC, terminal growth, margins, etc.)
+        - Projects 5 years forward (FY1-FY5)
+        - Outputs Excel file with formulas
         
         Args:
-            model_type: Financial model type ('dcf', 'comparable', 'comprehensive')
-            projection_years: Number of projection years (default: 5)
-            term_growth: Terminal growth rate (auto-infer if None)
-            wacc_override: Override WACC (auto-infer if None)  
-            strategy: Force specific forecast strategy (auto-select if None)
-            peers: Comma-separated peer tickers for comparable analysis (e.g., 'AAPL,MSFT,GOOGL')
             max_searched: Maximum articles to search/scrape
             query_override: Override default search query for news articles
             min_filter_score: Minimum relevance score for filtering (0-10)
             max_filtered: Maximum filtered articles to keep
             min_confidence: Minimum confidence for screening insights (0-1)
-            scaling: Base scaling factor for qualitative adjustment
-            adjustment_cap: Maximum adjustment percentage (±)
-            generate_reports: Whether to generate analysis reports
-            
-        Note: Deterministic event→parameter mapping and LLM scenarios are always enabled.
             
         Returns:
             Dictionary with complete pipeline results
@@ -168,15 +160,12 @@ class ComprehensiveStockAnalysisPipeline:
         financial_results = self.run_financial_scraping_stage()
         
         # Step 2: Financial Model Generation
-        self.logger.stage_start("FINANCIAL MODEL GENERATION", "Building DCF and comparable models with LLM insights")
-        model_results = self.run_model_generation_stage(
-            model_type, projection_years, term_growth, wacc_override, strategy, peers
-        )
+        self.logger.stage_start("FINANCIAL MODEL GENERATION", "Building DCF model with LLM-inferred assumptions")
+        model_results = self.run_model_generation_stage()
         
-        if not model_results.get("model"):
-            self.logger.error("❌ Financial model generation failed. Cannot continue to price adjustment.")
-            return self._get_pipeline_results()
-
+        if not model_results.get("success"):
+            self.logger.error("❌ Financial model generation failed. Continuing with news analysis...")
+        
         # Step 3: Article Scraping
         self.logger.stage_start("ARTICLE SCRAPING", "Collecting news articles from Google News")
         news_results = self.run_news_scraping_stage(max_searched, query_override)
@@ -190,43 +179,43 @@ class ComprehensiveStockAnalysisPipeline:
         # Step 5: Article Screening
         self.logger.stage_start("ARTICLE SCREENING", "Extracting investment insights using LLM")
         screening_results = self.run_screening_stage(
-            filtering_results.get("filtered_articles", []), min_confidence, generate_reports
+            filtering_results.get("filtered_articles", []), min_confidence
         )
         
-        # Step 6: Price Adjustment
-        self.logger.stage_start("PRICE ADJUSTMENT", "Combining quantitative model with qualitative factors")
-        price_results = self.run_price_adjustment_stage(
-            model_results, screening_results, scaling, adjustment_cap  # Mapped deltas and LLM scenarios always enabled
-        )
-        
-        # Generate technical analysis report (deterministic summary) as part of the main workflow
-        try:
-            if price_results.get("success"):
-                pa = price_results.get("price_analysis", {})
+        # Step 6: Professional Report Generation (if model was generated successfully)
+        if model_results.get("success") and screening_results:
+            self.logger.stage_start("PROFESSIONAL REPORT GENERATION", "Generating comprehensive analyst-style research report")
+            try:
+                # Generate technical analysis report (deterministic summary)
                 def _to_dict(x):
                     try:
                         return asdict(x)
                     except Exception:
                         return x if isinstance(x, dict) else dict(x.__dict__) if hasattr(x, '__dict__') else {"value": x}
+                
                 factors = {
                     "catalysts": [_to_dict(c) for c in screening_results.get("catalysts", [])],
                     "risks": [_to_dict(r) for r in screening_results.get("risks", [])],
                     "mitigations": [_to_dict(m) for m in screening_results.get("mitigations", [])],
                 }
-                meta = {"model": model_type, "years": projection_years, "term_growth": term_growth}
-                det_md = build_deterministic_summary(self.ticker, pa, factors, meta)
+                meta = {"model": "comprehensive_dcf", "years": 5, "excel_path": model_results.get("excel_path")}
+                
+                # Note: Price analysis not available since NEW model outputs Excel only
+                # Users should open the Excel file to view valuation results
+                det_md = build_deterministic_summary(self.ticker, {}, factors, meta)
                 self.logger.info(f"📝 Generating financial analysis summary for {self.ticker}")
-                self.logger.info(f"📄 Financial analysis summary generated successfully:\n{det_md}")
+                self.logger.info(f"📄 Financial analysis summary generated successfully")
                 saved = save_explanation_reports(self.ticker, det_md, self.analysis_path)
                 self.logger.info(f"📝 Financial analysis summary saved: {saved['path']} (latest: {saved['latest']})")
-                # Step 7: Professional Analyst Report Generation
-                self.logger.stage_start("PROFESSIONAL REPORT GENERATION", "Generating comprehensive analyst-style research report")
+                
+                # Generate professional report
                 report_results = self.run_professional_report_stage(
-                    model_results, screening_results, price_results
+                    model_results, screening_results, {}  # Empty price_results since model is Excel-only
                 )
-                self.logger.info(f"📄 Professional analyst report generated successfully:\n{report_results['professional_report']}")
-        except Exception as e:
-            self.logger.warning(f"⚠️ Failed to generate financial analysis summary: {e}")
+                if report_results.get("success"):
+                    self.logger.info(f"📄 Professional analyst report generated successfully")
+            except Exception as e:
+                self.logger.warning(f"⚠️  Failed to generate reports: {e}")
 
         # Pipeline completion
         duration = (datetime.now() - self.stats["start_time"]).total_seconds()
@@ -243,7 +232,7 @@ class ComprehensiveStockAnalysisPipeline:
             financial_data = self.financial_scraper.scrape_financial_modeling_data(annual=True)
             
             # Save the financial data to file for the model generator to use
-            file_path = self.financial_scraper.save_financial_data(financial_data, annual=True, statements_scraped=["modeling"])
+            file_path = self.financial_scraper.save_financial_data(financial_data)
             self.logger.info(f"💾 Financial data saved to: {file_path}")
             
             # Update statistics
@@ -301,86 +290,67 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.error(f"❌ Financial scraping failed: {e}")
             return {"success": False, "error": str(e)}
     
-    def run_model_generation_stage(self, model_type: str, projection_years: int,
-                                  term_growth: Optional[float], wacc_override: Optional[float],
-                                  strategy: Optional[str], peers: Optional[str] = None) -> Dict:
-        """Run the financial model generation stage."""
+    def run_model_generation_stage(self) -> Dict:
+        """Run the financial model generation stage using NEW FinancialModelBuilder.
+        
+        The NEW implementation:
+        - Always generates comprehensive 9-tab banker-grade DCF model
+        - Always uses LLM to automatically infer assumptions (WACC, terminal growth, etc.)
+        - Always projects 5 years forward (FY1-FY5)
+        - Outputs Excel file only (no Python dict)
+        """
         try:
-            # Initialize model generator with LLM control
-            self.model_generator = FinancialModelGenerator(
-                self.ticker, 
-                data_file=None, 
-                base_path=self.analysis_path, 
-                email=self.email
-            )
-            # Inject centralized logger for unified output
-            if hasattr(self.model_generator, 'set_logger'):
-                self.model_generator.set_logger(self.logger)
+            self.logger.info(f"🔢 Generating banker-grade DCF model for {self.ticker}...")
             
-            # Handle force overrides - if enabled, pre-populate overrides to bypass LLM agentic system
-            if term_growth is not None:
-                self.model_generator.overrides['terminal_growth'] = term_growth
-            if wacc_override is not None:
-                self.model_generator.overrides['wacc'] = wacc_override
+            # Find the latest modeling JSON file
+            json_file = self.analysis_path / "financials" / "financials_annual_modeling_latest.json"
             
-            self.logger.info(f"🔢 Generating {model_type} model for {self.ticker}...")            
-            # Parse peers if provided
-            peer_list = None
-            if peers:
-                peer_list = [p.strip().upper() for p in peers.split(',') if p.strip().upper() != self.ticker]
-                if peer_list:
-                    self.logger.info(f"📊 Including peer comparison with: {', '.join(peer_list)}")
-                else:
-                    self.logger.info("⚠️ No valid peer tickers provided after filtering")
+            if not json_file.exists():
+                self.logger.error(f"❌ Financial data file not found: {json_file}")
+                return {"success": False, "error": "Financial data file not found"}
             
-            # Generate comprehensive financial model
-            model = self.model_generator.generate_financial_model(
-                model_type=model_type,
-                projection_years=projection_years,
-                term_growth=term_growth,
-                override_wacc=wacc_override,
-                strategy=strategy,
-                peers=peer_list,
-                generate_sensitivities=True
+            # Create output path
+            output_file = self.analysis_path / "models" / f"{self.ticker}_financial_model.xlsx"
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Build the model using NEW FinancialModelBuilder
+            # This automatically calls LLM to infer all assumptions
+            self.logger.info(f"📊 Building model with LLM-inferred assumptions...")
+            
+            create_financial_model(
+                ticker=self.ticker,
+                json_path=str(json_file),
+                output_path=str(output_file)
             )
             
-            # Save model outputs (always enabled in production)
-            excel_path = None
-            try:
-                excel_path = self.model_generator.save_model_to_excel(model)
-                self.logger.info(f"📊 Model saved to Excel: {excel_path}")
-                self.logger.info(f"📁 Latest version available as: financial_model_{model_type}_latest.xlsx")
-            except Exception as e:
-                self.logger.warning(f"⚠️ Excel export failed: {e}")
-                # Continue without Excel - model is still valid
+            self.logger.info(f"✅ Model saved to Excel: {output_file}")
             
             # Update statistics
             self.stats["model_generation"] = {
-                "model_type": model_type,
-                "projection_years": projection_years,
-                "strategy_used": model.get("valuation_summary", {}).get("Strategy") or model.get("parameters", {}).get("strategy", "unknown"),
-                "implied_price": model.get("valuation_summary", {}).get("Implied Price"),
-                "peers_included": peer_list if peer_list else [],
-                "excel_saved": str(excel_path) if excel_path else "Failed"
+                "model_type": "comprehensive_dcf",
+                "projection_years": 5,
+                "strategy_used": "llm_inferred",
+                "excel_path": str(output_file),
+                "tabs_generated": 10  # 9 visible + 1 hidden LLM_Inferred
             }
             self.stats["stages_completed"].append("model_generation")
             
             # Log results
-            valuation = model.get("valuation_summary", {})
             stats = {
-                "Model strategy": model.get("valuation_summary", {}).get("Strategy") or model.get("parameters", {}).get("strategy", "N/A"),
-                "Implied price": f"${valuation.get('Implied Price', 0):,.2f}" if valuation.get('Implied Price') else "N/A",
-                "WACC used": f"{valuation.get('WACC', 0)*100:.1f}%" if valuation.get('WACC') else "N/A",
-                "Terminal growth": f"{valuation.get('Terminal Growth', 0)*100:.1f}%" if valuation.get('Terminal Growth') else "N/A"
+                "Model type": "Banker-grade DCF (9 tabs)",
+                "Implementation": "NEW FinancialModelBuilder",
+                "Tabs": "Raw, Keys_Map, Assumptions, Historical, Projections, 2×DCF, Sensitivity, Summary",
+                "LLM": "Assumptions automatically inferred",
+                "Excel file": str(output_file.name)
             }
-            if peer_list:
-                stats["Peer comparison"] = f"{len(peer_list)} peers included"
             self.logger.stage_end("FINANCIAL MODEL GENERATION", True, stats)
             
-            return {"success": True, "model": model, "excel_path": excel_path}
+            return {"success": True, "excel_path": str(output_file)}
             
         except Exception as e:
             self.logger.error(f"❌ Financial model generation failed: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return {"success": False, "error": str(e)}
     
     def run_news_scraping_stage(self, max_searched: int = 30, query_override: Optional[str] = None) -> Dict:
@@ -432,10 +402,8 @@ class ComprehensiveStockAnalysisPipeline:
                 self.logger.warning("⚠️  No articles met the filtering criteria")
                 return {"filtered_articles": [], "filtered_count": 0, "llm_cost": 0.0}
             
-            # Generate LLM report
-            report = self.article_filter.generate_llm_report(result["filtered_articles"])
-            report_path = self.article_filter.filtered_dir / "filtered_report.md"
-            report_path.write_text(report, encoding='utf-8')
+            # Note: LLM report generation removed to save costs
+            # Filtered articles are available in filtered/ directory with rankings
             
             # Update statistics
             filtering_results = {
@@ -474,8 +442,7 @@ class ComprehensiveStockAnalysisPipeline:
     
     def run_screening_stage(self, 
                            filtered_articles: List = None, 
-                           min_confidence: float = 0.5,
-                           generate_reports: bool = True) -> Dict:
+                           min_confidence: float = 0.5) -> Dict:
         """Run the article screening/analysis stage."""
         try:
             # Load articles if not provided
@@ -555,19 +522,11 @@ class ComprehensiveStockAnalysisPipeline:
             # Generate reports (always enabled in production)
             report_file = self.analysis_path / "screened" / "screening_report.md"
             data_file = self.analysis_path / "screened" / "screening_data.json"
-            if generate_reports:
-                self.article_screener.generate_screening_report(
-                    high_conf_catalysts, high_conf_risks, high_conf_mitigations, analysis_summary, report_file
-                )
-                self.article_screener.save_structured_data(
-                    high_conf_catalysts, high_conf_risks, high_conf_mitigations, analysis_summary, data_file
-                )
-                self.logger.file_operation("Report generated", report_file)
-                self.logger.file_operation("Structured data saved", data_file)
-            else:
-                self.logger.info("🛈 Report generation disabled (generate_reports=False)")
-                report_file = None
-                data_file = None
+            self.article_screener.save_structured_data(
+                high_conf_catalysts, high_conf_risks, high_conf_mitigations, analysis_summary, data_file
+            )
+            self.logger.file_operation("Report generated", report_file)
+            self.logger.file_operation("Structured data saved", data_file)
             
             # Log results
             stats = {
@@ -587,329 +546,9 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.error(f"❌ Screening stage failed: {e}")
             return {"catalysts": [], "risks": [], "mitigations": [], "error": str(e)}
     
-    def run_price_adjustment_stage(self, model_results: Dict, screening_results: Dict,
-                                  scaling: float, adjustment_cap: float) -> Dict:
-        """Run the price adjustment stage combining quantitative model with qualitative factors using LLM intelligence."""
-        try:
-            model = model_results.get("model", {})
-            base_price = model.get("valuation_summary", {}).get("Implied Price")
-            
-            if not base_price:
-                self.logger.error("❌ No base price available from financial model")
-                return {"success": False, "error": "No base price available"}
-            
-            self.logger.info(f"💰 Base implied price: ${base_price:,.2f}")
-            
-            # Log comparison with current market price if available
-            current_price = self.company_data.get("market_data", {}).get("current_price")
-            if current_price:
-                price_diff = ((base_price / current_price) - 1) * 100
-                self.logger.info(f"📊 vs Current market price: ${current_price:.2f} ({price_diff:+.1f}%)")
-            
-            # Parse screening report to extract factors
-            screening_report_path = self.analysis_path / "screened" / "screening_report.md"
-            
-            if screening_report_path.exists():
-                factors = parse_screening_report(screening_report_path)
-                self.logger.info(f"📋 Parsed screening report: {len(factors.get('catalysts', []))} catalysts, {len(factors.get('risks', []))} risks, {len(factors.get('mitigations', []))} mitigations")
-            else:
-                # Fallback: convert screening_results dataclasses to dict format
-                self.logger.warning("⚠️ No screening report file found, using direct screening results")
-                def _to_dict(x):
-                    try:
-                        return asdict(x)
-                    except Exception:
-                        if isinstance(x, dict):
-                            return x
-                        return dict(x.__dict__) if hasattr(x, '__dict__') else {"value": x}
-                
-                factors = {
-                    "catalysts": [_to_dict(c) for c in screening_results.get("catalysts", [])],
-                    "risks": [_to_dict(r) for r in screening_results.get("risks", [])],
-                    "mitigations": [_to_dict(m) for m in screening_results.get("mitigations", [])]
-                }
-            
-            # Classify events for mapping if not already classified
-            for kind in ("catalysts", "risks"):
-                for item in factors[kind]:
-                    if 'event_type' not in item or not item['event_type']:
-                        try:
-                            item['event_type'] = classify_event(item.get('description','') or item.get('type',''), item.get('description',''))
-                        except Exception:
-                            pass
-            
-            output = {
-                'ticker': self.ticker,
-                'base_model_price': base_price,
-                'screen_file_present': screening_report_path.exists(),
-            }
-            
-            # *** CORE CHANGE: Use LLM to propose intelligent parameter deltas instead of hardcoded calculations ***
-            self.logger.info("🤖 Using LLM to intelligently propose parameter adjustments based on screening factors...")
-            
-            # Extract base metrics from the financial model
-            base_metrics = extract_base_operating_metrics(model)
-            self.logger.info(f"📊 Base model metrics: {', '.join(f'{k}={v:.4f}' if v is not None else f'{k}=None' for k, v in base_metrics.items())}")
-            
-            # Use LLM to propose parameter deltas based on screening factors
-            llm_deltas_result = propose_parameter_deltas(factors, base_metrics)
-            
-            if llm_deltas_result.get("errors"):
-                self.logger.warning(f"⚠️ LLM parameter delta proposal had errors: {'; '.join(llm_deltas_result['errors'])}")
-            
-            proposed_deltas = llm_deltas_result.get("deltas", [])
-            
-            if proposed_deltas:
-                self.logger.info(f"🧠 LLM proposed {len(proposed_deltas)} parameter adjustments:")
-                for delta in proposed_deltas:
-                    param = delta['param']
-                    value = delta['delta_applied']
-                    reason = delta['reason'][:100] + "..." if len(delta['reason']) > 100 else delta['reason']
-                    sources = ', '.join(delta['sources'][:3])  # Show first 3 sources
-                    self.logger.info(f"   • {param}: {value:+.4f} | Reason: {reason} | Sources: {sources}")
-                
-                # Apply LLM-proposed deltas to create adjusted model
-                llm_adjusted_deltas = {
-                    delta['param']: delta['delta_applied'] 
-                    for delta in proposed_deltas
-                }
-                
-                # Create model with LLM-adjusted parameters
-                llm_adjusted_model = self._apply_parameter_deltas_to_model(model, llm_adjusted_deltas)
-                llm_adjusted_price = llm_adjusted_model.get("valuation_summary", {}).get("Implied Price")
-                
-                if llm_adjusted_price:
-                    llm_adjustment_pct = (llm_adjusted_price / base_price) - 1
-                    output['llm_adjusted_price'] = llm_adjusted_price
-                    output['llm_adjustment_pct'] = llm_adjustment_pct
-                    output['llm_deltas'] = proposed_deltas
-                    output['llm_raw_response'] = llm_deltas_result.get('raw_response', '')
-                    
-                    self.logger.info(f"🎯 LLM-adjusted price: ${llm_adjusted_price:,.2f} (Δ {llm_adjustment_pct*100:+.1f}%)")
-                    
-                    # Use LLM-adjusted price as our primary adjusted price
-                    output['adjusted_price'] = llm_adjusted_price
-                    output['adjustment_pct'] = llm_adjustment_pct
-                else:
-                    self.logger.warning("⚠️ LLM-adjusted model failed to produce a price, using base price")
-                    output['adjusted_price'] = base_price
-                    output['adjustment_pct'] = 0.0
-            else:
-                self.logger.info("🛈 LLM did not propose any parameter adjustments - using base price")
-                output['adjusted_price'] = base_price
-                output['adjustment_pct'] = 0.0
-            
-            # Generate intelligent bull/bear scenarios using volatility estimation
-            # Use LLM-informed volatility based on the dispersion of screening factors
-            catalyst_confidences = [float(c.get('confidence', 0.5)) for c in factors.get('catalysts', [])]
-            risk_confidences = [float(r.get('confidence', 0.5)) for r in factors.get('risks', [])]
-            all_confidences = catalyst_confidences + risk_confidences
-            
-            if len(all_confidences) >= 2:
-                confidence_variance = sum((c - sum(all_confidences)/len(all_confidences))**2 for c in all_confidences) / len(all_confidences)
-                vol_buffer = min(0.05 + confidence_variance * 0.5, 0.20)  # 5% base + confidence dispersion, max 20%
-            else:
-                vol_buffer = 0.10  # Default 10% buffer
-            
-            adjusted_price = output['adjusted_price']
-            output['bull_price'] = adjusted_price * (1 + vol_buffer)
-            output['bear_price'] = adjusted_price * (1 - vol_buffer)
-            output['vol_buffer'] = vol_buffer
-            
-            self.logger.info(f"📊 Intelligent price range: ${output['bear_price']:,.2f} (Bear) - ${output['bull_price']:,.2f} (Bull)")
-            
-            # Generate scenario summary
-            scenarios = [
-                {"name": "Base (Model Only)", "price": base_price, "delta_pct": 0.0},
-                {"name": "LLM-Adjusted", "price": adjusted_price, "delta_pct": output['adjustment_pct']},
-                {"name": "Bull Case", "price": output['bull_price'], "delta_pct": (output['bull_price']/base_price) - 1},
-                {"name": "Bear Case", "price": output['bear_price'], "delta_pct": (output['bear_price']/base_price) - 1},
-            ]
-            output['scenarios'] = scenarios
-
-            # Update statistics
-            self.stats["price_adjustment"] = {
-                "base_price": base_price,
-                "llm_adjusted_price": output.get('llm_adjusted_price'),
-                "llm_adjustment_pct": output.get('llm_adjustment_pct'),
-                "final_adjusted_price": adjusted_price,
-                "llm_deltas_count": len(proposed_deltas),
-                "factors_processed": {
-                    "catalysts": len(factors['catalysts']),
-                    "risks": len(factors['risks']),
-                    "mitigations": len(factors['mitigations'])
-                },
-                "vol_buffer": vol_buffer,
-                "llm_errors": llm_deltas_result.get("errors", [])
-            }
-            self.stats["stages_completed"].append("price_adjustment")
-            
-            # Log results
-            stats = {
-                "Base price": f"${base_price:,.2f}",
-                "LLM-adjusted price": f"${adjusted_price:,.2f}",
-                "LLM adjustment": f"{output['adjustment_pct']*100:+.1f}%",
-                "Bull/Bear range": f"${output['bear_price']:,.2f} - ${output['bull_price']:,.2f}",
-                "Parameter deltas": f"{len(proposed_deltas)} LLM-proposed"
-            }
-            
-            self.logger.stage_end("PRICE ADJUSTMENT", True, stats)
-            
-            return {"success": True, "price_analysis": output}
-            
-        except Exception as e:
-            self.logger.error(f"❌ Price adjustment stage failed: {e}")
-            return {"success": False, "error": str(e)}
-    
-    def _apply_parameter_deltas_to_model(self, base_model: Dict, deltas: Dict) -> Dict:
-        """Apply parameter deltas to base model and recompute valuation.
-        
-        Supports both LLM parameter format (first_year_growth, margin_uplift, capex_rate, wacc)
-        and legacy format (growth_delta_dec, margin_uplift_dec, etc.)
-        """
-        try:
-            if not self.model_generator:
-                return base_model
-                
-            # Capture original overrides
-            original_overrides = dict(self.model_generator.overrides)
-            new_overrides = dict(original_overrides)
-            
-            # Handle LLM parameter format (preferred)
-            if 'first_year_growth' in deltas:
-                delta = deltas['first_year_growth']
-                if abs(delta) > 1e-8:
-                    base_g = original_overrides.get('first_year_growth') or 0.0
-                    new_overrides['first_year_growth'] = max(0.0, base_g + delta)
-            
-            if 'margin_uplift' in deltas:
-                delta = deltas['margin_uplift']
-                if abs(delta) > 1e-8:
-                    base_mu = original_overrides.get('margin_uplift') or 0.0
-                    new_overrides['margin_uplift'] = base_mu + delta
-            
-            if 'capex_rate' in deltas:
-                delta = deltas['capex_rate']
-                if abs(delta) > 1e-8:
-                    base_capex = original_overrides.get('capex_rate') or 0.0
-                    new_overrides['capex_rate'] = max(0.0, base_capex + delta)
-            
-            if 'wacc' in deltas:
-                delta = deltas['wacc']
-                if abs(delta) > 1e-8:
-                    base_wacc = base_model.get('valuation_summary', {}).get('WACC')
-                    if base_wacc:
-                        new_overrides['override_wacc'] = max(0.01, base_wacc + delta)  # Minimum 1% WACC
-            
-            # Handle legacy parameter format for backward compatibility
-            elif 'growth_delta_dec' in deltas:
-                gd = deltas.get('growth_delta_dec')
-                if gd and abs(gd) > 1e-8:
-                    base_g = original_overrides.get('first_year_growth') or 0.0
-                    new_overrides['first_year_growth'] = max(0.0, base_g + gd)
-            
-            if 'margin_uplift_dec' in deltas:
-                mu = deltas.get('margin_uplift_dec')
-                if mu and abs(mu) > 1e-8:
-                    base_mu = original_overrides.get('margin_uplift') or 0.0
-                    new_overrides['margin_uplift'] = base_mu + mu
-            
-            if 'capex_rate_delta_dec' in deltas:
-                capx = deltas.get('capex_rate_delta_dec')
-                if capx and abs(capx) > 1e-8:
-                    base_capex = original_overrides.get('capex_rate') or 0.0
-                    new_overrides['capex_rate'] = max(0.0, base_capex + capx)
-                    
-            if 'wacc_delta_dec' in deltas:
-                wacc_d = deltas.get('wacc_delta_dec')
-                if wacc_d and abs(wacc_d) > 1e-8:
-                    base_wacc = base_model.get('valuation_summary', {}).get('WACC')
-                    if base_wacc:
-                        new_overrides['override_wacc'] = max(0.01, base_wacc + wacc_d)  # Minimum 1% WACC
-            
-            # Apply and regenerate model (reuse original model generation parameters from stats)
-            self.model_generator.overrides = new_overrides
-            gen_stats = self.stats.get('model_generation', {})
-            model_type = gen_stats.get('model_type', 'dcf')
-            projection_years = gen_stats.get('projection_years', 5)
-            term_growth = base_model.get('valuation_summary', {}).get('Terminal Growth')
-            override_wacc = new_overrides.get('override_wacc')
-            adjusted_model = self.model_generator.generate_financial_model(
-                model_type=model_type,
-                projection_years=projection_years,
-                term_growth=term_growth,
-                override_wacc=override_wacc,
-                strategy=None,
-                peers=None,
-                generate_sensitivities=False
-            )
-            # Restore overrides to original to avoid side-effects for subsequent operations
-            self.model_generator.overrides = original_overrides
-            return adjusted_model
-        except Exception as e:
-            self.logger.warning(f"⚠️ Re-forecast with parameter deltas failed: {e}")
-            return base_model
-    
-    def run_professional_report_stage(self, model_results: Dict, screening_results: Dict, price_results: Dict) -> Dict:
-        """Generate a professional analyst-style research report using LLM synthesis."""
-        try:
-            self.logger.info(f"🎯 Generating professional analyst report for {self.company_name}...")
-            
-            # Extract key data for report generation
-            financial_model = model_results.get("model", {})
-            price_analysis = price_results.get("price_analysis", {})
-            
-            # Generate professional analyst report
-            professional_report = generate_professional_analyst_report(
-                ticker=self.ticker,
-                company_name=self.company_name,
-                financial_model=financial_model,
-                screening_results=screening_results,
-                price_analysis=price_analysis,
-                company_data=self.company_data
-            )
-            
-            # Save professional report
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            report_dir = self.analysis_path / 'reports'
-            report_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Save with timestamp and latest versions
-            professional_report_path = report_dir / f"professional_analyst_report_{self.ticker}_{timestamp}.md"
-            professional_report_latest = report_dir / "professional_analyst_report_latest.md"
-            
-            professional_report_path.write_text(professional_report, encoding='utf-8')
-            professional_report_latest.write_text(professional_report, encoding='utf-8')
-            
-            # Update statistics
-            self.stats["professional_report"] = {
-                "success": True,
-                "report_length": len(professional_report),
-                "saved_path": str(professional_report_path),
-                "latest_path": str(professional_report_latest)
-            }
-            self.stats["stages_completed"].append("professional_report")
-            
-            # Log results
-            stats = {
-                "Report length": f"{len(professional_report):,} characters",
-                "Professional report": "✓ Generated",
-                "Saved to": f"reports/professional_analyst_report_latest.md"
-            }
-            self.logger.stage_end("PROFESSIONAL REPORT GENERATION", True, stats)
-            
-            self.logger.info(f"📄 Professional analyst report saved to: {professional_report_latest}")
-            
-            return {
-                "success": True, 
-                "professional_report": professional_report,
-                "report_path": str(professional_report_path),
-                "latest_path": str(professional_report_latest)
-            }
-            
-        except Exception as e:
-            self.logger.error(f"❌ Professional report generation failed: {e}")
-            return {"success": False, "error": str(e)}
+    # REMOVED: run_price_adjustment_stage() - incompatible with NEW Excel-only FinancialModelBuilder
+    # REMOVED: _apply_parameter_deltas_to_model() - expects OLD FinancialModelGenerator dict structure
+    # REMOVED: run_professional_report_stage() - expects OLD model dict, needs re-implementation for Excel parsing
     
     def _get_comprehensive_pipeline_results(self) -> Dict:
         """Get complete comprehensive pipeline results."""
@@ -935,15 +574,18 @@ class ComprehensiveStockAnalysisPipeline:
 def main():
     """Main entry point for the comprehensive stock analysis pipeline."""
     parser = argparse.ArgumentParser(
-        description="Comprehensive 7-Step Stock Analysis Pipeline",
+        description="Comprehensive Stock Analysis Pipeline with Banker-Grade DCF Model",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Full analysis with default model
-  python main.py --ticker NVDA --company "NVIDIA" --email user@example.com --timestamp 20250929_120000
+  # Full analysis (financial model + news analysis + reports)
+  python main.py --ticker NVDA --company "NVIDIA" --email user@example.com --timestamp 20250101_120000
   
-  # Use Claude Sonnet
-  python main.py --ticker AAPL --company "Apple" --email user@example.com --timestamp 20250929_120000 --llm claude-3.5-sonnet
+  # Use Claude Sonnet for LLM analysis
+  python main.py --ticker AAPL --company "Apple" --email user@example.com --timestamp 20250101_120000 --llm claude-3.5-sonnet
+  
+  # Just build financial model
+  python main.py --ticker MSFT --company "Microsoft" --email user@example.com --timestamp 20250101_120000 --pipeline financial-model
   
   # List available models
   python main.py --list-llms
@@ -951,39 +593,24 @@ Examples:
     )
     
     # Required arguments
-    parser.add_argument("--ticker", required=True, help="Stock ticker symbol (e.g., NVDA)")
-    parser.add_argument("--company", required=True, help="Company name (e.g., 'NVIDIA')")
-    parser.add_argument("--email", required=True, help="User email for data organization")
-    parser.add_argument("--timestamp", required=True, help="Custom timestamp for analysis folder (YYYYMMDD_HHMMSS)")
+    parser.add_argument("--ticker", help="Stock ticker symbol (e.g., NVDA)")
+    parser.add_argument("--company", help="Company name (e.g., 'NVIDIA')")
+    parser.add_argument("--email", help="User email for data organization")
+    parser.add_argument("--timestamp", help="Custom timestamp for analysis folder (YYYYMMDD_HHMMSS)")
     
     # Pipeline control
     parser.add_argument("--pipeline", 
                        choices=["comprehensive", "financial-statements", "financial-model", "search-news",
-                                "screen-news", "news-to-price"], 
+                                "screen-news"], 
                        default="comprehensive", 
                        help="Pipeline stages to execute")
-    
-    parser.add_argument("--base_price", type=float, help="Base price for adjustment (required for news-to-price)")
-    
-    # Financial modeling parameters
-    parser.add_argument("--model", choices=["dcf", "comparable", "comprehensive"], 
-                       default="comprehensive", help="Financial model type (LLM will auto-select optimal DCF strategy)")
-    parser.add_argument("--years", type=int, default=5, help="Projection years (LLM can suggest optimal range 3-10)")
-    parser.add_argument("--term-growth", type=float, help="Terminal growth rate override (LLM auto-infers if omitted)")
-    parser.add_argument("--wacc", type=float, help="WACC override (LLM auto-infers if omitted)")
-    parser.add_argument("--strategy", help="Force specific DCF strategy (e.g., 'saas_dcf', 'reit_dcf', 'bank_excess_returns', 'hardware_dcf') - LLM auto-selects if omitted")
-    parser.add_argument("--peers", help="Comma-separated peer tickers for comparable analysis (e.g., 'AAPL,MSFT,GOOGL')")
     
     # News analysis parameters  
     parser.add_argument("--max-searched", type=int, default=30, help="Maximum articles to search/scrape")
     parser.add_argument("--query", help="Override default search query for news articles")
-    parser.add_argument("--min-score", type=float, default=3.0, help="Minimum relevance score (0-10)")
+    parser.add_argument("--min-score", type=float, default=6.0, help="Minimum relevance score (0-10)")
     parser.add_argument("--max-filtered", type=int, default=15, help="Maximum filtered articles")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="Minimum confidence for insights (0-1)")
-    
-    # Price adjustment parameters
-    parser.add_argument("--scaling", type=float, default=0.15, help="Base scaling factor for qualitative adjustment")
-    parser.add_argument("--adjustment-cap", type=float, default=0.20, help="Maximum adjustment percentage (±)")
     
     # LLM selection parameters
     parser.add_argument("--llm", choices=["gpt-4o-mini", "claude-3.5-sonnet", "claude-3.5-haiku", "claude-3-opus"], 
@@ -1023,23 +650,12 @@ Examples:
         # Run selected pipeline
         if args.pipeline == "comprehensive":
             results = pipeline.run_comprehensive_pipeline(
-                # Financial model parameters
-                model_type=args.model,
-                projection_years=args.years,
-                term_growth=args.term_growth,
-                wacc_override=args.wacc,
-                strategy=args.strategy,
-                peers=args.peers,
                 # News analysis parameters
                 max_searched=args.max_searched,
                 query_override=args.query,
                 min_filter_score=args.min_score,
                 max_filtered=args.max_filtered,
-                min_confidence=args.min_confidence,
-                # Price adjustment parameters
-                scaling=args.scaling,
-                adjustment_cap=args.adjustment_cap
-                # Note: Mapped deltas and LLM scenarios are always enabled
+                min_confidence=args.min_confidence
             )
         
         elif args.pipeline == "financial-statements":
@@ -1048,9 +664,7 @@ Examples:
         elif args.pipeline == "financial-model":
             financial_results = pipeline.run_financial_scraping_stage()
             if financial_results.get("success"):
-                results = pipeline.run_model_generation_stage(
-                    args.model, args.years, args.term_growth, args.wacc, args.strategy, args.peers
-                )
+                results = pipeline.run_model_generation_stage()
             else:
                 results = financial_results
 
@@ -1073,34 +687,6 @@ Examples:
                     results = pipeline.run_screening_stage(
                         filtering_results["filtered_articles"], args.min_confidence
                     )
-                else:
-                    results = filtering_results
-            else:
-                results = news_results
-                
-        elif args.pipeline == "news-to-price":
-            # News analysis through price adjustment (requires existing financial model)
-            news_results = pipeline.run_news_scraping_stage(args.max_searched, args.query)
-            if news_results.get("scraped_count", 0) > 0:
-                # Generate default query if none provided
-                filter_query = args.query or f"{pipeline.company_name} financial outlook earnings growth investment analysis"
-                filtering_results = pipeline.run_filtering_stage(filter_query, args.min_score, args.max_filtered)
-                if filtering_results.get("filtered_articles"):
-                    screening_results = pipeline.run_screening_stage(
-                        filtering_results["filtered_articles"], args.min_confidence
-                    )
-                    if not args.base_price:
-                        pipeline.logger.error("❌ No base price available from financial model")
-                        return 1
-
-                    # Load existing model results or create basic model
-                    model_results = {"success": True, "model": {"valuation_summary": {"Implied Price": args.base_price}}}
-                    # Try to load existing financial model
-                    # Implementation would load saved model data
-                    
-                    results = pipeline.run_price_adjustment_stage(
-                        model_results, screening_results, args.scaling, args.adjustment_cap
-                    )  # Mapped deltas and LLM scenarios always enabled
                 else:
                     results = filtering_results
             else:

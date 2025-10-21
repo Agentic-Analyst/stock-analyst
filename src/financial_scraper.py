@@ -18,13 +18,7 @@ from typing import Dict, List, Optional, Any, Union
 import pandas as pd
 import numpy as np
 
-# Financial data libraries
-try:
-    import yfinance as yf
-    YFINANCE_AVAILABLE = True
-except ImportError:
-    YFINANCE_AVAILABLE = False
-    print("Warning: yfinance not installed. Install with: pip install yfinance")
+import yfinance as yf
 
 class FinancialScraper:
     """Financial statements scraper for collecting precise financial data."""
@@ -50,11 +44,8 @@ class FinancialScraper:
         self.data_points_extracted = 0
         
         # Yahoo Finance ticker object
-        if YFINANCE_AVAILABLE:
-            self.yf_ticker = yf.Ticker(self.ticker)
-        else:
-            raise RuntimeError("yfinance is required but not installed. Install with: pip install yfinance")
-    
+        self.yf_ticker = yf.Ticker(self.ticker)
+
     def set_logger(self, logger):
         """Set the logger instance."""
         self.logger = logger
@@ -1083,7 +1074,7 @@ class FinancialScraper:
         
         return all_data
     
-    def save_financial_data(self, data: Dict[str, Any], annual: bool = True, statements_scraped: List[str] = None) -> pathlib.Path:
+    def save_financial_data(self, data: Dict[str, Any]) -> pathlib.Path:
         """
         Save financial data to JSON file with clear naming for partial scrapes.
         
@@ -1096,33 +1087,15 @@ class FinancialScraper:
             Path to saved file
         """
         self._ensure_directories()
-        
-        # Generate filename with statement type info for clarity
-        data_type = "annual" if annual else "quarterly"
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        
-        # Add statement type to filename if partial scrape
-        if statements_scraped and len(statements_scraped) == 1:
-            statement_type = statements_scraped[0]
-            filename = f"financials_{data_type}_{statement_type}_{timestamp}.json"
-            latest_filename = f"financials_{data_type}_{statement_type}_latest.json"
-        else:
-            filename = f"financials_{data_type}_{timestamp}.json"
-            latest_filename = f"financials_{data_type}_latest.json"
-            
-        file_path = self.financials_dir / filename
-        
-        # Save data
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-        
+        latest_filename = f"financials_annual_modeling_latest.json"
+
         # Also save a "latest" version for easy access
         latest_path = self.financials_dir / latest_filename
         with open(latest_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-        
-        return file_path
-    
+
+        return latest_path
+
     def get_scraping_results(self) -> Dict[str, Any]:
         """Get current scraping statistics."""
         return {
@@ -1148,8 +1121,8 @@ class FinancialScraper:
                 "financials_dir": self.financials_dir.exists()
             },
             "latest_files": {
-                "annual": (self.financials_dir / "financials_annual_latest.json").exists(),
-                "quarterly": (self.financials_dir / "financials_quarterly_latest.json").exists()
+                "annual": (self.financials_dir / "financials_annual_modeling_latest.json").exists(),
+                "quarterly": (self.financials_dir / "financials_quarterly_modeling_latest.json").exists()
             }
         }
 
