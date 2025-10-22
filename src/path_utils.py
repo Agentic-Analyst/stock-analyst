@@ -59,7 +59,7 @@ def ensure_analysis_paths(analysis_path: pathlib.Path) -> None:
     """
     # Create standard subdirectories
     (analysis_path / "financials").mkdir(parents=True, exist_ok=True)
-    (analysis_path / "filtered").mkdir(parents=True, exist_ok=True)
+    # Note: "filtered" folder removed - articles now stored in MongoDB database
     (analysis_path / "searched").mkdir(parents=True, exist_ok=True)
     (analysis_path / "screened").mkdir(parents=True, exist_ok=True)
     (analysis_path / "reports").mkdir(parents=True, exist_ok=True)

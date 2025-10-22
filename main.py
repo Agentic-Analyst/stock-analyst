@@ -120,19 +120,25 @@ class ComprehensiveStockAnalysisPipeline:
                                   # News analysis parameters  
                                   max_searched: int = 30,
                                   query_override: Optional[str] = None,
-                                  min_filter_score: float = 3.0,
+                                  min_filter_score: float = 6.0,
                                   max_filtered: int = 15,
-                                  min_confidence: float = 0.5) -> Dict:
+                                  min_confidence: float = 0.6) -> Dict:
         """
         Run the complete analysis pipeline.
         
         Pipeline Stages:
         1. Financial Scraping - Collect financial statements
         2. Financial Model Generation - Build banker-grade DCF model (LLM-powered)
-        3. News Scraping - Collect recent news articles
-        4. Article Filtering - Filter for relevance using LLM
-        5. Article Screening - Extract investment insights using LLM
-        6. Report Generation - Generate professional analyst report
+        3. News Analysis - Smart workflow:
+           a) Check database for existing filtered articles
+           b) If found (recent run): Load from DB → Screen
+           c) If not found: Scrape → Filter → Save to DB → Screen
+        4. Report Generation - Generate professional analyst report
+        
+        Workflow Optimization:
+        - First run: Full news pipeline (scrape → filter → save to DB → screen)
+        - Subsequent runs: Fast path (load from DB → screen)
+        - Saves costs by avoiding re-scraping and re-filtering
         
         Note: The NEW financial model builder automatically:
         - Generates comprehensive 9-tab DCF model
@@ -141,7 +147,7 @@ class ComprehensiveStockAnalysisPipeline:
         - Outputs Excel file with formulas
         
         Args:
-            max_searched: Maximum articles to search/scrape
+            max_searched: Maximum articles to search/scrape (only used if DB empty)
             query_override: Override default search query for news articles
             min_filter_score: Minimum relevance score for filtering (0-10)
             max_filtered: Maximum filtered articles to keep
@@ -166,21 +172,50 @@ class ComprehensiveStockAnalysisPipeline:
         if not model_results.get("success"):
             self.logger.error("❌ Financial model generation failed. Continuing with news analysis...")
         
-        # Step 3: Article Scraping
-        self.logger.stage_start("ARTICLE SCRAPING", "Collecting news articles from Google News")
-        news_results = self.run_news_scraping_stage(max_searched, query_override)
+        # Step 3-5: Smart News Analysis Workflow
+        self.logger.stage_start("NEWS ANALYSIS", "Analyzing news articles for investment insights")
         
-        # Step 4: Article Filtering
-        self.logger.stage_start("ARTICLE FILTERING", "Filtering articles for relevance and quality using LLM")
-        # Generate default query if none provided
-        filter_query = query_override or f"{self.company_name} financial outlook earnings growth investment analysis"
-        filtering_results = self.run_filtering_stage(filter_query, min_filter_score, max_filtered)
+        # Check if we have recent articles in the database to avoid re-scraping
+        self.logger.info("🔍 Checking for existing filtered articles in database...")
+        existing_articles = self.article_screener.load_articles_from_db(limit=max_filtered)
         
-        # Step 5: Article Screening
-        self.logger.stage_start("ARTICLE SCREENING", "Extracting investment insights using LLM")
-        screening_results = self.run_screening_stage(
-            filtering_results.get("filtered_articles", []), min_confidence
-        )
+        if len(existing_articles) >= max_filtered:
+            # Fast path: Articles already in database
+            self.logger.info(f"✅ Found {len(existing_articles)} recent articles in database")
+            self.logger.info("⚡ Fast path: Skipping scraping & filtering, loading from database")
+
+            # Go directly to screening with database articles
+            self.logger.stage_start("ARTICLE SCREENING", "Extracting investment insights using LLM")
+            screening_results = self.run_screening_stage(
+                min_confidence=min_confidence
+            )
+            
+            skip_scraping = True
+        else:
+            # Need to scrape: Not enough articles in database
+            self.logger.info(f"⚠️  Only found {len(existing_articles)} articles in database (need {max_filtered})")
+            self.logger.info("🔄 Full pipeline: Will scrape → filter → save to DB → screen")
+            skip_scraping = False
+
+        if not skip_scraping:
+            # Full news pipeline: Scrape → Filter → Save to DB → Screen
+            
+            # Step 3a: Scrape news articles
+            self.logger.stage_start("ARTICLE SCRAPING", "Collecting news articles from Google News")
+            # Full news pipeline: Scrape → Filter → Save to DB → Screen
+            news_results = self.run_news_scraping_stage(max_searched, query_override)
+            
+            # Step 3b: Filter articles and save to database
+            self.logger.stage_start("ARTICLE FILTERING", "Filtering articles for relevance using LLM and saving to database")
+            # Generate default query if none provided
+            filter_query = query_override or f"{self.company_name} financial outlook earnings growth investment analysis"
+            filtering_results = self.run_filtering_stage(filter_query, min_filter_score, max_filtered)
+            
+            # Step 3c: Screen articles for investment insights
+            self.logger.stage_start("ARTICLE SCREENING", "Extracting investment insights using LLM")
+            screening_results = self.run_screening_stage(
+                min_confidence=min_confidence
+            )
         
         # Step 6: Professional Report Generation (if model was generated successfully)
         if model_results.get("success") and screening_results:
@@ -440,60 +475,17 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.error(f"❌ Article filtering stage failed: {e}")
             return {"filtered_articles": [], "filtered_count": 0, "error": str(e)}
     
-    def run_screening_stage(self, 
-                           filtered_articles: List = None, 
-                           min_confidence: float = 0.5) -> Dict:
-        """Run the article screening/analysis stage."""
+    def run_screening_stage(self,
+                           min_confidence: float = 0.6) -> Dict:
+        """Run the article screening/analysis stage.
+        
+        Args:
+            filtered_articles: Optional list of filtered articles. If None, will try to load from database first.
+            min_confidence: Minimum confidence threshold for insights
+        """
         try:
-            # Load articles if not provided
-            if filtered_articles is None:
-                articles_data = self.article_screener.load_filtered_articles()
-                if not articles_data:
-                    self.logger.error("❌ No filtered articles found for screening")
-                    return {"catalysts": [], "risks": [], "mitigations": []}
-            else:
-                # Convert filtered articles to format expected by screener
-                articles_data = []
-                for article_info in filtered_articles:
-                    # article_info is a dict with metadata about the filtered article
-                    # We need to load the actual article content for screening
-                    filename = article_info.get('filename') or article_info.get('original_filename')
-                    if filename:
-                        # Load article content from the filtered directory
-                        article_path = self.article_filter.filtered_dir / filename
-                        if article_path.exists():
-                            content = article_path.read_text(encoding='utf-8')
-                            
-                            # Parse frontmatter if present (to match screener's load_filtered_articles format)
-                            if content.startswith("---"):
-                                parts = content.split("---", 2)
-                                if len(parts) >= 3:
-                                    try:
-                                        import yaml
-                                        frontmatter = yaml.safe_load(parts[1]) or {}
-                                        text_content = parts[2].strip()
-                                    except:
-                                        frontmatter = {}
-                                        text_content = content
-                                else:
-                                    frontmatter = {}
-                                    text_content = content
-                            else:
-                                frontmatter = {}
-                                text_content = content
-                            
-                            # Create article data in the format screener expects
-                            article_data = {
-                                'file_path': article_path,
-                                'file_name': filename,  # screener expects this key
-                                'title': frontmatter.get('title', article_info.get('title', '')),
-                                'source_url': frontmatter.get('source_url', ''),
-                                'publish_date': frontmatter.get('publish_date', ''),
-                                'text': text_content,  # screener expects 'text', not 'content'
-                                'word_count': len(text_content.split()),
-                                'llm_score': article_info.get('llm_score', 0.0)
-                            }
-                            articles_data.append(article_data)
+            self.logger.info("📂 Loading articles from database...")
+            articles_data = self.article_screener.load_articles_from_db(limit=50)
             
             self.logger.info(f"🔍 Analyzing {len(articles_data)} articles with LLM...")
             
@@ -520,12 +512,10 @@ class ComprehensiveStockAnalysisPipeline:
             self.stats["stages_completed"].append("article_screening")
             
             # Generate reports (always enabled in production)
-            report_file = self.analysis_path / "screened" / "screening_report.md"
             data_file = self.analysis_path / "screened" / "screening_data.json"
             self.article_screener.save_structured_data(
                 high_conf_catalysts, high_conf_risks, high_conf_mitigations, analysis_summary, data_file
             )
-            self.logger.file_operation("Report generated", report_file)
             self.logger.file_operation("Structured data saved", data_file)
             
             # Log results
@@ -538,7 +528,6 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.stage_end("LLM ANALYSIS & SCREENING", True, stats)
             
             # Persist artifact paths
-            screening_results['report_file'] = str(report_file) if report_file else None
             screening_results['data_file'] = str(data_file) if data_file else None
             return screening_results
             
@@ -610,7 +599,7 @@ Examples:
     parser.add_argument("--query", help="Override default search query for news articles")
     parser.add_argument("--min-score", type=float, default=6.0, help="Minimum relevance score (0-10)")
     parser.add_argument("--max-filtered", type=int, default=15, help="Maximum filtered articles")
-    parser.add_argument("--min-confidence", type=float, default=0.5, help="Minimum confidence for insights (0-1)")
+    parser.add_argument("--min-confidence", type=float, default=0.6, help="Minimum confidence for insights (0-1)")
     
     # LLM selection parameters
     parser.add_argument("--llm", choices=["gpt-4o-mini", "claude-3.5-sonnet", "claude-3.5-haiku", "claude-3-opus"], 
@@ -669,28 +658,25 @@ Examples:
                 results = financial_results
 
         elif args.pipeline == "search-news":
+            # Search-news pipeline: Scrape → Filter → Save to DB
+            # This prepares articles for later screening in comprehensive mode
             news_results = pipeline.run_news_scraping_stage(args.max_searched, args.query)
             # Proceed to filtering if we either scraped new content OR have a pre-existing corpus
             if news_results.get("scraped_count", 0) > 0 or news_results.get('pre_existing', 0) > 0:
                 # Generate default query if none provided
                 filter_query = args.query or f"{pipeline.company_name} financial outlook earnings growth investment analysis"
+                # Filter and save to database (no local file storage)
                 results = pipeline.run_filtering_stage(filter_query, args.min_score, args.max_filtered)
-
-        elif args.pipeline == "screen-news":
-            news_results = pipeline.run_news_scraping_stage(args.max_searched, args.query)
-            # Proceed to filtering if we either scraped new content OR have a pre-existing corpus
-            if news_results.get("scraped_count", 0) > 0 or news_results.get('pre_existing', 0) > 0:
-                # Generate default query if none provided
-                filter_query = args.query or f"{pipeline.company_name} financial outlook earnings growth investment analysis"
-                filtering_results = pipeline.run_filtering_stage(filter_query, args.min_score, args.max_filtered)
-                if filtering_results.get("filtered_articles"):
-                    results = pipeline.run_screening_stage(
-                        filtering_results["filtered_articles"], args.min_confidence
-                    )
-                else:
-                    results = filtering_results
+                pipeline.logger.info(f"✅ Articles filtered and saved to database for {pipeline.ticker}")
+                pipeline.logger.info(f"💡 Tip: Run with --pipeline comprehensive to analyze these articles")
             else:
                 results = news_results
+
+        elif args.pipeline == "screen-news":
+            # Screen-news pipeline: Load DB → Screen
+            results = pipeline.run_screening_stage(
+                min_confidence=args.min_confidence
+            )
         
         # Pipeline execution completed successfully
         pipeline.logger.program_end()

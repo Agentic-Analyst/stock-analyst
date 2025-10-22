@@ -52,7 +52,6 @@ class ArticleScraper:
         self.company_name = company_name
         self.company_dir = base_path
         self.searched_dir = self.company_dir / "searched"
-        self.index_csv = self.searched_dir / "articles_index.csv"
 
         # Logger - will be set by pipeline if available
         self.logger = None
@@ -269,22 +268,6 @@ class ArticleScraper:
             self.failed_count += 1
             return None
     
-    def _load_seen_urls(self) -> Set[str]:
-        """Load previously scraped URLs to avoid duplicates."""
-        if self.index_csv.exists():
-            with open(self.index_csv, newline="", encoding="utf-8") as f:
-                return {row["url"] for row in csv.DictReader(f)}
-        return set()
-    
-    def _append_to_index(self, url: str, filename: str):
-        """Add scraped article to the index file."""
-        is_new_file = not self.index_csv.exists()
-        with open(self.index_csv, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["url", "file"])
-            if is_new_file:
-                writer.writeheader()
-            writer.writerow({"url": url, "file": filename})
-    
     def _save_article_markdown(self, article_data: Dict) -> pathlib.Path:
         """Save article as markdown file with enhanced frontmatter including SerpAPI metadata."""
         # Ensure directories exist
@@ -397,17 +380,9 @@ serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
             if url not in unique_articles:
                 metadata["search_category"] = category.replace('_', ' ')
                 unique_articles[url] = metadata
-        
-        # Load previously seen URLs
-        seen_urls = self._load_seen_urls()
-        self._log("info", f"Found {len(unique_articles)} unique URLs across all searches, {len(seen_urls)} already seen")
-        
+
         # Scrape each article
         for url, metadata in unique_articles.items():
-            if url in seen_urls:
-                self.duplicate_count += 1
-                continue
-            
             if self.logger:
                 self.logger.scraping_progress(url, "in progress")
             else:
@@ -433,7 +408,6 @@ serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
             # Save article
             try:
                 file_path = self._save_article_markdown(article_data)
-                self._append_to_index(url, file_path.name)
                 scraped_files.append(file_path)
                 self.scraped_count += 1
                 
@@ -547,12 +521,10 @@ serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
         return {
             "company_dir": str(self.company_dir),
             "searched_dir": str(self.searched_dir),
-            "index_file": str(self.index_csv),
             "total_articles": self.get_scraped_articles_count(),
             "directories_exist": {
                 "company_dir": self.company_dir.exists(),
                 "searched_dir": self.searched_dir.exists(),
-                "index_file": self.index_csv.exists()
             }
         }
 

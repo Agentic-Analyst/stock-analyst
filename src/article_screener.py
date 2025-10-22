@@ -20,6 +20,7 @@ from collections import defaultdict, Counter
 import yaml
 import tiktoken
 from llms.config import get_llm
+from vynn_core import find_recent, get_article_by_url
 
 PROMPTS_ROOT = pathlib.Path("prompts")
 
@@ -127,7 +128,6 @@ class ArticleScreener:
     def __init__(self, ticker: str, base_path: pathlib.Path):
         self.ticker = ticker.upper()
         self.company_dir = base_path
-        self.filtered_dir = self.company_dir / "filtered"
         
         # Logger - will be set by pipeline if available
         self.logger = None
@@ -538,43 +538,58 @@ class ArticleScreener:
 
     # ============= ARTICLE LOADING =============
 
-    def load_filtered_articles(self) -> List[Dict]:
-        """Load all filtered articles."""
-        if not self.filtered_dir.exists():
-            self._log("error", f"[error] Filtered directory {self.filtered_dir} does not exist")
-            return []
+    def load_articles_from_db(self, limit: int = 50) -> List[Dict]:
+        """
+        Load filtered articles from MongoDB database.
         
-        articles = []
-        for md_file in self.filtered_dir.glob("filtered_*.md"):
-            try:
-                content = md_file.read_text(encoding="utf-8")
-                
-                # Parse frontmatter
-                if content.startswith("---"):
-                    parts = content.split("---", 2)
-                    if len(parts) >= 3:
-                        frontmatter = yaml.safe_load(parts[1]) or {}
-                        text_content = parts[2].strip()
-                    else:
-                        frontmatter = {}
-                        text_content = content
-                else:
-                    frontmatter = {}
-                    text_content = content
-                
-                articles.append({
-                    "file_path": md_file,
-                    "file_name": md_file.name,
-                    "title": frontmatter.get("title", ""),
-                    "source_url": frontmatter.get("source_url", ""),
-                    "publish_date": frontmatter.get("publish_date", ""),
-                    "text": text_content,
-                    "word_count": len(text_content.split()),
-                })
-            except Exception as e:
-                self._log("warn", f"[warn] Could not load {md_file}: {e}")
+        This method retrieves articles that have already been filtered and scored,
+        avoiding the need to re-scrape and re-filter articles.
+        
+        Args:
+            min_score: Minimum LLM score threshold for articles
+            limit: Maximum number of articles to load
+            
+        Returns:
+            List of article dictionaries compatible with analyze_all_articles()
+        """        
+        try:
+            self._log("info", f"📂 Loading articles from MongoDB for {self.ticker} limit: {limit})")
+            
+            # Get recent articles from database using vynn_core
+            recent_articles = find_recent(limit=limit * 2, collection_name=self.ticker)
 
-        return articles
+            self._log("info", f"✅ Found {len(recent_articles)} recent articles in database")
+
+            # Filter by ticker and score, convert to screener format
+            filtered_articles = []
+            for article in recent_articles:
+                # Convert database format to screener format
+                screener_article = {
+                    "file_path": None,  # Not from file
+                    "file_name": f"db_article_{article.get('_id', 'unknown')}",
+                    "title": article.get('title', 'Untitled'),
+                    "source_url": article.get('url') or article.get('source_url', ''),
+                    "publish_date": article.get('publish_date', ''),
+                    "text": article.get('content', ''),
+                    "word_count": article.get('word_count', 0),
+                    "serpapi_snippet": article.get('serpapi_snippet', ''),
+                    "serpapi_source": article.get('serpapi_source', ''),
+                    "search_category": article.get('search_category', '')
+                }
+                filtered_articles.append(screener_article)
+            
+            # Limit to requested number
+            result = filtered_articles[:limit]
+            self._log("info", f"✅ Loaded {len(result)} articles from MongoDB (filtered from {len(recent_articles)} total)")
+            
+            return result
+            
+        except Exception as e:
+            self._log("error", f"❌ Error loading articles from MongoDB: {e}")
+            import traceback
+            self._log("error", f"Full traceback: {traceback.format_exc()}")
+            # Fallback to local file loading
+            self._log("info", "⚠️  Falling back to local file loading")
 
     def analyze_all_articles(self, articles: List[Dict], batch_size: int = 10) -> Tuple[List[Catalyst], List[Risk], List[Mitigation], AnalysisSummary]:
         """

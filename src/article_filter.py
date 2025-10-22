@@ -46,7 +46,6 @@ class ArticleFilter:
         self.ticker = ticker.upper()
         self.query = query
         self.company_dir = base_path
-        self.filtered_dir = self.company_dir / "filtered"
         
         # Logger - will be set by pipeline if available
         self.logger = None
@@ -93,18 +92,10 @@ class ArticleFilter:
 
     def _load_prompts(self):
         """Load prompt templates from markdown files."""
-        try:
-            # Load article relevance scoring prompt
-            relevance_path = self.prompts_dir / "article_relevance_scoring.md"
-            self.relevance_prompt_template = relevance_path.read_text(encoding='utf-8')
-            
-            # Report generation removed for cost optimization
-            
-        except Exception as e:
-            self._log(f"Error loading prompt templates: {e}", "error")
-            # Fallback to simple prompt
-            self.relevance_prompt_template = "Rate the relevance of these articles to: {query}\n{articles_summary}\nProvide scores as: 1:X 2:Y etc."
-    
+        # Load article relevance scoring prompt
+        relevance_path = self.prompts_dir / "article_relevance_scoring.md"
+        self.relevance_prompt_template = relevance_path.read_text(encoding='utf-8')
+             
     def set_logger(self, logger):
         """Set the logger instance."""
         self.logger = logger
@@ -388,14 +379,8 @@ class ArticleFilter:
         return qualified_articles[:max_filtered]
 
     def _finalize_filtering(self, filtered_articles: list) -> dict:
-        """Copy filtered articles to filtered directory, create index, and save to MongoDB."""
-        # Create filtered directory
-        self.filtered_dir.mkdir(parents=True, exist_ok=True)
+        """Save filtered articles to MongoDB database (no local file storage needed)."""
         
-        # Clear existing filtered articles
-        for existing_file in self.filtered_dir.glob("filtered_*.md"):
-            existing_file.unlink()
-            
         # Prepare articles for MongoDB storage
         db_articles = []
         final_articles = []
@@ -404,40 +389,25 @@ class ArticleFilter:
             score = article['llm_score']
             original_name = article['filename']
             
-            # Create new filename with ranking and score
-            new_filename = f"filtered_{i:02d}_score_{score:.1f}_{original_name}"
-            new_path = self.filtered_dir / new_filename
-            
             try:
-                # Copy the article content
-                searched_dir = self.company_dir / "searched"
-                source_path = searched_dir / original_name
+                # Prepare for database storage
+                article['llm_score'] = score  # Update with final score
+                db_article = self._convert_to_vynn_article(article)
+                if db_article:
+                    db_articles.append(db_article)
                 
-                if source_path.exists():
-                    new_path.write_text(
-                        source_path.read_text(encoding='utf-8'),
-                        encoding='utf-8'
-                    )
-                    
-                    # Prepare for database storage
-                    article['llm_score'] = score  # Update with final score
-                    db_article = self._convert_to_vynn_article(article)
-                    if db_article:
-                        db_articles.append(db_article)
-                    
-                    final_articles.append({
-                        "rank": i,
-                        "filename": new_filename,
-                        "original_filename": original_name,
-                        "llm_score": score,
-                        "title": article['title']
-                    })
+                final_articles.append({
+                    "rank": i,
+                    "original_filename": original_name,
+                    "llm_score": score,
+                    "title": article['title']
+                })
                     
             except Exception as e:
-                self._log(f"Error copying {original_name}: {e}", "error")
+                self._log(f"Error preparing article {original_name}: {e}", "error")
                 continue
         
-        # Save to MongoDB
+        # Save to MongoDB (primary storage)
         db_result = self._save_to_mongodb(db_articles)
         
         result = {"filtered_articles": final_articles}
@@ -485,156 +455,4 @@ class ArticleFilter:
     # Filtered articles with rankings are available in filtered/ directory
     
     # News Feed System Methods
-
-    def get_recent_articles_from_db(self, limit: int = 50, min_score: float = 5.0) -> list:
-        """
-        Retrieve recent articles from MongoDB for news feed system.
-        
-        Args:
-            limit: Maximum number of articles to retrieve
-            min_score: Minimum LLM score threshold
-            
-        Returns:
-            List of articles sorted by relevance and recency
-        """
-        if not self.db_enabled:
-            self._log("MongoDB not available for news feed", "warning")
-            return []
-            
-        try:
-            self._log(f"Retrieving recent articles for {self.ticker} (limit: {limit}, min_score: {min_score})")
-            
-            # Get recent articles from database
-            recent_articles = find_recent(limit=limit * 2)  # Get more to allow filtering
-            
-            # Filter by ticker and score
-            filtered_articles = []
-            for article in recent_articles:
-                # Check if article is relevant to our ticker
-                entities = article.get('entities', {})
-                tickers = entities.get('tickers', [])
-                quality = article.get('quality', {})
-                llm_score = quality.get('llmScore', 0.0)
-                
-                if self.ticker in tickers and llm_score >= min_score:
-                    # Add ranking score for news feed
-                    article['feed_score'] = self._calculate_feed_score(article)
-                    filtered_articles.append(article)
-            
-            # Sort by feed score (combination of LLM score and recency)
-            filtered_articles.sort(key=lambda x: x.get('feed_score', 0), reverse=True)
-            
-            result = filtered_articles[:limit]
-            self._log(f"Retrieved {len(result)} articles for news feed")
-            
-            return result
-            
-        except Exception as e:
-            self._log(f"Error retrieving articles from database: {e}", "error")
-            return []
-
-    def _calculate_feed_score(self, article: dict) -> float:
-        """
-        Calculate feed ranking score combining LLM score and recency.
-        
-        Args:
-            article: Article dictionary from database
-            
-        Returns:
-            Combined feed score for ranking
-        """
-        try:
-            # Get LLM score
-            quality = article.get('quality', {})
-            llm_score = quality.get('llmScore', 5.0)
-            
-            # Calculate recency factor
-            published_at = article.get('publishedAt')
-            if published_at:
-                if hasattr(published_at, 'timestamp'):
-                    age_hours = (datetime.utcnow().timestamp() - published_at.timestamp()) / 3600
-                else:
-                    # Handle datetime object
-                    age_hours = (datetime.utcnow() - published_at).total_seconds() / 3600
-                
-                # Recency decay: newer articles get higher scores
-                recency_factor = max(0.1, 1.0 / (1 + age_hours / 24))  # Decay over days
-            else:
-                recency_factor = 0.1
-            
-            # Combine scores (weighted average)
-            feed_score = (llm_score * 0.7) + (recency_factor * 10 * 0.3)
-            
-            return feed_score
-            
-        except Exception as e:
-            self._log(f"Error calculating feed score: {e}", "warning")
-            return 5.0
-
-    def check_article_exists(self, url: str) -> dict:
-        """
-        Check if an article already exists in the database.
-        
-        Args:
-            url: Article URL to check
-            
-        Returns:
-            Article data if exists, None otherwise
-        """
-        if not self.db_enabled:
-            return None
-            
-        try:
-            return get_article_by_url(url)
-        except Exception as e:
-            self._log(f"Error checking article existence: {e}", "error")
-            return None
-
-    def update_article_score(self, article_id: str, new_score: float, reason: str) -> bool:
-        """
-        Update an article's LLM score in the database.
-        
-        Args:
-            article_id: MongoDB ObjectId of the article
-            new_score: New LLM score
-            reason: Reason for the score update
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        if not self.db_enabled:
-            return False
-            
-        try:
-            # Note: This would require extending vynn_core with an update method
-            # For now, just log the intent
-            self._log(f"Would update article {article_id} score to {new_score}: {reason}")
-            return True
-        except Exception as e:
-            self._log(f"Error updating article score: {e}", "error")
-            return False
-
-    @classmethod
-    def create_news_feed_filter(cls, ticker: str, query: str = None):
-        """
-        Factory method to create an ArticleFilter optimized for news feed operations.
-        
-        Args:
-            ticker: Stock ticker symbol
-            query: Optional query string (defaults to ticker-based query)
-            
-        Returns:
-            ArticleFilter instance configured for news feed
-        """
-        if not query:
-            query = f"{ticker} stock analysis market performance earnings"
-            
-        # Use a temporary path since we're primarily using database
-        base_path = pathlib.Path.cwd() / "temp_news_feed" / ticker
-        
-        filter_instance = cls(ticker=ticker, query=query, base_path=base_path)
-        filter_instance._log(f"Created news feed filter for {ticker}")
-        
-        return filter_instance
-
 
