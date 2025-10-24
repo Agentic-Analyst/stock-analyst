@@ -59,7 +59,7 @@ class HistoricalTabBuilder:
             ws = workbook["Historical"]
             workbook.remove(ws)
         
-        ws = workbook.create_sheet("Historical", 3)  # Position 3 (fourth tab)
+        ws = workbook.create_sheet("Historical", 4)  # Position 4 (fifth tab)
         
         # Set up all sections
         self._setup_headers(ws)

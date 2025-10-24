@@ -55,7 +55,7 @@ class SummaryTabBuilder:
             ws = workbook["Summary"]
             workbook.remove(ws)
         
-        ws = workbook.create_sheet("Summary", 7)  # Position 7 (eighth tab)
+        ws = workbook.create_sheet("Summary", 9)  # Position 9 (tenth tab)
         
         # Set up sections following banker's specification
         self._setup_header(ws)

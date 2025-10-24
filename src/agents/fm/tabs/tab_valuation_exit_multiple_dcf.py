@@ -66,7 +66,7 @@ class ValuationExitMultipleDCFBuilder:
             ws = workbook["Valuation (Exit Multiple)"]
             workbook.remove(ws)
         
-        ws = workbook.create_sheet("Valuation (Exit Multiple)", 6)  # Position 6 (seventh tab)
+        ws = workbook.create_sheet("Valuation (Exit Multiple)", 7)  # Position 7 (eighth tab)
         
         # Set up sections following specification
         self._setup_header(ws)

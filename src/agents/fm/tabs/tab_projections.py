@@ -68,7 +68,7 @@ class ProjectionsTabBuilder:
             ws = workbook["Projections"]
             workbook.remove(ws)
         
-        ws = workbook.create_sheet("Projections", 4)  # Position 4 (fifth tab)
+        ws = workbook.create_sheet("Projections", 5)  # Position 5 (sixth tab)
         
         # Set up sections following exact specification
         self._setup_headers(ws)

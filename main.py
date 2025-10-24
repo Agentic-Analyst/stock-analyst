@@ -54,7 +54,8 @@ from agents.fm import create_financial_model
 from article_scraper import ArticleScraper
 from article_filter import ArticleFilter
 from article_screener import ArticleScreener
-# Price adjustor functions removed - not compatible with NEW Excel-only model
+# NEW: Price adjustor for news-based model adjustment (V2 - builds from scratch)
+from price_adjustor import adjust_price
 from path_utils import get_analysis_path, ensure_analysis_paths
 from report_agent import save_explanation_reports, build_deterministic_summary, generate_professional_analyst_report
 
@@ -107,7 +108,8 @@ class ComprehensiveStockAnalysisPipeline:
             "news_scraping": {},
             "article_filtering": {},
             "article_screening": {},
-            "price_adjustment": {}
+            "price_adjustment": {},
+            "report_generation": {}
         }
         
         # Store company data for use across pipeline stages
@@ -133,18 +135,18 @@ class ComprehensiveStockAnalysisPipeline:
            a) Check database for existing filtered articles
            b) If found (recent run): Load from DB → Screen
            c) If not found: Scrape → Filter → Save to DB → Screen
-        4. Report Generation - Generate professional analyst report
+        4. Price Adjustment - Build adjusted model based on news insights (NEW in V2)
+        5. Report Generation - Generate professional analyst report
         
         Workflow Optimization:
         - First run: Full news pipeline (scrape → filter → save to DB → screen)
         - Subsequent runs: Fast path (load from DB → screen)
         - Saves costs by avoiding re-scraping and re-filtering
         
-        Note: The NEW financial model builder automatically:
-        - Generates comprehensive 9-tab DCF model
-        - Infers assumptions using LLM (WACC, terminal growth, margins, etc.)
-        - Projects 5 years forward (FY1-FY5)
-        - Outputs Excel file with formulas
+        New in V2:
+        - Price adjustment now builds a brand new model from scratch
+        - Original model preserved for comparison
+        - All tab builders reused automatically
         
         Args:
             max_searched: Maximum articles to search/scrape (only used if DB empty)
@@ -217,7 +219,14 @@ class ComprehensiveStockAnalysisPipeline:
                 min_confidence=min_confidence
             )
         
-        # Step 6: Professional Report Generation (if model was generated successfully)
+        # Step 6: Price Adjustment (if model and screening were successful)
+        if model_results.get("success") and screening_results:
+            self.logger.stage_start("PRICE ADJUSTMENT", "Building adjusted model based on news insights")
+            price_adjustment_results = self.run_price_adjustment_stage(model_results, screening_results)
+        else:
+            price_adjustment_results = {"success": False, "reason": "Prerequisites not met"}
+        
+        # Step 7: Professional Report Generation (if model was generated successfully)
         if model_results.get("success") and screening_results:
             self.logger.stage_start("PROFESSIONAL REPORT GENERATION", "Generating comprehensive analyst-style research report")
             try:
@@ -235,20 +244,17 @@ class ComprehensiveStockAnalysisPipeline:
                 }
                 meta = {"model": "comprehensive_dcf", "years": 5, "excel_path": model_results.get("excel_path")}
                 
-                # Note: Price analysis not available since NEW model outputs Excel only
-                # Users should open the Excel file to view valuation results
+                # Note: Price analysis available from adjusted model if price adjustment succeeded
                 det_md = build_deterministic_summary(self.ticker, {}, factors, meta)
                 self.logger.info(f"📝 Generating financial analysis summary for {self.ticker}")
                 self.logger.info(f"📄 Financial analysis summary generated successfully")
                 saved = save_explanation_reports(self.ticker, det_md, self.analysis_path)
                 self.logger.info(f"📝 Financial analysis summary saved: {saved['path']} (latest: {saved['latest']})")
                 
-                # Generate professional report
-                report_results = self.run_professional_report_stage(
-                    model_results, screening_results, {}  # Empty price_results since model is Excel-only
-                )
-                if report_results.get("success"):
-                    self.logger.info(f"📄 Professional analyst report generated successfully")
+                # Professional report generation will be rewritten soon
+                # report_results = self.run_professional_report_stage(
+                #     model_results, screening_results, price_adjustment_results
+                # )
             except Exception as e:
                 self.logger.warning(f"⚠️  Failed to generate reports: {e}")
 
@@ -535,9 +541,85 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.error(f"❌ Screening stage failed: {e}")
             return {"catalysts": [], "risks": [], "mitigations": [], "error": str(e)}
     
-    # REMOVED: run_price_adjustment_stage() - incompatible with NEW Excel-only FinancialModelBuilder
-    # REMOVED: _apply_parameter_deltas_to_model() - expects OLD FinancialModelGenerator dict structure
-    # REMOVED: run_professional_report_stage() - expects OLD model dict, needs re-implementation for Excel parsing
+    def run_price_adjustment_stage(self, model_results: Dict, screening_results: Dict) -> Dict:
+        """Run the price adjustment stage to build adjusted model based on news insights.
+        
+        This stage:
+        1. Loads the original financial model
+        2. Loads the screening data (news analysis)
+        3. Calls LLM to infer adjustments based on news
+        4. Builds a BRAND NEW Excel model with adjusted assumptions
+        5. Original model is NEVER modified
+        
+        Args:
+            model_results: Results from model generation stage (must have 'excel_path')
+            screening_results: Results from screening stage (must have screening data)
+            
+        Returns:
+            Dictionary with adjustment results including path to adjusted model
+        """
+        try:
+            # Get paths
+            original_model_path = model_results.get("excel_path")
+            screening_data_path = self.analysis_path / "screened" / "screening_data.json"
+            adjusted_model_path = self.analysis_path / "models" / f"{self.ticker}_adjusted_model.xlsx"
+            
+            # Validate prerequisites
+            if not original_model_path or not pathlib.Path(original_model_path).exists():
+                self.logger.error(f"❌ Original model not found: {original_model_path}")
+                return {"success": False, "error": "Original model not found"}
+            
+            if not screening_data_path.exists():
+                self.logger.error(f"❌ Screening data not found: {screening_data_path}")
+                return {"success": False, "error": "Screening data not found"}
+            
+            # Run price adjustment (builds new model from scratch)
+            self.logger.info(f"🔄 Building adjusted model based on news insights...")
+            self.logger.info(f"   📁 Original model: {pathlib.Path(original_model_path).name}")
+            self.logger.info(f"   📰 News analysis: {screening_data_path.name}")
+            
+            result_path = adjust_price(
+                ticker=self.ticker,
+                model_path=str(original_model_path),
+                screening_path=str(screening_data_path),
+                output_path=str(adjusted_model_path)
+            )
+            
+            # Update statistics
+            self.stats["price_adjustment"] = {
+                "success": True,
+                "original_model": str(original_model_path),
+                "adjusted_model": str(result_path),
+                "screening_data": str(screening_data_path),
+                "approach": "build_from_scratch_v2",
+                "tabs_generated": 10,
+                "original_preserved": True
+            }
+            self.stats["stages_completed"].append("price_adjustment")
+            
+            # Log results
+            stats = {
+                "Adjusted model": pathlib.Path(result_path).name,
+                "Original model": "UNTOUCHED ✓",
+                "Tabs": "10 (complete model rebuilt)",
+                "Approach": "V2 (build from scratch)"
+            }
+            self.logger.stage_end("PRICE ADJUSTMENT", True, stats)
+            
+            return {
+                "success": True,
+                "adjusted_model_path": str(result_path),
+                "original_model_path": str(original_model_path),
+                "original_preserved": True
+            }
+            
+        except Exception as e:
+            self.logger.error(f"❌ Price adjustment failed: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return {"success": False, "error": str(e)}
+    
+    # REMOVED: run_professional_report_stage() - will be rewritten to work with Excel models
     
     def _get_comprehensive_pipeline_results(self) -> Dict:
         """Get complete comprehensive pipeline results."""

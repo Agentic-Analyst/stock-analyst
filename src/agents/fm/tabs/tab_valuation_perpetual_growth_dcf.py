@@ -66,7 +66,7 @@ class ValuationPerpetualGrowthDCFBuilder:
             ws = workbook["Valuation (DCF)"]
             workbook.remove(ws)
         
-        ws = workbook.create_sheet("Valuation (DCF)", 5)  # Position 5 (sixth tab)
+        ws = workbook.create_sheet("Valuation (DCF)", 6)  # Position 6 (seventh tab)
         
         # Set up sections following exact specification
         self._setup_header(ws)
