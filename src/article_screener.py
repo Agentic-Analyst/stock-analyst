@@ -52,7 +52,6 @@ class Catalyst:
     description: str
     confidence: float  # 0.0 to 1.0
     supporting_evidence: List[str]
-    articles_mentioned: List[str]
     timeline: str  # 'immediate', 'short-term', 'medium-term', 'long-term'
     llm_reasoning: Optional[str] = None  # AI reasoning for this catalyst
     llm_confidence: Optional[float] = None  # LLM-provided confidence score
@@ -75,7 +74,6 @@ class Risk:
     severity: str  # 'low', 'medium', 'high', 'critical'
     confidence: float  # 0.0 to 1.0
     supporting_evidence: List[str]
-    articles_mentioned: List[str]
     potential_impact: str
     llm_reasoning: Optional[str] = None  # AI reasoning for this risk
     llm_confidence: Optional[float] = None  # LLM-provided confidence score
@@ -97,7 +95,6 @@ class Mitigation:
     strategy: str
     confidence: float
     supporting_evidence: List[str]
-    articles_mentioned: List[str]
     effectiveness: str  # 'low', 'medium', 'high'
     company_action: Optional[str] = None  # What the company is doing/planning
     llm_reasoning: Optional[str] = None  # AI reasoning for this mitigation
@@ -251,7 +248,6 @@ class ArticleScreener:
                     description=cat_data.get("description", ""),
                     confidence=cat_data.get("confidence", 0.5),
                     supporting_evidence=cat_data.get("supporting_evidence", []),
-                    articles_mentioned=[a['file_name'] for a in articles],  # Legacy field
                     timeline=cat_data.get("timeline", "medium-term").lower().replace("_", "-"),
                     llm_reasoning=cat_data.get("reasoning", ""),
                     llm_confidence=cat_data.get("confidence", 0.5),
@@ -292,7 +288,6 @@ class ArticleScreener:
                     severity=risk_data.get("severity", "medium").lower(),
                     confidence=risk_data.get("confidence", 0.5),
                     supporting_evidence=risk_data.get("supporting_evidence", []),
-                    articles_mentioned=[a['file_name'] for a in articles],  # Legacy field
                     potential_impact=risk_data.get("potential_impact", ""),
                     llm_reasoning=risk_data.get("reasoning", ""),
                     llm_confidence=risk_data.get("confidence", 0.5),
@@ -332,7 +327,6 @@ class ArticleScreener:
                     strategy=mit_data.get("strategy", ""),
                     confidence=mit_data.get("confidence", 0.5),
                     supporting_evidence=mit_data.get("supporting_evidence", []),
-                    articles_mentioned=[a['file_name'] for a in articles],  # Legacy field
                     effectiveness=mit_data.get("effectiveness", "medium").lower(),
                     company_action=mit_data.get("company_action", ""),
                     llm_reasoning=mit_data.get("reasoning", ""),
@@ -553,7 +547,7 @@ class ArticleScreener:
             List of article dictionaries compatible with analyze_all_articles()
         """        
         try:
-            self._log("info", f"📂 Loading articles from MongoDB for {self.ticker} limit: {limit})")
+            self._log("info", f"📂 Loading articles from MongoDB for {self.ticker} limit: {limit}")
             
             # Get recent articles from database using vynn_core
             recent_articles = find_recent(limit=limit * 2, collection_name=self.ticker)
@@ -624,25 +618,25 @@ class ArticleScreener:
         
         self._log("info", f"🔄 Using LLM to intelligently deduplicate insights across {len(articles)} articles...")
         # Use LLM-powered deduplication instead of simple merging
-        merged_catalysts, merged_risks, merged_mitigations = self._llm_deduplicate_insights(all_catalysts, all_risks, all_mitigations)
+        # merged_catalysts, merged_risks, merged_mitigations = self._llm_deduplicate_insights(all_catalysts, all_risks, all_mitigations)
         
         self._log("info", f"✅ Batch analysis complete! Raw insights: {len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️")
-        self._log("info", f"🔍 After LLM deduplication: {len(merged_catalysts)}🚀 {len(merged_risks)}⚠️ {len(merged_mitigations)}🛡️")
+        # self._log("info", f"🔍 After LLM deduplication: {len(merged_catalysts)}🚀 {len(merged_risks)}⚠️ {len(merged_mitigations)}🛡️")
         self._log("info", f"💰 Total LLM cost: ${self.total_llm_cost:.4f} USD across {self.llm_call_count} calls")
         
         # Create overall analysis summary
         overall_summary = AnalysisSummary(
-            overall_sentiment=self._determine_overall_sentiment(merged_catalysts, merged_risks),
-            key_themes=self._extract_key_themes(merged_catalysts, merged_risks),
-            confidence_score=self._calculate_overall_confidence(merged_catalysts, merged_risks, merged_mitigations),
+            overall_sentiment=self._determine_overall_sentiment(all_catalysts, all_risks),
+            key_themes=self._extract_key_themes(all_catalysts, all_risks),
+            confidence_score=self._calculate_overall_confidence(all_catalysts, all_risks, all_mitigations),
             articles_analyzed=len(articles),
-            total_catalysts=len(merged_catalysts),
-            total_risks=len(merged_risks),
-            total_mitigations=len(merged_mitigations)
+            total_catalysts=len(all_catalysts),
+            total_risks=len(all_risks),
+            total_mitigations=len(all_mitigations)
         )
-        
-        return merged_catalysts, merged_risks, merged_mitigations, overall_summary
 
+        return all_catalysts, all_risks, all_mitigations, overall_summary
+    
     def _determine_overall_sentiment(self, catalysts: List[Catalyst], risks: List[Risk]) -> str:
         """Determine overall sentiment based on catalyst and risk balance."""
         if not catalysts and not risks:
@@ -685,418 +679,6 @@ class ArticleScreener:
         all_confidences.extend(m.confidence for m in mitigations)
         
         return sum(all_confidences) / len(all_confidences) if all_confidences else 0.5
-
-    # ============= LLM-POWERED DEDUPLICATION METHODS =============
-    
-    def _llm_deduplicate_insights(self, catalysts: List[Catalyst], risks: List[Risk], mitigations: List[Mitigation]) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
-        """
-        Use LLM to intelligently deduplicate and merge similar insights across all batches.
-        This replaces simple string matching with semantic understanding.
-        """        
-        if not any([catalysts, risks, mitigations]):
-            return [], [], []
-        
-        self._log("info", f"🔍 Using LLM to deduplicate {len(catalysts)} catalysts, {len(risks)} risks, {len(mitigations)} mitigations...")
-        
-        try:
-            # Format insights for LLM analysis
-            insights_content = self._format_insights_for_deduplication(catalysts, risks, mitigations)
-            
-            # Create deduplication prompt
-            dedup_prompt = self._create_deduplication_prompt(insights_content)
-            
-            # Make LLM call for deduplication
-            response, cost = get_llm()(dedup_prompt)
-            self.total_llm_cost += cost
-            self.llm_call_count += 1
-            
-            # Parse response
-            dedup_data = self._parse_llm_json_response(response, "deduplication_analysis")
-            
-            # Extract deduplicated insights
-            final_catalysts = self._parse_deduplicated_catalysts(dedup_data.get("catalysts", []))
-            final_risks = self._parse_deduplicated_risks(dedup_data.get("risks", []))
-            final_mitigations = self._parse_deduplicated_mitigations(dedup_data.get("mitigations", []))
-            
-            # Log deduplication results
-            summary = dedup_data.get("deduplication_summary", {})
-            original_total = summary.get("original_catalysts", 0) + summary.get("original_risks", 0) + summary.get("original_mitigations", 0)
-            final_total = summary.get("final_catalysts", 0) + summary.get("final_risks", 0) + summary.get("final_mitigations", 0)
-            merge_ops = summary.get("merge_operations", 0)
-            
-            self._log("info", f"✅ LLM deduplication complete: {original_total} → {final_total} insights ({merge_ops} merge operations)")
-            self._log("info", f"   📊 Final: {len(final_catalysts)}🚀 {len(final_risks)}⚠️ {len(final_mitigations)}🛡️")
-            self._log("info", f"💰 Deduplication cost: ${cost:.4f} USD | Running total: ${self.total_llm_cost:.4f} USD")
-            
-            return final_catalysts, final_risks, final_mitigations
-            
-        except Exception as e:
-            self._log("error", f"LLM deduplication failed: {e}")
-            self._log("warning", "Falling back to simple deduplication methods")
-            return self._merge_similar_catalysts(catalysts), self._merge_similar_risks(risks), self._merge_similar_mitigations(mitigations)
-    
-    def _create_deduplication_prompt(self, insights_content: str) -> List[Dict]:
-        """Create prompt for LLM-powered deduplication."""
-        system_prompt = load_prompt("deduplication_analysis")
-        user_prompt = load_prompt("deduplication_user").format(
-            company_ticker=self.ticker,
-            **insights_content
-        )
-        
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    
-    def _format_insights_for_deduplication(self, catalysts: List[Catalyst], risks: List[Risk], mitigations: List[Mitigation]) -> Dict[str, str]:
-        """Format insights into a structured text for LLM analysis."""
-        
-        # Format catalysts
-        catalysts_text = ""
-        for i, catalyst in enumerate(catalysts, 1):
-            catalysts_text += f"**Catalyst {i}:**\n"
-            catalysts_text += f"- Type: {catalyst.type}\n"
-            catalysts_text += f"- Description: {catalyst.description}\n"
-            catalysts_text += f"- Confidence: {catalyst.confidence:.2f}\n"
-            catalysts_text += f"- Timeline: {catalyst.timeline}\n"
-            if catalyst.reasoning:
-                catalysts_text += f"- Reasoning: {catalyst.reasoning}\n"
-            if catalyst.supporting_evidence:
-                catalysts_text += f"- Evidence: {'; '.join(catalyst.supporting_evidence)}\n"
-            if catalyst.direct_quotes:
-                quotes = [q.quote for q in catalyst.direct_quotes]
-                catalysts_text += f"- Quotes: {'; '.join(quotes)}\n"
-            # Format source articles properly
-            if catalyst.source_articles:
-                sources = [f"{ref.title} ({ref.url})" if ref.url else ref.title for ref in catalyst.source_articles]
-                catalysts_text += f"- Sources: {', '.join(sources)}\n"
-            elif catalyst.articles_mentioned:
-                catalysts_text += f"- Sources: {', '.join(catalyst.articles_mentioned)}\n"
-            catalysts_text += "\n"
-        
-        # Format risks
-        risks_text = ""
-        for i, risk in enumerate(risks, 1):
-            risks_text += f"**Risk {i}:**\n"
-            risks_text += f"- Type: {risk.type}\n"
-            risks_text += f"- Description: {risk.description}\n"
-            risks_text += f"- Severity: {risk.severity}\n"
-            risks_text += f"- Confidence: {risk.confidence:.2f}\n"
-            if risk.reasoning:
-                risks_text += f"- Reasoning: {risk.reasoning}\n"
-            if risk.supporting_evidence:
-                risks_text += f"- Evidence: {'; '.join(risk.supporting_evidence)}\n"
-            if risk.direct_quotes:
-                quotes = [q.quote for q in risk.direct_quotes]
-                risks_text += f"- Quotes: {'; '.join(quotes)}\n"
-            # Format source articles properly
-            if risk.source_articles:
-                sources = [f"{ref.title} ({ref.url})" if ref.url else ref.title for ref in risk.source_articles]
-                risks_text += f"- Sources: {', '.join(sources)}\n"
-            elif risk.articles_mentioned:
-                risks_text += f"- Sources: {', '.join(risk.articles_mentioned)}\n"
-            risks_text += "\n"
-        
-        # Format mitigations
-        mitigations_text = ""
-        for i, mitigation in enumerate(mitigations, 1):
-            mitigations_text += f"**Mitigation {i}:**\n"
-            mitigations_text += f"- Risk Addressed: {mitigation.risk_addressed}\n"
-            mitigations_text += f"- Strategy: {mitigation.strategy}\n"
-            mitigations_text += f"- Effectiveness: {mitigation.effectiveness}\n"
-            mitigations_text += f"- Confidence: {mitigation.confidence:.2f}\n"
-            if mitigation.reasoning:
-                mitigations_text += f"- Reasoning: {mitigation.reasoning}\n"
-            if mitigation.supporting_evidence:
-                mitigations_text += f"- Evidence: {'; '.join(mitigation.supporting_evidence)}\n"
-            if mitigation.direct_quotes:
-                quotes = [q.quote for q in mitigation.direct_quotes]
-                mitigations_text += f"- Quotes: {'; '.join(quotes)}\n"
-            # Format source articles properly
-            if mitigation.source_articles:
-                sources = [f"{ref.title} ({ref.url})" if ref.url else ref.title for ref in mitigation.source_articles]
-                mitigations_text += f"- Sources: {', '.join(sources)}\n"
-            elif mitigation.articles_mentioned:
-                mitigations_text += f"- Sources: {', '.join(mitigation.articles_mentioned)}\n"
-            mitigations_text += "\n"
-        
-        return {
-            "catalyst_count": len(catalysts),
-            "catalysts_data": catalysts_text or "None",
-            "risk_count": len(risks),
-            "risks_data": risks_text or "None",
-            "mitigation_count": len(mitigations),
-            "mitigations_data": mitigations_text or "None"
-        }
-    
-    def _parse_deduplicated_catalysts(self, catalysts_data: List[Dict]) -> List[Catalyst]:
-        """Parse deduplicated catalysts from LLM response."""
-        catalysts = []
-        for cat_data in catalysts_data:
-            # Parse direct quotes
-            direct_quotes = []
-            for quote_data in cat_data.get("direct_quotes", []):
-                direct_quotes.append(DirectQuote(
-                    quote=quote_data.get("quote", ""),
-                    source_article=quote_data.get("source_article", ""),
-                    source_url=quote_data.get("source_url", ""),
-                    context=quote_data.get("context", "")
-                ))
-            
-            # Parse source articles
-            source_articles = []
-            for source_data in cat_data.get("source_articles", []):
-                if isinstance(source_data, dict):
-                    source_articles.append(ArticleReference(
-                        title=source_data.get("title", ""),
-                        url=source_data.get("url", "")
-                    ))
-                else:
-                    # Handle legacy string format
-                    source_articles.append(ArticleReference(title=str(source_data), url=""))
-            
-            catalyst = Catalyst(
-                type=cat_data.get("type", "unknown").lower(),
-                description=cat_data.get("description", ""),
-                confidence=cat_data.get("confidence", 0.5),
-                supporting_evidence=cat_data.get("supporting_evidence", []),
-                articles_mentioned=cat_data.get("source_articles", []) if isinstance(cat_data.get("source_articles", []), list) and all(isinstance(x, str) for x in cat_data.get("source_articles", [])) else [],
-                timeline=cat_data.get("timeline", "medium-term").lower().replace("_", "-"),
-                llm_reasoning=cat_data.get("reasoning", ""),
-                llm_confidence=cat_data.get("confidence", 0.5),
-                reasoning=cat_data.get("reasoning", ""),
-                direct_quotes=direct_quotes,
-                source_articles=source_articles,
-                potential_impact=cat_data.get("potential_impact", "")
-            )
-            catalysts.append(catalyst)
-        
-        return catalysts
-    
-    def _parse_deduplicated_risks(self, risks_data: List[Dict]) -> List[Risk]:
-        """Parse deduplicated risks from LLM response."""
-        risks = []
-        for risk_data in risks_data:
-            # Parse direct quotes
-            direct_quotes = []
-            for quote_data in risk_data.get("direct_quotes", []):
-                direct_quotes.append(DirectQuote(
-                    quote=quote_data.get("quote", ""),
-                    source_article=quote_data.get("source_article", ""),
-                    source_url=quote_data.get("source_url", ""),
-                    context=quote_data.get("context", "")
-                ))
-            
-            # Parse source articles
-            source_articles = []
-            for source_data in risk_data.get("source_articles", []):
-                if isinstance(source_data, dict):
-                    source_articles.append(ArticleReference(
-                        title=source_data.get("title", ""),
-                        url=source_data.get("url", "")
-                    ))
-                else:
-                    # Handle legacy string format
-                    source_articles.append(ArticleReference(title=str(source_data), url=""))
-            
-            risk = Risk(
-                type=risk_data.get("type", "unknown").lower(),
-                description=risk_data.get("description", ""),
-                severity=risk_data.get("severity", "medium").lower(),
-                confidence=risk_data.get("confidence", 0.5),
-                supporting_evidence=risk_data.get("supporting_evidence", []),
-                articles_mentioned=risk_data.get("source_articles", []) if isinstance(risk_data.get("source_articles", []), list) and all(isinstance(x, str) for x in risk_data.get("source_articles", [])) else [],
-                potential_impact=risk_data.get("potential_impact", ""),
-                llm_reasoning=risk_data.get("reasoning", ""),
-                llm_confidence=risk_data.get("confidence", 0.5),
-                reasoning=risk_data.get("reasoning", ""),
-                direct_quotes=direct_quotes,
-                source_articles=source_articles,
-                likelihood=risk_data.get("likelihood", "medium")
-            )
-            risks.append(risk)
-        
-        return risks
-    
-    def _parse_deduplicated_mitigations(self, mitigations_data: List[Dict]) -> List[Mitigation]:
-        """Parse deduplicated mitigations from LLM response."""
-        mitigations = []
-        for mit_data in mitigations_data:
-            # Parse direct quotes
-            direct_quotes = []
-            for quote_data in mit_data.get("direct_quotes", []):
-                direct_quotes.append(DirectQuote(
-                    quote=quote_data.get("quote", ""),
-                    source_article=quote_data.get("source_article", ""),
-                    source_url=quote_data.get("source_url", ""),
-                    context=quote_data.get("context", "")
-                ))
-            
-            # Parse source articles
-            source_articles = []
-            for source_data in mit_data.get("source_articles", []):
-                if isinstance(source_data, dict):
-                    source_articles.append(ArticleReference(
-                        title=source_data.get("title", ""),
-                        url=source_data.get("url", "")
-                    ))
-                else:
-                    # Handle legacy string format
-                    source_articles.append(ArticleReference(title=str(source_data), url=""))
-            
-            mitigation = Mitigation(
-                risk_addressed=mit_data.get("risk_addressed", ""),
-                strategy=mit_data.get("strategy", ""),
-                confidence=mit_data.get("confidence", 0.5),
-                supporting_evidence=mit_data.get("supporting_evidence", []),
-                articles_mentioned=mit_data.get("source_articles", []) if isinstance(mit_data.get("source_articles", []), list) and all(isinstance(x, str) for x in mit_data.get("source_articles", [])) else [],
-                effectiveness=mit_data.get("effectiveness", "medium").lower(),
-                company_action=mit_data.get("company_action", ""),
-                llm_reasoning=mit_data.get("reasoning", ""),
-                llm_confidence=mit_data.get("confidence", 0.5),
-                reasoning=mit_data.get("reasoning", ""),
-                direct_quotes=direct_quotes,
-                source_articles=source_articles,
-                implementation_timeline=mit_data.get("implementation_timeline", "")
-            )
-            mitigations.append(mitigation)
-        
-        return mitigations
-
-    # ============= END LLM DEDUPLICATION METHODS =============
-
-
-    def _merge_similar_catalysts(self, catalysts: List[Catalyst]) -> List[Catalyst]:
-        """Merge similar catalysts to avoid duplicates."""
-        if not catalysts:
-            return []
-        
-        merged = []
-        used_indices = set()
-        
-        for i, catalyst in enumerate(catalysts):
-            if i in used_indices:
-                continue
-                
-            similar_catalysts = [catalyst]
-            used_indices.add(i)
-            
-            # Find similar catalysts
-            for j, other_catalyst in enumerate(catalysts[i+1:], i+1):
-                if j in used_indices:
-                    continue
-                    
-                if (catalyst.type == other_catalyst.type and 
-                    self._are_descriptions_similar(catalyst.description, other_catalyst.description)):
-                    similar_catalysts.append(other_catalyst)
-                    used_indices.add(j)
-            
-            # Merge if multiple similar catalysts found
-            if len(similar_catalysts) > 1:
-                merged_catalyst = self._merge_catalyst_group(similar_catalysts)
-                merged.append(merged_catalyst)
-            else:
-                merged.append(catalyst)
-        
-        return merged
-
-    def _merge_similar_risks(self, risks: List[Risk]) -> List[Risk]:
-        """Merge similar risks to avoid duplicates."""
-        # Similar logic to catalyst merging
-        if not risks:
-            return []
-        
-        merged = []
-        used_indices = set()
-        
-        for i, risk in enumerate(risks):
-            if i in used_indices:
-                continue
-                
-            similar_risks = [risk]
-            used_indices.add(i)
-            
-            for j, other_risk in enumerate(risks[i+1:], i+1):
-                if j in used_indices:
-                    continue
-                    
-                if (risk.type == other_risk.type and 
-                    self._are_descriptions_similar(risk.description, other_risk.description)):
-                    similar_risks.append(other_risk)
-                    used_indices.add(j)
-            
-            if len(similar_risks) > 1:
-                merged_risk = self._merge_risk_group(similar_risks)
-                merged.append(merged_risk)
-            else:
-                merged.append(risk)
-        
-        return merged
-
-    def _merge_similar_mitigations(self, mitigations: List[Mitigation]) -> List[Mitigation]:
-        """Merge similar mitigations."""
-        # Similar merging logic
-        return mitigations  # Simplified for now
-
-    def _are_descriptions_similar(self, desc1: str, desc2: str, threshold: float = 0.6) -> bool:
-        """Check if two descriptions are similar."""
-        # Simple similarity check based on common words
-        words1 = set(re.findall(r'\b\w+\b', desc1.lower()))
-        words2 = set(re.findall(r'\b\w+\b', desc2.lower()))
-        
-        if not words1 or not words2:
-            return False
-        
-        intersection = len(words1.intersection(words2))
-        union = len(words1.union(words2))
-        
-        similarity = intersection / union if union > 0 else 0
-        return similarity >= threshold
-
-    def _merge_catalyst_group(self, catalysts: List[Catalyst]) -> Catalyst:
-        """Merge a group of similar catalysts."""
-        # Combine evidence and articles
-        all_evidence = []
-        all_articles = []
-        total_confidence = 0
-        
-        for catalyst in catalysts:
-            all_evidence.extend(catalyst.supporting_evidence)
-            all_articles.extend(catalyst.articles_mentioned)
-            total_confidence += catalyst.confidence
-        
-        # Create merged catalyst
-        base_catalyst = catalysts[0]
-        return Catalyst(
-            type=base_catalyst.type,
-            description=base_catalyst.description,
-            confidence=min(1.0, total_confidence / len(catalysts) + 0.1),  # Boost merged confidence
-            supporting_evidence=list(set(all_evidence)),
-            articles_mentioned=list(set(all_articles)),
-            timeline=base_catalyst.timeline
-        )
-
-    def _merge_risk_group(self, risks: List[Risk]) -> Risk:
-        """Merge a group of similar risks."""
-        all_evidence = []
-        all_articles = []
-        total_confidence = 0
-        
-        for risk in risks:
-            all_evidence.extend(risk.supporting_evidence)
-            all_articles.extend(risk.articles_mentioned)
-            total_confidence += risk.confidence
-        
-        base_risk = risks[0]
-        return Risk(
-            type=base_risk.type,
-            description=base_risk.description,
-            severity=base_risk.severity,
-            confidence=min(1.0, total_confidence / len(risks) + 0.1),
-            supporting_evidence=list(set(all_evidence)),
-            articles_mentioned=list(set(all_articles)),
-            potential_impact=base_risk.potential_impact
-        )
 
     def save_structured_data(self, catalysts: List[Catalyst], risks: List[Risk], 
                            mitigations: List[Mitigation], analysis_summary: AnalysisSummary, output_file: pathlib.Path):
