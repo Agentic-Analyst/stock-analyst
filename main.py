@@ -57,7 +57,7 @@ from article_screener import ArticleScreener
 # NEW: Price adjustor for news-based model adjustment (V2 - builds from scratch)
 from price_adjustor import adjust_price
 from path_utils import get_analysis_path, ensure_analysis_paths
-from report_agent import save_explanation_reports, build_deterministic_summary, generate_professional_analyst_report
+from report_agent import generate_and_save_professional_report
 
 # Import LLM system
 from llms.config import init_llm, list_models, list_available_models
@@ -226,37 +226,31 @@ class ComprehensiveStockAnalysisPipeline:
         else:
             price_adjustment_results = {"success": False, "reason": "Prerequisites not met"}
         
-        # Step 7: Professional Report Generation (if model was generated successfully)
-        if model_results.get("success") and screening_results:
+        # Step 7: Professional Report Generation (if model and screening succeeded)
+        if model_results.get("success") and screening_results and price_adjustment_results.get("success"):
             self.logger.stage_start("PROFESSIONAL REPORT GENERATION", "Generating comprehensive analyst-style research report")
             try:
-                # Generate technical analysis report (deterministic summary)
-                def _to_dict(x):
-                    try:
-                        return asdict(x)
-                    except Exception:
-                        return x if isinstance(x, dict) else dict(x.__dict__) if hasattr(x, '__dict__') else {"value": x}
+                # NEW: Use rewritten report agent that collects data from all pipeline outputs
+                report, report_path = generate_and_save_professional_report(
+                    self.analysis_path,
+                    self.ticker,
+                    self.logger  # Pass logger instance
+                )
                 
-                factors = {
-                    "catalysts": [_to_dict(c) for c in screening_results.get("catalysts", [])],
-                    "risks": [_to_dict(r) for r in screening_results.get("risks", [])],
-                    "mitigations": [_to_dict(m) for m in screening_results.get("mitigations", [])],
-                }
-                meta = {"model": "comprehensive_dcf", "years": 5, "excel_path": model_results.get("excel_path")}
+                self.logger.info(f"✅ Professional report generated successfully")
+                self.logger.info(f"   Report length: {len(report):,} characters")
+                self.logger.info(f"   Saved to: {report_path}")
                 
-                # Note: Price analysis available from adjusted model if price adjustment succeeded
-                det_md = build_deterministic_summary(self.ticker, {}, factors, meta)
-                self.logger.info(f"📝 Generating financial analysis summary for {self.ticker}")
-                self.logger.info(f"📄 Financial analysis summary generated successfully")
-                saved = save_explanation_reports(self.ticker, det_md, self.analysis_path)
-                self.logger.info(f"📝 Financial analysis summary saved: {saved['path']} (latest: {saved['latest']})")
+                self.stats["report_generated"] = True
+                self.stats["report_path"] = str(report_path)
+                self.stats["stages_completed"].append("report_generation")
                 
-                # Professional report generation will be rewritten soon
-                # report_results = self.run_professional_report_stage(
-                #     model_results, screening_results, price_adjustment_results
-                # )
             except Exception as e:
-                self.logger.warning(f"⚠️  Failed to generate reports: {e}")
+                self.logger.warning(f"⚠️  Failed to generate professional report: {e}")
+                self.stats["report_generated"] = False
+        else:
+            self.logger.info("⏭️  Skipping report generation (prerequisites not met)")
+            self.stats["report_generated"] = False
 
         # Pipeline completion
         duration = (datetime.now() - self.stats["start_time"]).total_seconds()
@@ -582,7 +576,8 @@ class ComprehensiveStockAnalysisPipeline:
                 ticker=self.ticker,
                 model_path=str(original_model_path),
                 screening_path=str(screening_data_path),
-                output_path=str(adjusted_model_path)
+                output_path=str(adjusted_model_path),
+                logger=self.logger  # Pass logger instance
             )
             
             # Update statistics
@@ -618,7 +613,7 @@ class ComprehensiveStockAnalysisPipeline:
             import traceback
             self.logger.error(traceback.format_exc())
             return {"success": False, "error": str(e)}
-    
+
     # REMOVED: run_professional_report_stage() - will be rewritten to work with Excel models
     
     def _get_comprehensive_pipeline_results(self) -> Dict:
@@ -759,7 +754,7 @@ Examples:
             results = pipeline.run_screening_stage(
                 min_confidence=args.min_confidence
             )
-        
+
         # Pipeline execution completed successfully
         pipeline.logger.program_end()
         time.sleep(3)

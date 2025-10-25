@@ -208,11 +208,26 @@ class ArticleScraper:
             if not isinstance(result, dict):
                 self._log("warning", f"Unexpected SerpAPI response type: {type(result)}")
                 return []
+            
+            # Check for API errors
+            if "error" in result:
+                self._log("error", f"❌ SerpAPI returned error: {result['error']}")
+                if "message" in result:
+                    self._log("error", f"   Error details: {result['message']}")
+                return []
+            
+            # Log response for debugging
+            self._log("debug", f"SerpAPI response keys: {list(result.keys())}")
                 
             news_results = result.get("news_results", [])
             
             if not news_results:
                 self._log("warning", f"No news results found for query: {query}")
+                # Log additional info for debugging
+                search_params = result.get("search_parameters", {})
+                self._log("debug", f"   Search params used: {search_params}")
+                if "serpapi_pagination" in result:
+                    self._log("debug", f"   Pagination info: {result['serpapi_pagination']}")
                 return []
             
             enhanced_results = []
@@ -246,8 +261,21 @@ class ArticleScraper:
                     
             return enhanced_results
             
+        except KeyError as e:
+            self._log("error", f"❌ SerpAPI response missing expected key: {e}")
+            self._log("error", f"   Available keys: {list(result.keys()) if 'result' in locals() else 'N/A'}")
+            return []
         except Exception as e:
-            self._log("error", f"SerpAPI search failed for query '{query}': {e}")
+            self._log("error", f"❌ SerpAPI search failed for query '{query}'")
+            self._log("error", f"   Exception type: {type(e).__name__}")
+            self._log("error", f"   Exception details: {str(e)}")
+            
+            # Check if it's an API key issue
+            if "api_key" in str(e).lower() or "authentication" in str(e).lower() or "unauthorized" in str(e).lower():
+                self._log("error", f"   ⚠️  Possible API key issue - verify SERPAPI_API_KEY is valid")
+            elif "rate" in str(e).lower() or "limit" in str(e).lower() or "quota" in str(e).lower():
+                self._log("error", f"   ⚠️  Possible rate limit or quota issue - check SerpAPI dashboard")
+            
             return []
     
     def _scrape_article(self, url: str) -> Optional[Dict]:

@@ -22,6 +22,7 @@ from datetime import datetime
 import json
 import openpyxl
 from llms.config import get_llm
+from logger import StockAnalystLogger
 
 
 class PriceAdjustor:
@@ -36,10 +37,11 @@ class PriceAdjustor:
     5. Save as new Excel file (original untouched)
     """
     
-    def __init__(self, ticker: str, model_path, screening_path):
+    def __init__(self, ticker: str, model_path, screening_path, logger: Optional[StockAnalystLogger] = None):
         self.ticker = ticker.upper()
         self.model_path = Path(model_path)
         self.screening_path = Path(screening_path)
+        self.logger = logger
         
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model not found: {self.model_path}")
@@ -64,26 +66,34 @@ class PriceAdjustor:
     
     def load_data(self):
         """Load original model and screening data."""
-        print(f"\n{'='*70}\nLoading data for {self.ticker}\n{'='*70}")
+        if self.logger:
+            self.logger.stage_start("LOADING DATA FOR PRICE ADJUSTMENT", f"Loading model and screening data - {self.ticker}")
         
-        print(f"\n[1/3] Loading original model from {self.model_path.name}...")
+        if self.logger:
+            self.logger.info(f"[1/3] Loading original model from {self.model_path.name}...")
         self.original_workbook = openpyxl.load_workbook(self.model_path)
-        print(f"      ✅ Loaded {len(self.original_workbook.sheetnames)} tabs")
+        if self.logger:
+            self.logger.info(f"      ✅ Loaded {len(self.original_workbook.sheetnames)} tabs")
         
-        print(f"\n[2/3] Extracting Raw data from original model...")
+        if self.logger:
+            self.logger.info(f"[2/3] Extracting Raw data from original model...")
         # Extract JSON-like data from Raw tab (needed to rebuild model)
         self.json_data = self._extract_json_from_raw_tab()
-        print(f"      ✅ Extracted {len(self.json_data.get('data', []))} data points")
+        if self.logger:
+            self.logger.info(f"      ✅ Extracted {len(self.json_data.get('data', []))} data points")
         
-        print(f"\n[3/3] Loading screening data from {self.screening_path.name}...")
+        if self.logger:
+            self.logger.info(f"[3/3] Loading screening data from {self.screening_path.name}...")
         with open(self.screening_path, 'r') as f:
             self.screening_data = json.load(f)
         
         summary = self.screening_data.get('analysis_summary', {})
-        print(f"      ✅ Loaded news analysis:")
-        print(f"         • Sentiment: {summary.get('overall_sentiment', 'N/A')}")
-        print(f"         • Catalysts: {summary.get('total_catalysts', 0)}")
-        print(f"         • Risks: {summary.get('total_risks', 0)}")
+        if self.logger:
+            self.logger.info(f"      ✅ Loaded news analysis:")
+            self.logger.info(f"         • Sentiment: {summary.get('overall_sentiment', 'N/A')}")
+            self.logger.info(f"         • Catalysts: {summary.get('total_catalysts', 0)}")
+            self.logger.info(f"         • Risks: {summary.get('total_risks', 0)}")
+            self.logger.stage_end("LOADING DATA", success=True)
     
     def _extract_json_from_raw_tab(self) -> Dict:
         """Extract data from Raw tab to reconstruct JSON format."""
@@ -116,7 +126,8 @@ class PriceAdjustor:
     
     def extract_base_assumptions(self):
         """Extract base assumptions from original model's LLM_Inferred tab."""
-        print(f"\n{'-'*70}\nExtracting base assumptions...\n{'-'*70}")
+        if self.logger:
+            self.logger.stage_start("EXTRACTING BASE ASSUMPTIONS", "Reading assumptions from original model")
         
         if "LLM_Inferred" not in self.original_workbook.sheetnames:
             raise ValueError("LLM_Inferred tab not found")
@@ -135,13 +146,64 @@ class PriceAdjustor:
             'dpo_days': [ws[f'{c}10'].value or 90 for c in 'BCDEF']
         }
         
-        print(f"✅ Base assumptions extracted:")
-        print(f"   • WACC: {self.base_assumptions['wacc']*100:.2f}%")
-        print(f"   • Revenue Growth FY1: {self.base_assumptions['revenue_growth_rates'][0]*100:.1f}%")
+        if self.logger:
+            self.logger.info(f"✅ Base assumptions extracted:")
+            self.logger.info(f"   • WACC: {self.base_assumptions['wacc']*100:.2f}%")
+            self.logger.info(f"   • Revenue Growth FY1: {self.base_assumptions['revenue_growth_rates'][0]*100:.1f}%")
+            self.logger.stage_end("EXTRACTING ASSUMPTIONS", success=True)
     
     def call_llm_for_adjustments(self):
         """Call LLM to infer adjustments based on news analysis."""
-        print(f"\n{'-'*70}\nCalling LLM for adjustments...\n{'-'*70}")
+        if self.logger:
+            self.logger.stage_start("LLM ADJUSTMENT INFERENCE", "Calling LLM to infer parameter adjustments")
+        
+        # Check if there's any news to analyze
+        num_catalysts = len(self.screening_data.get('catalysts', []))
+        num_risks = len(self.screening_data.get('risks', []))
+        num_mitigations = len(self.screening_data.get('mitigations', []))
+        
+        if num_catalysts == 0 and num_risks == 0:
+            if self.logger:
+                self.logger.warning("⚠️  No catalysts or risks identified in news analysis")
+                self.logger.info("📊 Using base assumptions UNCHANGED (no news adjustments needed)")
+            
+            # Return base assumptions as-is - no changes
+            self.adjusted_assumptions = self.base_assumptions.copy()
+            self.adjustment_metadata = {
+                'adjustments_summary': {
+                    'revenue_growth_fy1_bps': 0,
+                    'revenue_growth_fy2_bps': 0,
+                    'revenue_growth_fy3_bps': 0,
+                    'revenue_growth_fy4_bps': 0,
+                    'revenue_growth_fy5_bps': 0,
+                    'gross_margin_fy1_bps': 0,
+                    'gross_margin_fy2_bps': 0,
+                    'gross_margin_fy3_bps': 0,
+                    'gross_margin_fy4_bps': 0,
+                    'gross_margin_fy5_bps': 0,
+                    'operating_margin_fy1_bps': 0,
+                    'operating_margin_fy2_bps': 0,
+                    'operating_margin_fy3_bps': 0,
+                    'operating_margin_fy4_bps': 0,
+                    'operating_margin_fy5_bps': 0,
+                },
+                'factor_mappings': [],
+                'note': 'No catalysts or risks identified - base case assumptions used unchanged'
+            }
+            
+            if self.logger:
+                self.logger.info("✅ Adjusted model will be IDENTICAL to base case (0 bps change on all parameters)")
+                self.logger.stage_end("LLM ADJUSTMENT INFERENCE", success=True, stats={
+                    "LLM Cost": "$0.0000 (skipped - no news)",
+                    "Adjustments": "All 0 bps",
+                    "News Factors": f"{num_catalysts} catalysts, {num_risks} risks"
+                })
+            return
+        
+        # Proceed with LLM call if there are catalysts or risks
+        if self.logger:
+            self.logger.info(f"📰 News factors found: {num_catalysts} catalysts, {num_risks} risks, {num_mitigations} mitigations")
+            self.logger.info(f"🤖 Calling LLM to infer parameter adjustments based on news...")
         
         prompt_path = Path(__file__).parent.parent / "prompts" / "news_to_adjustments.md"
         with open(prompt_path, 'r') as f:
@@ -189,10 +251,12 @@ class PriceAdjustor:
         llm = get_llm()
         messages = [{"role": "user", "content": prompt}]
         
-        print("🤖 Sending request to LLM...")
+        if self.logger:
+            self.logger.info("🤖 Sending request to LLM...")
         response, cost = llm(messages, temperature=0.3)
         self.llm_cost += cost
-        print(f"   💰 LLM cost: ${cost:.4f}")
+        if self.logger:
+            self.logger.llm_call("Price Adjustment Parameter Inference", cost)
         
         # Parse response
         try:
@@ -208,17 +272,70 @@ class PriceAdjustor:
                 'factor_mappings': result.get('factor_mappings', [])
             }
             
-            print(f"✅ LLM adjustment successful!")
-            
-            adj_summary = self.adjustment_metadata['adjustments_summary']
-            print(f"\n📊 Key Adjustments:")
-            for key in ['revenue_growth_fy1_bps', 'gross_margin_fy1_bps', 'operating_margin_fy1_bps']:
-                if key in adj_summary:
-                    print(f"   • {key}: {adj_summary[key]:+d} bps")
+            if self.logger:
+                self.logger.info(f"✅ LLM adjustment successful!")
+                
+                adj_summary = self.adjustment_metadata['adjustments_summary']
+                self.logger.info(f"📊 Key Adjustments:")
+                for key in ['revenue_growth_fy1_bps', 'gross_margin_fy1_bps', 'operating_margin_fy1_bps']:
+                    if key in adj_summary:
+                        self.logger.info(f"   • {key}: {adj_summary[key]:+d} bps")
+                
+                # Log ALL parameter changes for transparency
+                self.logger.info(f"\n📋 Complete Adjustment Details:")
+                self.logger.info(f"   Base Assumptions:")
+                self.logger.info(f"   • Revenue Growth Rates (FY1-FY5): {', '.join([f'{r*100:.1f}%' for r in self.base_assumptions['revenue_growth_rates']])}")
+                self.logger.info(f"   • Gross Margins (FY1-FY5): {', '.join([f'{m*100:.1f}%' for m in self.base_assumptions['gross_margins']])}")
+                self.logger.info(f"   • Operating Margins (FY1-FY5): {', '.join([f'{m*100:.1f}%' for m in self.base_assumptions['operating_margins']])}")
+                self.logger.info(f"   • EBITDA Margins (FY1-FY5): {', '.join([f'{m*100:.1f}%' for m in self.base_assumptions['ebitda_margins']])}")
+                self.logger.info(f"   • WACC: {self.base_assumptions['wacc']*100:.2f}%")
+                self.logger.info(f"   • Terminal Growth: {self.base_assumptions['terminal_growth_rate']*100:.2f}%")
+                
+                # Show adjusted values
+                self.logger.info(f"\n   Adjusted Parameters (from LLM):")
+                for param, value in self.adjusted_assumptions.items():
+                    if isinstance(value, (int, float)):
+                        # Handle both percentages and basis points
+                        if 'bps' in param or 'basis' in param.lower():
+                            self.logger.info(f"   • {param}: {value:+.0f} bps")
+                        elif param in ['wacc', 'terminal_growth_rate'] or 'rate' in param or 'margin' in param or 'growth' in param:
+                            self.logger.info(f"   • {param}: {value*100:.2f}%")
+                        else:
+                            self.logger.info(f"   • {param}: {value}")
+                    elif isinstance(value, list):
+                        if all(isinstance(v, (int, float)) for v in value):
+                            self.logger.info(f"   • {param}: {', '.join([f'{v*100:.1f}%' if v < 10 else f'{v:.0f}' for v in value])}")
+                        else:
+                            self.logger.info(f"   • {param}: {value}")
+                    else:
+                        self.logger.info(f"   • {param}: {value}")
+                
+                # Show news context
+                num_catalysts = len(self.screening_data.get('catalysts', []))
+                num_risks = len(self.screening_data.get('risks', []))
+                num_mitigations = len(self.screening_data.get('mitigations', []))
+                sentiment = self.screening_data.get('analysis_summary', {}).get('overall_sentiment', 'neutral')
+                
+                self.logger.info(f"\n   News Analysis Context:")
+                self.logger.info(f"   • Sentiment: {sentiment.upper()}")
+                self.logger.info(f"   • Catalysts: {num_catalysts}")
+                self.logger.info(f"   • Risks: {num_risks}")
+                self.logger.info(f"   • Mitigations: {num_mitigations}")
+                
+                if num_catalysts == 0 and num_risks == 0:
+                    self.logger.warning(f"   ⚠️  WARNING: No catalysts or risks identified - adjustments may be minimal or default!")
+                
+                self.logger.stage_end("LLM ADJUSTMENT INFERENCE", success=True, stats={
+                    "LLM Cost": f"${cost:.4f}",
+                    "Adjustments": len(adj_summary),
+                    "News Factors": f"{num_catalysts} catalysts, {num_risks} risks"
+                })
         
         except json.JSONDecodeError as e:
-            print(f"❌ Failed to parse LLM response: {e}")
-            print(f"Response: {response[:500]}")
+            if self.logger:
+                self.logger.error(f"❌ Failed to parse LLM response: {e}")
+                self.logger.error(f"Response: {response[:500]}")
+                self.logger.stage_end("LLM ADJUSTMENT INFERENCE", success=False)
             raise
     
     def _format_factors(self, factors, factor_type):
@@ -245,7 +362,8 @@ class PriceAdjustor:
     
     def build_new_model(self):
         """Build brand new Excel model from scratch using adjusted assumptions."""
-        print(f"\n{'='*70}\nBuilding new adjusted model from scratch...\n{'='*70}")
+        if self.logger:
+            self.logger.stage_start("BUILDING ADJUSTED MODEL", "Building new Excel model from scratch with adjusted assumptions")
         
         # Import all tab builders
         from agents.fm.tabs.tab_raw import RawTabBuilder
@@ -275,51 +393,70 @@ class PriceAdjustor:
         summary_builder = SummaryTabBuilder()
         
         # Build all tabs in sequence (same order as original FinancialModelBuilder)
-        print("\n[1/9] Building Raw tab...")
+        if self.logger:
+            self.logger.info("[1/9] Building Raw tab...")
         raw_builder.data_rows = self._convert_json_to_raw_rows()
         raw_builder.create_tab(self.new_workbook)
-        print(f"      ✅ Raw tab created ({len(raw_builder.data_rows)} rows)")
+        if self.logger:
+            self.logger.info(f"      ✅ Raw tab created ({len(raw_builder.data_rows)} rows)")
         
-        print("[2/9] Building Keys_Map tab...")
+        if self.logger:
+            self.logger.info("[2/9] Building Keys_Map tab...")
         keys_map_builder.build_from_raw_data(raw_builder.data_rows)
         keys_map_builder.create_tab(self.new_workbook)
-        print(f"      ✅ Keys_Map tab created ({len(keys_map_builder.field_mappings)} fields)")
+        if self.logger:
+            self.logger.info(f"      ✅ Keys_Map tab created ({len(keys_map_builder.field_mappings)} fields)")
         
-        print("[3/9] Building Assumptions tab (with ADJUSTED values)...")
+        if self.logger:
+            self.logger.info("[3/9] Building Assumptions tab (with ADJUSTED values)...")
         assumptions_builder.create_tab(self.new_workbook)
-        print("      ✅ Assumptions tab created (with LLM_Inferred containing adjusted values)")
+        if self.logger:
+            self.logger.info("      ✅ Assumptions tab created (with LLM_Inferred containing adjusted values)")
         
-        print("[4/9] Building Historical tab...")
+        if self.logger:
+            self.logger.info("[4/9] Building Historical tab...")
         historical_builder.create_tab(self.new_workbook)
-        print("      ✅ Historical tab created (5 years actuals)")
+        if self.logger:
+            self.logger.info("      ✅ Historical tab created (5 years actuals)")
         
-        print("[5/9] Building Projections tab...")
+        if self.logger:
+            self.logger.info("[5/9] Building Projections tab...")
         projections_builder.create_tab(self.new_workbook)
-        print("      ✅ Projections tab created (FY1-FY5 forecasts with adjusted assumptions)")
+        if self.logger:
+            self.logger.info("      ✅ Projections tab created (FY1-FY5 forecasts with adjusted assumptions)")
         
-        print("[6/9] Building Valuation (Perpetual Growth DCF) tab...")
+        if self.logger:
+            self.logger.info("[6/9] Building Valuation (Perpetual Growth DCF) tab...")
         perpetual_growth_dcf_builder.create_tab(self.new_workbook)
-        print("      ✅ Valuation (DCF) tab created")
+        if self.logger:
+            self.logger.info("      ✅ Valuation (DCF) tab created")
         
-        print("[7/9] Building Valuation (Exit Multiple DCF) tab...")
+        if self.logger:
+            self.logger.info("[7/9] Building Valuation (Exit Multiple DCF) tab...")
         exit_multiple_dcf_builder.create_tab(self.new_workbook)
-        print("      ✅ Valuation (Exit Multiple) tab created")
+        if self.logger:
+            self.logger.info("      ✅ Valuation (Exit Multiple) tab created")
         
-        print("[8/9] Building Sensitivity tab...")
+        if self.logger:
+            self.logger.info("[8/9] Building Sensitivity tab...")
         sensitivity_builder.create_tab(self.new_workbook)
-        print("      ✅ Sensitivity tab created (2-way analysis)")
+        if self.logger:
+            self.logger.info("      ✅ Sensitivity tab created (2-way analysis)")
         
-        print("[9/9] Building Summary tab...")
+        if self.logger:
+            self.logger.info("[9/9] Building Summary tab...")
         summary_builder.create_tab(self.new_workbook)
-        print("      ✅ Summary tab created (34 metrics)")
+        if self.logger:
+            self.logger.info("      ✅ Summary tab created (34 metrics)")
         
         # Set Summary as active sheet
         self.new_workbook.active = self.new_workbook["Summary"]
         
-        print(f"\n{'='*70}")
-        print("✅ New adjusted model build complete!")
-        print("   All tabs now reference ADJUSTED assumptions via LLM_Inferred tab")
-        print(f"{'='*70}")
+        if self.logger:
+            self.logger.stage_end("BUILDING ADJUSTED MODEL", success=True, stats={
+                "Total Tabs": len(self.new_workbook.sheetnames),
+                "Active Sheet": "Summary"
+            })
     
     def _convert_json_to_raw_rows(self):
         """Convert JSON data to Raw tab row format."""
@@ -340,16 +477,21 @@ class PriceAdjustor:
         else:
             output_path = Path(output_path)
         
-        print(f"\n{'='*70}\nSaving new adjusted model...\n{'='*70}")
+        if self.logger:
+            self.logger.stage_start("SAVING ADJUSTED MODEL", "Saving new Excel file to disk")
         
         self.new_workbook.save(output_path)
         
         file_size = output_path.stat().st_size
-        print(f"\n✅ New adjusted model saved to: {output_path}")
-        print(f"   • File size: {file_size:,} bytes")
-        print(f"   • Tabs: {len(self.new_workbook.sheetnames)} (complete model)")
-        print(f"   • Total LLM cost: ${self.llm_cost:.4f}")
-        print(f"   • Original model: UNTOUCHED")
+        
+        if self.logger:
+            self.logger.file_operation("Adjusted model saved", output_path)
+            self.logger.stage_end("SAVING ADJUSTED MODEL", success=True, stats={
+                "File Size": f"{file_size:,} bytes",
+                "Total Tabs": len(self.new_workbook.sheetnames),
+                "Total LLM Cost": f"${self.llm_cost:.4f}",
+                "Original Model": "UNTOUCHED"
+            })
         
         return output_path
     
@@ -361,7 +503,7 @@ class PriceAdjustor:
         self.build_new_model()
 
 
-def adjust_price(ticker, model_path, screening_path, output_path=None):
+def adjust_price(ticker, model_path, screening_path, output_path=None, logger: Optional[StockAnalystLogger] = None):
     """
     Convenience function to adjust a financial model based on news analysis.
     
@@ -373,15 +515,16 @@ def adjust_price(ticker, model_path, screening_path, output_path=None):
         model_path: Path to original financial model Excel file
         screening_path: Path to screening_data.json (news analysis)
         output_path: Optional path for new adjusted model (default: {original}_adjusted.xlsx)
+        logger: Optional logger instance
     
     Returns:
         Path to the new adjusted model
     
     Example:
         >>> from src.price_adjustor import adjust_price
-        >>> adjust_price("AAPL", "AAPL_financial_model.xlsx", "screening_data.json")
+        >>> adjust_price("AAPL", "AAPL_financial_model.xlsx", "screening_data.json", logger=my_logger)
         # Creates: AAPL_financial_model_adjusted.xlsx (brand new file)
     """
-    adjustor = PriceAdjustor(ticker, model_path, screening_path)
+    adjustor = PriceAdjustor(ticker, model_path, screening_path, logger)
     adjustor.run()
     return adjustor.save(output_path)
