@@ -55,7 +55,7 @@ from article_scraper import ArticleScraper
 from article_filter import ArticleFilter
 from article_screener import ArticleScreener
 # NEW: Price adjustor for news-based model adjustment (V2 - builds from scratch)
-from price_adjustor import adjust_price
+# from price_adjustor import adjust_price
 from path_utils import get_analysis_path, ensure_analysis_paths
 from report_agent import generate_and_save_professional_report
 
@@ -220,14 +220,14 @@ class ComprehensiveStockAnalysisPipeline:
             )
         
         # Step 6: Price Adjustment (if model and screening were successful)
-        if model_results.get("success") and screening_results:
-            self.logger.stage_start("PRICE ADJUSTMENT", "Building adjusted model based on news insights")
-            price_adjustment_results = self.run_price_adjustment_stage(model_results, screening_results)
-        else:
-            price_adjustment_results = {"success": False, "reason": "Prerequisites not met"}
+        # if model_results.get("success") and screening_results:
+        #     self.logger.stage_start("PRICE ADJUSTMENT", "Building adjusted model based on news insights")
+        #     price_adjustment_results = self.run_price_adjustment_stage(model_results, screening_results)
+        # else:
+        #     price_adjustment_results = {"success": False, "reason": "Prerequisites not met"}
         
         # Step 7: Professional Report Generation (if model and screening succeeded)
-        if model_results.get("success") and screening_results and price_adjustment_results.get("success"):
+        if model_results.get("success") and screening_results:
             self.logger.stage_start("PROFESSIONAL REPORT GENERATION", "Generating comprehensive analyst-style research report")
             try:
                 # NEW: Use rewritten report agent that collects data from all pipeline outputs
