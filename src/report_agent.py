@@ -937,9 +937,7 @@ def save_professional_report(
         Path to saved report
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{ticker}_Professional_Analysis_Report_{timestamp}.md"
+    filename = f"{ticker}_Professional_Analysis_Report.md"
     report_path = output_dir / filename
     
     with open(report_path, 'w') as f:
