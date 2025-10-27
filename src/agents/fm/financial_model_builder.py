@@ -82,6 +82,7 @@ from .tabs.tab_valuation_perpetual_growth_dcf import ValuationPerpetualGrowthDCF
 from .tabs.tab_valuation_exit_multiple_dcf import ValuationExitMultipleDCFBuilder
 from .tabs.tab_sensitivity import SensitivityTabBuilder
 from .tabs.tab_summary import SummaryTabBuilder
+from .formula_evaluator import FormulaEvaluator
 
 
 class FinancialModelBuilder:
@@ -133,6 +134,9 @@ class FinancialModelBuilder:
         self.exit_multiple_dcf_builder: Optional[ValuationExitMultipleDCFBuilder] = None
         self.sensitivity_builder: Optional[SensitivityTabBuilder] = None
         self.summary_builder: Optional[SummaryTabBuilder] = None
+        
+        # Formula evaluator (initialized after workbook is built)
+        self.formula_evaluator: Optional[FormulaEvaluator] = None
     
     def load_json_file(self, json_path: Path | str) -> None:
         """
@@ -259,6 +263,9 @@ class FinancialModelBuilder:
         # Set Summary as active sheet
         self.workbook.active = self.workbook["Summary"]
         
+        # Initialize formula evaluator
+        self.formula_evaluator = FormulaEvaluator(self.workbook)
+        
         print("\n" + "="*70)
         print("✅ Financial Model Build Complete!")
         print("="*70)
@@ -284,6 +291,40 @@ class FinancialModelBuilder:
         file_size = output_path.stat().st_size
         print(f"\n✅ Model saved to: {output_path}")
         print(f"   • File size: {file_size:,} bytes ({file_size/1024:.1f} KB)")
+    
+    def evaluate_and_save_json(self, json_output_path: Optional[Path | str] = None) -> Dict[str, Any]:
+        """
+        Evaluate all formulas and save computed values to JSON.
+        
+        This add-on feature:
+        1. Evaluates all Excel formulas dynamically
+        2. Computes concrete values for every cell
+        3. Stores results in a structured JSON file
+        
+        Args:
+            json_output_path: Optional path for JSON output. If None, derives from Excel path.
+            
+        Returns:
+            Dictionary with all evaluated tab values
+            
+        Raises:
+            ValueError: If model not built yet
+        """
+        if self.workbook is None:
+            raise ValueError("No workbook to evaluate. Call build_model() first.")
+        
+        if self.formula_evaluator is None:
+            # Initialize if not already done
+            self.formula_evaluator = FormulaEvaluator(self.workbook)
+        
+        # Evaluate all tabs
+        results = self.formula_evaluator.evaluate_all_tabs()
+        
+        # Save to JSON if path provided
+        if json_output_path:
+            self.formula_evaluator.save_to_json(results, json_output_path)
+        
+        return results
 
 
 def create_financial_model(
@@ -302,6 +343,7 @@ def create_financial_model(
         ticker: Stock ticker symbol
         json_path: Path to JSON financial data file
         output_path: Optional output path (default: {ticker}_financial_model.xlsx)
+        evaluate_formulas: If True, also generates JSON with computed values
         
     Returns:
         The FinancialModelBuilder instance (in case you need it)
@@ -319,5 +361,11 @@ def create_financial_model(
     if output_path is None:
         output_path = f"{ticker}_financial_model.xlsx"
     builder.save(output_path)
+    
+    # Evaluate formulas and save to JSON
+    # Derive JSON path from Excel path
+    excel_path = Path(output_path)
+    json_output_path = excel_path.parent / f"{excel_path.stem}_computed_values.json"
+    builder.evaluate_and_save_json(json_output_path)
     
     return builder

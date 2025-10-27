@@ -37,10 +37,12 @@ from .financial_model_builder import (
     TAB_NAMES,
     ExcelFormats,
 )
+from .formula_evaluator import FormulaEvaluator
 
 __all__ = [
     'FinancialModelBuilder',
     'create_financial_model',
+    'FormulaEvaluator',
     'TAB_NAMES',
     'ExcelFormats',
 ]
