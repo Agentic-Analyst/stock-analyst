@@ -17,6 +17,15 @@ Usage:
     results = evaluator.evaluate_all_tabs()
     evaluator.save_to_json(results, "output_path.json")
 """
+import re
+import json
+from typing import Dict, Any, List, Tuple, Optional, Union
+from pathlib import Path
+from openpyxl.workbook.workbook import Workbook
+from openpyxl.worksheet.worksheet import Worksheet
+from openpyxl.utils import get_column_letter, column_index_from_string
+import math
+from src.logger import get_logger
 
 import json
 import re
@@ -69,6 +78,17 @@ class FormulaEvaluator:
         
         # Cache for formula evaluation to avoid re-computing
         self.eval_cache: Dict[str, Any] = {}
+        
+        # Logger - will be set by pipeline if available
+        self.logger = None
+
+    def set_logger(self, logger):
+        """Set the logger instance."""
+        self.logger = logger
+    
+    def _log(self, level: str, message: str):
+        """Log message using logger if available, otherwise print."""
+        getattr(self.logger, level)(message)
     
     def evaluate_all_tabs(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -90,33 +110,33 @@ class FormulaEvaluator:
                 }
             }
         """
-        print("\n" + "="*70)
-        print("Starting Formula Evaluation")
-        print("="*70)
-        
+        self._log("info", "="*70)
+        self._log("info", "Starting Formula Evaluation")
+        self._log("info", "="*70)
+
         results = {}
         
         for tab_name in self.TAB_ORDER:
             if tab_name not in self.workbook.sheetnames:
-                print(f"⚠️  Skipping {tab_name} (not found in workbook)")
+                self._log("warning", f"Skipping {tab_name} (not found in workbook)")
                 continue
-            
-            print(f"\n[{self.TAB_ORDER.index(tab_name) + 1}/{len(self.TAB_ORDER)}] Evaluating {tab_name}...")
-            
+
+            self._log("info", f"[{self.TAB_ORDER.index(tab_name) + 1}/{len(self.TAB_ORDER)}] Evaluating {tab_name}...")
+
             tab_results = self._evaluate_tab(tab_name)
             results[tab_name] = tab_results
             
             # Store computed values for next tabs to reference
             self.computed_values[tab_name] = tab_results["cells"]
-            
-            print(f"      ✅ {tab_results['metadata']['total_cells']} cells evaluated")
-            print(f"         • Formulas: {tab_results['metadata']['formula_cells']}")
-            print(f"         • Values: {tab_results['metadata']['value_cells']}")
-        
-        print("\n" + "="*70)
-        print("✅ Formula Evaluation Complete!")
-        print("="*70)
-        
+
+            self._log("info", f"      ✅ {tab_results['metadata']['total_cells']} cells evaluated")
+            self._log("info", f"         • Formulas: {tab_results['metadata']['formula_cells']}")
+            self._log("info", f"         • Values: {tab_results['metadata']['value_cells']}")
+
+        self._log("info", "="*70)
+        self._log("info", "✅ Formula Evaluation Complete!")
+        self._log("info", "="*70)
+
         return results
     
     def _evaluate_tab(self, tab_name: str) -> Dict[str, Any]:
@@ -134,6 +154,10 @@ class FormulaEvaluator:
         cells = {}
         formula_count = 0
         value_count = 0
+        
+        # Initialize computed_values for this tab if not exists
+        if tab_name not in self.computed_values:
+            self.computed_values[tab_name] = {}
         
         # Iterate through all cells with data
         for row in ws.iter_rows():
@@ -156,17 +180,24 @@ class FormulaEvaluator:
                             col_idx
                         )
                         cells[key] = evaluated_value
+                        # Store immediately in computed_values so subsequent formulas can reference it
+                        self.computed_values[tab_name][key] = evaluated_value
                         formula_count += 1
                     except Exception as e:
                         # If formula evaluation fails, store error info
-                        cells[key] = {
+                        error_value = {
                             "error": str(e),
                             "formula": cell.value
                         }
+                        cells[key] = error_value
+                        self.computed_values[tab_name][key] = error_value
                         formula_count += 1
                 else:
                     # It's a direct value
-                    cells[key] = self._serialize_value(cell.value)
+                    serialized_value = self._serialize_value(cell.value)
+                    cells[key] = serialized_value
+                    # Store immediately in computed_values so formulas can reference it
+                    self.computed_values[tab_name][key] = serialized_value
                     value_count += 1
         
         return {
@@ -233,7 +264,29 @@ class FormulaEvaluator:
         expr = expr.strip()
         
         # Handle comparison operators (must come before function check)
-        if any(op in expr for op in ['<>', '>=', '<=', '=', '>', '<']):
+        # But only if the operator is at the top level, not inside parentheses
+        has_top_level_comparison = False
+        paren_depth = 0
+        in_quotes = False
+        
+        for i, char in enumerate(expr):
+            if char == '"':
+                in_quotes = not in_quotes
+            elif not in_quotes:
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+                elif paren_depth == 0:
+                    # Check for comparison operators at this position
+                    for op in ['<>', '>=', '<=', '>', '<', '=']:
+                        if expr[i:i+len(op)] == op:
+                            has_top_level_comparison = True
+                            break
+            if has_top_level_comparison:
+                break
+        
+        if has_top_level_comparison:
             return self._evaluate_comparison(expr, current_tab, current_row, current_col)
         
         # Handle Excel functions
@@ -314,7 +367,8 @@ class FormulaEvaluator:
         # Pattern: [Tab!]A1 or [Tab!]A1:B5 (single cell or range)
         # Handle both with and without quotes around tab name
         # Tab name can be: 'Tab Name'! or TabName! or no tab
-        pattern = r"^(?:'[^']+'!|[^!]+!)?[A-Z]+\d+(?::[A-Z]+\d+)?$"
+        # Changed [^!]+! to [A-Za-z0-9_ ]+! to only match valid tab name characters
+        pattern = r"^(?:'[^']+'!|[A-Za-z0-9_ ]+!)?[A-Z]+\d+(?::[A-Z]+\d+)?$"
         return bool(re.match(pattern, cleaned_expr))
     
     def _get_cell_value(self, cell_ref: str, current_tab: str) -> Any:

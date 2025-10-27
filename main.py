@@ -95,7 +95,7 @@ class ComprehensiveStockAnalysisPipeline:
         self.article_screener = ArticleScreener(self.ticker, base_path=self.analysis_path)
         
         # Pass logger to components that support it
-        for component in [self.article_scraper, self.article_screener]:
+        for component in [self.financial_scraper, self.article_scraper, self.article_screener]:
             if hasattr(component, 'set_logger'):
                 component.set_logger(self.logger)
         
@@ -352,13 +352,25 @@ class ComprehensiveStockAnalysisPipeline:
             # This automatically calls LLM to infer all assumptions
             self.logger.info(f"📊 Building model with LLM-inferred assumptions...")
             
-            create_financial_model(
+            builder = create_financial_model(
                 ticker=self.ticker,
                 json_path=str(json_file),
-                output_path=str(output_file)
+                output_path=str(output_file),
+                logger=self.logger
             )
             
             self.logger.info(f"✅ Model saved to Excel: {output_file}")
+            
+            # NEW: Evaluate all formulas and save to JSON
+            self.logger.info(f"🧮 Evaluating formulas and generating computed values JSON...")
+            json_output_path = output_file.parent / f"{self.ticker}_financial_model_computed_values.json"
+            
+            try:
+                builder.evaluate_and_save_json(json_output_path)
+                self.logger.info(f"✅ Computed values saved to: {json_output_path}")
+            except Exception as eval_error:
+                self.logger.warning(f"⚠️  Formula evaluation encountered issues: {eval_error}")
+                # Continue execution even if evaluation fails
             
             # Update statistics
             self.stats["model_generation"] = {
@@ -366,7 +378,8 @@ class ComprehensiveStockAnalysisPipeline:
                 "projection_years": 5,
                 "strategy_used": "llm_inferred",
                 "excel_path": str(output_file),
-                "tabs_generated": 10  # 9 visible + 1 hidden LLM_Inferred
+                "tabs_generated": 10,  # 9 visible + 1 hidden LLM_Inferred
+                "computed_values_json": str(json_output_path) if json_output_path.exists() else None
             }
             self.stats["stages_completed"].append("model_generation")
             
@@ -376,7 +389,8 @@ class ComprehensiveStockAnalysisPipeline:
                 "Implementation": "NEW FinancialModelBuilder",
                 "Tabs": "Raw, Keys_Map, Assumptions, Historical, Projections, 2×DCF, Sensitivity, Summary",
                 "LLM": "Assumptions automatically inferred",
-                "Excel file": str(output_file.name)
+                "Excel file": str(output_file.name),
+                "JSON computed values": str(json_output_path.name) if json_output_path.exists() else "N/A"
             }
             self.logger.stage_end("FINANCIAL MODEL GENERATION", True, stats)
             

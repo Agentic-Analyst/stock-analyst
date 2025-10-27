@@ -52,10 +52,7 @@ class FinancialScraper:
     
     def _log(self, level: str, message: str):
         """Log message using logger if available, otherwise print."""
-        if self.logger:
-            getattr(self.logger, level)(message)
-        else:
-            print(f"[{level.upper()}] {message}")
+        getattr(self.logger, level)(message)
     
     def _ensure_directories(self):
         """Create necessary directories."""

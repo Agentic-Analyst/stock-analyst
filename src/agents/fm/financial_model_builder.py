@@ -107,7 +107,7 @@ class FinancialModelBuilder:
     All tabs use Excel formulas (no hardcoded values) for banker-grade quality.
     """
     
-    def __init__(self, ticker: str):
+    def __init__(self, ticker: str, logger):
         """
         Initialize the Financial Model Builder.
         
@@ -137,7 +137,14 @@ class FinancialModelBuilder:
         
         # Formula evaluator (initialized after workbook is built)
         self.formula_evaluator: Optional[FormulaEvaluator] = None
+        
+        # Logger - will be set by pipeline if available
+        self.logger = logger
     
+    def _log(self, level: str, message: str):
+        """Log message using logger if available, otherwise print."""
+        getattr(self.logger, level)(message)
+
     def load_json_file(self, json_path: Path | str) -> None:
         """
         Load financial data from JSON file.
@@ -162,11 +169,11 @@ class FinancialModelBuilder:
         # Get summary
         summary = self.raw_builder.get_data_summary()
         years_str = ', '.join(map(str, summary['years']))
-        
-        print(f"✅ Loaded financial data from {json_path.name}")
-        print(f"   • Parsed {summary['total_rows']} data rows")
-        print(f"   • Years available: {years_str}")
-    
+
+        self._log("info", f"✅ Loaded financial data from {json_path.name}")
+        self._log("info", f"   • Parsed {summary['total_rows']} data rows")
+        self._log("info", f"   • Years available: {years_str}")
+
     def build_model(self) -> Workbook:
         """
         Build the complete financial model.
@@ -189,23 +196,23 @@ class FinancialModelBuilder:
         
         self.build_timestamp = datetime.now()
         
-        print("\n" + "="*70)
-        print(f"Building Financial Model for {self.ticker}")
-        print("="*70)
-        
+        self._log("info", "="*70)
+        self._log("info", f"Building Financial Model for {self.ticker}")
+        self._log("info", "="*70)
+
         # Step 1: Call LLM to infer forward assumptions
-        print("\n[Step 1/2] Inferring forward assumptions with LLM...")
-        print("-" * 70)
+        self._log("info", "[Step 1/2] Inferring forward assumptions with LLM...")
+        self._log("info", "-" * 70)
         self.llm_assumptions = infer_assumptions_with_llm(self.json_data)
-        print(f"✅ Assumptions inferred:")
-        print(f"   • WACC: {self.llm_assumptions.get('wacc', 0)*100:.2f}%")
-        print(f"   • Terminal Growth: {self.llm_assumptions.get('terminal_growth_rate', 0)*100:.2f}%")
-        print(f"   • Revenue Growth FY1-FY5: {[f'{r*100:.1f}%' for r in self.llm_assumptions.get('revenue_growth_rates', [])]}")
-        
+        self._log("info", f"✅ Assumptions inferred:")
+        self._log("info", f"   • WACC: {self.llm_assumptions.get('wacc', 0)*100:.2f}%")
+        self._log("info", f"   • Terminal Growth: {self.llm_assumptions.get('terminal_growth_rate', 0)*100:.2f}%")
+        self._log("info", f"   • Revenue Growth FY1-FY5: {[f'{r*100:.1f}%' for r in self.llm_assumptions.get('revenue_growth_rates', [])]}")
+
         # Step 2: Build all Excel tabs
-        print("\n[Step 2/2] Building Excel tabs with formulas...")
-        print("-" * 70)
-        
+        self._log("info", "[Step 2/2] Building Excel tabs with formulas...")
+        self._log("info", "-" * 70)
+
         # Create workbook
         self.workbook = openpyxl.Workbook()
         if 'Sheet' in self.workbook.sheetnames:
@@ -222,54 +229,54 @@ class FinancialModelBuilder:
         self.summary_builder = SummaryTabBuilder()
         
         # Build tabs in sequence
-        print("[1/9] Building Raw tab...")
+        self._log("info", "[1/9] Building Raw tab...")
         self.raw_builder.create_tab(self.workbook)
-        print(f"      ✅ Raw tab created ({len(self.raw_builder.data_rows)} rows)")
-        
-        print("[2/9] Building Keys_Map tab...")
+        self._log("info", f"      ✅ Raw tab created ({len(self.raw_builder.data_rows)} rows)")
+
+        self._log("info", "[2/9] Building Keys_Map tab...")
         # Populate Keys_Map from Raw data
         self.keys_map_builder.build_from_raw_data(self.raw_builder.data_rows)
         self.keys_map_builder.create_tab(self.workbook)
-        print(f"      ✅ Keys_Map tab created ({len(self.keys_map_builder.field_mappings)} fields)")
-        
-        print("[3/9] Building Assumptions tab...")
+        self._log("info", f"      ✅ Keys_Map tab created ({len(self.keys_map_builder.field_mappings)} fields)")
+
+        self._log("info", "[3/9] Building Assumptions tab...")
         self.assumptions_builder.create_tab(self.workbook)
-        print("      ✅ Assumptions tab created (with LLM_Inferred hidden tab)")
-        
-        print("[4/9] Building Historical tab...")
+        self._log("info", "      ✅ Assumptions tab created (with LLM_Inferred hidden tab)")
+        self._log("info", "[4/9] Building Historical tab...")
         self.historical_builder.create_tab(self.workbook)
-        print("      ✅ Historical tab created (5 years actuals)")
-        
-        print("[5/9] Building Projections tab...")
+        self._log("info", "      ✅ Historical tab created (5 years actuals)")
+
+        self._log("info", "[5/9] Building Projections tab...")
         self.projections_builder.create_tab(self.workbook)
-        print("      ✅ Projections tab created (FY1-FY5 forecasts)")
-        
-        print("[6/9] Building Valuation (Perpetual Growth DCF) tab...")
+        self._log("info", "      ✅ Projections tab created (FY1-FY5 forecasts)")
+
+        self._log("info", "[6/9] Building Valuation (Perpetual Growth DCF) tab...")
         self.perpetual_growth_dcf_builder.create_tab(self.workbook)
-        print("      ✅ Valuation (DCF) tab created")
-        
-        print("[7/9] Building Valuation (Exit Multiple DCF) tab...")
+        self._log("info", "      ✅ Valuation (DCF) tab created")
+
+        self._log("info", "[7/9] Building Valuation (Exit Multiple DCF) tab...")
         self.exit_multiple_dcf_builder.create_tab(self.workbook)
-        print("      ✅ Valuation (Exit Multiple) tab created")
-        
-        print("[8/9] Building Sensitivity tab...")
+        self._log("info", "      ✅ Valuation (Exit Multiple) tab created")
+
+        self._log("info", "[8/9] Building Sensitivity tab...")
         self.sensitivity_builder.create_tab(self.workbook)
-        print("      ✅ Sensitivity tab created (2-way analysis)")
-        
-        print("[9/9] Building Summary tab...")
+        self._log("info", "      ✅ Sensitivity tab created (2-way analysis)")
+
+        self._log("info", "[9/9] Building Summary tab...")
         self.summary_builder.create_tab(self.workbook)
-        print("      ✅ Summary tab created (34 metrics)")
-        
+        self._log("info", "      ✅ Summary tab created (34 metrics)")
+
         # Set Summary as active sheet
         self.workbook.active = self.workbook["Summary"]
         
         # Initialize formula evaluator
         self.formula_evaluator = FormulaEvaluator(self.workbook)
-        
-        print("\n" + "="*70)
-        print("✅ Financial Model Build Complete!")
-        print("="*70)
-        
+        self.formula_evaluator.set_logger(self.logger)
+
+        self._log("info", "="*70)
+        self._log("info", "✅ Financial Model Build Complete!")
+        self._log("info", "="*70)
+
         return self.workbook
     
     def save(self, output_path: Path | str) -> None:
@@ -289,9 +296,9 @@ class FinancialModelBuilder:
         self.workbook.save(output_path)
         
         file_size = output_path.stat().st_size
-        print(f"\n✅ Model saved to: {output_path}")
-        print(f"   • File size: {file_size:,} bytes ({file_size/1024:.1f} KB)")
-    
+        self._log("info", f"✅ Model saved to: {output_path}")
+        self._log("info", f"   • File size: {file_size:,} bytes ({file_size/1024:.1f} KB)")
+
     def evaluate_and_save_json(self, json_output_path: Optional[Path | str] = None) -> Dict[str, Any]:
         """
         Evaluate all formulas and save computed values to JSON.
@@ -316,7 +323,8 @@ class FinancialModelBuilder:
         if self.formula_evaluator is None:
             # Initialize if not already done
             self.formula_evaluator = FormulaEvaluator(self.workbook)
-        
+            self.formula_evaluator.set_logger(self.logger)
+
         # Evaluate all tabs
         results = self.formula_evaluator.evaluate_all_tabs()
         
@@ -330,6 +338,7 @@ class FinancialModelBuilder:
 def create_financial_model(
     ticker: str,
     json_path: Path | str,
+    logger,
     output_path: Optional[Path | str] = None
 ) -> FinancialModelBuilder:
     """
@@ -349,7 +358,7 @@ def create_financial_model(
         The FinancialModelBuilder instance (in case you need it)
     """
     # Create builder
-    builder = FinancialModelBuilder(ticker=ticker)
+    builder = FinancialModelBuilder(ticker=ticker, logger=logger)
     
     # Load data
     builder.load_json_file(json_path)
