@@ -167,9 +167,13 @@ class ComprehensiveStockAnalysisPipeline:
         self.logger.stage_start("FINANCIAL SCRAPING", "Collecting financial statements and company data")
         financial_results = self.run_financial_scraping_stage()
         
-        # Step 2: Financial Model Generation
-        self.logger.stage_start("FINANCIAL MODEL GENERATION", "Building DCF model with LLM-inferred assumptions")
-        model_results = self.run_model_generation_stage()
+        if financial_results.get("success"):
+            # Step 2: Financial Model Generation
+            self.logger.stage_start("FINANCIAL MODEL GENERATION", "Building DCF model with LLM-inferred assumptions")
+            model_results = self.run_model_generation_stage()
+        else:
+            self.logger.error("❌ Skipping model generation due to failed financial scraping")
+            model_results = {"success": False, "reason": "Financial scraping failed"}
         
         if not model_results.get("success"):
             self.logger.error("❌ Financial model generation failed. Continuing with news analysis...")
@@ -265,6 +269,10 @@ class ComprehensiveStockAnalysisPipeline:
             
             # Scrape comprehensive financial data for modeling
             financial_data = self.financial_scraper.scrape_financial_modeling_data(annual=True)
+
+            if self.financial_scraper.failed_statements:
+                self.logger.warning(f"⚠️  Some financial statements failed to scrape: {self.financial_scraper.failed_statements}")
+                return {"success": False, "error": "Failed to scrape all required financial statements"}
             
             # Save the financial data to file for the model generator to use
             file_path = self.financial_scraper.save_financial_data(financial_data)
@@ -398,8 +406,8 @@ class ComprehensiveStockAnalysisPipeline:
             
         except Exception as e:
             self.logger.error(f"❌ Financial model generation failed: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
+            # import traceback
+            # self.logger.error(traceback.format_exc())
             return {"success": False, "error": str(e)}
     
     def run_news_scraping_stage(self, max_searched: int = 30, query_override: Optional[str] = None) -> Dict:

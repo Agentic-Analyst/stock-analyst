@@ -460,36 +460,36 @@ def infer_assumptions_with_llm(json_data: Dict[str, Any]) -> Dict[str, Any]:
     prev_income = fs.get('income_statement', {}).get(prev_year, {}) if prev_year else {}
     latest_balance = fs.get('balance_sheet', {}).get(latest_year, {})
     
-    # Calculate FY0 metrics
-    revenue_fy0 = latest_income.get('Total Revenue', 0)
-    revenue_prev = prev_income.get('Total Revenue', 0)
-    revenue_growth_fy0 = ((revenue_fy0 / revenue_prev - 1) * 100) if revenue_prev else 0
+    # Calculate FY0 metrics (handle None values)
+    revenue_fy0 = latest_income.get('Total Revenue') or 0
+    revenue_prev = prev_income.get('Total Revenue') or 0
+    revenue_growth_fy0 = ((revenue_fy0 / revenue_prev - 1) * 100) if (revenue_prev and revenue_fy0) else 0
     
-    gross_profit = latest_income.get('Gross Profit', 0)
-    gross_margin_fy0 = (gross_profit / revenue_fy0 * 100) if revenue_fy0 else 0
+    gross_profit = latest_income.get('Gross Profit') or 0
+    gross_margin_fy0 = (gross_profit / revenue_fy0 * 100) if (revenue_fy0 and gross_profit) else 0
     
-    operating_income = latest_income.get('Operating Income', 0)
-    operating_margin_fy0 = (operating_income / revenue_fy0 * 100) if revenue_fy0 else 0
+    operating_income = latest_income.get('Operating Income') or 0
+    operating_margin_fy0 = (operating_income / revenue_fy0 * 100) if (revenue_fy0 and operating_income) else 0
     
-    da = latest_income.get('Depreciation And Amortization', 0)
+    da = latest_income.get('Depreciation And Amortization') or 0
     ebitda = operating_income + da
-    ebitda_margin_fy0 = (ebitda / revenue_fy0 * 100) if revenue_fy0 else 0
+    ebitda_margin_fy0 = (ebitda / revenue_fy0 * 100) if (revenue_fy0 and ebitda) else 0
     
-    # Working capital metrics
-    ar = latest_balance.get('Accounts Receivable', 0)
-    dso_fy0 = (ar / revenue_fy0 * 365) if revenue_fy0 else 45
+    # Working capital metrics (handle None values)
+    ar = latest_balance.get('Accounts Receivable') or 0
+    dso_fy0 = (ar / revenue_fy0 * 365) if (revenue_fy0 and ar) else 45
     
-    inventory = latest_balance.get('Inventory', 0)
-    cogs = latest_income.get('Cost Of Revenue', 0)
-    dio_fy0 = (inventory / cogs * 365) if cogs else 10
+    inventory = latest_balance.get('Inventory') or 0
+    cogs = latest_income.get('Cost Of Revenue') or 0
+    dio_fy0 = (inventory / cogs * 365) if (cogs and inventory) else 10
     
-    ap = latest_balance.get('Accounts Payable', 0)
-    dpo_fy0 = (ap / cogs * 365) if cogs else 90
+    ap = latest_balance.get('Accounts Payable') or 0
+    dpo_fy0 = (ap / cogs * 365) if (cogs and ap) else 90
     
-    # Tax rate
-    tax_provision = latest_income.get('Tax Provision', 0)
-    pretax_income = latest_income.get('Pretax Income', 0)
-    tax_rate_fy0 = (tax_provision / pretax_income * 100) if pretax_income else 21
+    # Tax rate (handle None values)
+    tax_provision = latest_income.get('Tax Provision') or 0
+    pretax_income = latest_income.get('Pretax Income') or 0
+    tax_rate_fy0 = (tax_provision / pretax_income * 100) if (pretax_income and tax_provision) else 21
     
     # Company info
     ticker = company_data.get('basic_info', {}).get('symbol', 'UNKNOWN')
