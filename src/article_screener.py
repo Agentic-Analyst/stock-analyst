@@ -187,7 +187,9 @@ class ArticleScreener:
     def _analyze_article_batch(self, articles: List[Dict], batch_num: int, depth: int = 0) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
         """
         Analyze a batch of articles using LLM for comprehensive insights.
-        Automatically splits batch if it exceeds token limits.
+        Automatically splits batch if rate limit error occurs.
+        
+        Strategy: Try the request first regardless of size. Only split if it fails due to rate limits.
         
         Args:
             articles: List of articles to analyze
@@ -201,55 +203,20 @@ class ArticleScreener:
         # Format articles for batch analysis
         batch_content = self._format_articles_for_batch(articles)
         
-        # Check token limits for batch
+        # Log token count for monitoring (but don't block based on it)
         total_tokens = self._count_tokens(batch_content)
-        
-        # If batch is too large, intelligently split it
-        if total_tokens > self.max_tokens_per_request:
-            self._log("warning", f"{indent}⚠️  Batch {batch_num} exceeds token limit ({total_tokens:,} > {self.max_tokens_per_request:,} tokens)")
-            
-            # Calculate optimal split point
-            if batch_size == 1:
-                # Single article is too large - truncate it
-                self._log("warning", f"{indent}📄 Single article exceeds token limit, truncating content...")
-                return self._analyze_truncated_article(articles[0], batch_num, depth)
-            
-            # Split batch in half and process recursively
-            mid_point = batch_size // 2
-            self._log("info", f"{indent}✂️  Splitting batch {batch_num} into 2 sub-batches: [{mid_point}] + [{batch_size - mid_point}] articles")
-            
-            # Process first half
-            catalysts_1, risks_1, mitigations_1 = self._analyze_article_batch(
-                articles[:mid_point], 
-                f"{batch_num}a", 
-                depth + 1
-            )
-            
-            # Process second half
-            catalysts_2, risks_2, mitigations_2 = self._analyze_article_batch(
-                articles[mid_point:], 
-                f"{batch_num}b", 
-                depth + 1
-            )
-            
-            # Combine results
-            all_catalysts = catalysts_1 + catalysts_2
-            all_risks = risks_1 + risks_2
-            all_mitigations = mitigations_1 + mitigations_2
-            
-            self._log("info", f"{indent}✅ Batch {batch_num} complete (split): {len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️")
-            return all_catalysts, all_risks, all_mitigations
+        self._log("info", f"{indent}📊 Batch {batch_num} size: {total_tokens:,} tokens")
         
         catalysts = []
         risks = []
         mitigations = []
         
         try:
-            # Create batch analysis prompt - no fallback to unified analysis
+            # Create batch analysis prompt
             batch_prompt = self._create_batch_analysis_prompt(batch_content, self.ticker, batch_size)
             
-            # Make LLM call
-            self._log("info", f"🤖 Processing batch {batch_num} - extracting insights across {batch_size} articles...")
+            # Make LLM call - try regardless of token count
+            self._log("info", f"{indent}🤖 Processing batch {batch_num} - extracting insights across {batch_size} article(s)...")
             response, cost = get_llm()(batch_prompt)
             self.total_llm_cost += cost
             self.llm_call_count += 1
@@ -390,9 +357,66 @@ class ArticleScreener:
                 self._log("info", f"   ⚠️  Top Risk: {top_risk.type.title()} [{top_risk.severity.upper()}] ({top_risk.confidence:.1%}) - {top_risk.description[:60]}...")
 
         except Exception as e:
-            self._log("error", f"Batch {batch_num} analysis failed: {e}")
-            # Return empty results if batch fails (no individual fallback)
-            return self._fallback_individual_analysis(articles)
+            error_message = str(e).lower()
+            
+            # Check if error is due to rate limiting or token limits
+            is_rate_limit_error = any(keyword in error_message for keyword in [
+                'rate limit',
+                'rate_limit',
+                'ratelimit',
+                'too many tokens',
+                'context length',
+                'maximum context',
+                'token limit',
+                'tokens exceeded',
+                'timeout',
+                '413',  # Payload Too Large
+                '429',  # Too Many Requests
+            ])
+            
+            if is_rate_limit_error:
+                self._log("warning", f"{indent}⚠️  Batch {batch_num} failed due to rate limit/token limit: {e}")
+                
+                # Intelligently split and retry
+                if batch_size == 1:
+                    # Check if article was already truncated to prevent infinite loop
+                    if articles[0].get('already_truncated', False):
+                        self._log("error", f"{indent}❌ Article was already truncated but still failed - giving up")
+                        return [], [], []
+                    
+                    # Single article is too large - truncate it
+                    self._log("warning", f"{indent}📄 Single article too large, truncating content...")
+                    return self._analyze_truncated_article(articles[0], batch_num, depth)
+                
+                # Split batch in half and process recursively
+                mid_point = batch_size // 2
+                self._log("info", f"{indent}✂️  Splitting batch {batch_num} into 2 sub-batches: [{mid_point}] + [{batch_size - mid_point}] articles")
+                
+                # Process first half
+                catalysts_1, risks_1, mitigations_1 = self._analyze_article_batch(
+                    articles[:mid_point], 
+                    f"{batch_num}a", 
+                    depth + 1
+                )
+                
+                # Process second half
+                catalysts_2, risks_2, mitigations_2 = self._analyze_article_batch(
+                    articles[mid_point:], 
+                    f"{batch_num}b", 
+                    depth + 1
+                )
+                
+                # Combine results
+                all_catalysts = catalysts_1 + catalysts_2
+                all_risks = risks_1 + risks_2
+                all_mitigations = mitigations_1 + mitigations_2
+                
+                self._log("info", f"{indent}✅ Batch {batch_num} complete (split after rate limit): {len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️")
+                return all_catalysts, all_risks, all_mitigations
+            else:
+                # Non-rate-limit error - log and return empty results
+                self._log("error", f"{indent}❌ Batch {batch_num} analysis failed with non-rate-limit error: {e}")
+                return [], [], []
 
         return catalysts, risks, mitigations
     
@@ -426,14 +450,20 @@ class ArticleScreener:
             
             self._log("warning", f"{indent}✂️  Truncated article from {original_words:,} to {truncated_words:,} words (~{len(text_tokens):,} → {available_tokens:,} tokens)")
             
-            # Create truncated copy
+            # Create truncated copy with flag to prevent re-truncation
             truncated_article = article.copy()
             truncated_article['text'] = truncated_text
             truncated_article['truncated'] = True
             truncated_article['original_word_count'] = original_words
+            truncated_article['already_truncated'] = True  # Prevent infinite truncation loops
             
-            # Analyze the truncated article
-            return self._analyze_article_batch([truncated_article], batch_num, depth)
+            # Analyze the truncated article - if this fails, we give up
+            try:
+                return self._analyze_article_batch([truncated_article], batch_num, depth)
+            except Exception as e:
+                self._log("error", f"{indent}❌ Truncated article still failed: {e}")
+                self._log("error", f"{indent}⚠️  Giving up on this article to prevent infinite loop")
+                return [], [], []
         else:
             # Article fits after all - shouldn't happen but handle gracefully
             return self._analyze_article_batch([article], batch_num, depth)

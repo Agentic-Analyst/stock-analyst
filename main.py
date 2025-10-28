@@ -61,8 +61,6 @@ from report_agent import generate_and_save_professional_report
 
 # Import LLM system
 from llms.config import init_llm, list_models, list_available_models
-from dotenv import load_dotenv
-load_dotenv()
 
 class ComprehensiveStockAnalysisPipeline:
     """Integrated 7-step pipeline for complete stock analysis workflow."""
