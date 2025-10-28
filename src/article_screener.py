@@ -184,12 +184,19 @@ class ArticleScreener:
         
         return batch_content
     
-    def _analyze_article_batch(self, articles: List[Dict], batch_num: int) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+    def _analyze_article_batch(self, articles: List[Dict], batch_num: int, depth: int = 0) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
         """
         Analyze a batch of articles using LLM for comprehensive insights.
+        Automatically splits batch if it exceeds token limits.
+        
+        Args:
+            articles: List of articles to analyze
+            batch_num: Batch number for logging
+            depth: Recursion depth (for sub-batch tracking)
         """
         batch_size = len(articles)
-        self._log("info", f"🔍 Analyzing batch {batch_num} with {batch_size} articles...")
+        indent = "  " * depth  # Indent for sub-batch logging
+        self._log("info", f"{indent}🔍 Analyzing batch {batch_num} with {batch_size} article(s)...")
         
         # Format articles for batch analysis
         batch_content = self._format_articles_for_batch(articles)
@@ -197,10 +204,41 @@ class ArticleScreener:
         # Check token limits for batch
         total_tokens = self._count_tokens(batch_content)
         
-        # If batch is too large, return empty results (no individual fallback)
+        # If batch is too large, intelligently split it
         if total_tokens > self.max_tokens_per_request:
-            self._log("warning", f"Batch {batch_num} exceeds token limit ({total_tokens} tokens), returning empty results")
-            return self._fallback_individual_analysis(articles)
+            self._log("warning", f"{indent}⚠️  Batch {batch_num} exceeds token limit ({total_tokens:,} > {self.max_tokens_per_request:,} tokens)")
+            
+            # Calculate optimal split point
+            if batch_size == 1:
+                # Single article is too large - truncate it
+                self._log("warning", f"{indent}📄 Single article exceeds token limit, truncating content...")
+                return self._analyze_truncated_article(articles[0], batch_num, depth)
+            
+            # Split batch in half and process recursively
+            mid_point = batch_size // 2
+            self._log("info", f"{indent}✂️  Splitting batch {batch_num} into 2 sub-batches: [{mid_point}] + [{batch_size - mid_point}] articles")
+            
+            # Process first half
+            catalysts_1, risks_1, mitigations_1 = self._analyze_article_batch(
+                articles[:mid_point], 
+                f"{batch_num}a", 
+                depth + 1
+            )
+            
+            # Process second half
+            catalysts_2, risks_2, mitigations_2 = self._analyze_article_batch(
+                articles[mid_point:], 
+                f"{batch_num}b", 
+                depth + 1
+            )
+            
+            # Combine results
+            all_catalysts = catalysts_1 + catalysts_2
+            all_risks = risks_1 + risks_2
+            all_mitigations = mitigations_1 + mitigations_2
+            
+            self._log("info", f"{indent}✅ Batch {batch_num} complete (split): {len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️")
+            return all_catalysts, all_risks, all_mitigations
         
         catalysts = []
         risks = []
@@ -358,16 +396,47 @@ class ArticleScreener:
 
         return catalysts, risks, mitigations
     
-    def _fallback_individual_analysis(self, articles: List[Dict]) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+    def _analyze_truncated_article(self, article: Dict, batch_num: int, depth: int = 0) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
         """
-        Fallback method when batch processing fails.
-        Now returns empty results instead of processing articles individually.
-        """
-        self._log("error", f"Batch processing failed for {len(articles)} articles - returning empty results")
-        self._log("info", "Individual article fallback has been disabled. Only batch processing is supported.")
+        Analyze a single article that's too large by truncating its content to fit token limits.
         
-        # Return empty results instead of processing individually
-        return [], [], []
+        Args:
+            article: Article to analyze
+            batch_num: Batch number for logging
+            depth: Recursion depth for logging
+        """
+        indent = "  " * depth
+        self._log("info", f"{indent}📝 Truncating article to fit token limit...")
+        
+        # Calculate available tokens for article content
+        # Reserve tokens for: prompt overhead + article metadata + response
+        available_tokens = self.max_tokens_per_request - self.prompt_overhead_tokens - 500  # 500 for metadata
+        
+        # Truncate article text to fit
+        article_text = article['text']
+        text_tokens = self.encoding.encode(article_text)
+        
+        if len(text_tokens) > available_tokens:
+            # Truncate to available tokens
+            truncated_tokens = text_tokens[:available_tokens]
+            truncated_text = self.encoding.decode(truncated_tokens)
+            
+            original_words = len(article_text.split())
+            truncated_words = len(truncated_text.split())
+            
+            self._log("warning", f"{indent}✂️  Truncated article from {original_words:,} to {truncated_words:,} words (~{len(text_tokens):,} → {available_tokens:,} tokens)")
+            
+            # Create truncated copy
+            truncated_article = article.copy()
+            truncated_article['text'] = truncated_text
+            truncated_article['truncated'] = True
+            truncated_article['original_word_count'] = original_words
+            
+            # Analyze the truncated article
+            return self._analyze_article_batch([truncated_article], batch_num, depth)
+        else:
+            # Article fits after all - shouldn't happen but handle gracefully
+            return self._analyze_article_batch([article], batch_num, depth)
 
     # ============= END BATCH PROCESSING METHODS =============
 
@@ -606,10 +675,14 @@ class ArticleScreener:
             end_idx = min(start_idx + batch_size, len(articles))
             batch_articles = articles[start_idx:end_idx]
             
-            self._log("info", f"� Batch {batch_num + 1}/{total_batches}: Processing articles {start_idx + 1}-{end_idx}")
+            self._log("info", f"📦 Batch {batch_num + 1}/{total_batches}: Processing articles {start_idx + 1}-{end_idx}")
             
-            # Analyze the batch
-            batch_catalysts, batch_risks, batch_mitigations = self._analyze_article_batch(batch_articles, batch_num + 1)
+            # Analyze the batch (will auto-split if too large)
+            batch_catalysts, batch_risks, batch_mitigations = self._analyze_article_batch(
+                batch_articles, 
+                batch_num + 1,
+                depth=0
+            )
             
             # Add to overall results
             all_catalysts.extend(batch_catalysts)
