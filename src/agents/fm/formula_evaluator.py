@@ -579,7 +579,12 @@ class FormulaEvaluator:
             else:
                 # It's a cell reference or expression
                 value = self._eval_expression(part, current_tab, current_row, current_col)
-                result_parts.append(str(value))
+                # Format numbers without unnecessary decimal points
+                # Excel's & operator converts 2024.0 to "2024", not "2024.0"
+                if isinstance(value, float) and value == int(value):
+                    result_parts.append(str(int(value)))
+                else:
+                    result_parts.append(str(value))
         
         return ''.join(result_parts)
     
