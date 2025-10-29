@@ -23,6 +23,7 @@ import json
 
 from llms.config import get_llm
 from logger import StockAnalystLogger
+from recommendation_engine import RecommendationEngine
 
 
 def load_prompt(prompt_name: str) -> str:
@@ -526,28 +527,38 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
 
 
 def generate_section_recommendation(data: Dict[str, Any], llm) -> Tuple[str, float]:
-    """Generate Recommendation & Price Target section."""
+    """
+    Generate Recommendation & Price Target section using LLM with quantitative foundation.
+    
+    Process:
+    1. Calculate all quantitative metrics (valuation gap, catalyst scores, risk scores, momentum)
+    2. Format structured input for LLM with all calculations shown
+    3. LLM generates investment rating, multi-horizon targets, and detailed justification
+    4. Return professional recommendation with transparent reasoning
+    
+    This approach provides:
+    - Auditable calculations that analysts can verify
+    - LLM reasoning and synthesis for professional judgment
+    - Transparent justification linking decisions to data
+    """
     company = data['company_overview']
     valuation = data['valuation']
     news = data['news']
     
-    # Load prompt template and fill in variables
-    prompt_template = load_prompt("report_recommendation")
-    prompt = prompt_template.format(
-        company_name=company['company_name'],
-        current_price=format_number(company['current_price'], 2),
-        dcf_intrinsic=format_number(valuation['dcf_perpetual']['intrinsic_value_per_share'], 2),
-        exit_intrinsic=format_number(valuation['dcf_exit']['intrinsic_value_per_share'], 2),
-        average_intrinsic=format_number(valuation['summary']['average_intrinsic'], 2),
-        upside=format_percent(valuation['summary']['upside']),
-        consensus=company['recommendation'].upper(),
-        target_mean=format_number(company['target_mean_price'], 2),
-        sentiment=news['summary'].get('overall_sentiment', 'neutral').upper()
+    # Initialize recommendation engine with sector-specific parameters
+    sector = company.get('sector', 'default')
+    engine = RecommendationEngine(sector=sector)
+    
+    # Generate LLM-based recommendation with quantitative foundation
+    recommendation_text, cost = engine.generate_recommendation(
+        company_data=company,
+        valuation_data=valuation,
+        news_data=news,
+        llm=llm
     )
-
-    messages = [{"role": "user", "content": prompt}]
-    response, cost = llm(messages, temperature=0.6)
-    return response, cost
+    
+    # Return recommendation and LLM cost
+    return recommendation_text, cost
 
 
 def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], llm) -> Tuple[str, float]:
@@ -1001,3 +1012,22 @@ def generate_and_save_professional_report(
         logger.info("="*70)
     
     return report, report_path
+
+
+def main():
+    """Main function for standalone execution."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Generate Professional Financial Report")
+    parser.add_argument("--analysis_path", type=str, required=True, help="Path to analysis folder")
+    parser.add_argument("--ticker", type=str, required=True, help="Stock ticker symbol")
+    args = parser.parse_args()
+
+    # logger = StockAnalystLogger()
+    generate_and_save_professional_report(
+        analysis_path=Path(args.analysis_path),
+        ticker=args.ticker,
+    )
+
+if __name__ == "__main__":
+    main()
