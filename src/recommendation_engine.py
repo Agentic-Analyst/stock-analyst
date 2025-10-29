@@ -99,8 +99,6 @@ class RecommendationEngine:
         
         # Step 4: Generate final prompt
         prompt = prompt_template.replace('{input_data}', formatted_input)
-
-        breakpoint()
         
         # Step 5: Call LLM (LLM does all analysis, weighting, and decision-making)
         messages = [{"role": "user", "content": prompt}]
