@@ -23,7 +23,7 @@ import json
 
 from llms.config import get_llm
 from logger import StockAnalystLogger
-from recommendation_engine import RecommendationEngine
+from recommendation_engine import RecommendationEngineV3
 
 
 def load_prompt(prompt_name: str) -> str:
@@ -526,39 +526,45 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
     return response, cost
 
 
-def generate_section_recommendation(data: Dict[str, Any], llm) -> Tuple[str, float]:
+def generate_section_recommendation(data: Dict[str, Any], llm, logger: Optional[StockAnalystLogger] = None) -> Tuple[str, float, Dict[str, Any]]:
     """
-    Generate Recommendation & Price Target section using LLM with quantitative foundation.
+    Generate Recommendation & Price Target section using evidence-based approach.
     
-    Process:
-    1. Calculate all quantitative metrics (valuation gap, catalyst scores, risk scores, momentum)
-    2. Format structured input for LLM with all calculations shown
-    3. LLM generates investment rating, multi-horizon targets, and detailed justification
-    4. Return professional recommendation with transparent reasoning
+    V3 Architecture:
+    1. Calculator (deterministic): All numbers computed in code
+    2. Evidence Pack: Structured evidence with IDs for citations  
+    3. Explainer LLM: Writes comprehensive narrative (NO number invention)
+    4. Validator: Ensures numbers unchanged & citations present
     
-    This approach provides:
-    - Auditable calculations that analysts can verify
-    - LLM reasoning and synthesis for professional judgment
-    - Transparent justification linking decisions to data
+    Key improvements over V2:
+    - Numbers are 100% deterministic (computed in Python, not LLM)
+    - LLM focuses on narrative explanation with evidence citations
+    - Every claim must cite evidence [E#] for transparency
+    - Comprehensive scenario analysis and monitoring plan
+    - Full calculation methodology shown for auditability
+    
+    Design Philosophy: Numbers = Code, Narrative = LLM, Validation = Code
+    
+    Returns:
+        Tuple[str, float, Dict[str, Any]]: (recommendation_text, cost, evidence_pack)
     """
     company = data['company_overview']
     valuation = data['valuation']
     news = data['news']
     
-    # Initialize recommendation engine with sector-specific parameters
+    # Initialize V3 evidence-based recommendation engine
     sector = company.get('sector', 'default')
-    engine = RecommendationEngine(sector=sector)
+    engine = RecommendationEngineV3(sector=sector, logger=logger)
     
-    # Generate LLM-based recommendation with quantitative foundation
-    recommendation_text, cost = engine.generate_recommendation(
+    # Generate recommendation with deterministic calculations and evidence-based narrative
+    recommendation_text, cost, evidence_pack = engine.generate_recommendation(
         company_data=company,
         valuation_data=valuation,
-        news_data=news,
+        screening_data=news,
         llm=llm
     )
     
-    # Return recommendation and LLM cost
-    return recommendation_text, cost
+    return recommendation_text, cost, evidence_pack
 
 
 def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], llm) -> Tuple[str, float]:
@@ -758,11 +764,58 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
         
         news_appendix.append("")
     
+    # Add Evidence References section (mapping [E1], [E2], etc. to actual sources)
+    news_appendix.append("\n### B. Evidence References\n")
+    news_appendix.append("The following table maps evidence citations [E#] used in the Recommendation section to their sources:\n")
+    
+    # Get evidence_pack from sections
+    evidence_pack = sections.get('evidence_pack', {})
+    evidence_list = evidence_pack.get('evidence', [])
+    
+    if evidence_list:
+        news_appendix.append("| ID | Type | Date | Source Title | URL |")
+        news_appendix.append("|----|------|------|--------------|-----|")
+        
+        for evidence in evidence_list:
+            eid = evidence.get('id', 'N/A')
+            etype = evidence.get('type', 'N/A').replace('_', ' ').title()
+            date = evidence.get('date', 'N/A')
+            
+            # Get title and source
+            title = evidence.get('title', 'N/A')
+            source = evidence.get('source', 'N/A')
+            
+            # Truncate title if too long
+            display_title = title[:80] + "..." if len(title) > 80 else title
+            
+            # Get URL
+            url = evidence.get('url', '#')
+            url_display = f"[Link]({url})" if url != '#' else 'N/A'
+            
+            news_appendix.append(f"| {eid} | {etype} | {date} | {display_title} | {url_display} |")
+        
+        news_appendix.append("")
+        
+        # Add detailed snippets for each evidence
+        news_appendix.append("#### Evidence Details\n")
+        for evidence in evidence_list:
+            eid = evidence.get('id', 'N/A')
+            title = evidence.get('title', 'N/A')
+            snippet = evidence.get('snippet', 'N/A')
+            source = evidence.get('source', 'N/A')
+            
+            news_appendix.append(f"**{eid}: {title}**")
+            news_appendix.append(f"- **Source**: {source}")
+            news_appendix.append(f"- **Excerpt**: {snippet}")
+            news_appendix.append("")
+    else:
+        news_appendix.append("*No evidence citations found in this report.*\n")
+    
     report_parts.append(f"""## Appendix
 
 {chr(10).join(news_appendix)}
 
-### B. Key Model Assumptions
+### C. Key Model Assumptions
 
 | Assumption | Value |
 |-----------|-------|
@@ -779,7 +832,7 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
 | EBITDA Margin (FY4) | {format_percent(assumptions['ebitda_margins'][3])} |
 | EBITDA Margin (FY5) | {format_percent(assumptions['ebitda_margins'][4])} |
 
-### C. Disclaimers
+### D. Disclaimers
 
 This report is for informational purposes only and should not be considered as investment advice. 
 The analysis is based on publicly available information and proprietary financial modeling. Past 
@@ -903,8 +956,9 @@ def generate_professional_report(
     # Section 6: Recommendation
     if logger:
         logger.info("  6/7 Generating Recommendation & Price Target...")
-    section, cost = generate_section_recommendation(data, llm)
+    section, cost, evidence_pack = generate_section_recommendation(data, llm, logger)
     sections['recommendation'] = section
+    sections['evidence_pack'] = evidence_pack  # Store for appendix
     total_cost += cost
     if logger:
         logger.info(f"     ✅ Complete (cost: ${cost:.4f})")
@@ -1019,13 +1073,13 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Generate Professional Financial Report")
-    parser.add_argument("--analysis_path", type=str, required=True, help="Path to analysis folder")
+    parser.add_argument("--path", type=str, required=True, help="Path to analysis folder")
     parser.add_argument("--ticker", type=str, required=True, help="Stock ticker symbol")
     args = parser.parse_args()
 
     # logger = StockAnalystLogger()
     generate_and_save_professional_report(
-        analysis_path=Path(args.analysis_path),
+        analysis_path=Path(args.path),
         ticker=args.ticker,
     )
 

@@ -1,401 +1,557 @@
 #!/usr/bin/env python3
 """
-recommendation_engine.py - LLM-Based Investment Recommendation Engine
+recommendation_engine_v3.py - Evidence-Based Recommendation Engine
 
-Extracts and organizes investment data, then lets LLM perform complete analysis.
-LLM has full flexibility to weight factors, reason about catalysts/risks, and generate recommendations.
+Architecture:
+1. Calculator (deterministic): All numbers computed in code
+2. Evidence Pack: Structured evidence with IDs for citations
+3. Explainer LLM: Writes comprehensive narrative (NO number invention)
+4. Validator: Ensures numbers unchanged & citations present
 
-Design Philosophy:
-- Provide comprehensive, structured data to LLM
-- LLM decides how to analyze and weight all factors
-- LLM generates investment rating, price targets (3M/6M/12M), and justification
-- All decisions traceable to source data
+Design: Numbers = Code, Narrative = LLM, Validation = Code + Critic
 """
 
-from typing import Dict, Any, List, Tuple
+import json
 import os
+from typing import Dict, Any, Tuple, Optional
+from pathlib import Path
+
+from recommendation_calculator import RecommendationCalculator
+from evidence_extractor import EvidenceExtractor
+from recommendation_validator import RecommendationValidator
+from logger import StockAnalystLogger
 
 
-def _format_label(value: Any) -> str:
-    """Safely format a label that may be string or numeric.
-
-    - If string: title-case it.
-    - If numeric between 0 and 1: format as percentage (e.g. 0.75 -> '75%').
-    - Otherwise convert to str.
+class RecommendationEngineV3:
     """
-    if value is None:
-        return None
-    # Strings: title-case
-    if isinstance(value, str):
-        return value.title()
-    # Numbers: treat 0-1 as probabilities, else raw
-    try:
-        if isinstance(value, (int, float)):
-            if 0 <= value <= 1:
-                return f"{value:.0%}"
-            return str(value)
-    except Exception:
-        pass
-    return str(value)
-
-
-class RecommendationEngine:
-    """
-    Data preparation engine for LLM-based investment recommendations.
-    
-    Extracts and formats all relevant data:
-    - Company fundamentals and market data
-    - DCF valuation results
-    - News-driven catalysts and risks
-    - Historical performance metrics
-    
-    Then passes everything to LLM for complete analysis and recommendation.
+    Evidence-based recommendation engine with deterministic calculations
+    and comprehensive LLM narratives.
     """
     
-    def __init__(self, sector: str = None):
-        """
-        Initialize engine.
-        
-        Args:
-            sector: Company sector (optional, for LLM context)
-        """
+    def __init__(self, sector: str = "default", logger: Optional[StockAnalystLogger] = None):
+        self.calculator = RecommendationCalculator(sector=sector)
+        self.evidence_extractor = EvidenceExtractor()
+        self.validator = RecommendationValidator()
         self.sector = sector
+        self.logger = logger
+    
+    def _load_prompt(self, prompt_name: str) -> str:
+        """Load a prompt template from the prompts folder."""
+        prompt_path = Path(__file__).parent.parent / "prompts" / f"{prompt_name}.md"
+        with open(prompt_path, 'r') as f:
+            return f.read()
+    
+    def _log(self, message: str, level: str = "info"):
+        """Log message using logger if available, otherwise print."""
+        if self.logger:
+            if level == "info":
+                self.logger.info(message)
+            elif level == "warning":
+                self.logger.warning(message)
+            elif level == "error":
+                self.logger.error(message)
+        else:
+            print(message)
     
     def generate_recommendation(
         self,
         company_data: Dict[str, Any],
         valuation_data: Dict[str, Any],
-        news_data: Dict[str, Any],
-        llm  # LLM callable
+        screening_data: Dict[str, Any],
+        llm
     ) -> Tuple[str, float]:
         """
-        Generate LLM-based investment recommendation.
+        Generate comprehensive, evidence-based recommendation.
         
-        Process:
-        1. Extract all relevant data from company, valuation, and news
-        2. Format into structured, clear input for LLM
-        3. Load prompt template that guides LLM analysis
-        4. LLM analyzes data and generates comprehensive recommendation
-        
-        Args:
-            company_data: Company overview (name, ticker, price, sector, etc.)
-            valuation_data: DCF valuation results (perpetual, exit multiple)
-            news_data: News analysis (catalysts, risks, sentiment)
-            llm: LLM callable (messages -> response, cost)
-        
-        Returns:
-            (recommendation_text, llm_cost)
+        Steps:
+        1. Calculate all numbers deterministically
+        2. Build evidence pack with citations
+        3. Send to LLM for narrative explanation
+        4. Validate output
         """
-        # Step 1: Extract and organize all data
-        structured_data = self._prepare_investment_data(
-            company_data, valuation_data, news_data
+        
+        # Step 1: Extract required data
+        ticker = company_data.get('ticker', 'UNKNOWN')
+        current_price = company_data.get('current_price', 0)
+        week_52_low = company_data.get('week_52_low', current_price)
+        week_52_high = company_data.get('week_52_high', current_price)
+        
+        # DCF values
+        dcf_perpetual = valuation_data.get('dcf_perpetual', {}).get('intrinsic_value_per_share', 0)
+        dcf_exit = valuation_data.get('dcf_exit', {}).get('intrinsic_value_per_share', 0)
+        
+        # Estimate volatility from company data or use default
+        # TODO: Calculate actual historical volatility from price data
+        hist_vol_annual_pct = 18.0  # Default for tech stocks
+        
+        # Calculate catalyst, risk, and momentum scores
+        catalysts = screening_data.get('catalysts', [])
+        risks = screening_data.get('risks', [])
+        sentiment = screening_data.get('analysis_summary', {}).get('overall_sentiment', 'neutral')
+        
+        catalyst_score = self.calculator.estimate_catalyst_impact(catalysts)
+        risk_score = self.calculator.estimate_risk_impact(risks)
+        momentum_score = self.calculator.calculate_momentum(
+            current_price, week_52_low, week_52_high, sentiment
         )
         
-        # Step 2: Format for LLM
-        formatted_input = self._format_for_llm(structured_data)
+        # Step 2: Calculate fixed numbers (deterministic)
+        fixed_numbers = self.calculator.calculate_fixed_numbers(
+            ticker=ticker,
+            current_price=current_price,
+            dcf_perpetual=dcf_perpetual,
+            dcf_exit=dcf_exit,
+            catalyst_score_pct=catalyst_score,
+            risk_score_pct=risk_score,
+            momentum_score_pct=momentum_score,
+            hist_vol_annual_pct=hist_vol_annual_pct,
+            survival_risk=False
+        )
         
-        # Step 3: Load prompt template
-        prompt_template = self._load_prompt_template()
+        # Step 3: Build evidence pack
+        evidence_pack = self.evidence_extractor.build_evidence_pack(screening_data)
         
-        # Step 4: Generate final prompt
-        prompt = prompt_template.replace('{input_data}', formatted_input)
+        # Step 4: Build prompt
+        prompt = self._build_explainer_prompt(
+            fixed_numbers,
+            evidence_pack,
+            company_data,
+            valuation_data
+        )
         
-        # Step 5: Call LLM (LLM does all analysis, weighting, and decision-making)
+        # Debug output
+        self._log("\n" + "="*80)
+        self._log("FIXED NUMBERS (Deterministic - LLM CANNOT change these)")
+        self._log("="*80)
+        self._log(json.dumps(fixed_numbers, indent=2))
+        self._log("\n" + "="*80)
+        self._log("EVIDENCE PACK (for citations)")
+        self._log("="*80)
+        self._log(json.dumps(evidence_pack, indent=2)[:2000] + "...")
+        self._log("\n" + "="*80)
+        self._log("EXPLAINER PROMPT")
+        self._log("="*80)
+        self._log(prompt)
+        self._log("="*80 + "\n")
+        
+        # Step 5: Call LLM
         messages = [{"role": "user", "content": prompt}]
-        response, cost = llm(messages, temperature=0.7)
+        response, cost = llm(messages, temperature=0.6)
         
-        return response, cost
-    
-    def _prepare_investment_data(
-        self,
-        company_data: Dict[str, Any],
-        valuation_data: Dict[str, Any],
-        news_data: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Extract and organize all investment-relevant data.
+        self._log("\n" + "="*80)
+        self._log("LLM RESPONSE (Initial)")
+        self._log("="*80)
+        self._log(response)
+        self._log("="*80 + "\n")
         
-        Returns:
-            Dictionary with all data organized by category
-        """
-        # Company fundamentals
-        company_info = {
-            'name': company_data.get('name', 'N/A'),
-            'ticker': company_data.get('ticker', 'N/A'),
-            'sector': company_data.get('sector', self.sector or 'N/A'),
-            'industry': company_data.get('industry', 'N/A'),
-            'market_cap': company_data.get('market_cap', 'N/A'),
-            'description': company_data.get('description', 'N/A'),
-        }
-        
-        # Market data
-        market_data = {
-            'current_price': company_data.get('current_price'),
-            'week_52_high': company_data.get('week_52_high'),
-            'week_52_low': company_data.get('week_52_low'),
-            'average_volume': company_data.get('average_volume'),
-            'beta': company_data.get('beta'),
-        }
-        
-        # Financial metrics
-        financial_metrics = {
-            'revenue': company_data.get('revenue'),
-            'revenue_growth': company_data.get('revenue_growth'),
-            'net_income': company_data.get('net_income'),
-            'net_margin': company_data.get('net_margin'),
-            'operating_margin': company_data.get('operating_margin'),
-            'roe': company_data.get('roe'),
-            'roic': company_data.get('roic'),
-            'debt_to_equity': company_data.get('debt_to_equity'),
-            'current_ratio': company_data.get('current_ratio'),
-            'free_cash_flow': company_data.get('free_cash_flow'),
-        }
-        
-        # Valuation metrics
-        valuation_metrics = {
-            'dcf_perpetual_value': valuation_data.get('dcf_perpetual', {}).get('intrinsic_value_per_share'),
-            'dcf_exit_value': valuation_data.get('dcf_exit', {}).get('intrinsic_value_per_share'),
-            'dcf_perpetual_assumptions': valuation_data.get('dcf_perpetual', {}).get('assumptions', {}),
-            'dcf_exit_assumptions': valuation_data.get('dcf_exit', {}).get('assumptions', {}),
-            'pe_ratio': company_data.get('pe_ratio'),
-            'forward_pe': company_data.get('forward_pe'),
-            'peg_ratio': company_data.get('peg_ratio'),
-            'price_to_book': company_data.get('price_to_book'),
-            'ev_to_ebitda': company_data.get('ev_to_ebitda'),
-        }
-        
-        # News-driven catalysts
-        catalysts = news_data.get('catalysts', [])
-        
-        # News-driven risks
-        risks = news_data.get('risks', [])
-        
-        # News summary and sentiment
-        news_summary = news_data.get('summary', {})
-        
-        return {
-            'company_info': company_info,
-            'market_data': market_data,
-            'financial_metrics': financial_metrics,
-            'valuation_metrics': valuation_metrics,
-            'catalysts': catalysts,
-            'risks': risks,
-            'news_summary': news_summary,
-        }
-    
-    def _format_for_llm(self, data: Dict[str, Any]) -> str:
-        """
-        Format investment data into clear, structured text for LLM.
-        
-        Args:
-            data: Organized investment data
-        
-        Returns:
-            Formatted markdown string
-        """
-        lines = []
-        
-        # ===== COMPANY INFORMATION =====
-        lines.append("# INVESTMENT DATA PACKAGE\n")
-        lines.append("## 1. COMPANY INFORMATION\n")
-        
-        company = data['company_info']
-        lines.append(f"**Company Name**: {company['name']}")
-        lines.append(f"**Ticker**: {company['ticker']}")
-        lines.append(f"**Sector**: {company['sector']}")
-        lines.append(f"**Industry**: {company['industry']}")
-        if company.get('market_cap'):
-            lines.append(f"**Market Cap**: {company['market_cap']}")
-        if company.get('description'):
-            lines.append(f"\n**Company Description**: {company['description']}\n")
-        
-        # ===== MARKET DATA =====
-        lines.append("## 2. MARKET DATA\n")
-        
-        market = data['market_data']
-        if market.get('current_price'):
-            lines.append(f"**Current Price**: ${market['current_price']:.2f}")
-        if market.get('week_52_high') and market.get('week_52_low'):
-            lines.append(f"**52-Week Range**: ${market['week_52_low']:.2f} - ${market['week_52_high']:.2f}")
-            # Calculate position in range
-            if market['current_price']:
-                range_span = market['week_52_high'] - market['week_52_low']
-                if range_span > 0:
-                    position = (market['current_price'] - market['week_52_low']) / range_span
-                    lines.append(f"**Price Position in Range**: {position:.1%}")
-        if market.get('average_volume'):
-            lines.append(f"**Average Volume**: {market['average_volume']:,.0f}")
-        if market.get('beta'):
-            lines.append(f"**Beta**: {market['beta']:.2f}\n")
-        
-        # ===== FINANCIAL METRICS =====
-        lines.append("## 3. FINANCIAL METRICS\n")
-        
-        financials = data['financial_metrics']
-        if financials.get('revenue'):
-            lines.append(f"**Revenue**: ${financials['revenue']:,.0f}")
-        if financials.get('revenue_growth') is not None:
-            lines.append(f"**Revenue Growth**: {financials['revenue_growth']:.1%}")
-        if financials.get('net_income'):
-            lines.append(f"**Net Income**: ${financials['net_income']:,.0f}")
-        if financials.get('net_margin') is not None:
-            lines.append(f"**Net Margin**: {financials['net_margin']:.1%}")
-        if financials.get('operating_margin') is not None:
-            lines.append(f"**Operating Margin**: {financials['operating_margin']:.1%}")
-        if financials.get('roe') is not None:
-            lines.append(f"**Return on Equity (ROE)**: {financials['roe']:.1%}")
-        if financials.get('roic') is not None:
-            lines.append(f"**Return on Invested Capital (ROIC)**: {financials['roic']:.1%}")
-        if financials.get('debt_to_equity') is not None:
-            lines.append(f"**Debt-to-Equity**: {financials['debt_to_equity']:.2f}")
-        if financials.get('current_ratio') is not None:
-            lines.append(f"**Current Ratio**: {financials['current_ratio']:.2f}")
-        if financials.get('free_cash_flow'):
-            lines.append(f"**Free Cash Flow**: ${financials['free_cash_flow']:,.0f}\n")
-        
-        # ===== VALUATION ANALYSIS =====
-        lines.append("## 4. VALUATION ANALYSIS\n")
-        
-        valuation = data['valuation_metrics']
-        
-        lines.append("### DCF Valuation Results\n")
-        if valuation.get('dcf_perpetual_value'):
-            lines.append(f"**DCF Perpetual Growth Method**: ${valuation['dcf_perpetual_value']:.2f} per share")
-            if valuation.get('dcf_perpetual_assumptions'):
-                assumptions = valuation['dcf_perpetual_assumptions']
-                lines.append("  - Key Assumptions:")
-                for key, value in assumptions.items():
-                    if isinstance(value, (int, float)):
-                        if 'rate' in key.lower() or 'growth' in key.lower():
-                            lines.append(f"    - {key}: {value:.1%}")
-                        else:
-                            lines.append(f"    - {key}: {value}")
-                    else:
-                        lines.append(f"    - {key}: {value}")
-        
-        if valuation.get('dcf_exit_value'):
-            lines.append(f"\n**DCF Exit Multiple Method**: ${valuation['dcf_exit_value']:.2f} per share")
-            if valuation.get('dcf_exit_assumptions'):
-                assumptions = valuation['dcf_exit_assumptions']
-                lines.append("  - Key Assumptions:")
-                for key, value in assumptions.items():
-                    if isinstance(value, (int, float)):
-                        if 'rate' in key.lower() or 'growth' in key.lower():
-                            lines.append(f"    - {key}: {value:.1%}")
-                        else:
-                            lines.append(f"    - {key}: {value}")
-                    else:
-                        lines.append(f"    - {key}: {value}")
-        
-        # Calculate valuation gap if data available
-        if valuation.get('dcf_perpetual_value') and valuation.get('dcf_exit_value') and market.get('current_price'):
-            avg_intrinsic = (valuation['dcf_perpetual_value'] + valuation['dcf_exit_value']) / 2
-            gap = ((avg_intrinsic - market['current_price']) / market['current_price']) * 100
-            lines.append(f"\n**Average DCF Intrinsic Value**: ${avg_intrinsic:.2f}")
-            lines.append(f"**Current Market Price**: ${market['current_price']:.2f}")
-            lines.append(f"**Valuation Gap**: {gap:+.1f}%")
-        
-        lines.append("\n### Market Multiples\n")
-        if valuation.get('pe_ratio'):
-            lines.append(f"**P/E Ratio**: {valuation['pe_ratio']:.1f}")
-        if valuation.get('forward_pe'):
-            lines.append(f"**Forward P/E**: {valuation['forward_pe']:.1f}")
-        if valuation.get('peg_ratio'):
-            lines.append(f"**PEG Ratio**: {valuation['peg_ratio']:.2f}")
-        if valuation.get('price_to_book'):
-            lines.append(f"**Price-to-Book**: {valuation['price_to_book']:.2f}")
-        if valuation.get('ev_to_ebitda'):
-            lines.append(f"**EV/EBITDA**: {valuation['ev_to_ebitda']:.1f}\n")
-        
-        # ===== POSITIVE CATALYSTS =====
-        lines.append("## 5. POSITIVE CATALYSTS\n")
-        
-        catalysts = data['catalysts']
-        if catalysts:
-            for i, catalyst in enumerate(catalysts, 1):
-                lines.append(f"### Catalyst #{i}: {catalyst.get('type', 'Catalyst')}\n")
-                lines.append(f"**Description**: {catalyst.get('description', 'N/A')}\n")
-                if catalyst.get('confidence') is not None:
-                    lines.append(f"**Confidence Level**: {_format_label(catalyst['confidence'])}")
-                if catalyst.get('timeframe'):
-                    lines.append(f"**Expected Timeframe**: {catalyst['timeframe']}")
-                if catalyst.get('impact'):
-                    lines.append(f"**Expected Impact**: {catalyst['impact']}")
-                if catalyst.get('source'):
-                    lines.append(f"**Source**: {catalyst['source']}")
-                lines.append("")
-        else:
-            lines.append("*No specific catalysts identified from news analysis.*\n")
-        
-        # ===== KEY RISKS =====
-        lines.append("## 6. KEY RISKS\n")
-        
-        risks = data['risks']
-        if risks:
-            for i, risk in enumerate(risks, 1):
-                lines.append(f"### Risk #{i}: {risk.get('type', 'Risk')}\n")
-                lines.append(f"**Description**: {risk.get('description', 'N/A')}\n")
-                if risk.get('likelihood') is not None:
-                    lines.append(f"**Likelihood**: {_format_label(risk['likelihood'])}")
-                if risk.get('severity') is not None:
-                    lines.append(f"**Severity**: {_format_label(risk['severity'])}")
-                if risk.get('timeframe'):
-                    lines.append(f"**Timeframe**: {risk['timeframe']}")
-                if risk.get('mitigation'):
-                    lines.append(f"**Potential Mitigation**: {risk['mitigation']}")
-                lines.append("")
-        else:
-            lines.append("*No specific risks identified from news analysis.*\n")
-        
-        # ===== NEWS SUMMARY =====
-        lines.append("## 7. NEWS SUMMARY & SENTIMENT\n")
-        
-        news_summary = data['news_summary']
-        if news_summary:
-            if news_summary.get('overall_sentiment') is not None:
-                lines.append(f"**Overall Sentiment**: {_format_label(news_summary['overall_sentiment'])}")
-            if news_summary.get('key_themes'):
-                lines.append(f"**Key Themes**: {', '.join(news_summary['key_themes'])}")
-            if news_summary.get('recent_developments'):
-                lines.append(f"\n**Recent Developments**:")
-                for dev in news_summary['recent_developments']:
-                    lines.append(f"- {dev}")
-            if news_summary.get('analyst_consensus'):
-                lines.append(f"\n**Analyst Consensus**: {news_summary['analyst_consensus']}")
-        else:
-            lines.append("*No news summary available.*")
-        
-        lines.append("\n")
-        lines.append("=" * 80)
-        lines.append("\nAbove is all the available investment data. Please analyze this comprehensively and generate your investment recommendation.")
-        
-        return "\n".join(lines)
-    
-    def _load_prompt_template(self) -> str:
-        """Load investment recommendation prompt template."""
-        prompt_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            'prompts',
-            'investment_recommendation.md'
+        # Step 6: Validate and auto-correct response
+        total_cost = cost
+        corrected_json, validation_report = self.validator.validate_and_correct(
+            response, fixed_numbers, evidence_pack
         )
         
-        with open(prompt_path, 'r', encoding='utf-8') as f:
-            return f.read()
+        # If JSON parsing failed completely, cannot proceed
+        if corrected_json is None:
+            self._log("\n❌ CRITICAL ERROR: JSON parsing failed completely", "error")
+            self._log("="*80, "error")
+            self._log("VALIDATION REPORT:", "error")
+            self._log(json.dumps(validation_report, indent=2), "error")
+            self._log("="*80, "error")
+            raise ValueError("LLM response is not valid JSON. Cannot proceed.")
+        
+        self._log("\n" + "="*80)
+        self._log("VALIDATION REPORT")
+        self._log("="*80)
+        self._log(json.dumps(validation_report, indent=2))
+        self._log("="*80 + "\n")
+        
+        # Show detailed coverage breakdown
+        coverage_details = validation_report.get("coverage_details", {})
+        if coverage_details:
+            self._log("📊 CITATION COVERAGE ANALYSIS")
+            self._log("="*80)
+            self._log(f"Material Sentences: {coverage_details.get('material_sentences', 0)}")
+            self._log(f"Cited Sentences: {coverage_details.get('cited_sentences', 0)}")
+            self._log(f"Coverage: {coverage_details.get('coverage_pct', 0):.1f}%")
+            self._log("")
+            
+            uncited = coverage_details.get('uncited_sentences', [])
+            if uncited:
+                self._log(f"❌ UNCITED SENTENCES ({len(uncited)} total, showing first 10):")
+                for i, sent in enumerate(uncited[:10], 1):
+                    self._log(f"  {i}. {sent[:120]}...")
+                self._log("")
+            
+            cited = coverage_details.get('cited_sentences', [])
+            if cited:
+                self._log(f"✅ CITED SENTENCES (showing {min(3, len(cited))} examples):")
+                for i, sent in enumerate(cited[:3], 1):
+                    self._log(f"  {i}. {sent[:120]}...")
+                self._log("")
+            self._log("="*80 + "\n")
+        
+        # Step 7: Multi-pass rewrite loop until 95%+ coverage or max attempts
+        max_rewrite_attempts = 3
+        rewrite_attempt = 0
+        
+        while self.validator.needs_rewrite(validation_report) and rewrite_attempt < max_rewrite_attempts:
+            rewrite_attempt += 1
+            self._log(f"\n⚠️  VALIDATION ISSUES DETECTED - Triggering Rewrite (Attempt {rewrite_attempt}/{max_rewrite_attempts})\n", "warning")
+            
+            if validation_report.get("corrections_made"):
+                self._log("Auto-corrections applied:")
+                for correction in validation_report["corrections_made"]:
+                    self._log(f"  ✓ {correction}")
+                self._log("")
+            
+            if validation_report.get("errors"):
+                self._log("Errors found:")
+                for error in validation_report["errors"]:
+                    self._log(f"  ✗ {error}")
+                self._log("")
+            
+            if validation_report.get("warnings"):
+                self._log("Warnings:")
+                for warning in validation_report["warnings"]:
+                    self._log(f"  ⚠ {warning}")
+                self._log("")
+            
+            # Build rewrite prompt with corrected JSON
+            rewrite_prompt = self._build_rewrite_prompt(
+                corrected_json,
+                fixed_numbers,
+                evidence_pack,
+                validation_report,
+                attempt=rewrite_attempt
+            )
+            
+            self._log("\n" + "="*80)
+            self._log(f"REWRITE PROMPT (Attempt {rewrite_attempt})")
+            self._log("="*80)
+            self._log(rewrite_prompt[:1500] + "..." if len(rewrite_prompt) > 1500 else rewrite_prompt)
+            self._log("="*80 + "\n")
+            
+            # Call LLM for text-only rewrite
+            # Slightly increase temperature with each attempt for creativity
+            rewrite_temp = 0.5 + (rewrite_attempt * 0.05)
+            rewrite_messages = [{"role": "user", "content": rewrite_prompt}]
+            rewrite_response, rewrite_cost = llm(rewrite_messages, temperature=rewrite_temp)
+            total_cost += rewrite_cost
+            
+            self._log("\n" + "="*80)
+            self._log(f"LLM RESPONSE (Rewrite Attempt {rewrite_attempt})")
+            self._log("="*80)
+            self._log(rewrite_response[:1000] + "..." if len(rewrite_response) > 1000 else rewrite_response)
+            self._log("="*80 + "\n")
+            
+            # Re-validate the rewrite
+            final_json, validation_report = self.validator.validate_and_correct(
+                rewrite_response, fixed_numbers, evidence_pack
+            )
+            
+            # Update corrected_json if we got valid output
+            if final_json:
+                corrected_json = final_json
+            
+            self._log("\n" + "="*80)
+            self._log(f"VALIDATION REPORT (After Attempt {rewrite_attempt})")
+            self._log("="*80)
+            self._log(json.dumps(validation_report, indent=2))
+            self._log("="*80 + "\n")
+            
+            # Show coverage progress
+            coverage_details = validation_report.get("coverage_details", {})
+            if coverage_details:
+                self._log("📊 CITATION COVERAGE PROGRESS")
+                self._log("="*80)
+                self._log(f"Attempt {rewrite_attempt}: {coverage_details.get('coverage_pct', 0):.1f}% coverage")
+                self._log(f"  Cited: {coverage_details.get('cited_sentences', 0)}/{coverage_details.get('material_sentences', 0)} sentences")
+                self._log("="*80 + "\n")
+            
+            # If validation passed, break early
+            if validation_report.get("valid"):
+                self._log(f"✅ VALIDATION PASSED on attempt {rewrite_attempt} - Output is production-ready\n")
+                break
+        else:
+            # Loop completed without breaking (either max attempts or no rewrite needed)
+            if self.validator.needs_rewrite(validation_report):
+                coverage_pct = validation_report.get('coverage_details', {}).get('coverage_pct', 0)
+                self._log(f"\n⚠️  Maximum rewrite attempts ({max_rewrite_attempts}) reached", "warning")
+                self._log(f"Final coverage: {coverage_pct:.1f}%", "warning")
+                raise RuntimeError(
+                    f"Recommendation validation failed after {max_rewrite_attempts} rewrite attempts; final coverage {coverage_pct:.1f}%"
+                )
+            else:
+                self._log("\n✅ VALIDATION PASSED - No rewrite needed\n")
 
+        if not validation_report.get("valid"):
+            coverage_pct = validation_report.get('coverage_details', {}).get('coverage_pct', 0)
+            raise RuntimeError(
+                f"Recommendation validation failed; coverage {coverage_pct:.1f}% is below the required threshold"
+            )
 
-def load_prompt(prompt_name: str) -> str:
-    """
-    Load a prompt template from the prompts folder.
+        # Step 8: Format final output
+        final_output = self._format_final_output(
+            json.dumps(corrected_json),
+            fixed_numbers,
+            validation_report
+        )
+        
+        self._log("\n" + "="*80)
+        self._log("FINAL OUTPUT")
+        self._log("="*80)
+        self._log(final_output)
+        self._log("="*80 + "\n")
+
+        return final_output, total_cost, evidence_pack
     
-    Args:
-        prompt_name: Name of the prompt file (without .md extension)
+    def _build_rewrite_prompt(
+        self,
+        corrected_json: Dict[str, Any],
+        fixed_numbers: Dict[str, Any],
+        evidence_pack: Dict[str, Any],
+        validation_report: Dict[str, Any],
+        attempt: int = 1
+    ) -> str:
+        """Build text-only rewrite prompt with corrected JSON and iteration-specific guidance."""
+        
+        valid_ids = sorted([ev['id'] for ev in evidence_pack.get('evidence', [])])
+        
+        # Build issues section
+        issues_section = ""
+        
+        if validation_report.get("corrections_made"):
+            issues_section += "**Numeric Corrections Made:**\n"
+            for correction in validation_report["corrections_made"]:
+                issues_section += f"- {correction}\n"
+            issues_section += "\n"
+        
+        if validation_report.get("errors"):
+            issues_section += "**Citation Errors:**\n"
+            for error in validation_report["errors"]:
+                issues_section += f"- {error}\n"
+            issues_section += "\n"
+        
+        if validation_report.get("warnings"):
+            issues_section += "**Warnings:**\n"
+            for warning in validation_report["warnings"]:
+                issues_section += f"- {warning}\n"
+            issues_section += "\n"
+        
+        coverage = validation_report.get("coverage_details", {})
+        if coverage:
+            issues_section += f"**Citation Coverage**: {coverage.get('coverage_pct', 0):.1f}% "
+            issues_section += f"({coverage.get('cited_sentences', 0)}/{coverage.get('material_sentences', 0)} sentences cited)\n"
+            issues_section += "**PRODUCTION REQUIREMENT**: 95%+ coverage (YOU MUST ACHIEVE THIS)\n\n"
+            
+            # Show uncited sentences if available
+            uncited = coverage.get('uncited_sentences', [])
+            if uncited:
+                issues_section += "**Sentences MISSING Citations** (add [E#] to these):\n"
+                for i, sent in enumerate(uncited[:10], 1):
+                    issues_section += f"{i}. {sent[:100]}...\n" if len(sent) > 100 else f"{i}. {sent}\n"
+                issues_section += "\n"
+            
+            # Show examples of good citations
+            cited = coverage.get('cited_sentences', [])
+            if cited:
+                issues_section += "**Examples of GOOD Citations** (keep this pattern):\n"
+                for i, sent in enumerate(cited[:3], 1):
+                    issues_section += f"{i}. {sent[:100]}...\n" if len(sent) > 100 else f"{i}. {sent}\n"
+                issues_section += "\n"
+        
+        # Build iteration-specific guidance
+        if attempt == 1:
+            iteration_guidance = """
+**First Attempt Strategy:**
+- Focus on the UNCITED sentences listed above
+- Add [E#] citations to ALL material claims
+- Check price target drivers especially (commonly missed)
+- Verify catalysts and risks have citations
+"""
+        elif attempt == 2:
+            iteration_guidance = """
+**Second Attempt - Precision Focus:**
+- You're getting closer! Target the remaining uncited sentences
+- Double-check numeric comparisons (e.g., "priced at $X") need citations
+- Ensure EVERY scenario narrative has [E#] citations
+- Review price target drivers one more time
+"""
+        else:
+            iteration_guidance = """
+**Final Attempt - Critical Push:**
+- This is your last chance to reach 95%+
+- Review EVERY sentence for factual claims
+- Add citations to comparisons, valuations, targets
+- Be aggressive - when in doubt, cite relevant evidence
+"""
+        
+        # Load template and fill in variables
+        template = self._load_prompt("recommendation_rewrite")
+        prompt = template.format(
+            issues_section=issues_section,
+            corrected_json=json.dumps(corrected_json, indent=2),
+            valid_evidence_ids=', '.join(valid_ids),
+            attempt=attempt,
+            iteration_guidance=iteration_guidance
+        )
+        
+        return prompt
     
-    Returns:
-        Prompt template content
-    """
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(script_dir)
-    prompt_path = os.path.join(project_root, 'prompts', f'{prompt_name}.md')
+    def _build_explainer_prompt(
+        self,
+        fixed_numbers: Dict[str, Any],
+        evidence_pack: Dict[str, Any],
+        company_data: Dict[str, Any],
+        valuation_data: Dict[str, Any]
+    ) -> str:
+        """Build explainer prompt for LLM."""
+        
+        # Load prompt template
+        prompt_path = Path(__file__).parent.parent / "prompts" / "recommendation_explainer.md"
+        with open(prompt_path, 'r') as f:
+            template = f.read()
+        
+        # Prepare additional context
+        # company_data comes from extract_company_overview() which has proper structure
+        context = {
+            "company_name": company_data.get('company_name', 'N/A'),
+            "sector": company_data.get('sector', self.sector),
+            "market_cap": company_data.get('market_cap', 'N/A'),
+            "pe_ratio": company_data.get('pe_trailing', company_data.get('pe_forward', 'N/A')),
+            "ev_ebitda": company_data.get('ev_to_ebitda', 'N/A'),
+            "pb_ratio": company_data.get('price_to_book', 'N/A'),
+            "revenue_growth": company_data.get('revenue_growth', 'N/A'),
+            "net_margin": company_data.get('net_margin', 'N/A'),
+            "roe": company_data.get('roe', 'N/A'),
+            "debt_equity": company_data.get('debt_to_equity', 'N/A'),
+            "week_52_low": company_data.get('week_52_low', 0),
+            "week_52_high": company_data.get('week_52_high', 0)
+        }
+        
+        # Format prompt
+        prompt = template.format(
+            fixed_numbers_json=json.dumps(fixed_numbers, indent=2),
+            evidence_pack_json=json.dumps(evidence_pack, indent=2),
+            company_context=json.dumps(context, indent=2)
+        )
+        
+        return prompt
     
-    with open(prompt_path, 'r', encoding='utf-8') as f:
-        return f.read()
+    def _extract_json(self, response: str) -> Dict[str, Any]:
+        """Extract JSON from LLM response."""
+        # Try to find JSON block
+        if '```json' in response:
+            start = response.find('```json') + 7
+            end = response.find('```', start)
+            json_str = response[start:end].strip()
+        elif '{' in response:
+            start = response.find('{')
+            end = response.rfind('}') + 1
+            json_str = response[start:end]
+        else:
+            json_str = response
+        
+        return json.loads(json_str)
+    
+    def _format_final_output(
+        self,
+        llm_response: str,
+        fixed_numbers: Dict[str, Any],
+        validation_result: Dict[str, Any]
+    ) -> str:
+        """Format final markdown output."""
+        
+        try:
+            response_data = self.validator._extract_json(llm_response)
+            
+            # Build markdown output
+            output = []
+            
+            # Header
+            output.append(f"## Investment Rating: {fixed_numbers['rating']}")
+            output.append(f"\n**12-Month Price Target**: ${fixed_numbers['targets']['m12']['price']:.2f}")
+            output.append(f"**Expected Return**: {fixed_numbers['expected_return_pct_12m']:+.1f}%")
+            
+            # Thesis
+            output.append(f"\n### Investment Thesis\n")
+            output.append(response_data.get('thesis', ''))
+            
+            # Valuation Perspective
+            output.append(f"\n### Valuation Perspective\n")
+            output.append(response_data.get('valuation_perspective', ''))
+            
+            # Price Targets
+            output.append(f"\n### Price Targets\n")
+            for period, label in [('m3', '3-Month'), ('m6', '6-Month'), ('m12', '12-Month')]:
+                target = fixed_numbers['targets'][period]
+                driver = response_data.get('price_targets', {}).get(period, {}).get('driver', 'N/A')
+                output.append(f"**{label}**: ${target['price']:.2f} (Range: ${target['range_low']:.2f} - ${target['range_high']:.2f})")
+                output.append(f"- Key Driver: {driver}\n")
+            
+            # Catalysts
+            output.append(f"\n### Catalysts to Watch\n")
+            catalysts = response_data.get('catalysts', [])
+            for cat in catalysts:
+                stmt = cat.get('statement', cat) if isinstance(cat, dict) else cat
+                output.append(f"- {stmt}")
+            
+            # Risks
+            output.append(f"\n### Key Risks\n")
+            risks = response_data.get('risks', [])
+            for risk in risks:
+                stmt = risk.get('statement', risk) if isinstance(risk, dict) else risk
+                output.append(f"- {stmt}")
+            
+            # Scenarios (if available)
+            scenarios = response_data.get('scenarios', {})
+            if scenarios:
+                output.append(f"\n### Scenario Analysis\n")
+                
+                for scenario_name, scenario_label in [('bull', 'Bull Case'), ('base', 'Base Case'), ('bear', 'Bear Case')]:
+                    scenario = scenarios.get(scenario_name, {})
+                    if scenario:
+                        narrative = scenario.get('narrative', '')
+                        watch = scenario.get('watch', [])
+                        output.append(f"**{scenario_label}**: {narrative}")
+                        if watch:
+                            output.append(f"  - Watch: {', '.join(watch)}\n")
+            
+            # Action
+            action = response_data.get('action', {})
+            if action:
+                output.append(f"\n### Recommended Action\n")
+                if action.get('buyers'):
+                    output.append(f"**For Buyers**: {action['buyers']}\n")
+                if action.get('holders'):
+                    output.append(f"**For Holders**: {action['holders']}\n")
+                if action.get('watch'):
+                    output.append(f"**Key Metrics to Monitor**: {', '.join(action['watch'])}")
+            
+            # Monitoring Plan
+            monitoring = response_data.get('monitoring_plan', [])
+            if monitoring:
+                output.append(f"\n### Monitoring Plan\n")
+                for item in monitoring:
+                    output.append(f"- {item}")
+            
+            # Add calculation transparency
+            output.append(f"\n---\n### Calculation Methodology\n")
+            inputs = fixed_numbers['inputs']
+            output.append(f"- **Raw Valuation Gap**: {inputs['raw_val_gap_pct']:.1f}%")
+            output.append(f"- **Sector Premium Adjustment**: {inputs['sector_premium_adjustment']*100:.0f}%")
+            output.append(f"- **Adjusted Valuation Gap**: {inputs['adj_val_gap_pct']:.1f}%")
+            output.append(f"- **Catalyst Score**: +{inputs['catalyst_score_pct']:.1f}%")
+            output.append(f"- **Risk Score**: -{inputs['risk_score_pct']:.1f}%")
+            output.append(f"- **Momentum Score**: {inputs['momentum_score_pct']:+.1f}%")
+            output.append(f"\n**Expected Return Formula**:")
+            output.append(f"- 40% × Valuation ({inputs['adj_val_gap_pct']:.1f}%) = {0.4 * inputs['adj_val_gap_pct']:.1f}%")
+            output.append(f"- 40% × Net Catalysts/Risks ({inputs['net_catalyst_risk_pct']:.1f}%) = {0.4 * inputs['net_catalyst_risk_pct']:.1f}%")
+            output.append(f"- 20% × Momentum ({inputs['momentum_score_pct']:.1f}%) = {0.2 * inputs['momentum_score_pct']:.1f}%")
+            output.append(f"- **Total**: {fixed_numbers['expected_return_pct_12m']:.1f}%")
+            
+            return '\n'.join(output)
+            
+        except Exception as e:
+            # Fallback to simple format
+            return f"## Investment Rating: {fixed_numbers['rating']}\n\n{llm_response}"

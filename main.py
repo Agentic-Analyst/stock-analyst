@@ -224,14 +224,7 @@ class ComprehensiveStockAnalysisPipeline:
             screening_results = self.run_screening_stage(
                 min_confidence=min_confidence
             )
-        
-        # Step 6: Price Adjustment (if model and screening were successful)
-        # if model_results.get("success") and screening_results:
-        #     self.logger.stage_start("PRICE ADJUSTMENT", "Building adjusted model based on news insights")
-        #     price_adjustment_results = self.run_price_adjustment_stage(model_results, screening_results)
-        # else:
-        #     price_adjustment_results = {"success": False, "reason": "Prerequisites not met"}
-        
+                
         # Step 7: Professional Report Generation (if model and screening succeeded)
         if model_results.get("success") and screening_results:
             self.logger.stage_start("PROFESSIONAL REPORT GENERATION", "Generating comprehensive analyst-style research report")
@@ -558,87 +551,6 @@ class ComprehensiveStockAnalysisPipeline:
         except Exception as e:
             self.logger.error(f"❌ Screening stage failed: {e}")
             return {"catalysts": [], "risks": [], "mitigations": [], "error": str(e)}
-    
-    def run_price_adjustment_stage(self, model_results: Dict, screening_results: Dict) -> Dict:
-        """Run the price adjustment stage to build adjusted model based on news insights.
-        
-        This stage:
-        1. Loads the original financial model
-        2. Loads the screening data (news analysis)
-        3. Calls LLM to infer adjustments based on news
-        4. Builds a BRAND NEW Excel model with adjusted assumptions
-        5. Original model is NEVER modified
-        
-        Args:
-            model_results: Results from model generation stage (must have 'excel_path')
-            screening_results: Results from screening stage (must have screening data)
-            
-        Returns:
-            Dictionary with adjustment results including path to adjusted model
-        """
-        try:
-            # Get paths
-            original_model_path = model_results.get("excel_path")
-            screening_data_path = self.analysis_path / "screened" / "screening_data.json"
-            adjusted_model_path = self.analysis_path / "models" / f"{self.ticker}_adjusted_model.xlsx"
-            
-            # Validate prerequisites
-            if not original_model_path or not pathlib.Path(original_model_path).exists():
-                self.logger.error(f"❌ Original model not found: {original_model_path}")
-                return {"success": False, "error": "Original model not found"}
-            
-            if not screening_data_path.exists():
-                self.logger.error(f"❌ Screening data not found: {screening_data_path}")
-                return {"success": False, "error": "Screening data not found"}
-            
-            # Run price adjustment (builds new model from scratch)
-            self.logger.info(f"🔄 Building adjusted model based on news insights...")
-            self.logger.info(f"   📁 Original model: {pathlib.Path(original_model_path).name}")
-            self.logger.info(f"   📰 News analysis: {screening_data_path.name}")
-            
-            result_path = adjust_price(
-                ticker=self.ticker,
-                model_path=str(original_model_path),
-                screening_path=str(screening_data_path),
-                output_path=str(adjusted_model_path),
-                logger=self.logger  # Pass logger instance
-            )
-            
-            # Update statistics
-            self.stats["price_adjustment"] = {
-                "success": True,
-                "original_model": str(original_model_path),
-                "adjusted_model": str(result_path),
-                "screening_data": str(screening_data_path),
-                "approach": "build_from_scratch_v2",
-                "tabs_generated": 10,
-                "original_preserved": True
-            }
-            self.stats["stages_completed"].append("price_adjustment")
-            
-            # Log results
-            stats = {
-                "Adjusted model": pathlib.Path(result_path).name,
-                "Original model": "UNTOUCHED ✓",
-                "Tabs": "10 (complete model rebuilt)",
-                "Approach": "V2 (build from scratch)"
-            }
-            self.logger.stage_end("PRICE ADJUSTMENT", True, stats)
-            
-            return {
-                "success": True,
-                "adjusted_model_path": str(result_path),
-                "original_model_path": str(original_model_path),
-                "original_preserved": True
-            }
-            
-        except Exception as e:
-            self.logger.error(f"❌ Price adjustment failed: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
-            return {"success": False, "error": str(e)}
-
-    # REMOVED: run_professional_report_stage() - will be rewritten to work with Excel models
     
     def _get_comprehensive_pipeline_results(self) -> Dict:
         """Get complete comprehensive pipeline results."""
