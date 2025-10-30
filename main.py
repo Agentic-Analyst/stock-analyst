@@ -117,7 +117,7 @@ class ComprehensiveStockAnalysisPipeline:
         # Store company data for use across pipeline stages
         self.company_data = {}
         
-        self.logger.info(f"🎯 Comprehensive pipeline initialized for {self.ticker} ({self.company_name})")
+        self.logger.info(f"🎯 Pipeline initialized for {self.ticker} ({self.company_name})")
         self.logger.info(f"📊 All logs will be saved to: {self.logger.get_log_file_path()}")
     
     def run_comprehensive_pipeline(self,
@@ -195,6 +195,7 @@ class ComprehensiveStockAnalysisPipeline:
             # Go directly to screening with database articles
             self.logger.stage_start("ARTICLE SCREENING", "Extracting investment insights using LLM")
             screening_results = self.run_screening_stage(
+                articles_data=existing_articles,
                 min_confidence=min_confidence
             )
             
@@ -493,7 +494,8 @@ class ComprehensiveStockAnalysisPipeline:
             return {"filtered_articles": [], "filtered_count": 0, "error": str(e)}
     
     def run_screening_stage(self,
-                           min_confidence: float = 0.6) -> Dict:
+                            articles_data: Optional[List[Dict]] = None,
+                            min_confidence: float = 0.6) -> Dict:
         """Run the article screening/analysis stage.
         
         Args:
@@ -502,7 +504,8 @@ class ComprehensiveStockAnalysisPipeline:
         """
         try:
             self.logger.info("📂 Loading articles from database...")
-            articles_data = self.article_screener.load_articles_from_db(limit=50)
+            if articles_data is None:
+                articles_data = self.article_screener.load_articles_from_db(limit=50)
             
             self.logger.info(f"🔍 Analyzing {len(articles_data)} articles with LLM...")
             
