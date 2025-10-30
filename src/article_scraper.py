@@ -28,7 +28,7 @@ Features:
 
 from __future__ import annotations
 import os, csv, time, argparse, pathlib, json, re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 from slugify import slugify
 
@@ -87,6 +87,89 @@ class ArticleScraper:
         if not prompt_path.exists():
             raise FileNotFoundError(f"Prompt template not found: {prompt_path}")
         return prompt_path.read_text(encoding='utf-8')
+    
+    def _parse_relative_time(self, relative_time_str: str, reference_time: datetime) -> str:
+        """
+        Parse relative time expressions (e.g., '6 hours ago', '2 days ago') into ISO timestamp.
+        
+        Args:
+            relative_time_str: Relative time string from SerpAPI (e.g., "6 hours ago", "2 days ago")
+            reference_time: Reference timestamp (scraped_at time)
+            
+        Returns:
+            ISO 8601 formatted timestamp string, or original string if parsing fails
+        """
+        if not relative_time_str or not isinstance(relative_time_str, str):
+            return relative_time_str
+        
+        # If it's already an ISO timestamp or a standard date, return as-is
+        if 'T' in relative_time_str or '-' in relative_time_str[:10]:
+            return relative_time_str
+        
+        # Parse relative time expressions
+        relative_time_lower = relative_time_str.lower().strip()
+        
+        try:
+            # Pattern: "X unit(s) ago" where unit can be: second, minute, hour, day, week, month, year
+            match = re.match(r'(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago', relative_time_lower)
+            
+            if match:
+                amount = int(match.group(1))
+                unit = match.group(2)
+                
+                # Calculate the actual timestamp
+                if unit == 'second':
+                    actual_time = reference_time - timedelta(seconds=amount)
+                elif unit == 'minute':
+                    actual_time = reference_time - timedelta(minutes=amount)
+                elif unit == 'hour':
+                    actual_time = reference_time - timedelta(hours=amount)
+                elif unit == 'day':
+                    actual_time = reference_time - timedelta(days=amount)
+                elif unit == 'week':
+                    actual_time = reference_time - timedelta(weeks=amount)
+                elif unit == 'month':
+                    # Approximate: 1 month = 30 days
+                    actual_time = reference_time - timedelta(days=amount * 30)
+                elif unit == 'year':
+                    # Approximate: 1 year = 365 days
+                    actual_time = reference_time - timedelta(days=amount * 365)
+                else:
+                    return relative_time_str
+                
+                return actual_time.isoformat()
+            
+            # Handle "a X ago" (e.g., "an hour ago", "a day ago")
+            match_a = re.match(r'an?\s+(second|minute|hour|day|week|month|year)\s+ago', relative_time_lower)
+            if match_a:
+                unit = match_a.group(1)
+                amount = 1
+                
+                if unit == 'second':
+                    actual_time = reference_time - timedelta(seconds=amount)
+                elif unit == 'minute':
+                    actual_time = reference_time - timedelta(minutes=amount)
+                elif unit == 'hour':
+                    actual_time = reference_time - timedelta(hours=amount)
+                elif unit == 'day':
+                    actual_time = reference_time - timedelta(days=amount)
+                elif unit == 'week':
+                    actual_time = reference_time - timedelta(weeks=amount)
+                elif unit == 'month':
+                    actual_time = reference_time - timedelta(days=30)
+                elif unit == 'year':
+                    actual_time = reference_time - timedelta(days=365)
+                else:
+                    return relative_time_str
+                
+                return actual_time.isoformat()
+            
+            # If no pattern matched, return original
+            return relative_time_str
+            
+        except Exception as e:
+            self._log("warning", f"Failed to parse relative time '{relative_time_str}': {e}")
+            return relative_time_str
     
     def _classify_industry(self) -> Dict:
         """Use LLM to classify the company's industry."""
@@ -201,6 +284,7 @@ class ArticleScraper:
                 "q": query,
                 "tbm": "nws",
                 "num": max_results,
+                "tbs": "qdr:d",  # Last 24 hours
                 "api_key": self.api_key
             })
             result = search.get_dict()
@@ -303,7 +387,8 @@ class ArticleScraper:
         self.searched_dir.mkdir(parents=True, exist_ok=True)
         
         # Generate filename with timestamp and title slug
-        timestamp = datetime.utcnow().strftime("%Y-%m-%d-%H%M%S")
+        scraped_at = datetime.utcnow()
+        timestamp = scraped_at.strftime("%Y-%m-%d-%H%M%S")
         # Use SerpAPI title if available, fallback to scraped title
         title_for_filename = article_data.get('serpapi_title') or article_data.get('title', 'untitled')
         title_slug = slugify(title_for_filename[:60])
@@ -313,8 +398,9 @@ class ArticleScraper:
         # Prepare enhanced frontmatter with SerpAPI metadata
         search_category = article_data.get('search_category', 'general').replace('_', ' ')
         
-        # Use SerpAPI published date if available, fallback to scraped date
-        publish_date = article_data.get('serpapi_published_date') or article_data.get('publish_date', '')
+        # Parse relative time to actual timestamp
+        raw_publish_date = article_data.get('serpapi_published_date') or article_data.get('publish_date', '')
+        publish_date = self._parse_relative_time(raw_publish_date, scraped_at)
         
         # Use SerpAPI title if available, fallback to scraped title
         title = article_data.get('serpapi_title') or article_data.get('title', 'Untitled Article')
@@ -327,9 +413,10 @@ class ArticleScraper:
 title: "{title}"
 source_url: {article_data['url']}
 publish_date: {publish_date}
+publish_date_raw: {raw_publish_date}
 word_count: {article_data['word_count']}
 search_category: {search_category}
-scraped_at: {datetime.utcnow().isoformat()}Z
+scraped_at: {scraped_at.isoformat()}Z
 ticker: {self.ticker}
 company: {self.company_name}
 # SerpAPI Enhanced Metadata

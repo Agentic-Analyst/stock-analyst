@@ -611,10 +611,10 @@ Examples:
                        help="Pipeline stages to execute")
     
     # News analysis parameters  
-    parser.add_argument("--max-searched", type=int, default=30, help="Maximum articles to search/scrape")
+    parser.add_argument("--max-searched", type=int, default=10, help="Maximum articles to search/scrape")
     parser.add_argument("--query", help="Override default search query for news articles")
     parser.add_argument("--min-score", type=float, default=6.0, help="Minimum relevance score (0-10)")
-    parser.add_argument("--max-filtered", type=int, default=15, help="Maximum filtered articles")
+    parser.add_argument("--max-filtered", type=int, default=5, help="Maximum filtered articles")
     parser.add_argument("--min-confidence", type=float, default=0.6, help="Minimum confidence for insights (0-1)")
     
     # LLM selection parameters
