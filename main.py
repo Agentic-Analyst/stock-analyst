@@ -60,6 +60,7 @@ from path_utils import get_analysis_path, ensure_analysis_paths
 from report_agent import generate_and_save_professional_report
 # NEW: Daily company news intelligence report
 from agents.news.daily.company_daily_report import CompanyDailyReportGenerator
+from agents.news.daily.sector_daily_report import SectorDailyReportGenerator
 
 # Import LLM system
 from llms.config import init_llm, list_models, list_available_models
@@ -558,21 +559,19 @@ class ComprehensiveStockAnalysisPipeline:
             return {"catalysts": [], "risks": [], "mitigations": [], "error": str(e)}
     
     def run_company_daily_report_stage(self) -> Dict:
-        """Run the company daily news intelligence report generation stage.
+        """Run the company and sector daily news intelligence report generation stage.
         
         This stage:
         1. Fetches last 24 hours of news from database
         2. Fetches company data (sector, industry, etc.) from financial scraper
-        3. Analyzes news for catalysts, risks, and mitigations
-        4. Fetches peer company context
-        5. Fetches price action data
-        6. Generates institutional-grade daily report
+        3. Generates company daily report (catalysts, risks, price action)
+        4. Generates sector daily report (sector-wide catalysts, rotation trends)
         
         Returns:
             Dictionary with report generation results
         """
         try:
-            self.logger.stage_start("COMPANY DAILY REPORT", "Generating daily news intelligence report")
+            self.logger.stage_start("DAILY REPORTS", "Generating company and sector daily news intelligence reports")
             
             # Step 1: Get company data from financial scraper (for sector, industry, etc.)
             self.logger.info("📊 Fetching company information...")
@@ -599,8 +598,15 @@ class ComprehensiveStockAnalysisPipeline:
                     'market_cap': 'Unknown'
                 }
             
-            # Step 2: Initialize daily report generator with proper paths and logger
+            # Step 2: Initialize reports directory
             reports_dir = self.analysis_path / "reports"
+            
+            # ==========================================
+            # PART A: Company Daily Report
+            # ==========================================
+            self.logger.info("=" * 60)
+            self.logger.info("📄 GENERATING COMPANY DAILY REPORT")
+            self.logger.info("=" * 60)
             
             daily_report_generator = CompanyDailyReportGenerator(
                 ticker=self.ticker,
@@ -608,31 +614,87 @@ class ComprehensiveStockAnalysisPipeline:
                 logger=self.logger  # Pass the main pipeline logger
             )
             
-            # Step 3: Generate the daily report
-            self.logger.info("📝 Generating daily intelligence report...")
-            report = daily_report_generator.generate_daily_report(company_info=company_info)
+            self.logger.info("📝 Generating company daily intelligence report...")
+            company_report = daily_report_generator.generate_daily_report(company_info=company_info)
+            company_llm_cost = daily_report_generator.total_llm_cost
             
-            # Step 4: Update statistics
+            self.logger.info(f"✅ Company report generated (Cost: ${company_llm_cost:.4f})")
+            
+            # ==========================================
+            # PART B: Sector Daily Report
+            # ==========================================
+            self.logger.info("=" * 60)
+            self.logger.info("� GENERATING SECTOR DAILY REPORT")
+            self.logger.info("=" * 60)
+            
+            # Only generate sector report if we have valid sector information
+            sector_name = company_info.get('sector', 'Unknown')
+            sector_report_path = None
+            sector_llm_cost = 0.0
+            
+            if sector_name and sector_name != 'Unknown':
+                try:
+                    # Initialize sector report generator
+                    sector_report_generator = SectorDailyReportGenerator(
+                        sector=sector_name,
+                        output_dir=reports_dir / "sectors",
+                        logger=self.logger  # Pass the main pipeline logger
+                    )
+                    
+                    self.logger.info(f"📝 Generating sector daily report for {sector_name}...")
+                    sector_report_path = sector_report_generator.generate_sector_report()
+                    sector_llm_cost = sector_report_generator.total_llm_cost
+                    
+                    if sector_report_path:
+                        self.logger.info(f"✅ Sector report generated (Cost: ${sector_llm_cost:.4f})")
+                        self.logger.info(f"📄 Sector report saved to: {sector_report_path}")
+                    else:
+                        self.logger.warning("⚠️  Sector report generation returned None")
+                        
+                except Exception as sector_error:
+                    self.logger.error(f"❌ Sector report generation failed: {sector_error}")
+                    import traceback
+                    self.logger.error(traceback.format_exc())
+                    # Continue even if sector report fails
+            else:
+                self.logger.warning(f"⚠️  Skipping sector report - invalid sector: {sector_name}")
+            
+            # ==========================================
+            # Update Statistics
+            # ==========================================
+            total_llm_cost = company_llm_cost + sector_llm_cost
+            
             self.stats["company_daily_report"] = {
                 "success": True,
-                "report_generated": True,
-                "llm_cost": daily_report_generator.total_llm_cost,
+                "company_report_generated": True,
+                "sector_report_generated": sector_report_path is not None,
+                "company_llm_cost": company_llm_cost,
+                "sector_llm_cost": sector_llm_cost,
+                "total_llm_cost": total_llm_cost,
+                "sector": sector_name,
                 "report_path": str(reports_dir)
             }
             self.stats["stages_completed"].append("company_daily_report")
             
-            # Log results
+            # Log combined results
             stats = {
-                "Report generated": "✓",
-                "LLM cost": f"${daily_report_generator.total_llm_cost:.4f}",
+                "Company report": "✓",
+                "Sector report": "✓" if sector_report_path else "✗",
+                "Sector analyzed": sector_name,
+                "Company LLM cost": f"${company_llm_cost:.4f}",
+                "Sector LLM cost": f"${sector_llm_cost:.4f}",
+                "Total LLM cost": f"${total_llm_cost:.4f}",
                 "Output directory": str(reports_dir)
             }
-            self.logger.stage_end("COMPANY DAILY REPORT", True, stats)
+            self.logger.stage_end("DAILY REPORTS", True, stats)
             
             return {
                 "success": True,
-                "report": report,
-                "llm_cost": daily_report_generator.total_llm_cost
+                "company_report": company_report,
+                "sector_report_path": str(sector_report_path) if sector_report_path else None,
+                "company_llm_cost": company_llm_cost,
+                "sector_llm_cost": sector_llm_cost,
+                "total_llm_cost": total_llm_cost
             }
             
         except Exception as e:

@@ -37,7 +37,7 @@ sys.path.insert(0, str(project_root))
 src_dir = project_root / "src"
 sys.path.insert(0, str(src_dir))
 
-from vynn_core.dao.articles import get_last_24_hours_news
+from vynn_core.dao.articles import get_last_n_hours_news
 from llms.config import get_llm
 from logger import StockAnalystLogger
 import yfinance as yf
@@ -176,7 +176,7 @@ class CompanyDailyReportGenerator:
         self._log("info", f"📰 Fetching last 24 hours of news for {self.ticker}")
         
         try:
-            articles = get_last_24_hours_news(collection_name=self.ticker)
+            articles = get_last_n_hours_news(collection_name=self.ticker, n_hours_ago=24)
             self._log("info", f"✅ Found {len(articles)} articles from last 24 hours")
             
             if not articles:
@@ -468,7 +468,7 @@ class CompanyDailyReportGenerator:
         peer_context = {}
         for peer_ticker in peer_tickers:
             try:
-                articles = get_last_24_hours_news(collection_name=peer_ticker)
+                articles = get_last_n_hours_news(collection_name=peer_ticker, n_hours_ago=24)
                 
                 # Fetch peer price data if available
                 price_move = None
@@ -819,65 +819,3 @@ class CompanyDailyReportGenerator:
         
         return report
 
-
-def main():
-    """Command-line interface for daily report generation."""
-    parser = argparse.ArgumentParser(
-        description="Generate daily news intelligence report for a company"
-    )
-    parser.add_argument(
-        "--ticker",
-        type=str,
-        required=True,
-        help="Company ticker symbol (e.g., AAPL, NVDA)"
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Output directory for reports"
-    )
-    parser.add_argument(
-        "--company-name",
-        type=str,
-        default=None,
-        help="Company name (optional)"
-    )
-    parser.add_argument(
-        "--sector",
-        type=str,
-        default=None,
-        help="Company sector (optional)"
-    )
-    
-    args = parser.parse_args()
-    
-    # Setup output directory
-    output_dir = Path(args.output) if args.output else None
-    
-    # Create generator
-    generator = CompanyDailyReportGenerator(
-        ticker=args.ticker,
-        output_dir=output_dir
-    )
-    
-    # Prepare company info
-    company_info = {
-        'company_name': args.company_name or args.ticker,
-        'sector': args.sector or 'Unknown',
-        'industry': 'Unknown',
-        'market_cap': 'Unknown'
-    }
-    
-    # Generate report
-    report = generator.generate_daily_report(company_info)
-    
-    print("\n" + "="*80)
-    print("DAILY REPORT PREVIEW")
-    print("="*80)
-    print(report[:1000] + "..." if len(report) > 1000 else report)
-    print("="*80)
-
-
-if __name__ == "__main__":
-    main()
