@@ -58,6 +58,8 @@ from article_screener import ArticleScreener
 # from price_adjustor import adjust_price
 from path_utils import get_analysis_path, ensure_analysis_paths
 from report_agent import generate_and_save_professional_report
+# NEW: Daily company news intelligence report
+from agents.news.daily.company_daily_report import CompanyDailyReportGenerator
 
 # Import LLM system
 from llms.config import init_llm, list_models, list_available_models
@@ -555,6 +557,90 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.error(f"❌ Screening stage failed: {e}")
             return {"catalysts": [], "risks": [], "mitigations": [], "error": str(e)}
     
+    def run_company_daily_report_stage(self) -> Dict:
+        """Run the company daily news intelligence report generation stage.
+        
+        This stage:
+        1. Fetches last 24 hours of news from database
+        2. Fetches company data (sector, industry, etc.) from financial scraper
+        3. Analyzes news for catalysts, risks, and mitigations
+        4. Fetches peer company context
+        5. Fetches price action data
+        6. Generates institutional-grade daily report
+        
+        Returns:
+            Dictionary with report generation results
+        """
+        try:
+            self.logger.stage_start("COMPANY DAILY REPORT", "Generating daily news intelligence report")
+            
+            # Step 1: Get company data from financial scraper (for sector, industry, etc.)
+            self.logger.info("📊 Fetching company information...")
+            try:
+                company_data = self.financial_scraper.scrape_comprehensive_company_data()
+                basic_info = company_data.get("basic_info", {})
+                market_data = company_data.get("market_data", {})
+                
+                company_info = {
+                    'company_name': self.company_name,
+                    'sector': basic_info.get('sector', 'Unknown'),
+                    'industry': basic_info.get('industry', 'Unknown'),
+                    'market_cap': market_data.get('market_cap', 'Unknown')
+                }
+                
+                self.logger.info(f"✅ Company data: {company_info['sector']} sector, {company_info['industry']} industry")
+                
+            except Exception as e:
+                self.logger.warning(f"⚠️  Could not fetch company data: {e}. Using defaults.")
+                company_info = {
+                    'company_name': self.company_name,
+                    'sector': 'Unknown',
+                    'industry': 'Unknown',
+                    'market_cap': 'Unknown'
+                }
+            
+            # Step 2: Initialize daily report generator with proper paths and logger
+            reports_dir = self.analysis_path / "reports"
+            
+            daily_report_generator = CompanyDailyReportGenerator(
+                ticker=self.ticker,
+                output_dir=reports_dir,
+                logger=self.logger  # Pass the main pipeline logger
+            )
+            
+            # Step 3: Generate the daily report
+            self.logger.info("📝 Generating daily intelligence report...")
+            report = daily_report_generator.generate_daily_report(company_info=company_info)
+            
+            # Step 4: Update statistics
+            self.stats["company_daily_report"] = {
+                "success": True,
+                "report_generated": True,
+                "llm_cost": daily_report_generator.total_llm_cost,
+                "report_path": str(reports_dir)
+            }
+            self.stats["stages_completed"].append("company_daily_report")
+            
+            # Log results
+            stats = {
+                "Report generated": "✓",
+                "LLM cost": f"${daily_report_generator.total_llm_cost:.4f}",
+                "Output directory": str(reports_dir)
+            }
+            self.logger.stage_end("COMPANY DAILY REPORT", True, stats)
+            
+            return {
+                "success": True,
+                "report": report,
+                "llm_cost": daily_report_generator.total_llm_cost
+            }
+            
+        except Exception as e:
+            self.logger.error(f"❌ Daily report generation failed: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return {"success": False, "error": str(e)}
+    
     def _get_comprehensive_pipeline_results(self) -> Dict:
         """Get complete comprehensive pipeline results."""
         self.stats["end_time"] = datetime.now()
@@ -592,6 +678,9 @@ Examples:
   # Just build financial model
   python main.py --ticker MSFT --company "Microsoft" --email user@example.com --timestamp 20250101_120000 --pipeline financial-model
   
+  # Generate daily news intelligence report
+  python main.py --ticker NVDA --company "NVIDIA" --email user@example.com --timestamp 20250101_120000 --pipeline company-daily-report
+  
   # List available models
   python main.py --list-llms
         """
@@ -606,7 +695,7 @@ Examples:
     # Pipeline control
     parser.add_argument("--pipeline", 
                        choices=["comprehensive", "financial-statements", "financial-model", "search-news",
-                                "screen-news"], 
+                                "screen-news", "company-daily-report"], 
                        default="comprehensive", 
                        help="Pipeline stages to execute")
     
@@ -693,6 +782,10 @@ Examples:
             results = pipeline.run_screening_stage(
                 min_confidence=args.min_confidence
             )
+        
+        elif args.pipeline == "company-daily-report":
+            # Company daily report pipeline: Fetch company data → Generate daily report
+            results = pipeline.run_company_daily_report_stage()
 
         # Pipeline execution completed successfully
         pipeline.logger.program_end()
