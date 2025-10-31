@@ -35,6 +35,7 @@ from slugify import slugify
 from serpapi import GoogleSearch
 from newspaper import Article
 from llms.config import get_llm
+from financial_scraper import FinancialScraper
 
 class ArticleScraper:
     """News article scraper for collecting stock-related news articles."""
@@ -69,6 +70,10 @@ class ArticleScraper:
         # Cache for industry classification and search queries
         self.industry_info = None
         self.search_queries = None
+        
+        # Company sector and industry (fetched from financial data)
+        self.company_sector = None
+        self.company_industry = None
     
     def set_logger(self, logger):
         """Set the logger instance."""
@@ -80,6 +85,65 @@ class ArticleScraper:
             getattr(self.logger, level)(message)
         else:
             print(f"[{level.upper()}] {message}")
+    
+    def fetch_sector_industry_from_financial_data(self) -> Dict:
+        """
+        Fetch sector and industry from financial scraper instead of using LLM.
+        
+        This is more accurate and cost-effective than LLM classification.
+        Falls back to LLM if financial data is unavailable.
+        
+        Returns:
+            Dictionary with sector and industry information
+        """
+        if self.company_sector and self.company_industry:
+            # Already fetched
+            return {
+                "sector": self.company_sector,
+                "industry": self.company_industry,
+                "source": "cached"
+            }
+        
+        try:
+            self._log("info", f"📊 Fetching sector/industry from financial data for {self.company_name}")
+            
+            # Create financial scraper instance
+            financial_scraper = FinancialScraper(self.ticker, base_path=self.company_dir)
+            financial_scraper.set_logger(self.logger)
+            
+            # Fetch comprehensive company data
+            company_data = financial_scraper.scrape_comprehensive_company_data()
+            basic_info = company_data.get("basic_info", {})
+            
+            sector = basic_info.get("sector", "Unknown")
+            industry = basic_info.get("industry", "Unknown")
+            
+            # Cache the results
+            self.company_sector = sector
+            self.company_industry = industry
+            
+            self._log("info", f"✅ Financial data: Sector = {sector}, Industry = {industry}")
+            
+            return {
+                "sector": sector,
+                "industry": industry,
+                "source": "financial_data"
+            }
+            
+        except Exception as e:
+            self._log("warning", f"⚠️  Could not fetch from financial data: {e}. Falling back to LLM.")
+            # Fallback to LLM classification
+            llm_result = self._classify_industry_with_llm()
+            
+            # Extract sector and industry from LLM result and ensure they're set
+            self.company_sector = llm_result.get("broad_sector", "Unknown")
+            self.company_industry = llm_result.get("primary_industry", "Unknown")
+            
+            return {
+                "sector": self.company_sector,
+                "industry": self.company_industry,
+                "source": "llm_fallback"
+            }
     
     def _load_prompt_template(self, filename: str) -> str:
         """Load prompt template from prompts folder."""
@@ -172,11 +236,37 @@ class ArticleScraper:
             return relative_time_str
     
     def _classify_industry(self) -> Dict:
-        """Use LLM to classify the company's industry."""
+        """
+        Classify company's industry and sector.
+        
+        Primary method: Fetch from financial data (accurate and free)
+        Fallback method: Use LLM classification (costs money but works if financial data unavailable)
+        """
         if self.industry_info:
             return self.industry_info
-            
-        self._log("info", f"🏭 Classifying industry for {self.company_name}")
+        
+        # Try financial data first (preferred method)
+        sector_industry = self.fetch_sector_industry_from_financial_data()
+        
+        # Ensure self.company_sector and self.company_industry are set
+        # (fetch_sector_industry_from_financial_data already sets these, but double-check)
+        if not self.company_sector:
+            self.company_sector = sector_industry.get("sector", "Unknown")
+        if not self.company_industry:
+            self.company_industry = sector_industry.get("industry", "Unknown")
+        
+        self.industry_info = {
+            "primary_industry": sector_industry.get("industry", "Unknown"),
+            "broad_sector": sector_industry.get("sector", "Unknown"),
+            "description": f"{self.company_name} - {sector_industry.get('sector')} sector, {sector_industry.get('industry')} industry",
+            "source": sector_industry.get("source", "unknown")
+        }
+        
+        return self.industry_info
+    
+    def _classify_industry_with_llm(self) -> Dict:
+        """Use LLM to classify the company's industry (fallback method)."""
+        self._log("info", f"🏭 Classifying industry for {self.company_name} using LLM")
         
         try:
             prompt_template = self._load_prompt_template("industry_classification.md")
@@ -197,6 +287,11 @@ class ArticleScraper:
             if json_match:
                 industry_data = json.loads(json_match.group(0))
                 self.industry_info = industry_data
+                
+                # Set self.company_sector and self.company_industry from LLM result
+                self.company_sector = industry_data.get('broad_sector', 'Unknown')
+                self.company_industry = industry_data.get('primary_industry', 'Unknown')
+                
                 self._log("info", f"📊 Industry classified: {industry_data.get('primary_industry', 'Unknown')}")
                 return industry_data
             else:
@@ -209,6 +304,10 @@ class ArticleScraper:
     
     def _get_fallback_industry(self) -> Dict:
         """Provide fallback industry classification."""
+        # Set fallback values for sector and industry
+        self.company_sector = "Unknown"
+        self.company_industry = "Unknown"
+        
         return {
             "primary_industry": "unknown",
             "broad_sector": "general",
@@ -381,7 +480,7 @@ class ArticleScraper:
             return None
     
     def _save_article_markdown(self, article_data: Dict) -> pathlib.Path:
-        """Save article as markdown file with enhanced frontmatter including SerpAPI metadata."""
+        """Save article as markdown file with enhanced frontmatter including SerpAPI metadata and sector/industry."""
         # Ensure directories exist
         self.company_dir.mkdir(parents=True, exist_ok=True)
         self.searched_dir.mkdir(parents=True, exist_ok=True)
@@ -408,7 +507,7 @@ class ArticleScraper:
         # Clean snippet text for YAML (escape quotes)
         snippet = article_data.get('serpapi_snippet', '').replace('"', '\\"')
         
-        # Create markdown content with enhanced YAML frontmatter
+        # Create markdown content with enhanced YAML frontmatter (including sector/industry for filter)
         markdown_content = f"""---
 title: "{title}"
 source_url: {article_data['url']}
@@ -419,6 +518,8 @@ search_category: {search_category}
 scraped_at: {scraped_at.isoformat()}Z
 ticker: {self.ticker}
 company: {self.company_name}
+sector: {self.company_sector or 'Unknown'}
+industry: {self.company_industry or 'Unknown'}
 # SerpAPI Enhanced Metadata
 serpapi_source: "{article_data.get('serpapi_source', '')}"
 serpapi_authors: {article_data.get('serpapi_authors', [])}
@@ -520,16 +621,19 @@ serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
                 'search_category': metadata.get('search_category', '')
             })
             
-            # Save article
+            # Save article to local markdown file only (MongoDB save happens in article_filter after filtering)
             try:
+                # Save to local markdown file (existing functionality)
                 file_path = self._save_article_markdown(article_data)
                 scraped_files.append(file_path)
                 self.scraped_count += 1
                 
                 if self.logger:
                     self.logger.file_operation("Article saved", file_path)
+                    self.logger.debug(f"   📊 Sector: {self.company_sector}, Industry: {self.company_industry}")
                 else:
                     self._log("info", f"📁 Article saved: {file_path}")
+                    self._log("debug", f"   📊 Sector: {self.company_sector}, Industry: {self.company_industry}")
                 
                 time.sleep(1)  # Be polite to servers
                 

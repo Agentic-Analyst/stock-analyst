@@ -57,6 +57,10 @@ class ArticleFilter:
         # Batch processing configuration
         self.batch_size = 10  # Process articles in batches for efficiency
         
+        # Company sector and industry (fetched from articles metadata)
+        self.company_sector = None
+        self.company_industry = None
+        
         # MongoDB integration - Initialize database if available
         self.db_enabled = VYNN_CORE_AVAILABLE
         self._log(f"🔧 Initializing MongoDB integration (vynn_core available: {VYNN_CORE_AVAILABLE})", "info")
@@ -417,7 +421,14 @@ class ArticleFilter:
         return result
 
     def _save_to_mongodb(self, articles: list) -> dict:
-        """Save filtered articles to MongoDB using vynn_core."""
+        """
+        Save filtered articles to MongoDB in multiple collections: ticker, sector, and industry.
+        
+        This enables:
+        1. Ticker-specific news analysis (existing functionality)
+        2. Sector-wide news aggregation (for sector daily reports)
+        3. Industry-wide news aggregation (for industry analysis)
+        """
         if not self.db_enabled:
             self._log("MongoDB storage skipped - vynn_core not enabled", "warning")
             return None
@@ -427,22 +438,82 @@ class ArticleFilter:
             return None
             
         try:
-            self._log(f"🔄 Attempting to save {len(articles)} articles to MongoDB collection '{self.ticker}'", "info")
+            # Extract sector and industry from first article (all should have same company metadata)
+            if articles and not self.company_sector and not self.company_industry:
+                first_article = articles[0]
+                self.company_sector = first_article.get('sector')
+                self.company_industry = first_article.get('industry')
+                
+                if self.company_sector:
+                    self._log(f"� Detected sector: {self.company_sector}", "info")
+                if self.company_industry:
+                    self._log(f"🏭 Detected industry: {self.company_industry}", "info")
             
-            # Debug: Print sample article data
-            self._log(f"Sample article data: {articles[0].keys() if articles else 'No articles'}", "debug")
+            # Save to multiple collections
+            all_results = {}
             
-            # Use vynn_core to save articles to ticker-specific collection
-            result = upsert_articles(articles, collection_name=self.ticker)
+            # 1. Save to ticker collection (primary - existing functionality)
+            self._log(f"🔄 Saving {len(articles)} articles to MongoDB collection '{self.ticker}'", "info")
             
-            self._log(f"✅ MongoDB storage complete in collection '{self.ticker}' - Created: {len(result['created'])}, "
-                     f"Updated: {len(result['updated'])}, Skipped: {len(result['skipped'])}", "info")
+            ticker_result = upsert_articles(articles, collection_name=self.ticker)
             
-            # Debug: Print detailed results
-            if result['created']:
-                self._log(f"Created article IDs: {result['created'][:3]}...", "debug")
+            all_results["ticker"] = {
+                "collection": self.ticker,
+                "created": len(ticker_result['created']),
+                "updated": len(ticker_result['updated']),
+                "skipped": len(ticker_result['skipped'])
+            }
             
-            return result
+            self._log(f"✅ MongoDB storage complete in collection '{self.ticker}' - Created: {len(ticker_result['created'])}, "
+                     f"Updated: {len(ticker_result['updated'])}, Skipped: {len(ticker_result['skipped'])}", "info")
+            
+            # 2. Save to sector collection (NEW - for sector daily reports)
+            if self.company_sector and self.company_sector != "Unknown":
+                try:
+                    sector_collection = self.company_sector.upper().replace(" ", "_")
+                    self._log(f"🔄 Saving {len(articles)} articles to sector collection '{sector_collection}'", "info")
+                    
+                    init_indexes(sector_collection)
+                    sector_result = upsert_articles(articles, collection_name=sector_collection)
+                    
+                    all_results["sector"] = {
+                        "collection": sector_collection,
+                        "created": len(sector_result['created']),
+                        "updated": len(sector_result['updated']),
+                        "skipped": len(sector_result['skipped'])
+                    }
+                    
+                    self._log(f"✅ Sector collection '{sector_collection}' - Created: {len(sector_result['created'])}, "
+                             f"Updated: {len(sector_result['updated'])}, Skipped: {len(sector_result['skipped'])}", "info")
+                             
+                except Exception as e:
+                    self._log(f"❌ Error saving to sector collection '{sector_collection}': {e}", "error")
+                    all_results["sector"] = {"error": str(e)}
+            
+            # 3. Save to industry collection (NEW - for industry analysis)
+            if self.company_industry and self.company_industry != "Unknown":
+                try:
+                    industry_collection = self.company_industry.upper().replace(" ", "_")
+                    self._log(f"🔄 Saving {len(articles)} articles to industry collection '{industry_collection}'", "info")
+                    
+                    init_indexes(industry_collection)
+                    industry_result = upsert_articles(articles, collection_name=industry_collection)
+                    
+                    all_results["industry"] = {
+                        "collection": industry_collection,
+                        "created": len(industry_result['created']),
+                        "updated": len(industry_result['updated']),
+                        "skipped": len(industry_result['skipped'])
+                    }
+                    
+                    self._log(f"✅ Industry collection '{industry_collection}' - Created: {len(industry_result['created'])}, "
+                             f"Updated: {len(industry_result['updated'])}, Skipped: {len(industry_result['skipped'])}", "info")
+                             
+                except Exception as e:
+                    self._log(f"❌ Error saving to industry collection '{industry_collection}': {e}", "error")
+                    all_results["industry"] = {"error": str(e)}
+            
+            return all_results
             
         except Exception as e:
             self._log(f"❌ Error saving to MongoDB: {e}", "error")
