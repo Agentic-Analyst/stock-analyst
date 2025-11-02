@@ -12,7 +12,7 @@ Features:
 - Configurable filtering thresholds and article limits
 
 ▶ Usage:
-    python article_filter.py --ticker NVDA --query "nvidia ai data center growth" --min-score 6.0 --max-articles 8
+    python article_filter.py --ticker NVDA --query "nvidia ai data center growth" --min-score 5.0 --max-articles 8
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ class ArticleFilter:
         else:
             print(f"[{level.upper()}] {message}")
 
-    def filter_articles(self, max_filtered: int = 15, min_score: float = 6.0) -> dict:
+    def filter_articles(self, max_filtered: int = 15, min_score: float = 5.0) -> dict:
         """
         Filter articles using LLM intelligence based on the query.
         
@@ -138,6 +138,17 @@ class ArticleFilter:
         # Process all articles with LLM scoring
         scored_articles = self._score_articles_with_llm(articles_data)
         
+        # Log all scores for transparency
+        self._log("=" * 80)
+        self._log(f"📊 LLM SCORING RESULTS (All {len(scored_articles)} articles)")
+        self._log("=" * 80)
+        for i, article in enumerate(scored_articles, 1):
+            score = article.get('llm_score', 0.0)
+            title = article.get('title', 'Untitled')[:80]
+            status = "✅ PASS" if score >= min_score else "❌ FAIL"
+            self._log(f"{i:2d}. [{score:.1f}/10] {status} - {title}")
+        self._log("=" * 80)
+        
         # Filter by minimum score and limit count
         filtered_articles = self._select_final_articles(scored_articles, max_filtered, min_score)
 
@@ -151,6 +162,27 @@ class ArticleFilter:
             "llm_cost": self.total_llm_cost,
             "llm_calls": self.llm_call_count
         })
+        
+        # Log filtering summary
+        passed_count = len([a for a in scored_articles if a.get('llm_score', 0) >= min_score])
+        failed_count = len(scored_articles) - passed_count
+        
+        self._log("=" * 80)
+        self._log(f"📋 FILTERING SUMMARY")
+        self._log("=" * 80)
+        self._log(f"Total articles processed: {len(articles_data)}")
+        self._log(f"Passed threshold (≥{min_score}): {passed_count}")
+        self._log(f"Failed threshold (<{min_score}): {failed_count}")
+        self._log(f"Final selected (top {max_filtered}): {len(result['filtered_articles'])}")
+        self._log(f"LLM cost: ${self.total_llm_cost:.4f} ({self.llm_call_count} calls)")
+        self._log("=" * 80)
+        
+        if failed_count > 0:
+            self._log(f"ℹ️  {failed_count} articles were below the minimum score threshold of {min_score}")
+            avg_score = sum(a.get('llm_score', 0) for a in scored_articles) / len(scored_articles) if scored_articles else 0
+            self._log(f"ℹ️  Average score across all articles: {avg_score:.2f}/10")
+            if avg_score < min_score:
+                self._log(f"💡 Consider lowering --min-score threshold (current: {min_score}) to get more results")
         
         self._log(f"Filtering complete: {len(result['filtered_articles'])} articles selected")
         self._log(f"Total LLM cost: ${self.total_llm_cost:.4f} ({self.llm_call_count} calls)")

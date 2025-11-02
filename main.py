@@ -21,16 +21,16 @@ Enhanced Features:
 
 ▶ Usage Examples:
     # Full LLM-powered analysis (AI selects strategy and optimizes parameters)
-    python main.py --ticker NVDA --company "NVIDIA" --pipeline comprehensive
+    python main.py --ticker NVDA --pipeline comprehensive
     
     # LLM analysis with manual strategy override
-    python main.py --ticker AAPL --company "Apple Inc" --pipeline comprehensive --strategy hardware_dcf
+    python main.py --ticker AAPL --pipeline comprehensive --strategy hardware_dcf
     
     # Traditional analysis without LLM (deterministic defaults)
-    python main.py --ticker TSLA --company "Tesla" --pipeline comprehensive --wacc 0.095
+    python main.py --ticker TSLA --pipeline comprehensive --wacc 0.095
 
     # Force manual overrides even with LLM enabled
-    python main.py --ticker MSFT --company "Microsoft" --pipeline comprehensive --term-growth 0.025
+    python main.py --ticker MSFT --pipeline comprehensive --term-growth 0.025
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ from report_agent import generate_and_save_professional_report
 # NEW: Daily company news intelligence report
 from agents.news.daily.company_daily_report import CompanyDailyReportGenerator
 from agents.news.daily.sector_daily_report import SectorDailyReportGenerator
-
+import yfinance as yf
 # Import LLM system
 from llms.config import init_llm, list_models, list_available_models
 from dotenv import load_dotenv
@@ -70,7 +70,7 @@ load_dotenv()
 class ComprehensiveStockAnalysisPipeline:
     """Integrated 7-step pipeline for complete stock analysis workflow."""
 
-    def __init__(self, ticker: str, company_name: str, email: str, timestamp: str):
+    def __init__(self, ticker: str, email: str, timestamp: str):
         """
         Initialize the comprehensive analysis pipeline.
         
@@ -80,7 +80,7 @@ class ComprehensiveStockAnalysisPipeline:
             email: User's email for data organization
         """
         self.ticker = ticker.upper()
-        self.company_name = company_name
+        self.company_name = yf.Ticker(self.ticker).info.get("longName")
         self.email = email.lower()
         self.timestamp = timestamp
         
@@ -127,9 +127,9 @@ class ComprehensiveStockAnalysisPipeline:
                                   # News analysis parameters  
                                   max_searched: int = 30,
                                   query_override: Optional[str] = None,
-                                  min_filter_score: float = 6.0,
+                                  min_filter_score: float = 5.0,
                                   max_filtered: int = 15,
-                                  min_confidence: float = 0.6) -> Dict:
+                                  min_confidence: float = 0.5) -> Dict:
         """
         Run the complete analysis pipeline.
         
@@ -442,7 +442,7 @@ class ComprehensiveStockAnalysisPipeline:
             self.logger.error(f"❌ News scraping stage failed: {e}")
             return {"scraped_count": 0, "error": str(e)}
     
-    def run_filtering_stage(self, query: str, min_score: float = 6.0, max_filtered: int = 15) -> Dict:
+    def run_filtering_stage(self, query: str, min_score: float = 5.0, max_filtered: int = 15) -> Dict:
         """Run the article filtering stage with LLM-powered intelligence."""
         try:
             # Initialize article filter with query (required for LLM filtering)
@@ -498,7 +498,7 @@ class ComprehensiveStockAnalysisPipeline:
     
     def run_screening_stage(self,
                             articles_data: Optional[List[Dict]] = None,
-                            min_confidence: float = 0.6) -> Dict:
+                            min_confidence: float = 0.5) -> Dict:
         """Run the article screening/analysis stage.
         
         Args:
@@ -559,29 +559,29 @@ class ComprehensiveStockAnalysisPipeline:
             return {"catalysts": [], "risks": [], "mitigations": [], "error": str(e)}
     
     def run_company_daily_report_stage(self) -> Dict:
-        """Run the company and sector daily news intelligence report generation stage.
+        """Run the company daily news intelligence report generation stage.
         
         This stage:
         1. Fetches last 24 hours of news from database
         2. Fetches company data (sector, industry, etc.) from financial scraper
         3. Generates company daily report (catalysts, risks, price action)
-        4. Generates sector daily report (sector-wide catalysts, rotation trends)
         
         Returns:
             Dictionary with report generation results
         """
         try:
-            self.logger.stage_start("DAILY REPORTS", "Generating company and sector daily news intelligence reports")
+            self.logger.stage_start("COMPANY DAILY REPORT", "Generating company daily news intelligence report")
             
             # Step 1: Get company data from financial scraper (for sector, industry, etc.)
             self.logger.info("📊 Fetching company information...")
             try:
                 company_data = self.financial_scraper.scrape_comprehensive_company_data()
                 basic_info = company_data.get("basic_info", {})
+                company_name = basic_info.get("long_name", self.company_name)
                 market_data = company_data.get("market_data", {})
                 
                 company_info = {
-                    'company_name': self.company_name,
+                    'company_name': company_name,
                     'sector': basic_info.get('sector', 'Unknown'),
                     'industry': basic_info.get('industry', 'Unknown'),
                     'market_cap': market_data.get('market_cap', 'Unknown')
@@ -601,9 +601,7 @@ class ComprehensiveStockAnalysisPipeline:
             # Step 2: Initialize reports directory
             reports_dir = self.analysis_path / "reports"
             
-            # ==========================================
-            # PART A: Company Daily Report
-            # ==========================================
+            # Generate Company Daily Report
             self.logger.info("=" * 60)
             self.logger.info("📄 GENERATING COMPANY DAILY REPORT")
             self.logger.info("=" * 60)
@@ -620,85 +618,110 @@ class ComprehensiveStockAnalysisPipeline:
             
             self.logger.info(f"✅ Company report generated (Cost: ${company_llm_cost:.4f})")
             
-            # ==========================================
-            # PART B: Sector Daily Report
-            # ==========================================
-            self.logger.info("=" * 60)
-            self.logger.info("� GENERATING SECTOR DAILY REPORT")
-            self.logger.info("=" * 60)
-            
-            # Only generate sector report if we have valid sector information
-            sector_name = company_info.get('sector', 'Unknown')
-            sector_report_path = None
-            sector_llm_cost = 0.0
-            
-            if sector_name and sector_name != 'Unknown':
-                try:
-                    # Initialize sector report generator
-                    sector_report_generator = SectorDailyReportGenerator(
-                        sector=sector_name,
-                        output_dir=reports_dir / "sectors",
-                        logger=self.logger  # Pass the main pipeline logger
-                    )
-                    
-                    self.logger.info(f"📝 Generating sector daily report for {sector_name}...")
-                    sector_report_path = sector_report_generator.generate_sector_report()
-                    sector_llm_cost = sector_report_generator.total_llm_cost
-                    
-                    if sector_report_path:
-                        self.logger.info(f"✅ Sector report generated (Cost: ${sector_llm_cost:.4f})")
-                        self.logger.info(f"📄 Sector report saved to: {sector_report_path}")
-                    else:
-                        self.logger.warning("⚠️  Sector report generation returned None")
-                        
-                except Exception as sector_error:
-                    self.logger.error(f"❌ Sector report generation failed: {sector_error}")
-                    import traceback
-                    self.logger.error(traceback.format_exc())
-                    # Continue even if sector report fails
-            else:
-                self.logger.warning(f"⚠️  Skipping sector report - invalid sector: {sector_name}")
-            
-            # ==========================================
             # Update Statistics
-            # ==========================================
-            total_llm_cost = company_llm_cost + sector_llm_cost
-            
             self.stats["company_daily_report"] = {
                 "success": True,
                 "company_report_generated": True,
-                "sector_report_generated": sector_report_path is not None,
                 "company_llm_cost": company_llm_cost,
-                "sector_llm_cost": sector_llm_cost,
-                "total_llm_cost": total_llm_cost,
-                "sector": sector_name,
+                "sector": company_info.get('sector', 'Unknown'),
                 "report_path": str(reports_dir)
             }
             self.stats["stages_completed"].append("company_daily_report")
             
-            # Log combined results
+            # Log results
             stats = {
                 "Company report": "✓",
-                "Sector report": "✓" if sector_report_path else "✗",
-                "Sector analyzed": sector_name,
-                "Company LLM cost": f"${company_llm_cost:.4f}",
-                "Sector LLM cost": f"${sector_llm_cost:.4f}",
-                "Total LLM cost": f"${total_llm_cost:.4f}",
+                "Sector": company_info.get('sector', 'Unknown'),
+                "LLM cost": f"${company_llm_cost:.4f}",
                 "Output directory": str(reports_dir)
             }
-            self.logger.stage_end("DAILY REPORTS", True, stats)
+            self.logger.stage_end("COMPANY DAILY REPORT", True, stats)
             
             return {
                 "success": True,
                 "company_report": company_report,
-                "sector_report_path": str(sector_report_path) if sector_report_path else None,
                 "company_llm_cost": company_llm_cost,
-                "sector_llm_cost": sector_llm_cost,
-                "total_llm_cost": total_llm_cost
+                "sector": company_info.get('sector', 'Unknown')
             }
             
         except Exception as e:
-            self.logger.error(f"❌ Daily report generation failed: {e}")
+            self.logger.error(f"❌ Company daily report generation failed: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return {"success": False, "error": str(e)}
+    
+    def run_sector_daily_report_stage(self) -> Dict:
+        """Run the sector daily news intelligence report generation stage.
+        
+        This stage:
+        1. Fetches last 24 hours of sector-wide news from database
+        2. Analyzes sector-level catalysts and trends
+        3. Generates sector daily report (sector catalysts, rotation trends, company movers)
+        
+        Args:
+            sector: Sector name (e.g., 'TECHNOLOGY', 'HEALTHCARE')
+        
+        Returns:
+            Dictionary with report generation results
+        """
+        try:
+            sector = self.ticker
+            self.logger.stage_start("SECTOR DAILY REPORT", f"Generating sector daily news intelligence report for {sector}")
+            
+            # Initialize reports directory
+            reports_dir = self.analysis_path / "reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate Sector Daily Report
+            self.logger.info("=" * 60)
+            self.logger.info(f"📊 GENERATING SECTOR DAILY REPORT: {sector}")
+            self.logger.info("=" * 60)
+            
+            sector_report_generator = SectorDailyReportGenerator(
+                sector=sector,
+                output_dir=reports_dir,
+                logger=self.logger  # Pass the main pipeline logger
+            )
+            
+            self.logger.info(f"📝 Generating sector daily report for {sector}...")
+            sector_report_path = sector_report_generator.generate_sector_report()
+            sector_llm_cost = sector_report_generator.total_llm_cost
+            
+            if sector_report_path:
+                self.logger.info(f"✅ Sector report generated (Cost: ${sector_llm_cost:.4f})")
+                self.logger.info(f"📄 Sector report saved to: {sector_report_path}")
+            else:
+                self.logger.warning("⚠️  Sector report generation returned None")
+                return {"success": False, "error": "Report generation returned None"}
+            
+            # Update Statistics
+            self.stats["sector_daily_report"] = {
+                "success": True,
+                "sector_report_generated": True,
+                "sector_llm_cost": sector_llm_cost,
+                "sector": sector,
+                "report_path": str(sector_report_path)
+            }
+            self.stats["stages_completed"].append("sector_daily_report")
+            
+            # Log results
+            stats = {
+                "Sector report": "✓",
+                "Sector": sector,
+                "LLM cost": f"${sector_llm_cost:.4f}",
+                "Output file": str(sector_report_path.name)
+            }
+            self.logger.stage_end("SECTOR DAILY REPORT", True, stats)
+            
+            return {
+                "success": True,
+                "sector_report_path": str(sector_report_path),
+                "sector_llm_cost": sector_llm_cost,
+                "sector": sector
+            }
+            
+        except Exception as e:
+            self.logger.error(f"❌ Sector daily report generation failed: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
             return {"success": False, "error": str(e)}
@@ -723,7 +746,7 @@ class ComprehensiveStockAnalysisPipeline:
             "company_name": self.company_name,
             "statistics": self.stats
         }
-
+    
 def main():
     """Main entry point for the comprehensive stock analysis pipeline."""
     parser = argparse.ArgumentParser(
@@ -732,16 +755,19 @@ def main():
         epilog="""
 Examples:
   # Full analysis (financial model + news analysis + reports)
-  python main.py --ticker NVDA --company "NVIDIA" --email user@example.com --timestamp 20250101_120000
+  python main.py --ticker NVDA --email user@example.com --timestamp 20250101_120000
   
   # Use Claude Sonnet for LLM analysis
-  python main.py --ticker AAPL --company "Apple" --email user@example.com --timestamp 20250101_120000 --llm claude-3.5-sonnet
+  python main.py --ticker AAPL --email user@example.com --timestamp 20250101_120000 --llm claude-3.5-sonnet
   
   # Just build financial model
-  python main.py --ticker MSFT --company "Microsoft" --email user@example.com --timestamp 20250101_120000 --pipeline financial-model
+  python main.py --ticker MSFT --email user@example.com --timestamp 20250101_120000 --pipeline financial-model
   
   # Generate daily news intelligence report
-  python main.py --ticker NVDA --company "NVIDIA" --email user@example.com --timestamp 20250101_120000 --pipeline company-daily-report
+  python main.py --ticker NVDA --email user@example.com --timestamp 20250101_120000 --pipeline company-daily-report
+  
+  # Generate sector daily intelligence report
+  python main.py --ticker NVDA --email user@example.com --timestamp 20250101_120000 --pipeline sector-daily-report --sector TECHNOLOGY
   
   # List available models
   python main.py --list-llms
@@ -750,24 +776,22 @@ Examples:
     
     # Required arguments
     parser.add_argument("--ticker", help="Stock ticker symbol (e.g., NVDA)")
-    parser.add_argument("--company", help="Company name (e.g., 'NVIDIA')")
     parser.add_argument("--email", help="User email for data organization")
     parser.add_argument("--timestamp", help="Custom timestamp for analysis folder (YYYYMMDD_HHMMSS)")
     
     # Pipeline control
     parser.add_argument("--pipeline", 
                        choices=["comprehensive", "financial-statements", "financial-model", "search-news",
-                                "screen-news", "company-daily-report"], 
+                                "screen-news", "company-daily-report", "sector-daily-report"], 
                        default="comprehensive", 
                        help="Pipeline stages to execute")
     
     # News analysis parameters  
-    parser.add_argument("--max-searched", type=int, default=10, help="Maximum articles to search/scrape")
+    parser.add_argument("--max-searched", type=int, default=20, help="Maximum articles to search/scrape")
     parser.add_argument("--query", help="Override default search query for news articles")
-    parser.add_argument("--min-score", type=float, default=6.0, help="Minimum relevance score (0-10)")
-    parser.add_argument("--max-filtered", type=int, default=5, help="Maximum filtered articles")
-    parser.add_argument("--min-confidence", type=float, default=0.6, help="Minimum confidence for insights (0-1)")
-    
+    parser.add_argument("--min-score", type=float, default=5.0, help="Minimum relevance score (0-10)")
+    parser.add_argument("--max-filtered", type=int, default=20, help="Maximum filtered articles")
+    parser.add_argument("--min-confidence", type=float, default=0.5, help="Minimum confidence for insights (0-1)")    
     # LLM selection parameters
     parser.add_argument("--llm", choices=["gpt-4o-mini", "claude-3.5-sonnet", "claude-3.5-haiku", "claude-3-opus"], 
                        default="gpt-4o-mini", help="LLM model to use for analysis")
@@ -793,15 +817,15 @@ Examples:
         return 0
     
     # Check required arguments for normal operation
-    if not all([args.ticker, args.company, args.email, args.timestamp]):
-        parser.error("--ticker, --company, --email, and --timestamp are required for analysis operations")
-        
+    if not all([args.ticker, args.email, args.timestamp]):
+        parser.error("--ticker, --email, and --timestamp are required for analysis operations")
+            
     try:
         # Initialize LLM model
         init_llm(args.llm)
         
         # Initialize comprehensive pipeline
-        pipeline = ComprehensiveStockAnalysisPipeline(args.ticker, args.company, args.email, args.timestamp)
+        pipeline = ComprehensiveStockAnalysisPipeline(args.ticker, args.email, args.timestamp)
         
         # Run selected pipeline
         if args.pipeline == "comprehensive":
@@ -848,6 +872,10 @@ Examples:
         elif args.pipeline == "company-daily-report":
             # Company daily report pipeline: Fetch company data → Generate daily report
             results = pipeline.run_company_daily_report_stage()
+        
+        elif args.pipeline == "sector-daily-report":
+            # Sector daily report pipeline: Generate sector-wide daily report
+            results = pipeline.run_sector_daily_report_stage()
 
         # Pipeline execution completed successfully
         pipeline.logger.program_end()

@@ -28,7 +28,7 @@ Generate a **complete, professional sector intelligence report** following the s
 
 ---
 
-# 📈 {sector} Sector — 24H News Intelligence Report
+# {sector} Sector — 24H News Intelligence Report
 
 **Coverage Universe:** {num_companies} companies
 **Date:** {date}
@@ -36,7 +36,7 @@ Generate a **complete, professional sector intelligence report** following the s
 
 ---
 
-## 0️⃣ Sector Price Action — What Moved?
+## Section 0: Sector Price Action — What Moved?
 
 [Create table with: Metric, Value, Δ vs Market]
 - Sector 1-Day Move
@@ -51,14 +51,14 @@ Generate a **complete, professional sector intelligence report** following the s
 
 ---
 
-## 1️⃣ Most Material Sector Catalysts — Last 24 Hours
+## Section 1: Most Material Sector Catalysts — Last 24 Hours
 
 [Create ranked table with top 5 catalysts]
 Columns: Rank, Headline, Sub-Sector, Driver Type, Sentiment, Materiality %
 
 ---
 
-## 2️⃣ Sector Impact — What Changed Financially?
+## Section 2: Sector Impact — What Changed Financially?
 
 [Create table analyzing financial levers]
 Columns: Lever Affected, Direction, Magnitude, Commentary
@@ -76,7 +76,7 @@ Levers to analyze:
 
 ---
 
-## 3️⃣ Company-Level Movers & Drivers
+## Section 3: Company-Level Movers & Drivers
 
 [Create table showing top movers]
 Columns: Ticker, 1-Day Move, Key News Catalyst, Sentiment, Actionability
@@ -93,7 +93,7 @@ Columns: Ticker, 1-Day Move, Key News Catalyst, Sentiment, Actionability
 
 ---
 
-## 4️⃣ Thematic & Competitive Landscape Signals
+## Section 4: Thematic & Competitive Landscape Signals
 
 [Create table showing key themes]
 Columns: Theme, Signal Today, Thesis Impact, Watchpoint
@@ -102,18 +102,18 @@ Examples: AI Capex, Pricing Power, Regulation, Labor Costs
 
 ---
 
-## 5️⃣ TL;DR: Sector Takeaways
+## Section 5: TL;DR: Sector Takeaways
 
-> 1️⃣ [Most important signal/shift - SYNTHESIZE competing signals into coherent story]
-> 2️⃣ [Where the rotation opportunities are - connect price action to positioning]
-> 3️⃣ [Where major risk build-up is - forward-looking concerns]
+> 1. [Most important signal/shift - SYNTHESIZE competing signals into coherent story]
+> 2. [Where the rotation opportunities are - connect price action to positioning]
+> 3. [Where major risk build-up is - forward-looking concerns]
 
 **CRITICAL**: Tie together offsetting forces into unified sector narrative.
 Example: "Apple strength offsets NVDA weakness, but China risk and valuation pressure keep Tech neutral overall"
 
-🧠 **Sector Recommendation:** [Overweight / Neutral / Underweight]
-🎯 **Highest Conviction Theme Today:** [Theme]
-📍 **Where to Position:** [Sub-sector / Top tickers]
+**Sector Recommendation:** [Overweight / Neutral / Underweight]  
+**Highest Conviction Theme Today:** [Theme]  
+**Where to Position:** [Sub-sector / Top tickers]
 
 ---
 

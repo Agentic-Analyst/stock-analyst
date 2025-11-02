@@ -8,7 +8,7 @@ google-search-results>=2.4.2
 lxml_html_clean>=0.4.2
 
 # vynn_core - News feed data layer for MongoDB/Redis
-git+https://github.com/Agentic-Analyst/vynn-core.git
+vynn-core @ git+https://github.com/Agentic-Analyst/vynn-core.git@a84098d41d1fdeebd437fb698f20ac683ccc1e3c
 
 # AI/LLM functionality  
 openai>=1.30.0

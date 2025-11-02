@@ -136,7 +136,7 @@ class SectorDailyReportGenerator:
         self.sector = sector
         self.sector_collection = sector.upper().replace(" ", "_")  # e.g., "TECHNOLOGY"
         self.companies = []
-        self.output_dir = output_dir or project_root / "reports" / "daily" / "sectors"
+        self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logger
         
@@ -216,76 +216,63 @@ class SectorDailyReportGenerator:
         """
         self._log("info", f"📈 Fetching price action data for {len(self.companies)} companies")
         
-        if not self.companies:
-            return {
-                'sector_1d_move': 0.0,
-                'top_gainer': None,
-                'top_laggard': None,
-                'sentiment': 'neutral',
-                'rotation_trend': 'neutral'
-            }
-        
-        price_data = []
-        for company in self.companies:
-            ticker = company['ticker']
-            try:
-                stock = yf.Ticker(ticker)
-                hist = stock.history(period="5d")  # Last 5 days for context
-                
-                if len(hist) >= 2:
-                    latest_close = hist['Close'].iloc[-1]
-                    prev_close = hist['Close'].iloc[-2]
-                    change_pct = ((latest_close - prev_close) / prev_close) * 100
+        try:
+            price_data = []
+            for company in self.companies:
+                ticker = company['ticker']
+                try:
+                    stock = yf.Ticker(ticker)
+                    hist = stock.history(period="5d")  # Last 5 days for context
                     
-                    price_data.append({
-                        'ticker': ticker,
-                        'company': company['name'],
-                        'change_pct': change_pct,
-                        'latest_close': latest_close
-                    })
-            except Exception as e:
-                self._log("warning", f"Could not fetch price data for {ticker}: {e}")
-        
-        if not price_data:
+                    if len(hist) >= 2:
+                        latest_close = hist['Close'].iloc[-1]
+                        prev_close = hist['Close'].iloc[-2]
+                        change_pct = ((latest_close - prev_close) / prev_close) * 100
+                        
+                        price_data.append({
+                            'ticker': ticker,
+                            'company': company['name'],
+                            'change_pct': change_pct,
+                            'latest_close': latest_close
+                        })
+                except Exception as e:
+                    self._log("warning", f"Could not fetch price data for {ticker}: {e}")
+            
+            # Calculate sector average move
+            avg_move = sum(p['change_pct'] for p in price_data) / len(price_data)
+            
+            # Find top gainer and laggard (only if we have multiple companies)
+            if len(price_data) >= 2:
+                top_gainer = max(price_data, key=lambda x: x['change_pct'])
+                top_laggard = min(price_data, key=lambda x: x['change_pct'])
+            else:
+                # For single company, set to None to avoid showing same ticker twice
+                top_gainer = None
+                top_laggard = None
+            
+            # Determine sentiment
+            if avg_move > 1.0:
+                sentiment = 'bullish'
+                rotation = 'money_flowing_in'
+            elif avg_move < -1.0:
+                sentiment = 'bearish'
+                rotation = 'money_flowing_out'
+            else:
+                sentiment = 'neutral'
+                rotation = 'neutral'
+            
             return {
-                'sector_1d_move': 0.0,
-                'top_gainer': None,
-                'top_laggard': None,
-                'sentiment': 'neutral',
-                'rotation_trend': 'neutral'
+                'sector_1d_move': round(avg_move, 2),
+                'top_gainer': top_gainer,
+                'top_laggard': top_laggard,
+                'sentiment': sentiment,
+                'rotation_trend': rotation,
+                'company_moves': price_data
             }
-        
-        # Calculate sector average move
-        avg_move = sum(p['change_pct'] for p in price_data) / len(price_data)
-        
-        # Find top gainer and laggard (only if we have multiple companies)
-        if len(price_data) >= 2:
-            top_gainer = max(price_data, key=lambda x: x['change_pct'])
-            top_laggard = min(price_data, key=lambda x: x['change_pct'])
-        else:
-            # For single company, set to None to avoid showing same ticker twice
-            top_gainer = None
-            top_laggard = None
-        
-        # Determine sentiment
-        if avg_move > 1.0:
-            sentiment = 'bullish'
-            rotation = 'money_flowing_in'
-        elif avg_move < -1.0:
-            sentiment = 'bearish'
-            rotation = 'money_flowing_out'
-        else:
-            sentiment = 'neutral'
-            rotation = 'neutral'
-        
-        return {
-            'sector_1d_move': round(avg_move, 2),
-            'top_gainer': top_gainer,
-            'top_laggard': top_laggard,
-            'sentiment': sentiment,
-            'rotation_trend': rotation,
-            'company_moves': price_data
-        }
+        except Exception as e:
+            self._log("error", f"Error fetching price action data: {e}")
+            import traceback
+            self._log("error", traceback.format_exc())
     
     def _format_articles_for_sector_analysis(self, articles: List[Dict]) -> str:
         """Format articles for sector-level LLM analysis."""
@@ -447,11 +434,24 @@ class SectorDailyReportGenerator:
             for i, cat in enumerate(catalysts[:10])  # Top 10
         ])
         
+        # Safely extract top gainer/laggard data
+        top_gainer = price_data.get('top_gainer') if price_data else None
+        top_laggard = price_data.get('top_laggard') if price_data else None
+        
+        top_gainer_str = (
+            f"{top_gainer.get('ticker')} ({top_gainer.get('change_pct', 0):.2f}%)" 
+            if top_gainer else "N/A"
+        )
+        top_laggard_str = (
+            f"{top_laggard.get('ticker')} ({top_laggard.get('change_pct', 0):.2f}%)" 
+            if top_laggard else "N/A"
+        )
+        
         price_summary = f"""
-Sector 1-Day Move: {price_data.get('sector_1d_move', 0):.2f}%
-Sentiment: {price_data.get('sentiment', 'neutral')}
-Top Gainer: {price_data.get('top_gainer', {}).get('ticker', 'N/A')} ({price_data.get('top_gainer', {}).get('change_pct', 0):.2f}%)
-Top Laggard: {price_data.get('top_laggard', {}).get('ticker', 'N/A')} ({price_data.get('top_laggard', {}).get('change_pct', 0):.2f}%)
+Sector 1-Day Move: {price_data.get('sector_1d_move', 0) if price_data else 0:.2f}%
+Sentiment: {price_data.get('sentiment', 'neutral') if price_data else 'neutral'}
+Top Gainer: {top_gainer_str}
+Top Laggard: {top_laggard_str}
 """
         
         user_prompt = user_prompt_template.format(

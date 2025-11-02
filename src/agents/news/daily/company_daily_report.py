@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass, asdict
 import tiktoken
+import re
 
 # Add project root to path
 # From src/agents/news/daily/ go up 4 levels to get to project root
@@ -497,30 +498,47 @@ class CompanyDailyReportGenerator:
         
         return peer_context
     
-    def fetch_price_action_data(self, sector_etf: str = "XLK") -> str:
+    def fetch_price_action_data(self, sector: str) -> str:
         """Fetch stock price movement vs sector benchmark for last 24 hours.
         
+        Automatically determines the appropriate sector ETF based on the provided sector.
+        
         Args:
-            sector_etf: Sector ETF ticker for comparison (default: XLK for Technology)
-                       - XLK: Technology
-                       - XLF: Financials  
-                       - XLE: Energy
-                       - XLV: Healthcare
-                       - XLI: Industrials
+            sector: Sector name from yfinance (e.g., 'Technology', 'Financial Services')
         
         Returns:
             Formatted markdown table with price action data
         """
-        self._log("info", f"📊 Fetching price action for {self.ticker} vs {sector_etf}...")
-        
         try:
+            # Map yfinance sector names to Select Sector SPDR ETFs
+            sector_etf_map = {
+                'Technology': 'XLK',
+                'Financial Services': 'XLF',
+                'Financials': 'XLF',  # Alternative name
+                'Energy': 'XLE',
+                'Healthcare': 'XLV',
+                'Industrials': 'XLI',
+                'Consumer Cyclical': 'XLY',
+                'Consumer Defensive': 'XLP',
+                'Basic Materials': 'XLB',
+                'Materials': 'XLB',  # Alternative name
+                'Utilities': 'XLU',
+                'Real Estate': 'XLRE',
+                'Communication Services': 'XLC'
+            }
+            
+            # Get sector ETF or default to SPY (S&P 500)
+            sector_etf = sector_etf_map.get(sector, 'SPY')
+            
+            self._log("info", f"📊 Fetching price action for {self.ticker} ({sector}) vs {sector_etf}...")
+            
             # Fetch data for stock and sector
             stock = yf.Ticker(self.ticker)
-            sector = yf.Ticker(sector_etf)
+            sector_ticker = yf.Ticker(sector_etf)
             
             # Get last 5 days of data to ensure we have 24h comparison
             stock_hist = stock.history(period="5d")
-            sector_hist = sector.history(period="5d")
+            sector_hist = sector_ticker.history(period="5d")
             
             if len(stock_hist) < 2 or len(sector_hist) < 2:
                 self._log("warning", "Insufficient price data available")
@@ -540,7 +558,7 @@ class CompanyDailyReportGenerator:
 | {self.ticker} 1-Day Move | {stock_return:+.2f}% | {relative_return:+.2f}% |
 | Current Price | ${current_price:.2f} | - |
 | Sector Move | {sector_return:+.2f}% | - |
-| Relative Performance | {'🟢 Outperforming' if relative_return > 0 else '🔴 Underperforming'} | {abs(relative_return):.2f}% {'ahead' if relative_return > 0 else 'behind'} |"""
+| Relative Performance | {'Outperforming' if relative_return > 0 else 'Underperforming'} | {abs(relative_return):.2f}% {'ahead' if relative_return > 0 else 'behind'} |"""
             
             self._log("info", f"✅ Price action: {self.ticker} {stock_return:+.2f}% vs {sector_etf} {sector_return:+.2f}%")
             return price_data
@@ -704,43 +722,77 @@ class CompanyDailyReportGenerator:
         warnings = []
         
         # Check for mixed Q1/Q2/Q3/Q4 references that might indicate confusion
-        import re
+        # BUT: Allow mentions of consecutive quarters (e.g., Q1 results + Q2 guidance is normal)
         quarters = re.findall(r'Q[1-4]', report_text)
-        if len(set(quarters)) > 1:
+        unique_quarters = set(quarters)
+        
+        # Only warn if there are 3+ different quarters mentioned (likely mixing up data)
+        if len(unique_quarters) >= 3:
             warnings.append(
-                f"⚠️ Multiple fiscal quarters mentioned: {set(quarters)}. "
+                f"WARNING: Multiple fiscal quarters mentioned: {unique_quarters}. "
                 "Verify these are from the same news story and not mixed up."
             )
         
         # Check for very large revenue numbers that seem unrealistic
-        revenue_matches = re.findall(r'\$(\d+\.?\d*)[BM]', report_text)
-        if revenue_matches:
-            revenue_values = []
-            for match in revenue_matches:
-                value = float(match)
-                # Check if any revenue > 100B (unrealistic for single quarter for most companies)
-                if 'B' in report_text and value > 100:
-                    warnings.append(
-                        f"⚠️ Very large revenue figure detected: ${match}B. "
-                        "Verify this is accurate and not a hallucination."
-                    )
+        # Match patterns like $100B or $800M with context
+        revenue_patterns = re.findall(r'\$(\d+(?:\.\d+)?)\s*([BM])', report_text)
+        
+        for value_str, unit in revenue_patterns:
+            value = float(value_str)
+            
+            # Check for unrealistic quarterly revenue (>$200B for any single company)
+            # or insider sales >$5B (very unusual)
+            if unit == 'B':
+                if value > 200:
+                    # Check if this is in context of insider selling or market cap
+                    pattern = re.escape(f"${value_str}{unit}")
+                    matches = list(re.finditer(pattern, report_text))
+                    
+                    is_insider_sale = False
+                    is_market_cap = False
+                    
+                    for match in matches:
+                        start = max(0, match.start() - 100)
+                        end = min(len(report_text), match.end() + 100)
+                        context = report_text[start:end].lower()
+                        
+                        if any(term in context for term in ['sell', 'sale', 'sold', 'insider', 'stock sale']):
+                            is_insider_sale = True
+                        if any(term in context for term in ['market cap', 'valuation', 'market value']):
+                            is_market_cap = True
+                    
+                    # Only warn if it's not clearly an insider sale or market cap
+                    if not is_insider_sale and not is_market_cap:
+                        warnings.append(
+                            f"WARNING: Very large revenue figure detected: ${value_str}{unit}. "
+                            "Verify this is accurate and not a hallucination."
+                        )
         
         # Check for speculative language without attribution
+        # This helps catch LLM hallucinations where it makes claims without source data
         speculative_phrases = [
             "concerns over potential",
             "fears of",
-            "expected to",
-            "could potentially",
-            "may lead to"
+            "analysts expect",
+            "market expects"
         ]
+        
         for phrase in speculative_phrases:
             if phrase.lower() in report_text.lower():
-                # Check if it has a source nearby (within 100 chars)
+                # Check if it has a source nearby (within 150 chars)
                 idx = report_text.lower().find(phrase.lower())
-                context = report_text[max(0, idx-50):idx+150]
-                if not any(source in context.lower() for source in ['analyst', 'report', 'according to', 'cited', 'morgan stanley', 'goldman sachs', 'jp morgan']):
+                context = report_text[max(0, idx-75):idx+150]
+                
+                # Look for attribution signals
+                has_source = any(source in context.lower() for source in [
+                    'analyst', 'report', 'according to', 'cited', 'source',
+                    'morgan stanley', 'goldman sachs', 'jp morgan', 'bank of america',
+                    'article', 'reuters', 'bloomberg', 'cnbc', 'mentioned'
+                ])
+                
+                if not has_source:
                     warnings.append(
-                        f"⚠️ Speculative language without clear source: '{phrase}'. "
+                        f"WARNING: Speculative language without clear source: '{phrase}'. "
                         "Ensure this is backed by actual analyst reports or news sources."
                     )
         
@@ -765,23 +817,9 @@ class CompanyDailyReportGenerator:
             self._log("warning", "No articles found - cannot generate report")
             return "No news articles found for the last 24 hours."
         
-        # Step 2: Fetch price action data
-        # Map sector to ETF (default to XLK for Technology)
-        sector_etf_map = {
-            'Technology': 'XLK',
-            'Financials': 'XLF',
-            'Energy': 'XLE',
-            'Healthcare': 'XLV',
-            'Industrials': 'XLI',
-            'Consumer Discretionary': 'XLY',
-            'Consumer Staples': 'XLP',
-            'Materials': 'XLB',
-            'Utilities': 'XLU',
-            'Real Estate': 'XLRE',
-            'Communication Services': 'XLC'
-        }
-        sector_etf = sector_etf_map.get(company_info.get('sector', 'Unknown'), 'SPY')
-        price_action_data = self.fetch_price_action_data(sector_etf)
+        # Step 2: Fetch price action data using sector from company_info
+        sector = company_info.get('sector', 'Unknown')
+        price_action_data = self.fetch_price_action_data(sector)
         
         # Step 3: Analyze news
         catalysts, risks, mitigations, summary = self.analyze_news_batch(articles)

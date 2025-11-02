@@ -31,7 +31,7 @@
 
 Generate a professional **24-Hour Company News Intelligence Report** following this template structure:
 
-# 🗞️ Vynn AI — 24H Company News Intelligence Report
+# Vynn AI — 24H Company News Intelligence Report
 
 **Company:** {company_name} ({ticker})
 **Sector:** {sector}
@@ -40,20 +40,20 @@ Generate a professional **24-Hour Company News Intelligence Report** following t
 
 ---
 
-## 0️⃣ Price Action — Did News Move the Stock?
+## Price Action — Did News Move the Stock?
 
 {price_action_data}
 
 ---
 
-## 1️⃣ Top Headlines — Last 24 Hours (Ranked by Materiality)
+## Top Headlines — Last 24 Hours (Ranked by Materiality)
 
 Create a table with the most material news ranked by importance.
 
 **IMPORTANT**: Headlines should attribute source when claiming specific data:
-- ✅ Good: "Industry report confirms Nvidia's 50% IC design market share"
-- ✅ Good: "TrendForce data shows 40% GPU order growth from hyperscalers"
-- ❌ Bad: "Growing demand for AI products" (too generic, no source)
+- Good: "Industry report confirms Nvidia's 50% IC design market share"
+- Good: "TrendForce data shows 40% GPU order growth from hyperscalers"
+- Bad: "Growing demand for AI products" (too generic, no source)
 
 | Rank | News Headline | Category | Sentiment | Time Horizon | Materiality Score |
 | ---- | ------------- | -------- | --------- | ------------ | ----------------- |
@@ -66,7 +66,7 @@ Create a table with the most material news ranked by importance.
 
 ---
 
-## 2️⃣ Why It Matters — Quick Impact Analysis
+## Why It Matters — Quick Impact Analysis
 
 Provide 1-2 bullet points per major story explaining the business/stock impact.
 **IMPORTANT**: Include specific numbers, percentages, and quantitative data from the articles.
@@ -83,7 +83,7 @@ Format for this report:
 
 ---
 
-## 3️⃣ Financial Materiality Mapping
+## Financial Materiality Mapping
 
 Translate news into model levers with **quantified impact estimates**:
 
@@ -104,9 +104,9 @@ Translate news into model levers with **quantified impact estimates**:
 
 ---
 
-## 3️⃣.5 Market Pricing Assessment
+## Market Pricing Assessment
 
-> **🎯 Alpha Opportunity**: [Is there a gap between news and market pricing?]
+> **Alpha Opportunity**: [Is there a gap between news and market pricing?]
 > 
 > **Current Market View**: [What is the market pricing in based on price action?]
 > 
@@ -121,7 +121,7 @@ Examples:
 
 ---
 
-## 4️⃣ Peer & Market Sentiment Context
+## Peer & Market Sentiment Context
 
 **Include peer price movements if available in peer_context data.**
 
@@ -133,7 +133,7 @@ Example format:
 
 ---
 
-## 5️⃣ Risks & Watch Items (Last 24 Hours)
+## Risks & Watch Items (Last 24 Hours)
 
 Include **multiple risks** when identified in the analysis. Categories:
 - Insider selling / management concerns
@@ -152,7 +152,7 @@ Include **multiple risks** when identified in the analysis. Categories:
 
 ---
 
-## 6️⃣ Forward Watch — What to Monitor Next
+## Forward Watch — What to Monitor Next
 
 | Trigger Event | Expected Timing | Signal to Watch | Potential Action |
 | ------------- | --------------- | --------------- | ---------------- |
@@ -160,14 +160,14 @@ Include **multiple risks** when identified in the analysis. Categories:
 
 ---
 
-### 📌 TL;DR: Key Takeaways
+### TL;DR: Key Takeaways
 
-> 1️⃣ [Most important insight]
-> 2️⃣ [Second most important insight]
-> 3️⃣ [Third most important insight]
+> 1. [Most important insight]
+> 2. [Second most important insight]
+> 3. [Third most important insight]
 
-🧠 **Actionability Rating:** High/Medium/Low
-🕒 **Is the market pricing this?** Yes/No — [Why]
+**Actionability Rating:** High/Medium/Low
+**Is the market pricing this?** Yes/No — [Why]
 
 ---
 

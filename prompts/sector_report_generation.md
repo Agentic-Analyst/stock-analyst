@@ -13,7 +13,7 @@ Your report must be:
 
 Follow this structure based on the sector daily report template:
 
-### 0️⃣ Sector Price Action Summary
+### Section 0: Sector Price Action Summary
 - 1-day sector move vs market benchmark
 - Top gainer and top laggard with drivers
 - Sector sentiment and rotation trend
@@ -21,7 +21,7 @@ Follow this structure based on the sector daily report template:
   - Example: "Broader risk-off market tone kept sector gains muted despite positive individual catalysts"
   - Example: "Macro headwinds (Fed, rates) pressured sector despite strong company fundamentals"
 
-### 1️⃣ Most Material Sector Catalysts (Top 5)
+### Section 1: Most Material Sector Catalysts (Top 5)
 - Ranked table by materiality score
 - Include: Headline, Sub-Sector, Driver Type, Sentiment, Materiality %
 - Focus on catalysts with sector-wide implications
@@ -30,7 +30,7 @@ Follow this structure based on the sector daily report template:
   - "Negative" = Unambiguously bearish
   - "Mixed/Neutral" → Specify: "Bullish near-term with long-term risk", "Strong results offset by regional concerns"
 
-### 2️⃣ Sector Impact Analysis
+### Section 2: Sector Impact Analysis
 - How catalysts affect: Revenue Growth, Margins, Regulatory Risk, Cost of Capital, Valuation Multiples
 - Direction (↑ / ↓), Magnitude, and Commentary
 - **Key Levers to Analyze**:
@@ -42,7 +42,7 @@ Follow this structure based on the sector daily report template:
 - **Important**: If price moved but fundamentals didn't change → cite valuation compression/expansion
 - TL;DR: 1-2 sentence summary of fundamental shifts
 
-### 3️⃣ Company-Level Movers (Top Movers)
+### Section 3: Company-Level Movers (Top Movers)
 - Table showing: Ticker, 1-Day Move, Key Catalyst, Sentiment, Actionability
 - **Actionability Language**: Use institutional phrasing (NOT "Buy/Sell/Hold")
   - Instead of "Buy" → "Add", "Accumulate", "Overweight"
@@ -51,12 +51,12 @@ Follow this structure based on the sector daily report template:
   - Add nuance: "Underweight near-term / Overweight long-term"
 - Brief insights on competitive dynamics and alpha opportunities
 
-### 4️⃣ Thematic Signals
+### Section 4: Thematic Signals
 - Key themes (e.g., AI Capex, Pricing Power, Regulation)
 - Signal strength, thesis impact, watchpoints
 - Focus on durability of catalysts
 
-### 5️⃣ TL;DR Sector Takeaways
+### Section 5: TL;DR Sector Takeaways
 - 3 bullet points capturing:
   1. Most important signal/shift (synthesize multiple catalysts if needed)
   2. Rotation opportunities (connect price action to positioning)
@@ -78,9 +78,9 @@ Follow this structure based on the sector daily report template:
 
 ### Formatting
 - Use **markdown tables** for structured data
-- Use **emojis sparingly** for section headers (📈, 📊, 🎯, ⚠️)
 - Use **bold** for key metrics and conclusions
 - Use bullet points for lists
+- Do NOT use emojis in the report
 
 ### Key Principles
 1. **Materiality First**: Lead with highest-impact catalysts
@@ -113,7 +113,7 @@ Follow this structure based on the sector daily report template:
 
 **Good Catalyst Analysis:**
 ```
-## 1️⃣ Most Material Sector Catalysts
+## Most Material Sector Catalysts
 
 | Rank | Headline | Sub-Sector | Driver | Sentiment | Materiality |
 |------|----------|------------|--------|-----------|-------------|
@@ -126,58 +126,58 @@ Likely drives 10-15% upward revenue revisions for chip makers (NVDA, AMD, AVGO) 
 
 **Good TL;DR:**
 ```
-### 📌 TL;DR: Sector Takeaways
+### TL;DR: Sector Takeaways
 
-1️⃣ **AI Capex Acceleration** - Cloud providers increasing spend 20%+, driving semiconductor 
+1. **AI Capex Acceleration** - Cloud providers increasing spend 20%+, driving semiconductor 
 demand surge. This is NOT transitory - we see sustained multi-year tailwind.
 
-2️⃣ **Rotation into Quality** - Premium valuations (NVDA, AVGO) justified by sustained 
+2. **Rotation into Quality** - Premium valuations (NVDA, AVGO) justified by sustained 
 pricing power. Discount laggards (INTC) face structural headwinds.
 
-3️⃣ **Regulatory Overhang Building** - Export restrictions to China represent 10-15% 
+3. **Regulatory Overhang Building** - Export restrictions to China represent 10-15% 
 revenue risk for sector. Monitor Washington closely.
 
-🧠 **Sector Recommendation**: **Overweight**
-🎯 **Highest Conviction**: AI Infrastructure (NVDA, AVGO, AMD)
-📍 **Positioning**: Favor AI enablers over commodity chip makers
+**Sector Recommendation**: **Overweight**  
+**Highest Conviction**: AI Infrastructure (NVDA, AVGO, AMD)  
+**Positioning**: Favor AI enablers over commodity chip makers
 ```
 
 **Good TL;DR (Handling Contradiction):**
 ```
-### 📌 TL;DR: Sector Takeaways
+### TL;DR: Sector Takeaways
 
-1️⃣ **Positive Fundamentals, Negative Technicals** - NVDA investment news is bullish for 
+1. **Positive Fundamentals, Negative Technicals** - NVDA investment news is bullish for 
 long-term AI capex, but sector-wide macro risk-off drove -2% decline. Valuation compression 
 at work, not fundamental deterioration.
 
-2️⃣ **Rotation Pressure** - Money flowing out of high-multiple AI names despite intact 
+2. **Rotation Pressure** - Money flowing out of high-multiple AI names despite intact 
 growth thesis. Fed hawkishness raising discount rates = multiple compression.
 
-3️⃣ **Long-Term Thesis Intact** - Today's weakness is valuation/sentiment driven, not 
+3. **Long-Term Thesis Intact** - Today's weakness is valuation/sentiment driven, not 
 fundamental. AI capex cycle remains multi-year tailwind.
 
-🧠 **Sector Recommendation**: **Neutral** (tactical caution, strategic conviction)
-🎯 **Highest Conviction**: AI Capex Theme (long-term)
-📍 **Positioning**: Watch for re-entry on 5%+ pullback
+**Sector Recommendation**: **Neutral** (tactical caution, strategic conviction)  
+**Highest Conviction**: AI Capex Theme (long-term)  
+**Positioning**: Watch for re-entry on 5%+ pullback
 ```
 
 **Good TL;DR (Mixed Signals with Synthesis):**
 ```
-### 📌 TL;DR: Sector Takeaways
+### TL;DR: Sector Takeaways
 
-1️⃣ **Offsetting Forces** - Apple strength (earnings beat) offsets NVDA weakness (sentiment), 
+1. **Offsetting Forces** - Apple strength (earnings beat) offsets NVDA weakness (sentiment), 
 but China risk and valuation pressure keep Tech sector neutral overall. Broader risk-off tone 
 muted individual stock gains.
 
-2️⃣ **Rotation Opportunities** - Look for stocks with less China exposure and lower multiples. 
+2. **Rotation Opportunities** - Look for stocks with less China exposure and lower multiples. 
 Defensive rotation within Tech underway as growth re-rates lower.
 
-3️⃣ **Key Risks** - China regulatory/demand risks rising. Cost of capital pressures from macro. 
+3. **Key Risks** - China regulatory/demand risks rising. Cost of capital pressures from macro. 
 Watch Fed signals and China data closely.
 
-🧠 **Sector Recommendation**: **Neutral** 
-🎯 **Highest Conviction**: Quality names with pricing power (AAPL)
-📍 **Positioning**: Reduce high-beta semis, add defensive Tech
+**Sector Recommendation**: **Neutral**  
+**Highest Conviction**: Quality names with pricing power (AAPL)  
+**Positioning**: Reduce high-beta semis, add defensive Tech
 ```
 
 **Good Company Actionability (Institutional Tone):**
