@@ -15,7 +15,7 @@ from typing import Optional
 class StockAnalystLogger:
     """Centralized logger for the stock analysis pipeline."""
     
-    def __init__(self, ticker: str, base_path: pathlib.Path, console_level: str = "INFO"):
+    def __init__(self, ticker: str, base_path: pathlib.Path, console_level: str = "INFO", log_filename: str = "info.log", logger_name: str = None):
         """
         Initialize stock analyst logger with both console and file output.
         
@@ -24,21 +24,27 @@ class StockAnalystLogger:
             console_level: Console logging level ('DEBUG', 'INFO', 'WARNING', 'ERROR')
         """
         self.ticker = ticker.upper()
+        # Base directory for log files (should be a directory for the ticker)
         self.data_dir = base_path
-        self.log_file = self.data_dir / "info.log"
-        
+        # Allow custom log filename (so agent-specific logs can be stored separately)
+        self.log_file = self.data_dir / log_filename
+
         # Ensure data directory exists
         self.data_dir.mkdir(parents=True, exist_ok=True)
         
         # Create logger
-        self.logger = logging.getLogger(f"stock-analyst-{self.ticker}")
+        # Use a unique logger name when provided (useful for agent-specific loggers)
+        if logger_name:
+            self.logger = logging.getLogger(logger_name)
+        else:
+            self.logger = logging.getLogger(f"stock-analyst-{self.ticker}")
         self.logger.setLevel(logging.DEBUG)
         
         # Clear any existing handlers
         self.logger.handlers.clear()
         
-        # File handler - logs everything
-        file_handler = logging.FileHandler(self.log_file, mode='w+', encoding='utf-8')
+        # File handler - logs everything (overwrite mode for fresh logs each run)
+        file_handler = logging.FileHandler(self.log_file, mode='w', encoding='utf-8')
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter(
             '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
@@ -46,14 +52,14 @@ class StockAnalystLogger:
         )
         file_handler.setFormatter(file_formatter)
         self.logger.addHandler(file_handler)
-        
+
         # Console handler - configurable level
         console_handler = logging.StreamHandler()
         console_handler.setLevel(getattr(logging, console_level.upper()))
         console_formatter = logging.Formatter('%(message)s')
         console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
-        
+
         # Log session start
         self.logger.info(f"🚀 Stock Analysis Pipeline Session Started - {self.ticker}")
         self.logger.info(f"📅 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -162,9 +168,49 @@ def set_logger(logger: StockAnalystLogger):
 
 def setup_logger(ticker: str, base_path: pathlib.Path = None, console_level: str = "INFO") -> StockAnalystLogger:
     """Setup and return a new logger instance."""
+    # If no base_path provided, default to data/{ticker}
+    if base_path is None:
+        base_path = pathlib.Path("data") / ticker.upper()
+    else:
+        # ensure Path instance
+        base_path = pathlib.Path(base_path)
+
     logger = StockAnalystLogger(ticker, base_path, console_level)
     set_logger(logger)
     return logger
+
+
+# Agent-specific loggers registry
+_agent_loggers: dict = {}
+
+def setup_agent_logger(agent_name: str, console_level: str = "INFO") -> StockAnalystLogger:
+    """Create (or return existing) an agent-specific logger.
+
+    This writes to a separate file under the main logger's data directory, e.g.
+    data/{TICKER}/{agent_name}.log
+    """
+    if _logger is None:
+        raise RuntimeError("Global logger not initialized. Call setup_logger() first.")
+
+    # File name for this agent
+    filename = f"{agent_name}.log"
+
+    # Use same data directory as global logger
+    # Give each agent logger a unique logger name so handlers don't clobber each other
+    unique_logger_name = f"stock-analyst-{_logger.ticker}-{agent_name}"
+    agent_logger = StockAnalystLogger(_logger.ticker, _logger.data_dir, console_level, log_filename=filename, logger_name=unique_logger_name)
+    _agent_loggers[agent_name] = agent_logger
+    return agent_logger
+
+
+def get_agent_logger(agent_name: str) -> Optional[StockAnalystLogger]:
+    """Return an agent-specific logger if it exists, otherwise None."""
+    return _agent_loggers.get(agent_name)
+
+
+def list_agent_loggers() -> list:
+    """List names of configured agent loggers."""
+    return list(_agent_loggers.keys())
 
 # Convenience functions for when logger is set
 def info(message: str, **kwargs):

@@ -439,7 +439,7 @@ class RecommendationEngineV3:
         return prompt
     
     def _extract_json(self, response: str) -> Dict[str, Any]:
-        """Extract JSON from LLM response."""
+        """Extract JSON from LLM response with robust cleaning."""
         # Try to find JSON block
         if '```json' in response:
             start = response.find('```json') + 7
@@ -451,6 +451,17 @@ class RecommendationEngineV3:
             json_str = response[start:end]
         else:
             json_str = response
+        
+        # Clean up common JSON issues
+        # Remove trailing commas before closing braces/brackets (multiple passes for nested structures)
+        import re
+        # Do multiple passes to catch all nested cases
+        for _ in range(3):
+            json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)  # Remove comma before } or ]
+        
+        # Remove any comments (sometimes LLMs add them)
+        json_str = re.sub(r'//.*?\n', '\n', json_str)  # Remove // comments
+        json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)  # Remove /* */ comments
         
         return json.loads(json_str)
     
