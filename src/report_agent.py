@@ -604,7 +604,7 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     
     # Header
     report_parts.append(f"""# {company['company_name']} ({company['ticker']})
-## Professional Investment Analysis Report
+## Investment Analysis Report
 
 **Report Date**: {report_date}  
 **Sector**: {company['sector']} | **Industry**: {company['industry']}  
@@ -869,7 +869,7 @@ def generate_professional_report(
     """
     if logger:
         logger.info("="*70)
-        logger.info("Generating Professional Financial Report")
+        logger.info("Generating Financial Report")
         logger.info("="*70)
     
     # Step 1: Load all data

@@ -15,17 +15,20 @@ from typing import Optional
 class StockAnalystLogger:
     """Centralized logger for the stock analysis pipeline."""
     
-    def __init__(self, ticker: str, base_path: pathlib.Path, console_level: str = "INFO"):
+    def __init__(self, ticker: str, base_path: pathlib.Path, console_level: str = "INFO", session_name: Optional[str] = None):
         """
         Initialize stock analyst logger with both console and file output.
         
         Args:
             ticker: Stock ticker symbol (e.g., 'NVDA')
+            base_path: Base directory for logs
             console_level: Console logging level ('DEBUG', 'INFO', 'WARNING', 'ERROR')
+            session_name: Optional session identifier for chatbot continuity
         """
         self.ticker = ticker.upper()
         self.data_dir = base_path
         self.log_file = self.data_dir / "info.log"
+        self.session_name = session_name  # Store session ID for output
         
         # Ensure data directory exists
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -125,7 +128,9 @@ class StockAnalystLogger:
         self.logger.info("=" * 80)
 
     def program_end(self):
-        """Log program end with summary."""
+        """Log program end with summary and session ID."""
+        if self.session_name:
+            self.logger.info(f"SESSION_ID: {self.session_name}")
         self.logger.info(f"THE ENTIRE PROGRAM IS COMPLETED - {self.ticker}")
 
     def get_log_file_path(self) -> pathlib.Path:
@@ -160,9 +165,9 @@ def set_logger(logger: StockAnalystLogger):
     global _logger
     _logger = logger
 
-def setup_logger(ticker: str, base_path: pathlib.Path = None, console_level: str = "INFO") -> StockAnalystLogger:
+def setup_logger(ticker: str, base_path: pathlib.Path = None, console_level: str = "INFO", session_name: Optional[str] = None) -> StockAnalystLogger:
     """Setup and return a new logger instance."""
-    logger = StockAnalystLogger(ticker, base_path, console_level)
+    logger = StockAnalystLogger(ticker, base_path, console_level, session_name)
     set_logger(logger)
     return logger
 

@@ -66,6 +66,11 @@ import yfinance as yf
 from llms.config import init_llm, list_models, list_available_models
 from dotenv import load_dotenv
 load_dotenv()
+import traceback
+import asyncio
+
+# Import supervisor workflow
+from src.agents.supervisor.supervisor_agent import SupervisorWorkflowRunner
 
 class ComprehensiveStockAnalysisPipeline:
     """Integrated 7-step pipeline for complete stock analysis workflow."""
@@ -405,7 +410,6 @@ class ComprehensiveStockAnalysisPipeline:
             
         except Exception as e:
             self.logger.error(f"❌ Financial model generation failed: {e}")
-            # import traceback
             # self.logger.error(traceback.format_exc())
             return {"success": False, "error": str(e)}
     
@@ -646,7 +650,6 @@ class ComprehensiveStockAnalysisPipeline:
             
         except Exception as e:
             self.logger.error(f"❌ Company daily report generation failed: {e}")
-            import traceback
             self.logger.error(traceback.format_exc())
             return {"success": False, "error": str(e)}
     
@@ -722,7 +725,6 @@ class ComprehensiveStockAnalysisPipeline:
             
         except Exception as e:
             self.logger.error(f"❌ Sector daily report generation failed: {e}")
-            import traceback
             self.logger.error(traceback.format_exc())
             return {"success": False, "error": str(e)}
     
@@ -747,6 +749,55 @@ class ComprehensiveStockAnalysisPipeline:
             "statistics": self.stats
         }
     
+def _print_pipeline_failure_summary(pipeline):
+    """Print time and cost summary when pipeline fails."""
+    try:
+        if hasattr(pipeline, 'stats') and hasattr(pipeline, 'logger'):
+            end_time = datetime.now()
+            start_time = pipeline.stats.get("start_time", end_time)
+            duration = (end_time - start_time).total_seconds()
+            
+            pipeline.logger.info("")
+            pipeline.logger.info("=" * 80)
+            pipeline.logger.info("📊 FAILURE SUMMARY")
+            pipeline.logger.info("=" * 80)
+            pipeline.logger.info(f"   Total Duration: {duration:.2f}s")
+            pipeline.logger.info("=" * 80)
+            pipeline.logger.info("")
+    except Exception:
+        pass  # Silently ignore if we can't print summary
+
+def _print_supervisor_failure_summary(supervisor_runner):
+    """Print time and cost summary when supervisor fails."""
+    try:
+        if hasattr(supervisor_runner, 'stats') and hasattr(supervisor_runner, 'logger'):
+            end_time = datetime.now()
+            start_time = supervisor_runner.stats.get("start_time", end_time)
+            duration = (end_time - start_time).total_seconds()
+            
+            # Get LLM cost if available
+            llm_cost = 0.0
+            if hasattr(supervisor_runner, 'state') and supervisor_runner.state and hasattr(supervisor_runner.state, 'total_llm_cost'):
+                llm_cost = supervisor_runner.state.total_llm_cost
+            
+            supervisor_runner.logger.info("")
+            supervisor_runner.logger.info("=" * 80)
+            supervisor_runner.logger.info("📊 FAILURE SUMMARY")
+            supervisor_runner.logger.info("=" * 80)
+            if hasattr(supervisor_runner, 'ticker') and supervisor_runner.ticker:
+                supervisor_runner.logger.info(f"   Ticker: {supervisor_runner.ticker} ({supervisor_runner.company_name or 'Unknown'})")
+            supervisor_runner.logger.info(f"   Total Duration: {duration:.2f}s")
+            supervisor_runner.logger.info(f"   💰 Total LLM Cost: ${llm_cost:.4f}")
+            if hasattr(supervisor_runner.stats, '__getitem__'):
+                iterations = supervisor_runner.stats.get("iterations", 0)
+                agents_executed = supervisor_runner.stats.get("agents_executed", [])
+                supervisor_runner.logger.info(f"   Iterations: {iterations}")
+                supervisor_runner.logger.info(f"   Agents Executed: {len(agents_executed)}")
+            supervisor_runner.logger.info("=" * 80)
+            supervisor_runner.logger.info("")
+    except Exception:
+        pass  # Silently ignore if we can't print summary
+
 def main():
     """Main entry point for the comprehensive stock analysis pipeline."""
     parser = argparse.ArgumentParser(
@@ -769,6 +820,9 @@ Examples:
   # Generate sector daily intelligence report
   python main.py --ticker NVDA --email user@example.com --timestamp 20250101_120000 --pipeline sector-daily-report --sector TECHNOLOGY
   
+  # Supervisor agent (AI-powered agentic workflow with natural language prompt)
+  python main.py --email user@example.com --timestamp 20250101_120000 --pipeline chat --prompt "Analyze NVDA comprehensively with focus on AI chip market"
+  
   # List available models
   python main.py --list-llms
         """
@@ -778,20 +832,24 @@ Examples:
     parser.add_argument("--ticker", help="Stock ticker symbol (e.g., NVDA)")
     parser.add_argument("--email", help="User email for data organization")
     parser.add_argument("--timestamp", help="Custom timestamp for analysis folder (YYYYMMDD_HHMMSS)")
-    
+    # Supervisor pipeline parameters
+    parser.add_argument("--user-prompt", help="Natural language prompt for supervisor agent (e.g., 'Analyze NVDA comprehensively')")
+    parser.add_argument("--session-id", help="Custom session ID for continuous chat (empty means starting a new session)")
+
     # Pipeline control
     parser.add_argument("--pipeline", 
                        choices=["comprehensive", "financial-statements", "financial-model", "search-news",
-                                "screen-news", "company-daily-report", "sector-daily-report"], 
+                                "screen-news", "company-daily-report", "sector-daily-report","chat"], 
                        default="comprehensive", 
                        help="Pipeline stages to execute")
     
-    # News analysis parameters  
+    # News analysis parameters
     parser.add_argument("--max-searched", type=int, default=20, help="Maximum articles to search/scrape")
     parser.add_argument("--query", help="Override default search query for news articles")
     parser.add_argument("--min-score", type=float, default=5.0, help="Minimum relevance score (0-10)")
     parser.add_argument("--max-filtered", type=int, default=20, help="Maximum filtered articles")
-    parser.add_argument("--min-confidence", type=float, default=0.5, help="Minimum confidence for insights (0-1)")    
+    parser.add_argument("--min-confidence", type=float, default=0.5, help="Minimum confidence for insights (0-1)")
+        
     # LLM selection parameters
     parser.add_argument("--llm", choices=["gpt-4o-mini", "claude-3.5-sonnet", "claude-3.5-haiku", "claude-3-opus"], 
                        default="gpt-4o-mini", help="LLM model to use for analysis")
@@ -816,16 +874,23 @@ Examples:
         
         return 0
     
-    # Check required arguments for normal operation
-    if not all([args.ticker, args.email, args.timestamp]):
-        parser.error("--ticker, --email, and --timestamp are required for analysis operations")
+    # Check required arguments based on pipeline
+    if args.pipeline == "chat":
+        # Chat pipeline needs email, timestamp, and user prompt
+        if not all([args.email, args.timestamp, args.user_prompt]):
+            parser.error("--email, --timestamp, and --user-prompt are required for chat pipeline")
+    else:
+        # Other pipelines need ticker, email, timestamp
+        if not all([args.ticker, args.email, args.timestamp]):
+            parser.error("--ticker, --email, and --timestamp are required for analysis operations")
             
     try:
         # Initialize LLM model
         init_llm(args.llm)
-        
-        # Initialize comprehensive pipeline
-        pipeline = ComprehensiveStockAnalysisPipeline(args.ticker, args.email, args.timestamp)
+
+        # Initialize comprehensive pipeline (skip for chat)
+        if args.pipeline != "chat":
+            pipeline = ComprehensiveStockAnalysisPipeline(args.ticker, args.email, args.timestamp)
         
         # Run selected pipeline
         if args.pipeline == "comprehensive":
@@ -876,16 +941,55 @@ Examples:
         elif args.pipeline == "sector-daily-report":
             # Sector daily report pipeline: Generate sector-wide daily report
             results = pipeline.run_sector_daily_report_stage()
+        
+        elif args.pipeline == "chat":
+            # Supervisor agentic pipeline: AI-powered multi-agent stock analysis workflow
+            # The supervisor will automatically extract ticker from the prompt and initialize everything
+            supervisor_runner = None
+            try:
+                supervisor_runner = SupervisorWorkflowRunner(
+                    email=args.email,
+                    timestamp=args.timestamp,
+                    user_prompt=args.user_prompt,
+                    session_id=args.session_id
+                )
+                    
+                results = asyncio.run(supervisor_runner.run_workflow())
+            except Exception as e:
+                # If error happens before initialization, supervisor_runner.logger won't exist
+                # So we log to console and also try to save to logger if it exists
+                if supervisor_runner and supervisor_runner.logger:
+                    supervisor_runner.logger.error(f"❌ Pipeline failed: {e}")
+                    # Try to save session with error state if session was created
+                    if supervisor_runner.session_manager and supervisor_runner.current_conversation_index is not None:
+                        supervisor_runner.session_manager.update_conversation(
+                            conversation_index=supervisor_runner.current_conversation_index,
+                            completion_status="failed",
+                            error_message=str(e)
+                        )
+                    # Print summary even on failure
+                    _print_supervisor_failure_summary(supervisor_runner)
+                    supervisor_runner.logger.program_end()
+                else:
+                    print(f"❌ Pipeline failed: {e}")
+                time.sleep(3)
+                return 1
 
         # Pipeline execution completed successfully
-        pipeline.logger.program_end()
+        if 'pipeline' in locals():
+            pipeline.logger.program_end()
         time.sleep(3)
         return 0
         
     except KeyboardInterrupt:
         if 'pipeline' in locals():
             pipeline.logger.warning("\n⏹️  Pipeline interrupted by user")
+            _print_pipeline_failure_summary(pipeline)
             pipeline.logger.program_end()
+        elif 'supervisor_runner' in locals() and supervisor_runner.logger:
+            supervisor_runner.logger.warning("\n⏹️  Pipeline interrupted by user")
+            _print_supervisor_failure_summary(supervisor_runner)
+            supervisor_runner.logger.program_end()
         else:
             print("\n⏹️  Pipeline interrupted by user")
         time.sleep(3)
@@ -893,7 +997,12 @@ Examples:
     except Exception as e:
         if 'pipeline' in locals():
             pipeline.logger.error(f"❌ Pipeline failed: {e}")
+            _print_pipeline_failure_summary(pipeline)
             pipeline.logger.program_end()
+        elif 'supervisor_runner' in locals() and supervisor_runner.logger:
+            supervisor_runner.logger.error(f"❌ Pipeline failed: {e}")
+            _print_supervisor_failure_summary(supervisor_runner)
+            supervisor_runner.logger.program_end()
         else:
             print(f"❌ Pipeline failed: {e}")
         time.sleep(3)

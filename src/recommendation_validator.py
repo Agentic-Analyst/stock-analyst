@@ -25,8 +25,9 @@ class RecommendationValidator:
     # Pattern to find evidence citations like [E1] or [E2][E3]
     EVIDENCE_PATTERN = re.compile(r'\[E(\d+)\]')
     
-    # Pattern to find sentences
-    SENTENCE_PATTERN = re.compile(r'[^.!?]+(?:\.(?!\d)|[!?])')
+    # Pattern to find sentences (handle abbreviations like U.S., Dr., etc.)
+    # Split on . ! ? but not on abbreviations
+    SENTENCE_PATTERN = re.compile(r'(?<!\b[A-Z])(?<!\b[A-Z][a-z])(?<!\bU\.S)(?<!\bU\.K)(?<!\bDr)(?<!\bMr)(?<!\bMs)(?<!\bInc)(?<!\bCo)(?<!\bCorp)(?<!\betc)(?<!\bi\.e)(?<!\be\.g)[.!?]+(?=\s+[A-Z]|$)', re.MULTILINE)
     
     def validate_and_correct(
         self,
@@ -114,7 +115,7 @@ class RecommendationValidator:
         return response_data, validation_report
     
     def _extract_json(self, response: str) -> Dict[str, Any]:
-        """Extract JSON from LLM response."""
+        """Extract JSON from LLM response with robust cleaning."""
         if '```json' in response:
             start = response.find('```json') + 7
             end = response.find('```', start)
@@ -125,6 +126,16 @@ class RecommendationValidator:
             json_str = response[start:end]
         else:
             json_str = response
+        
+        # Clean up common JSON issues
+        # Remove trailing commas before closing braces/brackets (multiple passes for nested structures)
+        # Do multiple passes to catch all nested cases
+        for _ in range(3):
+            json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)  # Remove comma before } or ]
+        
+        # Remove any comments (sometimes LLMs add them)
+        json_str = re.sub(r'//.*?\n', '\n', json_str)  # Remove // comments
+        json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)  # Remove /* */ comments
         
         return json.loads(json_str)
     
@@ -320,7 +331,11 @@ class RecommendationValidator:
         sentences = []
         for text in key_texts:
             if text:
-                sentences.extend(self.SENTENCE_PATTERN.findall(text))
+                # Split by sentence boundaries (handles U.S., Inc., etc.)
+                text_sentences = re.split(self.SENTENCE_PATTERN, text)
+                # Clean and filter empty strings
+                text_sentences = [s.strip() for s in text_sentences if s.strip()]
+                sentences.extend(text_sentences)
         
         # Filter to material sentences
         # Criteria: >= 4 words AND (has factual claim keywords OR mentions specific entities)

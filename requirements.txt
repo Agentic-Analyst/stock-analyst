@@ -23,5 +23,4 @@ numpy>=1.24.0
 # Excel export
 openpyxl>=3.1.0
 
-# Data processing (usually included with Python but explicit for clarity)
-# pathlib, json, csv, re, datetime, typing, dataclasses, collections - built-in modules
+langgraph>=0.3.14

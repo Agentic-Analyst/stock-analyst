@@ -94,9 +94,51 @@ python main.py --ticker NVDA --company "NVIDIA" --email user@example.com --times
 python main.py --list-llms
 ```
 
+## Workflow Options
+
+### 1. Supervisor Agent (LLM-Powered Agentic Workflow) 🧠 **NEW**
+
+The **Supervisor Agent** provides intelligent, LLM-powered workflow orchestration that dynamically routes between analysis agents based on the current state. This is ideal for exploratory analysis where the system adapts to available data.
+
+**Key Features:**
+- 🧠 LLM-powered dynamic routing (non-sequential, intelligent decisions)
+- ✅ Prerequisite validation (prevents invalid routing)
+- 🔄 Deterministic fallback (when LLM fails)
+- 📊 Complete observability (routing decisions, agent execution, results)
+
+**Quick Start:**
+```sh
+# Basic supervisor workflow
+python supervisor_main.py --ticker NVDA --company "NVIDIA" --email user@example.com
+
+# Use Claude Sonnet for routing
+python supervisor_main.py --ticker AAPL --company "Apple" --email user@example.com --llm claude-3.5-sonnet
+
+# Run in Docker
+./run_supervisor_docker.sh NVDA "NVIDIA" user@example.com
+```
+
+**See [README_SUPERVISOR.md](README_SUPERVISOR.md) for complete documentation.**
+
+### 2. Traditional Pipeline (Sequential Workflow)
+
+The traditional `main.py` pipeline runs a fixed 7-step workflow in sequence. This is ideal for production scenarios where you want predictable, repeatable analysis.
+
+**Quick Start:**
+```sh
+# Complete pipeline with LLM selection
+python main.py --ticker NVDA --company "NVIDIA" --email user@example.com --timestamp 20241003_120000
+
+# Use specific model
+python main.py --ticker NVDA --company "NVIDIA" --email user@example.com --llm claude-3.5-sonnet
+
+# List available models
+python main.py --list-llms
+```
+
 ## Multi-LLM Support
 
-The pipeline now supports multiple LLM providers:
+Both workflows support multiple LLM providers:
 
 **Available Models:**
 - `gpt-4o-mini` (OpenAI) - Fast and cost-effective
