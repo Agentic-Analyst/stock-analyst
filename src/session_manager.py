@@ -32,6 +32,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any
+from src.path_utils import DATA_ROOT
 
 
 class SessionManager:
@@ -50,11 +51,13 @@ class SessionManager:
         self.ticker = ticker.upper()
         self.session_name = session_name or "default"
         
-        # Session directory: data/{email}/sessions/{ticker}/
-        self.session_dir = Path("data") / self.email / "sessions" / self.ticker
+        # Session directory: {DATA_ROOT}/{email}/sessions/{ticker}/
+        # In Docker: /data/{email}/sessions/{ticker}/
+        # In local: data/{email}/sessions/{ticker}/
+        self.session_dir = DATA_ROOT / self.email / "sessions" / self.ticker
         self.session_dir.mkdir(parents=True, exist_ok=True)
         
-        # Session file: data/{email}/sessions/{ticker}/{session_name}.json
+        # Session file: {DATA_ROOT}/{email}/sessions/{ticker}/{session_name}.json
         self.session_file = self.session_dir / f"{self.session_name}.json"
         
         # Load existing session or create new one
@@ -224,11 +227,23 @@ class SessionManager:
         """
         history = self.get_conversation_history(limit)
         
-        if not history:
-            return "No previous conversation history in this session."
-        
         summary_lines = [f"## Previous Conversation History (Session: {self.session_name})"]
         summary_lines.append("")
+        
+        # ALWAYS add ticker and company info at the top for easy extraction
+        # Even if company_name is not set, ticker is always available
+        company_name = self.session_data.get('company_name', '')
+        if self.ticker:
+            if company_name and company_name.strip():
+                summary_lines.append(f"**Company:** {company_name} ({self.ticker})")
+            else:
+                summary_lines.append(f"**Ticker:** {self.ticker}")
+            summary_lines.append("")
+        
+        if not history:
+            summary_lines.append("No previous conversation history in this session yet.")
+            return "\n".join(summary_lines)
+            summary_lines.append("")
         
         for i, conv in enumerate(history, 1):
             timestamp = conv.get("timestamp", "Unknown")
@@ -328,13 +343,18 @@ class SessionManager:
         """
         List all sessions for a ticker.
         
+        NOTE: This method is deprecated and doesn't account for email-based organization.
+        Use instance method on SessionManager instead.
+        
         Args:
             ticker: Stock ticker symbol
         
         Returns:
             List of session names
         """
-        session_dir = Path("data") / "sessions" / ticker.upper()
+        # This is incorrect - sessions are now under data/{email}/sessions/{ticker}/
+        # Kept for backwards compatibility but should not be used
+        session_dir = DATA_ROOT / "sessions" / ticker.upper()
         
         if not session_dir.exists():
             return []
@@ -346,6 +366,9 @@ class SessionManager:
         """
         Get information about a session without loading the full manager.
         
+        NOTE: This method is deprecated and doesn't account for email-based organization.
+        Use instance method on SessionManager instead.
+        
         Args:
             ticker: Stock ticker symbol
             session_name: Session name
@@ -353,7 +376,9 @@ class SessionManager:
         Returns:
             Session metadata or None if not found
         """
-        session_file = Path("data") / "sessions" / ticker.upper() / f"{session_name}.json"
+        # This is incorrect - sessions are now under data/{email}/sessions/{ticker}/
+        # Kept for backwards compatibility but should not be used
+        session_file = DATA_ROOT / "sessions" / ticker.upper() / f"{session_name}.json"
         
         if not session_file.exists():
             return None

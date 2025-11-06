@@ -401,6 +401,10 @@ Provide a helpful, informative answer:"""
             # Parse JSON response
             result = json.loads(response_text)
             
+            # DEBUG: Print what LLM returned
+            print(f"[SUPERVISOR] 🔍 DEBUG - LLM returned ticker: '{result.get('ticker', 'MISSING')}'")
+            print(f"[SUPERVISOR] 🔍 DEBUG - LLM full response: {json.dumps(result, indent=2)}")
+            
             # Validate response - ticker and next_agent required
             if "ticker" not in result or "next_agent" not in result:
                 raise ValueError("LLM response missing required fields (ticker, next_agent)")
@@ -486,6 +490,8 @@ Provide a helpful, informative answer:"""
                                 )
                                 conversation_context = temp_session.get_conversation_summary(limit=3)
                                 print(f"[SUPERVISOR] 📚 Loaded conversation context from session '{self.session_name}'")
+                                print(f"[SUPERVISOR] 🔍 DEBUG - Conversation context preview:")
+                                print(f"[SUPERVISOR] {conversation_context[:500]}...")  # Print first 500 chars
                         except Exception as e:
                             print(f"[SUPERVISOR] ⚠️  Could not load session context: {e}")
                     

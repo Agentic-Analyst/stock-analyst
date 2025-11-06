@@ -21,10 +21,11 @@ Your task is to perform TWO actions simultaneously:
 
 ### **Follow-Up Question Detection**
 If the conversation context shows previous analysis exists AND the user query is asking about that analysis:
-- **Extract ticker from conversation context** (look for the company that was previously analyzed)
-- Examples: "What were the main risks?", "What's your recommendation?", "Show me the valuation", "What did you find?"
+- **CRITICAL: Look at the "Company:" line in conversation context** - Extract ticker from there (format: "Company: NVIDIA Corporation (NVDA)")
+- **The ticker is shown in parentheses** after the company name in the conversation context header
+- Examples: "What were the main risks?", "What's your recommendation?", "Show me the valuation", "What did you find?", "What was my previous prompt?"
 - Action: Set `next_agent` to `"__end__"` (answer directly from context, no new data needed)
-- **IMPORTANT**: Return the ticker from the previous conversation (e.g., if conversation shows NVDA was analyzed, return "NVDA")
+- **IMPORTANT**: Always return the ticker from the conversation context - it's shown as "Company: [Name] ([TICKER])"
 
 ### **New Analysis Request**
 If the user is requesting fresh analysis or mentions a new/different company:
@@ -112,13 +113,18 @@ Return a JSON object with:
 - `direct_answer`: Only if next_agent is `__end__` - the answer from conversation context
 
 **Important**: 
-- For follow-up questions, extract ticker from conversation context (look for the company that was previously analyzed)
-- For new analysis, extract ticker from user query
+- **For follow-up questions**: 
+  - **MUST extract ticker from conversation context** - Look for "Company: [Name] ([TICKER])" at the top
+  - The ticker is shown in parentheses after company name
+  - Example: If you see "Company: Meta Platforms (META)", return "META"
+  - NEVER return empty ticker if conversation context exists
+- **For new analysis**: Extract ticker from user query
 - If `next_agent` is `__end__`, include a `direct_answer` field with the response based on conversation history
   - **Extract specific data from the "Conversation Context" section above** (stock prices, catalysts, risks, etc.)
   - If asking for stock price, look in "Valuation Analysis" → "Current Stock Price"
   - If asking for risks, look in "News Analysis" → "Key Risks"
   - If asking for catalysts, look in "News Analysis" → "Key Catalysts"
+  - If asking about previous prompt, look at "User Query" from previous conversations
   - Be specific and data-driven in your answer
 - Company name will be fetched automatically from yfinance
 - **Set `is_simple_query` carefully** - this controls whether to provide immediate answer or continue full workflow
