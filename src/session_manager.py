@@ -214,6 +214,7 @@ class SessionManager:
     def get_conversation_summary(self, limit: int = 3) -> str:
         """
         Generate a text summary of recent conversations for LLM context.
+        Includes analysis results if available.
         
         Args:
             limit: Maximum number of recent conversations to include
@@ -235,13 +236,59 @@ class SessionManager:
             status = conv.get("completion_status", "unknown")
             agents = conv.get("routing_decisions", [])
             findings = conv.get("key_findings", "")
+            analysis_results = conv.get("analysis_results", {})
             
             summary_lines.append(f"**Conversation {i}** ({timestamp}):")
             summary_lines.append(f"- User Query: \"{user_query}\"")
             summary_lines.append(f"- Status: {status}")
-            summary_lines.append(f"- Agents Used: {', '.join(agents)}")
+            summary_lines.append(f"- Agents Used: {', '.join(agents) if agents else 'None (direct answer)'}")
             if findings:
                 summary_lines.append(f"- Key Findings: {findings}")
+            
+            # Include analysis results if available
+            if analysis_results:
+                # Valuation data
+                valuation = analysis_results.get("valuation", {})
+                if valuation:
+                    summary_lines.append(f"- **Valuation Analysis**:")
+                    if "current_price" in valuation:
+                        summary_lines.append(f"  - Current Stock Price: ${valuation.get('current_price', 'N/A')}")
+                    if "fair_value" in valuation:
+                        summary_lines.append(f"  - Fair Value: ${valuation.get('fair_value', 'N/A')}")
+                    if "upside_downside" in valuation:
+                        upside = valuation.get('upside_downside', 0)
+                        summary_lines.append(f"  - Upside/Downside: {upside:+.2f}%")
+                    if "model_type" in valuation:
+                        summary_lines.append(f"  - Model Used: {valuation.get('model_type', 'N/A')}")
+                
+                # News summary
+                news = analysis_results.get("news_summary", {})
+                if news:
+                    summary_lines.append(f"- **News Analysis**:")
+                    if "articles_analyzed" in news:
+                        summary_lines.append(f"  - Articles Analyzed: {news.get('articles_analyzed', 0)}")
+                    if "overall_sentiment" in news:
+                        summary_lines.append(f"  - Overall Sentiment: {news.get('overall_sentiment', 'N/A')}")
+                    
+                    # Catalysts
+                    catalysts = news.get("top_catalysts", [])
+                    if catalysts:
+                        summary_lines.append(f"  - **Key Catalysts** ({len(catalysts)}):")
+                        for catalyst in catalysts[:3]:  # Top 3
+                            summary_lines.append(f"    • {catalyst}")
+                    
+                    # Risks
+                    risks = news.get("top_risks", [])
+                    if risks:
+                        summary_lines.append(f"  - **Key Risks** ({len(risks)}):")
+                        for risk in risks[:3]:  # Top 3
+                            summary_lines.append(f"    • {risk}")
+                
+                # Report info
+                report = analysis_results.get("report", {})
+                if report and "path" in report:
+                    summary_lines.append(f"- **Report Generated**: {report.get('path', 'N/A')}")
+            
             summary_lines.append("")
         
         return "\n".join(summary_lines)

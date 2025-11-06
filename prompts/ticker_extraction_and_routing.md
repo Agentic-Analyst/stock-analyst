@@ -50,20 +50,44 @@ If the user is requesting fresh analysis or mentions a new/different company:
 
 5. **__end__**: Answer directly from conversation context
    - Use when: Follow-up question about previous analysis
+   - **IMPORTANT**: Base your answer ONLY on the data shown in "Conversation Context" above
+   - Look for: Stock prices in valuation data, catalysts/risks in news analysis, report details
+   - If the requested data exists in conversation context, extract it and provide a clear answer
+   - If the data is NOT in conversation context, be honest: "I don't see that information in our previous analysis"
    - No new data collection needed
 
 ## Routing Strategy
 
-Think carefully about the user's intent:
+Think carefully about the user's intent and classify the query type:
 
-- **Follow-up questions** (e.g., "What were the risks?", "What's the valuation?") → **__end__** (answer from previous context)
-- **Comprehensive/general analysis** (e.g., "analyze AAPL", "evaluate Tesla") → **financial_data_agent** (gather fundamentals first)
-- **News-focused requests** (e.g., "latest news on NVDA", "what's the sentiment?", "recent developments") → **news_analysis_agent** (analyze market sentiment and catalysts)
-- **Valuation-specific requests** (e.g., "DCF model for META", "what's AMZN worth?", "fair value") → **financial_data_agent** (need data before building model)
-- **Report requests** (e.g., "create report on MSFT", "investment thesis") → **financial_data_agent** (comprehensive data needed)
-- **Outlook/forecast requests** (e.g., "next 3 months", "outlook for Q4") → **news_analysis_agent** (recent events drive near-term outlook)
+**SIMPLE QUERIES** - User wants a specific piece of information:
+- "What is the current stock price?" → financial_data_agent (then END immediately after answering)
+- "What's the P/E ratio?" → financial_data_agent (then END)
+- "Show me the revenue" → financial_data_agent (then END)
+- **Characteristic**: Asking for ONE specific data point, not full analysis
 
-**Critical**: If conversation context shows recent analysis and user is asking about it, use `__end__` to answer directly!
+**COMPREHENSIVE ANALYSIS** - User wants full investigation:
+- "Analyze AAPL" → Complete workflow (financial → model → news → report)
+- "Should I invest in Tesla?" → Complete workflow  
+- "Create a report on MSFT" → Complete workflow
+- "Evaluate for next 3 months" → Complete workflow
+- **Characteristic**: Broad request, needs valuation + news + recommendation
+
+**FOLLOW-UP QUESTIONS** - About previous analysis:
+- "What were the risks?" → __end__ (answer from previous context)
+- "What's your recommendation?" → __end__ (answer from previous context)
+- **Characteristic**: Refers to something already analyzed
+
+**Routing decisions:**
+- **Follow-up questions** → **__end__** (answer from previous context)
+- **Simple queries** → Single agent (financial_data_agent for price/metrics, news_analysis_agent for sentiment)
+- **Comprehensive analysis** → **financial_data_agent** (will continue to full workflow)
+- **News-focused** → **news_analysis_agent** 
+- **Valuation-focused** → **financial_data_agent**
+
+**Critical**: 
+- Simple queries should be marked with `is_simple_query: true` to prevent continuing to full workflow
+- Comprehensive analysis should be marked with `is_simple_query: false` to ensure complete analysis
 
 ## Output Format
 
@@ -72,14 +96,29 @@ Return a JSON object with:
 {{
   "ticker": "AAPL",
   "next_agent": "financial_data_agent",
+  "is_simple_query": false,
   "reasoning": "Brief explanation of your routing decision",
   "direct_answer": "Optional: If next_agent is __end__, provide a direct answer based on conversation context"
 }}
 ```
 
+**Field Descriptions:**
+- `ticker`: Stock ticker symbol (NVDA, AAPL, etc.)
+- `next_agent`: Which agent to route to first
+- **`is_simple_query`**: 
+  - `true` = User wants ONE specific data point (stock price, P/E ratio, etc.) - Provide immediate answer after first agent
+  - `false` = User wants comprehensive analysis (full workflow with valuation + news + report)
+- `reasoning`: Why you chose this routing (1-2 sentences)
+- `direct_answer`: Only if next_agent is `__end__` - the answer from conversation context
+
 **Important**: 
 - For follow-up questions, extract ticker from conversation context (look for the company that was previously analyzed)
 - For new analysis, extract ticker from user query
 - If `next_agent` is `__end__`, include a `direct_answer` field with the response based on conversation history
+  - **Extract specific data from the "Conversation Context" section above** (stock prices, catalysts, risks, etc.)
+  - If asking for stock price, look in "Valuation Analysis" → "Current Stock Price"
+  - If asking for risks, look in "News Analysis" → "Key Risks"
+  - If asking for catalysts, look in "News Analysis" → "Key Catalysts"
+  - Be specific and data-driven in your answer
 - Company name will be fetched automatically from yfinance
-- Choose the BEST action based on whether user wants NEW data or is asking about EXISTING analysis
+- **Set `is_simple_query` carefully** - this controls whether to provide immediate answer or continue full workflow

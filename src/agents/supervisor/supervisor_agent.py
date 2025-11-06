@@ -149,6 +149,7 @@ class SupervisorWorkflowRunner:
         self.logger = None
         self.state = None
         self.session_manager = None
+        self.is_simple_query = False  # Track if this is a simple query vs comprehensive analysis
         
         # Workflow statistics
         self.stats = {
@@ -235,7 +236,124 @@ class SupervisorWorkflowRunner:
         self.logger.info(f"[SUPERVISOR] 💾 Session conversation started (will be saved progressively)")
         self.logger.info("")
     
-    def _extract_ticker_and_route(self, user_prompt: str, conversation_context: Optional[str] = None) -> tuple[str, Optional[str], str, str, Optional[str]]:
+    def _check_for_immediate_answer(self, completed_agent: str) -> Optional[str]:
+        """
+        Check if we can provide an immediate answer to a simple query after an agent completes.
+        
+        Args:
+            completed_agent: The agent that just completed
+            
+        Returns:
+            Answer string if available, None otherwise
+        """
+        # Build context from available data
+        context_parts = []
+        
+        # Add financial data if available
+        if self.state.is_financial_data_collected() and self.state.financial_data:
+            try:
+                basic_info = self.state.financial_data.key_metrics.get("basic_info", {})
+                market_data = self.state.financial_data.key_metrics.get("market_data", {})
+                
+                context_parts.append(f"**Financial Data for {self.ticker}:**")
+                
+                if market_data.get("current_price"):
+                    context_parts.append(f"- Current Stock Price: ${market_data['current_price']:.2f}")
+                if market_data.get("market_cap"):
+                    context_parts.append(f"- Market Cap: ${market_data['market_cap']:,.0f}")
+                if market_data.get("trailing_pe"):
+                    context_parts.append(f"- P/E Ratio: {market_data['trailing_pe']:.2f}")
+                if market_data.get("forward_pe"):
+                    context_parts.append(f"- Forward P/E: {market_data['forward_pe']:.2f}")
+                if market_data.get("revenue"):
+                    context_parts.append(f"- Revenue (TTM): ${market_data['revenue']:,.0f}")
+                if basic_info.get("sector"):
+                    context_parts.append(f"- Sector: {basic_info['sector']}")
+                if basic_info.get("industry"):
+                    context_parts.append(f"- Industry: {basic_info['industry']}")
+                    
+                context_parts.append("")
+            except Exception as e:
+                self.logger.warning(f"[SUPERVISOR] ⚠️  Error extracting financial data: {e}")
+        
+        # Add news data if available
+        if self.state.is_news_analyzed() and self.state.news_analysis:
+            try:
+                context_parts.append(f"**News Analysis for {self.ticker}:**")
+                context_parts.append(f"- Articles Analyzed: {self.state.news_analysis.articles_count}")
+                context_parts.append(f"- Overall Sentiment: {self.state.news_analysis.overall_sentiment}")
+                if self.state.news_analysis.catalysts:
+                    context_parts.append(f"- Top Catalysts:")
+                    for catalyst in self.state.news_analysis.catalysts[:3]:
+                        catalyst_text = catalyst if isinstance(catalyst, str) else catalyst.get("description", str(catalyst))
+                        context_parts.append(f"  • {catalyst_text}")
+                if self.state.news_analysis.risks:
+                    context_parts.append(f"- Top Risks:")
+                    for risk in self.state.news_analysis.risks[:3]:
+                        risk_text = risk if isinstance(risk, str) else risk.get("description", str(risk))
+                        context_parts.append(f"  • {risk_text}")
+                context_parts.append("")
+            except Exception as e:
+                self.logger.warning(f"[SUPERVISOR] ⚠️  Error extracting news data: {e}")
+        
+        # Add valuation if available
+        if self.state.is_model_generated() and self.state.financial_model:
+            try:
+                context_parts.append(f"**Valuation for {self.ticker}:**")
+                context_parts.append(f"- Model Type: {self.state.financial_model.model_type}")
+                
+                val_metrics = self.state.financial_model.valuation_metrics
+                if val_metrics.get("average_price"):
+                    context_parts.append(f"- Fair Value: ${val_metrics['average_price']:.2f}")
+                if val_metrics.get("upside_vs_market"):
+                    context_parts.append(f"- Upside/Downside: {val_metrics['upside_vs_market']:+.2f}%")
+                    
+                context_parts.append("")
+            except Exception as e:
+                self.logger.warning(f"[SUPERVISOR] ⚠️  Error extracting valuation data: {e}")
+        
+        if not context_parts:
+            return None
+        
+        # Build prompt for LLM to answer the simple query
+        context_str = "\n".join(context_parts)
+        
+        prompt = f"""You are answering a specific question about {self.ticker}.
+
+**User's Question:** {self.user_prompt}
+
+**Available Data:**
+{context_str}
+
+**Instructions:**
+- Answer the user's question DIRECTLY using the data above
+- Provide the specific information requested along with relevant context
+- If asking for stock price, include the price AND add 1-2 relevant metrics (P/E, market cap, or sector)
+- If asking for a metric, provide it with brief context
+- Be informative but concise (2-4 sentences)
+- Be precise and data-driven - use actual numbers from the data
+- If the specific data requested is not available, say so honestly
+
+**Example Response Styles:**
+- Stock price query: "NVDA is currently trading at $195.21. The company has a market cap of $4.8T and operates in the Semiconductors industry with a P/E ratio of 45.2."
+- Metric query: "NVDA's P/E ratio is 45.2, which is higher than the industry average, reflecting strong growth expectations in the AI and semiconductor markets."
+
+Provide a helpful, informative answer:"""
+
+        try:
+            response, cost = get_llm()([
+                {"role": "system", "content": "You are a helpful financial assistant. Provide informative yet concise answers using data."},
+                {"role": "user", "content": prompt}
+            ], temperature=0.3)
+            
+            self.state.total_llm_cost += cost
+            return response.strip()
+            
+        except Exception as e:
+            self.logger.error(f"[SUPERVISOR] ⚠️  Failed to generate immediate answer: {e}")
+            return None
+    
+    def _extract_ticker_and_route(self, user_prompt: str, conversation_context: Optional[str] = None) -> tuple[str, Optional[str], str, str, Optional[str], bool]:
         """
         First supervisor call: Extract ticker from prompt AND decide first routing.
         
@@ -244,9 +362,10 @@ class SupervisorWorkflowRunner:
             conversation_context: Previous conversation history (optional)
             
         Returns:
-            Tuple of (ticker, company_name, next_agent, reasoning, direct_answer)
+            Tuple of (ticker, company_name, next_agent, reasoning, direct_answer, is_simple_query)
             Note: company_name will be None - fetched from yfinance in initialization
                   direct_answer will be populated if next_agent is __end__
+                  is_simple_query indicates if this is a simple data request vs full analysis
         """
         
         # Load combined prompt for ticker extraction + routing
@@ -289,9 +408,10 @@ class SupervisorWorkflowRunner:
             # Extract reasoning and direct_answer (will be logged after logger is initialized)
             reasoning = result.get("reasoning", "No reasoning provided")
             direct_answer = result.get("direct_answer", None)
+            is_simple_query = result.get("is_simple_query", False)
             
-            # Return ticker, next_agent, reasoning, and direct_answer
-            return result["ticker"], None, result["next_agent"], reasoning, direct_answer
+            # Return ticker, next_agent, reasoning, direct_answer, and is_simple_query
+            return result["ticker"], None, result["next_agent"], reasoning, direct_answer, is_simple_query
             
         except json.JSONDecodeError as e:
             raise ValueError(
@@ -371,10 +491,13 @@ class SupervisorWorkflowRunner:
                     
                     # Combined ticker extraction + routing
                     # LLM will use conversation context to infer ticker if needed
-                    ticker, company_name, next_agent, reasoning, direct_answer = self._extract_ticker_and_route(
+                    ticker, company_name, next_agent, reasoning, direct_answer, is_simple_query = self._extract_ticker_and_route(
                         self.user_prompt,
                         conversation_context
                     )
+                    
+                    # Store the query type
+                    self.is_simple_query = is_simple_query
                     
                     # Validate ticker
                     if not ticker or ticker.strip() == "":
@@ -532,6 +655,20 @@ class SupervisorWorkflowRunner:
                     }
                 )
                 
+                # Check if this is a simple query and we can answer immediately
+                if self.is_simple_query:
+                    immediate_answer = self._check_for_immediate_answer(next_agent)
+                    if immediate_answer:
+                        self.logger.info("")
+                        self.logger.info("=" * 80)
+                        self.logger.info("[SUPERVISOR] 💡 IMMEDIATE ANSWER:")
+                        self.logger.info("=" * 80)
+                        self.logger.info(f"[LLM] {immediate_answer}")
+                        self.logger.info("")
+                        self.stats["completion_status"] = "completed"
+                        # Mark as completed and end workflow
+                        break
+                
                 # Check for errors in state
                 if self.state.last_error:
                     self.logger.error(f"[SUPERVISOR] ⚠️  Agent reported error: {self.state.last_error}")
@@ -672,7 +809,10 @@ class SupervisorWorkflowRunner:
         # Generate LLM-powered performance summary ONLY if:
         # 1. Workflow completed successfully
         # 2. At least one agent was executed (not a direct answer)
-        if self.stats["completion_status"] == "completed" and len(self.stats["agents_executed"]) > 0:
+        # 3. NOT a simple query (comprehensive analysis only)
+        if (self.stats["completion_status"] == "completed" and 
+            len(self.stats["agents_executed"]) > 0 and 
+            not self.is_simple_query):
             self._generate_performance_summary()
         
         # Log final summary
@@ -701,11 +841,15 @@ class SupervisorWorkflowRunner:
             prompt_file = Path("prompts/supervisor_performance_summary.md")
             prompt_template = prompt_file.read_text()
             
+            # Build list of completed agents for context
+            completed_agents_list = [agent["agent"] for agent in self.stats["agents_executed"]]
+            completed_agents_str = ", ".join(completed_agents_list) if completed_agents_list else "None"
+            
             # Prepare data for template
             financial_model_summary = (
                 f"Generated {self.state.financial_model.model_type} valuation model" 
                 if self.state.is_model_generated() 
-                else "Not available"
+                else "Not completed"
             )
             
             news_analysis_summary = (
@@ -714,19 +858,21 @@ class SupervisorWorkflowRunner:
                 f"Found {len(self.state.news_analysis.catalysts)} catalysts and "
                 f"{len(self.state.news_analysis.risks)} risks."
                 if self.state.is_news_analyzed() 
-                else "Not available"
+                else "Not completed"
             )
             
             report_summary = (
                 "Generated comprehensive analyst report with investment recommendation" 
                 if self.state.is_report_generated() 
-                else "Not available"
+                else "Not completed"
             )
             
             # Build summary prompt with state information
             summary_prompt = prompt_template.format(
                 ticker=self.ticker,
                 company_name=self.company_name,
+                user_query=self.user_prompt,
+                completed_agents=completed_agents_str,
                 financial_model_summary=financial_model_summary,
                 news_analysis_summary=news_analysis_summary,
                 report_summary=report_summary
@@ -734,7 +880,7 @@ class SupervisorWorkflowRunner:
 
             # Call LLM to generate summary
             summary_response, summary_cost = get_llm()([
-                {"role": "system", "content": "You are a senior financial analyst providing a concise analysis summary."},
+                {"role": "system", "content": "You are a senior financial analyst providing a contextual analysis summary."},
                 {"role": "user", "content": summary_prompt}
             ], temperature=0.7)
             self.state.total_llm_cost += summary_cost
@@ -742,7 +888,7 @@ class SupervisorWorkflowRunner:
             # Log the analysis summary with [LLM] prefix for natural language
             self.logger.info("")
             self.logger.info("=" * 80)
-            self.logger.info(f"[SUPERVISOR] � {self.ticker} Analysis Summary")
+            self.logger.info(f"[SUPERVISOR] {self.ticker} Analysis Summary")
             self.logger.info("=" * 80)
             self.logger.info("")
             self.logger.info(f"[LLM] {summary_response.strip()}")
