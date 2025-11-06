@@ -22,7 +22,6 @@ from src.agents.supervisor.state import (
 from src.article_scraper import ArticleScraper
 from src.article_filter import ArticleFilter
 from src.article_screener import ArticleScreener
-from src.logger import get_agent_logger, StockAnalystLogger
 
 
 async def news_analysis_agent(

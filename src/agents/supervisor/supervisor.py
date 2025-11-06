@@ -19,7 +19,7 @@ from src.agents.supervisor.state import (
     PipelineStage
 )
 from src.llms.config import get_llm
-from src.logger import get_agent_logger, get_logger
+from src.logger import get_logger
 
 
 # Load routing prompt from prompts folder
@@ -105,26 +105,26 @@ def _log_workflow_completion(state: FinancialState, logger=None):
             
             # Log the completion message
             main_logger.info("")
-            main_logger.info("[supervisor] " + "="*60)
-            main_logger.info("[supervisor] 🎉 WORKFLOW COMPLETED SUCCESSFULLY")
-            main_logger.info("[supervisor] " + "="*60)
+            main_logger.info("[SUPERVISOR] " + "="*60)
+            main_logger.info("[SUPERVISOR] 🎉 WORKFLOW COMPLETED SUCCESSFULLY")
+            main_logger.info("[SUPERVISOR] " + "="*60)
             main_logger.info("")
-            main_logger.info(f"[supervisor] {summary_response.strip()}")
+            main_logger.info(f"[SUPERVISOR] {summary_response.strip()}")
             main_logger.info("")
-            main_logger.info(f"[supervisor] 📁 Analysis saved to: {state.analysis_path}")
-            main_logger.info(f"[supervisor] 💰 Total LLM cost: ${state.total_llm_cost:.4f}")
+            main_logger.info(f"[SUPERVISOR] 📁 Analysis saved to: {state.analysis_path}")
+            main_logger.info(f"[SUPERVISOR] 💰 Total LLM cost: ${state.total_llm_cost:.4f}")
             main_logger.info("")
             
         except Exception:
             # Fallback to simple summary if LLM fails
             main_logger.info("")
-            main_logger.info(f"[supervisor] 🎉 Perfect! I've finished the analysis for {state.ticker}!")
-            main_logger.info(f"[supervisor] 📊 Summary of what we completed:")
-            main_logger.info(f"[supervisor]    {'✅' if state.is_financial_data_collected() else '⏭️'} Financial data collection")
-            main_logger.info(f"[supervisor]    {'✅' if state.is_news_analyzed() else '⏭️'} News analysis")
-            main_logger.info(f"[supervisor]    {'✅' if state.is_model_generated() else '⏭️'} Financial model generation")
-            main_logger.info(f"[supervisor]    {'✅' if state.is_report_generated() else '⏭️'} Professional analyst report")
-            main_logger.info(f"[supervisor] 💼 Your comprehensive stock analysis is ready!")
+            main_logger.info(f"[SUPERVISOR] 🎉 Perfect! I've finished the analysis for {state.ticker}!")
+            main_logger.info(f"[SUPERVISOR] 📊 Summary of what we completed:")
+            main_logger.info(f"[SUPERVISOR]    {'✅' if state.is_financial_data_collected() else '⏭️'} Financial data collection")
+            main_logger.info(f"[SUPERVISOR]    {'✅' if state.is_news_analyzed() else '⏭️'} News analysis")
+            main_logger.info(f"[SUPERVISOR]    {'✅' if state.is_model_generated() else '⏭️'} Financial model generation")
+            main_logger.info(f"[SUPERVISOR]    {'✅' if state.is_report_generated() else '⏭️'} Professional analyst report")
+            main_logger.info(f"[SUPERVISOR] 💼 Your comprehensive stock analysis is ready!")
             main_logger.info("")
         
         # Force flush
@@ -161,11 +161,11 @@ def route_workflow(state: FinancialState, config: dict = None, logger=None) -> L
     # Add state summary for deterministic routing
     if main_logger:
         main_logger.info("")
-        main_logger.info("[supervisor] 📊 Current State Summary (Deterministic Mode):")
-        main_logger.info(f"[supervisor]    • Financial Data: {'✅ Collected' if state.is_financial_data_collected() else '⏳ Pending'}")
-        main_logger.info(f"[supervisor]    • Financial Model: {'✅ Generated' if state.is_model_generated() else '⏳ Pending'}")
-        main_logger.info(f"[supervisor]    • News Analysis: {'✅ Completed' if state.is_news_analyzed() else '⏳ Pending'}")
-        main_logger.info(f"[supervisor]    • Analyst Report: {'✅ Generated' if state.is_report_generated() else '⏳ Pending'}")
+        main_logger.info("[SUPERVISOR] 📊 Current State Summary (Deterministic Mode):")
+        main_logger.info(f"[SUPERVISOR]    • Financial Data: {'✅ Collected' if state.is_financial_data_collected() else '⏳ Pending'}")
+        main_logger.info(f"[SUPERVISOR]    • Financial Model: {'✅ Generated' if state.is_model_generated() else '⏳ Pending'}")
+        main_logger.info(f"[SUPERVISOR]    • News Analysis: {'✅ Completed' if state.is_news_analyzed() else '⏳ Pending'}")
+        main_logger.info(f"[SUPERVISOR]    • Analyst Report: {'✅ Generated' if state.is_report_generated() else '⏳ Pending'}")
         main_logger.info("")
     
     if not state.is_financial_data_collected():
@@ -176,8 +176,8 @@ def route_workflow(state: FinancialState, config: dict = None, logger=None) -> L
         )
         state.next_agent = AgentNode.FINANCIAL_DATA_AGENT
         if main_logger:
-            main_logger.info(f"[supervisor] Alright, let's get started! First things first - I need to gather the fundamental financial data for {state.ticker}. This will give us the foundation for everything else.")
-            main_logger.info(f"[supervisor] → Next action: financial_data_agent")
+            main_logger.info(f"[SUPERVISOR] Alright, let's get started! First things first - I need to gather the fundamental financial data for {state.ticker}. This will give us the foundation for everything else.")
+            main_logger.info(f"[SUPERVISOR] → Next action: financial_data_agent")
         return "financial_data_agent"
     
     if not state.is_model_generated():
@@ -188,8 +188,8 @@ def route_workflow(state: FinancialState, config: dict = None, logger=None) -> L
         )
         state.next_agent = AgentNode.MODEL_GENERATION_AGENT
         if main_logger:
-            main_logger.info(f"[supervisor] Great! Now that we have the financial data, let me build a comprehensive DCF model. This will help us understand the intrinsic value and future projections.")
-            main_logger.info(f"[supervisor] → Next action: model_generation_agent")
+            main_logger.info(f"[SUPERVISOR] Great! Now that we have the financial data, let me build a comprehensive DCF model. This will help us understand the intrinsic value and future projections.")
+            main_logger.info(f"[SUPERVISOR] → Next action: model_generation_agent")
         return "model_generation_agent"
     
     # CRITICAL: Force news_analysis to run before report generation
@@ -201,8 +201,8 @@ def route_workflow(state: FinancialState, config: dict = None, logger=None) -> L
         )
         state.next_agent = AgentNode.NEWS_ANALYSIS_AGENT
         if main_logger:
-            main_logger.info(f"[supervisor] Perfect timing! With the financials and model ready, I should analyze recent news and market sentiment. This will give us crucial context for the final report.")
-            main_logger.info(f"[supervisor] → Next action: news_analysis_agent")
+            main_logger.info(f"[SUPERVISOR] Perfect timing! With the financials and model ready, I should analyze recent news and market sentiment. This will give us crucial context for the final report.")
+            main_logger.info(f"[SUPERVISOR] → Next action: news_analysis_agent")
         return "news_analysis_agent"
     
     if not state.is_report_generated():
@@ -213,8 +213,8 @@ def route_workflow(state: FinancialState, config: dict = None, logger=None) -> L
         )
         state.next_agent = AgentNode.REPORT_GENERATOR_AGENT
         if main_logger:
-            main_logger.info(f"[supervisor] Excellent! I've gathered all the pieces - financial data, valuation model, and news insights. Time to synthesize everything into a comprehensive analyst report!")
-            main_logger.info(f"[supervisor] → Next action: report_generator_agent")
+            main_logger.info(f"[SUPERVISOR] Excellent! I've gathered all the pieces - financial data, valuation model, and news insights. Time to synthesize everything into a comprehensive analyst report!")
+            main_logger.info(f"[SUPERVISOR] → Next action: report_generator_agent")
         return "report_generator_agent"
     
     state.log_action(
@@ -399,34 +399,34 @@ def route_workflow_with_llm(state: FinancialState, config: dict = None, logger=N
             if next_node == AgentNode.REPORT_GENERATOR_AGENT.value and not state.is_financial_data_collected():
                 raise ValueError(f"LLM chose report_generator_agent but no financial data available yet. Need financial_data_agent first.")
             
-            # Write the LLM's conversational message to the main info.log with [supervisor] prefix
+            # Write the LLM's conversational message to the main info.log with [SUPERVISOR] prefix
             try:
                 main_logger = logger or get_logger()
                 if main_logger:
                     # Add current state summary before supervisor message
                     main_logger.info("")
-                    main_logger.info("[supervisor] 📊 Current State Summary:")
-                    main_logger.info(f"[supervisor]    • Financial Data: {'✅ Collected' if state.is_financial_data_collected() else '❌ Not collected'}")
-                    main_logger.info(f"[supervisor]    • Financial Model: {'✅ Generated' if state.is_model_generated() else '❌ Not generated (REQUIRED for report)'}")
-                    main_logger.info(f"[supervisor]    • News Analysis: {'✅ Completed' if state.is_news_analyzed() else '❌ Not completed (REQUIRED for report)'}")
-                    main_logger.info(f"[supervisor]    • Analyst Report: {'✅ Generated' if state.is_report_generated() else '⏳ Pending'}")
+                    main_logger.info("[SUPERVISOR] 📊 Current State Summary:")
+                    main_logger.info(f"[SUPERVISOR]    • Financial Data: {'✅ Collected' if state.is_financial_data_collected() else '❌ Not collected'}")
+                    main_logger.info(f"[SUPERVISOR]    • Financial Model: {'✅ Generated' if state.is_model_generated() else '❌ Not generated (REQUIRED for report)'}")
+                    main_logger.info(f"[SUPERVISOR]    • News Analysis: {'✅ Completed' if state.is_news_analyzed() else '❌ Not completed (REQUIRED for report)'}")
+                    main_logger.info(f"[SUPERVISOR]    • Analyst Report: {'✅ Generated' if state.is_report_generated() else '⏳ Pending'}")
                     if not state.is_model_generated() or not state.is_news_analyzed():
                         missing = []
                         if not state.is_model_generated():
                             missing.append("financial model")
                         if not state.is_news_analyzed():
                             missing.append("news analysis")
-                        main_logger.info(f"[supervisor]    ⚠️  Missing prerequisites for report: {', '.join(missing)}")
+                        main_logger.info(f"[SUPERVISOR]    ⚠️  Missing prerequisites for report: {', '.join(missing)}")
                     main_logger.info("")
                     
-                    # If LLM provided a supervisor_message, log it with [supervisor] prefix
+                    # If LLM provided a supervisor_message, log it with [SUPERVISOR] prefix
                     if supervisor_message:
-                        main_logger.info(f"[supervisor] {supervisor_message}")
-                        main_logger.info(f"[supervisor] → Next action: {next_node} (confidence: {confidence:.0%})")
+                        main_logger.info(f"[SUPERVISOR] {supervisor_message}")
+                        main_logger.info(f"[SUPERVISOR] → Next action: {next_node} (confidence: {confidence:.0%})")
                     else:
                         # Fallback to reasoning if no supervisor_message
-                        main_logger.info(f"[supervisor] {reasoning.strip()}")
-                        main_logger.info(f"[supervisor] → Next action: {next_node} (confidence: {confidence:.0%})")
+                        main_logger.info(f"[SUPERVISOR] {reasoning.strip()}")
+                        main_logger.info(f"[SUPERVISOR] → Next action: {next_node} (confidence: {confidence:.0%})")
                     main_logger.info("")
                     
                     # Force flush to ensure log is written immediately

@@ -16,7 +16,6 @@ from typing import Optional
 
 from src.agents.supervisor.state import FinancialState, FinancialModel, PipelineStage, PipelineConfig
 from src.agents.fm import create_financial_model
-from src.logger import get_agent_logger
 
 
 async def model_generation_agent(

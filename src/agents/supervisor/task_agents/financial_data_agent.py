@@ -17,7 +17,6 @@ from datetime import datetime
 
 from src.agents.supervisor.state import FinancialState, FinancialData, PipelineStage, PipelineConfig
 from src.financial_scraper import FinancialScraper
-from src.logger import get_agent_logger
 
 
 async def financial_data_agent(

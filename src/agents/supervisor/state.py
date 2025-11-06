@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import json
-from src.logger import get_agent_logger, get_logger
+from src.logger import get_logger
 
 
 class AgentNode(str, Enum):
@@ -226,25 +226,16 @@ class FinancialState:
         """Check if report has been generated."""
         return self.report is not None and self.report.error is None
     
-    def get_effective_logger(self, agent_name: str = None):
+    def get_effective_logger(self, agent_name: Optional[str] = None):
         """
-        Get the effective logger for an agent.
-        
-        Tries agent-specific logger first, falls back to state logger.
+        Get the effective logger (always returns state logger).
         
         Args:
-            agent_name: Optional agent name for agent-specific logger
+            agent_name: Optional agent name (kept for compatibility, not used)
             
         Returns:
-            Logger instance (agent-specific or state logger)
+            Logger instance from state
         """
-        if agent_name:
-            try:
-                agent_logger = get_agent_logger(agent_name)
-                if agent_logger:
-                    return agent_logger
-            except Exception:
-                pass
         return self.logger
     
     def should_stop(self) -> bool:
@@ -267,19 +258,11 @@ class FinancialState:
             "details": details or {}
         }
         self.execution_log.append(log_entry)
-        # Also write to the agent-specific logger (if configured), otherwise use global logger
-        try:
-            agent_logger = get_agent_logger(agent)
-        except Exception:
-            agent_logger = None
-
-        if agent_logger is None:
-            agent_logger = get_logger()
-
-        if agent_logger:
-            # Write a compact one-line JSON summary to the agent log
+        
+        # Write to unified info.log
+        if self.logger:
             try:
-                agent_logger.info(f"ACTION | {agent} | {action} | {json.dumps(details or {})}")
+                self.logger.info(f"[{agent}] {action}")
             except Exception:
                 # Best-effort logging; don't raise from logging
                 pass
@@ -294,18 +277,11 @@ class FinancialState:
         }
         self.errors.append(error_entry)
         self.last_error = error_message
-        # Also write to the agent-specific logger (if configured), otherwise use global logger
-        try:
-            agent_logger = get_agent_logger(agent)
-        except Exception:
-            agent_logger = None
-
-        if agent_logger is None:
-            agent_logger = get_logger()
-
-        if agent_logger:
+        
+        # Write to unified info.log
+        if self.logger:
             try:
-                agent_logger.error(f"ERROR | {agent} | {error_message} | {json.dumps(details or {})}")
+                self.logger.error(f"[{agent}] {error_message}")
             except Exception:
                 pass
     

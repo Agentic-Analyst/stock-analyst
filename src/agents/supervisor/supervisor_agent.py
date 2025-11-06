@@ -76,7 +76,7 @@ except ImportError:
     print("⚠️  python-dotenv not installed. Environment variables from .env won't be loaded.")
     print("   Install with: pip install python-dotenv")
 
-from src.logger import setup_logger, setup_agent_logger
+from src.logger import setup_logger
 from src.path_utils import get_analysis_path, ensure_analysis_paths
 from src.llms.config import init_llm, list_models, list_available_models
 from src.session_manager import SessionManager
@@ -137,17 +137,8 @@ class SupervisorWorkflowRunner:
         self.analysis_path = get_analysis_path(self.email, self.ticker, self.timestamp)
         ensure_analysis_paths(self.analysis_path)
         
-        # Setup logging - single info.log with prefixes
+        # Setup logging - single info.log
         self.logger = setup_logger(self.ticker, base_path=self.analysis_path)
-        
-        # No separate agent loggers - everything goes to info.log with prefixes
-        # self.supervisor_logger = setup_agent_logger("supervisor")
-        # self.financial_data_logger = setup_agent_logger("financial_data_agent")
-        # self.news_analysis_logger = setup_agent_logger("news_analysis_agent")
-        # self.model_generation_logger = setup_agent_logger("model_generation_agent")
-        # self.report_generator_logger = setup_agent_logger("report_generator_agent")
-        
-        self.logger.info(f"✅ Using unified logging to info.log with [supervisor] and [logs] prefixes")
         
         # Initialize state (FinancialState requires: user_query, ticker, company_name, email)
         self.state = FinancialState(
@@ -169,17 +160,17 @@ class SupervisorWorkflowRunner:
         }
         
         self.logger.info("=" * 80)
-        self.logger.info(f"🎯 SUPERVISOR WORKFLOW INITIALIZED")
+        self.logger.info(f"[SUPERVISOR] 🎯 SUPERVISOR WORKFLOW INITIALIZED")
         self.logger.info("=" * 80)
-        self.logger.info(f"   Ticker: {self.ticker}")
-        self.logger.info(f"   Company: {self.company_name}")
-        self.logger.info(f"   Analysis Path: {self.analysis_path}")
-        self.logger.info(f"   Max Iterations: {self.max_iterations}")
-        self.logger.info(f"   Timestamp: {self.timestamp}")
+        self.logger.info(f"[SUPERVISOR]    Ticker: {self.ticker}")
+        self.logger.info(f"[SUPERVISOR]    Company: {self.company_name}")
+        self.logger.info(f"[SUPERVISOR]    Analysis Path: {self.analysis_path}")
+        self.logger.info(f"[SUPERVISOR]    Max Iterations: {self.max_iterations}")
+        self.logger.info(f"[SUPERVISOR]    Timestamp: {self.timestamp}")
         if self.session_name:
-            self.logger.info(f"   Session: {self.session_name}")
+            self.logger.info(f"[SUPERVISOR]    Session: {self.session_name}")
             conversation_count = len(self.session_manager.session_data.get("conversation_history", []))
-            self.logger.info(f"   Previous Conversations: {conversation_count}")
+            self.logger.info(f"[SUPERVISOR]    Previous Conversations: {conversation_count}")
         self.logger.info("=" * 80)
     
     async def run_workflow(self) -> Dict:
@@ -196,23 +187,23 @@ class SupervisorWorkflowRunner:
         Returns:
             Dictionary with workflow results and statistics
         """
-        self.logger.info("▶ STARTING AGENTIC WORKFLOW")
+        self.logger.info("[SUPERVISOR] ▶ STARTING AGENTIC WORKFLOW")
         self.logger.info("")
         
         # Show conversation history if in a session
         if self.session_manager:
             history_summary = self.session_manager.get_conversation_summary(limit=3)
             if "No previous" not in history_summary:
-                self.logger.info("📚 CONTINUING FROM PREVIOUS CONVERSATION:")
+                self.logger.info("[SUPERVISOR] 📚 CONTINUING FROM PREVIOUS CONVERSATION:")
                 for line in history_summary.split('\n'):
                     if line.strip():
-                        self.logger.info(f"   {line}")
+                        self.logger.info(f"[SUPERVISOR]    {line}")
                 self.logger.info("")
         
         # Log user query if custom
         if self.user_query != f"Analyze {self.ticker} ({self.company_name})":
-            self.logger.info("💬 USER QUERY:")
-            self.logger.info(f"   \"{self.user_query}\"")
+            self.logger.info("[SUPERVISOR] 💬 USER QUERY:")
+            self.logger.info(f"[SUPERVISOR]    \"{self.user_query}\"")
             self.logger.info("")
         
         iteration = 0
@@ -222,13 +213,13 @@ class SupervisorWorkflowRunner:
             self.stats["iterations"] = iteration
             
             self.logger.info("─" * 80)
-            self.logger.info(f"📍 ITERATION {iteration}/{self.max_iterations}")
+            self.logger.info(f"[SUPERVISOR] 📍 ITERATION {iteration}/{self.max_iterations}")
             self.logger.info("─" * 80)
             
             # Step 1: Supervisor routing decision
-            self.logger.info("[logs] 🧠 Supervisor evaluating current state...")
-            self.logger.info(f"[logs] 📍 ITERATION {iteration}/{self.max_iterations}")
-            self.logger.info(f"[logs] Current state: financial_data={self.state.is_financial_data_collected()}, model={self.state.is_model_generated()}, news={self.state.is_news_analyzed()}, report={self.state.is_report_generated()}")
+            self.logger.info("[SUPERVISOR] 🧠 Supervisor evaluating current state...")
+            self.logger.info(f"[SUPERVISOR] 📍 ITERATION {iteration}/{self.max_iterations}")
+            self.logger.info(f"[SUPERVISOR] Current state: financial_data={self.state.is_financial_data_collected()}, model={self.state.is_model_generated()}, news={self.state.is_news_analyzed()}, report={self.state.is_report_generated()}")
             
             try:
                 # Use LLM-powered routing
@@ -250,11 +241,11 @@ class SupervisorWorkflowRunner:
                 }
                 self.stats["routing_decisions"].append(routing_decision)
                 
-                self.logger.info(f"[logs] 📌 Routing to: {next_agent}")
+                self.logger.info(f"[SUPERVISOR] 📌 Routing to: {next_agent}")
                 
             except Exception as e:
-                self.logger.warning(f"[logs] ⚠️  LLM routing failed: {e}")
-                self.logger.info("[logs] 🔄 Falling back to deterministic routing...")
+                self.logger.warning(f"[SUPERVISOR] ⚠️  LLM routing failed: {e}")
+                self.logger.info("[SUPERVISOR] 🔄 Falling back to deterministic routing...")
                 
                 # Fallback to deterministic routing
                 next_agent = route_workflow(self.state, logger=self.logger)
@@ -268,20 +259,20 @@ class SupervisorWorkflowRunner:
                 }
                 self.stats["routing_decisions"].append(routing_decision)
                 
-                self.logger.info(f"[logs] 📌 Fallback routing to: {next_agent}")
+                self.logger.info(f"[SUPERVISOR] 📌 Fallback routing to: {next_agent}")
             
             # Step 2: Check for workflow completion
             if next_agent == "__end__":
                 self.logger.info("")
-                self.logger.info("[logs] " + "=" * 80)
-                self.logger.info("[logs] 🎉 WORKFLOW COMPLETED SUCCESSFULLY")
-                self.logger.info("[logs] " + "=" * 80)
+                self.logger.info("[SUPERVISOR] " + "=" * 80)
+                self.logger.info("[SUPERVISOR] 🎉 WORKFLOW COMPLETED SUCCESSFULLY")
+                self.logger.info("[SUPERVISOR] " + "=" * 80)
                 self.stats["completion_status"] = "completed"
                 break
             
             # Step 3: Execute chosen agent
             self.logger.info("")
-            self.logger.info(f"[logs] ▶ EXECUTING AGENT: {next_agent}")
+            self.logger.info(f"[SUPERVISOR] ▶ EXECUTING AGENT: {next_agent}")
             self.logger.info("")
             
             try:
@@ -296,12 +287,12 @@ class SupervisorWorkflowRunner:
                 agent_func = agent_map.get(next_agent)
                 
                 if agent_func is None:
-                    self.logger.error(f"[logs] ❌ Unknown agent: {next_agent}")
+                    self.logger.error(f"[SUPERVISOR] ❌ Unknown agent: {next_agent}")
                     self.stats["completion_status"] = "failed"
                     break
                 
                 # Log agent start
-                self.logger.info(f"[logs] 🚀 Starting {next_agent} (iteration {iteration})")
+                self.logger.info(f"[SUPERVISOR] 🚀 Starting {next_agent} (iteration {iteration})")
                 
                 # Execute agent (async)
                 agent_start = datetime.now()
@@ -316,22 +307,22 @@ class SupervisorWorkflowRunner:
                 })
                 
                 self.logger.info("")
-                self.logger.info(f"[logs] ✅ Agent {next_agent} completed in {agent_duration:.2f}s")
+                self.logger.info(f"[SUPERVISOR] ✅ Agent {next_agent} completed in {agent_duration:.2f}s")
                 
                 # Log state after agent execution
-                self.logger.info(f"[logs] 📊 State after {next_agent}:")
-                self.logger.info(f"[logs]    - Financial data collected: {self.state.is_financial_data_collected()}")
-                self.logger.info(f"[logs]    - Model generated: {self.state.is_model_generated()}")
-                self.logger.info(f"[logs]    - News analyzed: {self.state.is_news_analyzed()}")
-                self.logger.info(f"[logs]    - Report generated: {self.state.is_report_generated()}")
-                self.logger.info(f"[logs]    - Current stage: {self.state.current_stage.value}")
+                self.logger.info(f"[SUPERVISOR] 📊 State after {next_agent}:")
+                self.logger.info(f"[SUPERVISOR]    - Financial data collected: {self.state.is_financial_data_collected()}")
+                self.logger.info(f"[SUPERVISOR]    - Model generated: {self.state.is_model_generated()}")
+                self.logger.info(f"[SUPERVISOR]    - News analyzed: {self.state.is_news_analyzed()}")
+                self.logger.info(f"[SUPERVISOR]    - Report generated: {self.state.is_report_generated()}")
+                self.logger.info(f"[SUPERVISOR]    - Current stage: {self.state.current_stage.value}")
                 
                 # Check for errors in state
                 if self.state.last_error:
-                    self.logger.error(f"[logs] ⚠️  Agent reported error: {self.state.last_error}")
+                    self.logger.error(f"[SUPERVISOR] ⚠️  Agent reported error: {self.state.last_error}")
                 
                 if self.state.current_stage == PipelineStage.FAILED:
-                    self.logger.error(f"[logs] ❌ Workflow failed during {next_agent}")
+                    self.logger.error(f"[SUPERVISOR] ❌ Workflow failed during {next_agent}")
                     self.stats["completion_status"] = "failed"
                     break
                 

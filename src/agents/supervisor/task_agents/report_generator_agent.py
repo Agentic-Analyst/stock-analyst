@@ -17,7 +17,6 @@ from datetime import datetime
 
 from src.agents.supervisor.state import FinancialState, Report, PipelineStage, PipelineConfig
 from src.report_agent import generate_and_save_professional_report
-from src.logger import get_agent_logger
 
 
 async def report_generator_agent(
