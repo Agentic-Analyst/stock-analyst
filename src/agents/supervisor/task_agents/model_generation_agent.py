@@ -11,16 +11,12 @@ This agent:
 5. Marks pipeline stage as MODEL_GENERATED
 """
 
-import pathlib
-import sys
+from pathlib import Path
 from typing import Optional
 
-# Add src directory to path
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent.parent))
-
-from agents.agentic_pipeline.state import FinancialState, FinancialModel, PipelineStage, PipelineConfig
-from agents.fm import create_financial_model
-from logger import StockAnalystLogger, get_agent_logger
+from src.agents.supervisor.state import FinancialState, FinancialModel, PipelineStage, PipelineConfig
+from src.agents.fm import create_financial_model
+from src.logger import get_agent_logger
 
 
 async def model_generation_agent(
@@ -49,9 +45,8 @@ async def model_generation_agent(
             f"Starting financial model generation for {state.ticker}..."
         )
         
-        # Get agent-specific logger
-        agent_logger = get_agent_logger("model_generation_agent")
-        effective_logger = agent_logger if agent_logger else state.logger
+        # Use effective logger from state
+        effective_logger = state.get_effective_logger("model_generation_agent")
         
         # Validate prerequisites
         if not state.financial_data:
@@ -62,9 +57,8 @@ async def model_generation_agent(
             state.current_stage = PipelineStage.FAILED
             return state
         
-        # Find the latest financial JSON file
-        # Convert analysis_path string to Path for file operations
-        analysis_path = pathlib.Path(state.analysis_path)
+        # Use state's analysis_path directly
+        analysis_path = Path(state.analysis_path) if isinstance(state.analysis_path, str) else state.analysis_path
         json_file = analysis_path / "financials" / "financials_annual_modeling_latest.json"
         
         if not json_file.exists():

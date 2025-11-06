@@ -66,6 +66,9 @@ import yfinance as yf
 from llms.config import init_llm, list_models, list_available_models
 from dotenv import load_dotenv
 load_dotenv()
+import traceback
+import asyncio
+from session_manager import SessionManager
 
 # Import supervisor workflow
 from supervisor_main import SupervisorWorkflowRunner
@@ -408,7 +411,6 @@ class ComprehensiveStockAnalysisPipeline:
             
         except Exception as e:
             self.logger.error(f"❌ Financial model generation failed: {e}")
-            # import traceback
             # self.logger.error(traceback.format_exc())
             return {"success": False, "error": str(e)}
     
@@ -649,7 +651,6 @@ class ComprehensiveStockAnalysisPipeline:
             
         except Exception as e:
             self.logger.error(f"❌ Company daily report generation failed: {e}")
-            import traceback
             self.logger.error(traceback.format_exc())
             return {"success": False, "error": str(e)}
     
@@ -725,7 +726,6 @@ class ComprehensiveStockAnalysisPipeline:
             
         except Exception as e:
             self.logger.error(f"❌ Sector daily report generation failed: {e}")
-            import traceback
             self.logger.error(traceback.format_exc())
             return {"success": False, "error": str(e)}
     
@@ -836,7 +836,7 @@ Examples:
         if not args.ticker:
             parser.error("--ticker is required to list sessions")
         
-        from session_manager import SessionManager
+        
         sessions = SessionManager.list_sessions(args.email, args.ticker)
         
         if sessions:
@@ -930,7 +930,6 @@ Examples:
                     session_name=args.session
                 )
                 
-                import asyncio
                 results_1 = asyncio.run(supervisor_runner_1.run_workflow())
                 
                 # Run analysis for second stock
@@ -939,7 +938,6 @@ Examples:
                 pipeline.logger.info(f"{'='*80}\n")
                 
                 # Get company name for second ticker
-                import yfinance as yf
                 ticker_2_info = yf.Ticker(args.compare_with)
                 company_name_2 = ticker_2_info.info.get("longName", args.compare_with)
                 
@@ -997,7 +995,6 @@ Examples:
                     session_name=args.session
                 )
                 
-                import asyncio
                 results = asyncio.run(supervisor_runner.run_workflow())
             
             pipeline.logger.info("✅ Supervisor Pipeline completed successfully")

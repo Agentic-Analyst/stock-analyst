@@ -11,17 +11,13 @@ This agent:
 5. Marks pipeline stage as FINANCIAL_DATA_COLLECTED
 """
 
-import pathlib
-import sys
+from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
-# Add src directory to path
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent.parent))
-
-from agents.agentic_pipeline.state import FinancialState, FinancialData, PipelineStage, PipelineConfig
-from financial_scraper import FinancialScraper
-from logger import StockAnalystLogger, get_agent_logger
+from src.agents.supervisor.state import FinancialState, FinancialData, PipelineStage, PipelineConfig
+from src.financial_scraper import FinancialScraper
+from src.logger import get_agent_logger
 
 
 async def financial_data_agent(
@@ -50,16 +46,14 @@ async def financial_data_agent(
             f"Starting financial data collection for {state.ticker}..."
         )
         
-        # Instantiate FinancialScraper (convert analysis_path string to Path)
-        analysis_path = pathlib.Path(state.analysis_path)
+        # Use state's analysis_path directly (already a Path object or string)
+        analysis_path = Path(state.analysis_path) if isinstance(state.analysis_path, str) else state.analysis_path
         scraper = FinancialScraper(state.ticker, analysis_path)
         
-        # Use agent-specific logger if available, otherwise fall back to state logger
-        agent_logger = get_agent_logger("financial_data_agent")
-        if agent_logger:
-            scraper.set_logger(agent_logger)
-        elif state.logger:
-            scraper.set_logger(state.logger)
+        # Use effective logger from state
+        effective_logger = state.get_effective_logger("financial_data_agent")
+        if effective_logger:
+            scraper.set_logger(effective_logger)
         
         # Scrape comprehensive financial data
         state.log_action("financial_data_agent", "Scraping financial statements...")
@@ -104,7 +98,7 @@ async def financial_data_agent(
         stats = {
             "Years of data": data_completeness.get("income_statement_periods", 0),
             "Company": f"{basic_info.get('long_name', state.company_name)}{company_context}",
-            "Data file": pathlib.Path(file_path).name
+            "Data file": Path(file_path).name
         }
         
         state.log_action(

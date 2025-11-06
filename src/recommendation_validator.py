@@ -129,7 +129,6 @@ class RecommendationValidator:
         
         # Clean up common JSON issues
         # Remove trailing commas before closing braces/brackets (multiple passes for nested structures)
-        import re
         # Do multiple passes to catch all nested cases
         for _ in range(3):
             json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)  # Remove comma before } or ]

@@ -13,6 +13,7 @@ Design: Numbers = Code, Narrative = LLM, Validation = Code + Critic
 
 import json
 import os
+import re
 from typing import Dict, Any, Tuple, Optional
 from pathlib import Path
 
@@ -454,7 +455,6 @@ class RecommendationEngineV3:
         
         # Clean up common JSON issues
         # Remove trailing commas before closing braces/brackets (multiple passes for nested structures)
-        import re
         # Do multiple passes to catch all nested cases
         for _ in range(3):
             json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)  # Remove comma before } or ]

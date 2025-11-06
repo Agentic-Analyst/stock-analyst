@@ -1,21 +1,21 @@
 """
-agentic_pipeline - Cyclical Agentic Workflow for Financial Analysis
+supervisor - Supervisor-based Workflow for Financial Analysis
 
-This package implements a LangGraph-based workflow with:
+This package implements a supervisor-based workflow with:
 - Central FinancialState for tracking analysis progress
 - Supervisor Agent for intelligent routing
-- Specialized Agent Nodes for data collection, analysis, modeling, and reporting
+- Specialized Task Agent Nodes for data collection, analysis, modeling, and reporting
 - Deterministic + LLM-powered decision making
 
 Core Components:
 - state.py: FinancialState, PipelineConfig, enums
 - supervisor.py: Routing logic and decision making
-- agents/: Individual agent implementations
+- task_agents/: Individual task agent implementations
 - graph.py: LangGraph workflow assembly
-- runner.py: CLI and graph invocation
+- supervisor_agent.py: CLI and workflow invocation
 """
 
-from src.agents.agentic_pipeline.state import (
+from src.agents.supervisor.state import (
     FinancialState,
     FinancialData,
     NewsAnalysis,
@@ -27,7 +27,7 @@ from src.agents.agentic_pipeline.state import (
     AnalysisObjective,
 )
 
-from src.agents.agentic_pipeline.supervisor import (
+from src.agents.supervisor.supervisor import (
     route_workflow,
     route_workflow_with_llm,
 )

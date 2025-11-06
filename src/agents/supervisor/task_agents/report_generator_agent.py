@@ -11,17 +11,13 @@ This agent:
 5. Marks pipeline stage as REPORT_GENERATED
 """
 
-import pathlib
-import sys
+from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
-# Add src directory to path
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent.parent))
-
-from agents.agentic_pipeline.state import FinancialState, Report, PipelineStage, PipelineConfig
-from report_agent import generate_and_save_professional_report
-from logger import StockAnalystLogger, get_agent_logger
+from src.agents.supervisor.state import FinancialState, Report, PipelineStage, PipelineConfig
+from src.report_agent import generate_and_save_professional_report
+from src.logger import get_agent_logger
 
 
 async def report_generator_agent(
@@ -50,9 +46,8 @@ async def report_generator_agent(
             f"Starting professional report generation for {state.ticker}..."
         )
         
-        # Get agent-specific logger
-        agent_logger = get_agent_logger("report_generator_agent")
-        effective_logger = agent_logger if agent_logger else state.logger
+        # Use effective logger from state
+        effective_logger = state.get_effective_logger("report_generator_agent")
         
         # Validate prerequisites
         if not state.financial_data:
@@ -84,36 +79,27 @@ async def report_generator_agent(
             "All prerequisites met. Generating comprehensive analyst report..."
         )
         
-        # Convert analysis_path string to Path for file operations
-        analysis_path = pathlib.Path(state.analysis_path)
+        # Use state's analysis_path directly
+        analysis_path = Path(state.analysis_path) if isinstance(state.analysis_path, str) else state.analysis_path
         
-        try:
-            # Generate professional report
-            report_text, report_path = generate_and_save_professional_report(
-                analysis_path,
-                state.ticker,
-                logger=effective_logger
-            )
-            
-            state.log_action(
-                "report_generator_agent",
-                f"✅ Professional report generated successfully"
-            )
-            
-            state.log_action(
-                "report_generator_agent",
-                f"Report details: "
-                f"{len(report_text):,} characters, "
-                f"saved to {report_path.name}"
-            )
-            
-        except Exception as report_error:
-            state.log_error(
-                "report_generator_agent",
-                f"Report generation failed: {str(report_error)}"
-            )
-            state.current_stage = PipelineStage.FAILED
-            return state
+        # Generate professional report
+        report_text, report_path = generate_and_save_professional_report(
+            analysis_path,
+            state.ticker,
+            logger=effective_logger
+        )
+        
+        state.log_action(
+            "report_generator_agent",
+            f"✅ Professional report generated successfully"
+        )
+        
+        state.log_action(
+            "report_generator_agent",
+            f"Report details: "
+            f"{len(report_text):,} characters, "
+            f"saved to {report_path.name}"
+        )
         
         # Update FinancialState with generated report
         state.report = Report(

@@ -1,10 +1,8 @@
 """
-state.py - Central State and Configuration for Agentic Pipeline
+state.py - State Management for Supervisor Workflow
 
-Defines the FinancialState dataclass (shared across all agents),
-configuration enums, and pipeline metadata tracking.
-
-This is the single source of truth for all workflow data.
+Defines the core data structures and state machine for the supervisor-based
+agentic workflow.
 """
 
 from dataclasses import dataclass, field
@@ -227,6 +225,27 @@ class FinancialState:
     def is_report_generated(self) -> bool:
         """Check if report has been generated."""
         return self.report is not None and self.report.error is None
+    
+    def get_effective_logger(self, agent_name: str = None):
+        """
+        Get the effective logger for an agent.
+        
+        Tries agent-specific logger first, falls back to state logger.
+        
+        Args:
+            agent_name: Optional agent name for agent-specific logger
+            
+        Returns:
+            Logger instance (agent-specific or state logger)
+        """
+        if agent_name:
+            try:
+                agent_logger = get_agent_logger(agent_name)
+                if agent_logger:
+                    return agent_logger
+            except Exception:
+                pass
+        return self.logger
     
     def should_stop(self) -> bool:
         """Determine if workflow should terminate."""

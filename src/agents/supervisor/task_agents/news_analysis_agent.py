@@ -12,25 +12,17 @@ This agent:
 6. Marks pipeline stage as NEWS_ANALYSIS_COMPLETED
 """
 
-import pathlib
-import sys
-import json
+from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
 
-# Add src directory to path
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent.parent))
-
-from agents.agentic_pipeline.state import (
+from src.agents.supervisor.state import (
     FinancialState, NewsAnalysis, PipelineStage, PipelineConfig
 )
-from article_scraper import ArticleScraper
-from article_filter import ArticleFilter
-from article_screener import ArticleScreener
-from logger import get_agent_logger
-from article_filter import ArticleFilter
-from article_screener import ArticleScreener
-from logger import StockAnalystLogger
+from src.article_scraper import ArticleScraper
+from src.article_filter import ArticleFilter
+from src.article_screener import ArticleScreener
+from src.logger import get_agent_logger, StockAnalystLogger
 
 
 async def news_analysis_agent(
@@ -77,12 +69,11 @@ async def news_analysis_agent(
             f"[1/3] Scraping news articles (max {max_articles_to_search})..."
         )
         
-        # Convert analysis_path string to Path for file operations
-        analysis_path = pathlib.Path(state.analysis_path)
+        # Use state's analysis_path directly
+        analysis_path = Path(state.analysis_path) if isinstance(state.analysis_path, str) else state.analysis_path
         
-        # Get agent-specific logger
-        agent_logger = get_agent_logger("news_analysis_agent")
-        effective_logger = agent_logger if agent_logger else state.logger
+        # Use effective logger from state
+        effective_logger = state.get_effective_logger("news_analysis_agent")
         
         scraper = ArticleScraper(state.ticker, state.company_name, analysis_path)
         if effective_logger:

@@ -1,10 +1,10 @@
 """
-Agentic Pipeline Agent Nodes
+Supervisor Task Agent Nodes
 
-This package contains the specialized agent node implementations that wrap
-domain-specific agents and integrate with the LangGraph workflow.
+This package contains the specialized task agent node implementations that wrap
+domain-specific agents and integrate with the supervisor workflow.
 
-Each agent node:
+Each task agent node:
 - Accepts FinancialState as input
 - Performs domain-specific work
 - Updates FinancialState with results

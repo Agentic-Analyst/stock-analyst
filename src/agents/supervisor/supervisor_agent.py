@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-supervisor_main.py - Agentic Workflow Supervisor Entry Point
+supervisor_agent.py - Supervisor Agent Entry Point
 
-This is the main entry point for running the LLM-powered agentic workflow
-that uses the Supervisor Agent to intelligently route between analysis agents.
+This is the main entry point for running the LLM-powered supervisor workflow
+that uses the Supervisor Agent to intelligently route between task agents.
 
 The supervisor system provides:
 - LLM-powered dynamic routing (non-sequential, intelligent decisions)
@@ -25,7 +25,7 @@ Workflow Architecture:
                               │
                               ▼
         ┌────────────────────────────────────────┐
-        │         Agent Execution                │
+        │      Task Agent Execution              │
         │  - financial_data_agent                │
         │  - model_generation_agent              │
         │  - news_analysis_agent                 │
@@ -42,22 +42,22 @@ Workflow Architecture:
 
 ▶ Usage Examples:
     # Run LLM-powered workflow for a ticker (simplest)
-    python supervisor_main.py AAPL
+    python -m src.agents.supervisor.supervisor_agent AAPL
     
     # With custom company name and email
-    python supervisor_main.py NVDA --company "NVIDIA Corporation" --email user@example.com
+    python -m src.agents.supervisor.supervisor_agent NVDA --company "NVIDIA Corporation" --email user@example.com
     
     # Use Claude Sonnet for routing and analysis
-    python supervisor_main.py AAPL --llm claude-3.5-sonnet
+    python -m src.agents.supervisor.supervisor_agent AAPL --llm claude-3.5-sonnet
     
     # Limit maximum iterations (default: 10)
-    python supervisor_main.py MSFT --max-iterations 6
+    python -m src.agents.supervisor.supervisor_agent MSFT --max-iterations 6
     
     # Custom timestamp for analysis folder
-    python supervisor_main.py TSLA --timestamp 20250102_153000
+    python -m src.agents.supervisor.supervisor_agent TSLA --timestamp 20250102_153000
     
     # List available LLM models
-    python supervisor_main.py --list-llms
+    python -m src.agents.supervisor.supervisor_agent --list-llms
 """
 
 from __future__ import annotations
@@ -76,21 +76,18 @@ except ImportError:
     print("⚠️  python-dotenv not installed. Environment variables from .env won't be loaded.")
     print("   Install with: pip install python-dotenv")
 
-# Add src directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+from src.logger import setup_logger, setup_agent_logger
+from src.path_utils import get_analysis_path, ensure_analysis_paths
+from src.llms.config import init_llm, list_models, list_available_models
+from src.session_manager import SessionManager
 
-from logger import setup_logger, setup_agent_logger
-from path_utils import get_analysis_path, ensure_analysis_paths
-from llms.config import init_llm, list_models, list_available_models
-from session_manager import SessionManager
-
-# Import agentic pipeline components
-from agents.agentic_pipeline.state import FinancialState, AgentNode, PipelineStage
-from agents.agentic_pipeline.supervisor import route_workflow_with_llm, route_workflow
-from agents.agentic_pipeline.agents.financial_data_agent import financial_data_agent
-from agents.agentic_pipeline.agents.news_analysis_agent import news_analysis_agent
-from agents.agentic_pipeline.agents.model_generation_agent import model_generation_agent
-from agents.agentic_pipeline.agents.report_generator_agent import report_generator_agent
+# Import supervisor workflow components
+from src.agents.supervisor.state import FinancialState, AgentNode, PipelineStage
+from src.agents.supervisor.supervisor import route_workflow_with_llm, route_workflow
+from src.agents.supervisor.task_agents.financial_data_agent import financial_data_agent
+from src.agents.supervisor.task_agents.news_analysis_agent import news_analysis_agent
+from src.agents.supervisor.task_agents.model_generation_agent import model_generation_agent
+from src.agents.supervisor.task_agents.report_generator_agent import report_generator_agent
 
 
 class SupervisorWorkflowRunner:
@@ -459,10 +456,7 @@ Be direct and professional. Respond with ONLY the performance summary, no JSON o
             
         except Exception as e:
             # If LLM summary fails, log error but don't crash
-            import sys
-            print(f"[WARNING] Failed to generate LLM performance summary: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc(file=sys.stderr)
+            self.logger.error(f"Failed to generate LLM performance summary: {str(e)}")
     
     def _log_workflow_summary(self):
         """Log a comprehensive workflow summary."""

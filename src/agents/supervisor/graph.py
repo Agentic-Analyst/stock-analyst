@@ -14,19 +14,14 @@ Architecture:
 The workflow is cyclical: Supervisor → Agent → Supervisor → Agent → ... → __end__
 """
 
-import sys
-import pathlib
 from typing import Literal
-
-# Add src directory to path
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent.parent))
 
 from langgraph.graph import StateGraph, END
 from langgraph.types import Command
 
-from agents.agentic_pipeline.state import FinancialState, PipelineStage, PipelineConfig
-from agents.agentic_pipeline.supervisor import route_workflow_with_llm
-from agents.agentic_pipeline.agents import (
+from src.agents.supervisor.state import FinancialState, PipelineStage, PipelineConfig, AgentNode
+from src.agents.supervisor.supervisor import route_workflow_with_llm
+from src.agents.supervisor.task_agents import (
     financial_data_agent,
     news_analysis_agent,
     model_generation_agent,
@@ -119,11 +114,11 @@ async def build_workflow_graph(config: PipelineConfig = None) -> callable:
         "supervisor",
         route_workflow_with_llm,
         {
-            "financial_data_agent": "financial_data_agent",
-            "news_analysis_agent": "news_analysis_agent",
-            "model_generation_agent": "model_generation_agent",
-            "report_generator_agent": "report_generator_agent",
-            "__end__": END,
+            AgentNode.FINANCIAL_DATA_AGENT.value: AgentNode.FINANCIAL_DATA_AGENT.value,
+            AgentNode.NEWS_ANALYSIS_AGENT.value: AgentNode.NEWS_ANALYSIS_AGENT.value,
+            AgentNode.MODEL_GENERATION_AGENT.value: AgentNode.MODEL_GENERATION_AGENT.value,
+            AgentNode.REPORT_GENERATOR_AGENT.value: AgentNode.REPORT_GENERATOR_AGENT.value,
+            AgentNode.END.value: END,
         }
     )
     
@@ -147,7 +142,8 @@ def get_workflow_graph(config: PipelineConfig = None):
     """
     Get a compiled workflow graph (synchronous wrapper).
     
-    For use in synchronous contexts. For async, use build_workflow_graph().
+    For async contexts, use build_workflow_graph() directly with await.
+    For sync contexts, use asyncio.run(build_workflow_graph()).
     
     Args:
         config: Optional PipelineConfig for agent parameters
@@ -156,16 +152,7 @@ def get_workflow_graph(config: PipelineConfig = None):
         Compiled runnable graph
     """
     import asyncio
-    
-    try:
-        # Try to get running event loop
-        loop = asyncio.get_running_loop()
-        # If we're already in async context, create task
-        task = loop.create_task(build_workflow_graph(config))
-        return task
-    except RuntimeError:
-        # No running loop, create new one
-        return asyncio.run(build_workflow_graph(config))
+    return asyncio.run(build_workflow_graph(config))
 
 
 # ==================== GRAPH INVOCATION ====================
@@ -225,7 +212,9 @@ async def stream_workflow(
         state: Initial FinancialState
         config: Optional PipelineConfig for agent parameters
     """
+    from src.logger import get_logger
     
+    logger = get_logger()
     state.log_action("workflow", f"Starting workflow stream for {state.ticker}...")
     
     # Build the graph
@@ -238,11 +227,13 @@ async def stream_workflow(
         for node_name, node_state in step.items():
             if node_name == "supervisor":
                 next_node = route_workflow_with_llm(node_state)
-                print(f"🤖 Supervisor → {next_node}")
+                if logger:
+                    logger.info(f"🤖 Supervisor → {next_node}")
             else:
-                print(f"✅ {node_name} completed")
-                if node_state.current_stage:
-                    print(f"   Stage: {node_state.current_stage}")
+                if logger:
+                    logger.info(f"✅ {node_name} completed")
+                    if node_state.current_stage:
+                        logger.info(f"   Stage: {node_state.current_stage}")
 
 
 # ==================== GRAPH VISUALIZATION ====================
@@ -304,9 +295,9 @@ if __name__ == "__main__":
     """
     
     import asyncio
-    from path_utils import get_analysis_path, ensure_analysis_paths
-    from logger import setup_logger
     from datetime import datetime
+    from src.path_utils import get_analysis_path, ensure_analysis_paths
+    from src.logger import setup_logger
     
     async def main():
         # Setup
@@ -326,37 +317,42 @@ if __name__ == "__main__":
             ticker=ticker,
             company_name=company,
             email=email,
-            analysis_path=analysis_path,
-            logger=logger
+            analysis_path=analysis_path
         )
         
         # Create config
         config = PipelineConfig(llm_model="gpt-4o-mini")
         
         # Show graph structure
-        print("\n" + "="*80)
-        print("LANGGRAPH WORKFLOW STRUCTURE")
-        print("="*80)
-        print(visualize_graph(config))
+        if logger:
+            logger.info("")
+            logger.info("="*80)
+            logger.info("LANGGRAPH WORKFLOW STRUCTURE")
+            logger.info("="*80)
+            logger.info(visualize_graph(config))
         
         # Invoke workflow
-        print("\n" + "="*80)
-        print("RUNNING WORKFLOW")
-        print("="*80)
+        if logger:
+            logger.info("")
+            logger.info("="*80)
+            logger.info("RUNNING WORKFLOW")
+            logger.info("="*80)
         
         final_state = await invoke_workflow(state, config, verbose=True)
         
         # Show results
-        print("\n" + "="*80)
-        print("WORKFLOW RESULTS")
-        print("="*80)
-        print(f"Final Stage: {final_state.current_stage}")
-        print(f"Financial Data: {'✅' if final_state.financial_data else '❌'}")
-        print(f"News Analysis: {'✅' if final_state.news_analysis else '❌'}")
-        print(f"Financial Model: {'✅' if final_state.financial_model else '❌'}")
-        print(f"Report: {'✅' if final_state.report else '❌'}")
-        print(f"Total LLM Cost: ${final_state.total_llm_cost:.4f}")
-        print(f"Execution Log Entries: {len(final_state.execution_log)}")
+        if logger:
+            logger.info("")
+            logger.info("="*80)
+            logger.info("WORKFLOW RESULTS")
+            logger.info("="*80)
+            logger.info(f"Final Stage: {final_state.current_stage}")
+            logger.info(f"Financial Data: {'✅' if final_state.financial_data else '❌'}")
+            logger.info(f"News Analysis: {'✅' if final_state.news_analysis else '❌'}")
+            logger.info(f"Financial Model: {'✅' if final_state.financial_model else '❌'}")
+            logger.info(f"Report: {'✅' if final_state.report else '❌'}")
+            logger.info(f"Total LLM Cost: ${final_state.total_llm_cost:.4f}")
+            logger.info(f"Execution Log Entries: {len(final_state.execution_log)}")
     
     # Run
     asyncio.run(main())

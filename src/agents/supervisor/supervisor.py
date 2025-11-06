@@ -13,7 +13,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from src.agents.agentic_pipeline.state import (
+from src.agents.supervisor.state import (
     FinancialState, 
     AgentNode, 
     PipelineStage
@@ -33,12 +33,106 @@ def _load_routing_prompt():
     return content
 
 
+def _load_completion_summary_prompt():
+    """Load the workflow completion summary prompt from prompts folder."""
+    prompt_path = Path(__file__).parent.parent.parent.parent / "prompts" / "workflow_completion_summary.md"
+    with open(prompt_path, 'r') as f:
+        return f.read()
+
+
 ROUTING_PROMPT_TEMPLATE = _load_routing_prompt()
+COMPLETION_SUMMARY_TEMPLATE = _load_completion_summary_prompt()
 
 
 def load_routing_prompt():
     """Public function to load and display the routing prompt."""
     return ROUTING_PROMPT_TEMPLATE
+
+
+def _log_workflow_completion(state: FinancialState, logger=None):
+    """
+    Log workflow completion with LLM-generated summary.
+    
+    Args:
+        state: Current FinancialState (all work complete)
+        logger: Optional logger to use (falls back to get_logger())
+    """
+    try:
+        main_logger = logger or get_logger()
+        if not main_logger:
+            return
+            
+        # Build status messages
+        financial_data_status = (
+            f"✅ Collected comprehensive financial data including {len(state.financial_data.raw_data) if state.financial_data and state.financial_data.raw_data else 0} data points"
+            if state.is_financial_data_collected() else "⏭️ Skipped"
+        )
+        
+        model_status = (
+            f"✅ Generated {state.financial_model.model_type} model saved to {state.financial_model.excel_path}"
+            if state.is_model_generated() else "⏭️ Skipped"
+        )
+        
+        news_status = (
+            f"✅ Analyzed {state.news_analysis.articles_count} articles, found {len(state.news_analysis.catalysts)} catalysts, {len(state.news_analysis.risks)} risks. Overall sentiment: {state.news_analysis.overall_sentiment}"
+            if state.is_news_analyzed() else "⏭️ Skipped"
+        )
+        
+        report_status = (
+            f"✅ Generated comprehensive analyst report ({len(state.report.content):,} characters) saved to {state.report.report_path}"
+            if state.is_report_generated() and state.report.content else "⏭️ Skipped"
+        )
+        
+        # Format the completion summary prompt
+        summary_prompt = COMPLETION_SUMMARY_TEMPLATE.format(
+            ticker=state.ticker,
+            company_name=state.company_name,
+            financial_data_status=financial_data_status,
+            model_status=model_status,
+            news_status=news_status,
+            report_status=report_status,
+            analysis_path=state.analysis_path,
+            total_llm_cost=f"{state.total_llm_cost:.4f}"
+        )
+        
+        try:
+            # Generate LLM-powered summary
+            summary_response, summary_cost = get_llm()([
+                {"role": "system", "content": "You are a senior financial analyst providing a professional summary."},
+                {"role": "user", "content": summary_prompt}
+            ], temperature=0.7)
+            state.total_llm_cost += summary_cost
+            
+            # Log the completion message
+            main_logger.info("")
+            main_logger.info("[supervisor] " + "="*60)
+            main_logger.info("[supervisor] 🎉 WORKFLOW COMPLETED SUCCESSFULLY")
+            main_logger.info("[supervisor] " + "="*60)
+            main_logger.info("")
+            main_logger.info(f"[supervisor] {summary_response.strip()}")
+            main_logger.info("")
+            main_logger.info(f"[supervisor] 📁 Analysis saved to: {state.analysis_path}")
+            main_logger.info(f"[supervisor] 💰 Total LLM cost: ${state.total_llm_cost:.4f}")
+            main_logger.info("")
+            
+        except Exception:
+            # Fallback to simple summary if LLM fails
+            main_logger.info("")
+            main_logger.info(f"[supervisor] 🎉 Perfect! I've finished the analysis for {state.ticker}!")
+            main_logger.info(f"[supervisor] 📊 Summary of what we completed:")
+            main_logger.info(f"[supervisor]    {'✅' if state.is_financial_data_collected() else '⏭️'} Financial data collection")
+            main_logger.info(f"[supervisor]    {'✅' if state.is_news_analyzed() else '⏭️'} News analysis")
+            main_logger.info(f"[supervisor]    {'✅' if state.is_model_generated() else '⏭️'} Financial model generation")
+            main_logger.info(f"[supervisor]    {'✅' if state.is_report_generated() else '⏭️'} Professional analyst report")
+            main_logger.info(f"[supervisor] 💼 Your comprehensive stock analysis is ready!")
+            main_logger.info("")
+        
+        # Force flush
+        for handler in main_logger.logger.handlers:
+            handler.flush()
+            
+    except Exception:
+        pass
 
 
 def route_workflow(state: FinancialState, config: dict = None, logger=None) -> Literal[
@@ -131,67 +225,8 @@ def route_workflow(state: FinancialState, config: dict = None, logger=None) -> L
     state.current_stage = PipelineStage.COMPLETED
     state.next_agent = AgentNode.END
     
-    # Log workflow completion with [supervisor] prefix and generate comprehensive summary
-    try:
-        main_logger = get_logger()
-        if main_logger:
-            # Generate LLM-powered comprehensive summary
-            summary_prompt = f"""You are a senior financial analyst completing a comprehensive stock analysis workflow for {state.ticker} ({state.company_name}).
-
-You have just completed the following analysis stages:
-
-**Financial Data Collection:**
-{f"✅ Collected comprehensive financial data including {len(state.financial_data.raw_data) if state.financial_data and state.financial_data.raw_data else 0} data points" if state.is_financial_data_collected() else "⏭️ Skipped"}
-
-**Financial Model Generation:**
-{f"✅ Generated {state.financial_model.model_type} model saved to {state.financial_model.excel_path}" if state.is_model_generated() else "⏭️ Skipped"}
-
-**News Analysis:**
-{f"✅ Analyzed {state.news_analysis.articles_count} articles, found {len(state.news_analysis.catalysts)} catalysts, {len(state.news_analysis.risks)} risks. Overall sentiment: {state.news_analysis.overall_sentiment}" if state.is_news_analyzed() else "⏭️ Skipped"}
-
-**Report Generation:**
-{f"✅ Generated comprehensive analyst report ({len(state.report.content):,} characters) saved to {state.report.report_path}" if state.is_report_generated() and state.report.content else "⏭️ Skipped"}
-
-**Analysis Path:** {state.analysis_path}
-**Total LLM Cost:** ${state.total_llm_cost:.4f}
-
-Write a natural, conversational summary (4-6 sentences) as if you're briefing a colleague about what was accomplished in this analysis session. Be specific about the findings and deliverables. Make it sound professional yet approachable.
-
-Respond with ONLY the summary text, no JSON or formatting."""
-
-            try:
-                summary_response, summary_cost = get_llm()([
-                    {"role": "system", "content": "You are a senior financial analyst providing a professional summary."},
-                    {"role": "user", "content": summary_prompt}
-                ], temperature=0.7)
-                state.total_llm_cost += summary_cost
-                
-                main_logger.info("")
-                main_logger.info("[supervisor] " + "="*60)
-                main_logger.info("[supervisor] 🎉 WORKFLOW COMPLETED SUCCESSFULLY")
-                main_logger.info("[supervisor] " + "="*60)
-                main_logger.info("")
-                main_logger.info(f"[supervisor] {summary_response.strip()}")
-                main_logger.info("")
-                main_logger.info(f"[supervisor] 📁 Analysis saved to: {state.analysis_path}")
-                main_logger.info(f"[supervisor] 💰 Total LLM cost: ${state.total_llm_cost:.4f}")
-                main_logger.info("")
-                
-            except Exception as e:
-                # Fallback to simple summary if LLM fails
-                main_logger.info(f"[supervisor] 🎉 Perfect! I've finished the analysis for {state.ticker}!")
-                main_logger.info(f"[supervisor] 📊 Summary of what we completed:")
-                main_logger.info(f"[supervisor]    {'✅' if state.is_financial_data_collected() else '⏭️'} Financial data collection")
-                main_logger.info(f"[supervisor]    {'✅' if state.is_news_analyzed() else '⏭️'} News analysis")
-                main_logger.info(f"[supervisor]    {'✅' if state.is_model_generated() else '⏭️'} Financial model generation")
-                main_logger.info(f"[supervisor]    {'✅' if state.is_report_generated() else '⏭️'} Professional analyst report")
-                main_logger.info(f"[supervisor] 💼 Your comprehensive stock analysis is ready!")
-            
-            # Force flush
-            for handler in main_logger.logger.handlers:
-                handler.flush()
-    except Exception:
-        pass
+    # Log workflow completion
+    _log_workflow_completion(state, logger)
     
     return "__end__"
 
@@ -321,57 +356,47 @@ def route_workflow_with_llm(state: FinancialState, config: dict = None, logger=N
                 cleaned_response = cleaned_response[:-3]  # Remove trailing ```
             cleaned_response = cleaned_response.strip()
             
-            # Debug: print what we're trying to parse
-            import sys
-            print(f"[DEBUG] Raw LLM response length: {len(response)}", file=sys.stderr)
-            print(f"[DEBUG] Cleaned response length: {len(cleaned_response)}", file=sys.stderr)
-            print(f"[DEBUG] Response: {repr(cleaned_response)}", file=sys.stderr)
-            
             response_data = json.loads(cleaned_response)
             next_node = response_data.get("next_node")
             reasoning = response_data.get("reasoning", "")
             confidence = response_data.get("confidence", 0.5)
             supervisor_message = response_data.get("supervisor_message", "")
             
-            # Debug: print supervisor_message
-            import sys
-            print(f"[DEBUG] supervisor_message: {repr(supervisor_message[:100] if supervisor_message else 'NONE')}", file=sys.stderr)
-            
             # Validate next_node
             valid_nodes = [
-                "financial_data_agent",
-                "news_analysis_agent",
-                "model_generation_agent",
-                "report_generator_agent",
-                "__end__"
+                AgentNode.FINANCIAL_DATA_AGENT.value,
+                AgentNode.NEWS_ANALYSIS_AGENT.value,
+                AgentNode.MODEL_GENERATION_AGENT.value,
+                AgentNode.REPORT_GENERATOR_AGENT.value,
+                AgentNode.END.value
             ]
             
             if next_node not in valid_nodes:
                 raise ValueError(f"Invalid next_node from LLM: {next_node}")
             
             # Validate that LLM isn't routing to an agent whose work is already complete
-            if next_node == "model_generation_agent" and state.is_model_generated():
+            if next_node == AgentNode.MODEL_GENERATION_AGENT.value and state.is_model_generated():
                 raise ValueError(f"LLM chose model_generation_agent but models already generated. Rejecting.")
-            if next_node == "news_analysis_agent" and state.is_news_analyzed():
+            if next_node == AgentNode.NEWS_ANALYSIS_AGENT.value and state.is_news_analyzed():
                 raise ValueError(f"LLM chose news_analysis_agent but news already analyzed. Rejecting.")
-            if next_node == "financial_data_agent" and state.is_financial_data_collected():
+            if next_node == AgentNode.FINANCIAL_DATA_AGENT.value and state.is_financial_data_collected():
                 raise ValueError(f"LLM chose financial_data_agent but data already collected. Rejecting.")
-            if next_node == "report_generator_agent" and state.is_report_generated():
+            if next_node == AgentNode.REPORT_GENERATOR_AGENT.value and state.is_report_generated():
                 raise ValueError(f"LLM chose report_generator_agent but report already generated. Rejecting.")
             
             # Validate prerequisites are met
-            if next_node == "model_generation_agent" and not state.is_financial_data_collected():
+            if next_node == AgentNode.MODEL_GENERATION_AGENT.value and not state.is_financial_data_collected():
                 raise ValueError(f"LLM chose model_generation_agent but financial data not collected yet. Need financial_data_agent first.")
             
             # CRITICAL: Force model generation before report
-            if next_node == "report_generator_agent" and not state.is_model_generated():
+            if next_node == AgentNode.REPORT_GENERATOR_AGENT.value and not state.is_model_generated():
                 raise ValueError(f"LLM chose report_generator_agent but financial model not generated yet. Need model_generation_agent first.")
             
             # CRITICAL: Force news_analysis to run before report generation
-            if next_node == "report_generator_agent" and not state.is_news_analyzed():
+            if next_node == AgentNode.REPORT_GENERATOR_AGENT.value and not state.is_news_analyzed():
                 raise ValueError(f"LLM chose report_generator_agent but news_analysis not completed yet. Need news_analysis_agent first.")
             
-            if next_node == "report_generator_agent" and not state.is_financial_data_collected():
+            if next_node == AgentNode.REPORT_GENERATOR_AGENT.value and not state.is_financial_data_collected():
                 raise ValueError(f"LLM chose report_generator_agent but no financial data available yet. Need financial_data_agent first.")
             
             # Write the LLM's conversational message to the main info.log with [supervisor] prefix
@@ -407,20 +432,8 @@ def route_workflow_with_llm(state: FinancialState, config: dict = None, logger=N
                     # Force flush to ensure log is written immediately
                     for handler in main_logger.logger.handlers:
                         handler.flush()
-                else:
-                    # If no logger, print to stderr for debugging
-                    import sys
-                    print(f"[DEBUG] main_logger is None! Cannot log supervisor message", file=sys.stderr)
             except Exception as log_error:
-                # Print error to stderr for debugging
-                import sys
-                print(f"[DEBUG] Error logging supervisor message: {log_error}", file=sys.stderr)
-                import traceback
-                traceback.print_exc(file=sys.stderr)
                 # Log the error but don't fail the routing
-                import sys
-                print(f"[WARNING] Failed to log supervisor message: {log_error}", file=sys.stderr)
-                # best-effort logging; do not raise
                 pass
 
             # Log the LLM decision with structured details for machine consumption
@@ -446,90 +459,20 @@ def route_workflow_with_llm(state: FinancialState, config: dict = None, logger=N
             })
             
             # Update state based on routing decision
-            if next_node == "financial_data_agent":
+            if next_node == AgentNode.FINANCIAL_DATA_AGENT.value:
                 state.next_agent = AgentNode.FINANCIAL_DATA_AGENT
-            elif next_node == "news_analysis_agent":
+            elif next_node == AgentNode.NEWS_ANALYSIS_AGENT.value:
                 state.next_agent = AgentNode.NEWS_ANALYSIS_AGENT
-            elif next_node == "model_generation_agent":
+            elif next_node == AgentNode.MODEL_GENERATION_AGENT.value:
                 state.next_agent = AgentNode.MODEL_GENERATION_AGENT
-            elif next_node == "report_generator_agent":
+            elif next_node == AgentNode.REPORT_GENERATOR_AGENT.value:
                 state.next_agent = AgentNode.REPORT_GENERATOR_AGENT
-            else:  # __end__
+            else:  # AgentNode.END.value
                 state.current_stage = PipelineStage.COMPLETED
                 state.next_agent = AgentNode.END
                 
-                # Log workflow completion with [supervisor] prefix and generate comprehensive summary
-                try:
-                    main_logger = get_logger()
-                    if main_logger:
-                        # Generate LLM-powered comprehensive summary focused on stock performance
-                        summary_prompt = f"""You are a senior financial analyst who just completed a comprehensive analysis of {state.ticker} ({state.company_name}).
-
-Based on the analysis results:
-
-**Financial Model:**
-{f"Generated {state.financial_model.model_type} valuation model" if state.is_model_generated() else "Not available"}
-
-**News Analysis:**
-{f"Analyzed {state.news_analysis.articles_count} articles - Overall sentiment: {state.news_analysis.overall_sentiment}. Found {len(state.news_analysis.catalysts)} catalysts and {len(state.news_analysis.risks)} risks." if state.is_news_analyzed() else "Not available"}
-
-**Report:**
-{f"Generated comprehensive analyst report with investment recommendation" if state.is_report_generated() else "Not available"}
-
-Write a 5-6 sentence summary about how {state.ticker} is performing based on this analysis. Focus on:
-1. The investment outlook (positive/negative/mixed)
-2. Key drivers or concerns from the news
-3. Valuation insights
-4. Risk factors
-5. Overall investment recommendation
-
-Be direct and professional. Respond with ONLY the performance summary, no JSON or formatting."""
-
-                        try:
-                            summary_response, summary_cost = get_llm()([
-                                {"role": "system", "content": "You are a senior financial analyst providing a professional summary."},
-                                {"role": "user", "content": summary_prompt}
-                            ], temperature=0.7)
-                            state.total_llm_cost += summary_cost
-                            
-                            main_logger.info("")
-                            main_logger.info("[supervisor] " + "="*60)
-                            main_logger.info("[supervisor] 🎉 WORKFLOW COMPLETED SUCCESSFULLY")
-                            main_logger.info("[supervisor] " + "="*60)
-                            main_logger.info("")
-                            main_logger.info(f"[supervisor] 📊 {state.ticker} Performance Summary:")
-                            main_logger.info(f"[supervisor] {summary_response.strip()}")
-                            main_logger.info("")
-                            main_logger.info(f"[supervisor] 📁 Full analysis saved to: {state.analysis_path}")
-                            main_logger.info(f"[supervisor] 💰 Total LLM cost: ${state.total_llm_cost:.4f}")
-                            main_logger.info("")
-                            
-                        except Exception as e:
-                            # Fallback to simple summary if LLM fails
-                            import sys
-                            print(f"[ERROR] Failed to generate LLM performance summary: {e}", file=sys.stderr)
-                            import traceback
-                            traceback.print_exc(file=sys.stderr)
-                            
-                            main_logger.info("")
-                            main_logger.info(f"[supervisor] 🎉 Perfect! I've finished the analysis for {state.ticker}!")
-                            main_logger.info(f"[supervisor] 📊 Summary of what we completed:")
-                            main_logger.info(f"[supervisor]    {'✅' if state.is_financial_data_collected() else '⏭️'} Financial data collection")
-                            main_logger.info(f"[supervisor]    {'✅' if state.is_news_analyzed() else '⏭️'} News analysis")
-                            main_logger.info(f"[supervisor]    {'✅' if state.is_model_generated() else '⏭️'} Financial model generation")
-                            main_logger.info(f"[supervisor]    {'✅' if state.is_report_generated() else '⏭️'} Professional analyst report")
-                            main_logger.info(f"[supervisor] 💼 Your comprehensive stock analysis is ready!")
-                            main_logger.info("")
-                        
-                        # Force flush
-                        for handler in main_logger.logger.handlers:
-                            handler.flush()
-                except Exception:
-                    import sys
-                    print(f"[ERROR] Outer exception in completion summary generation", file=sys.stderr)
-                    import traceback
-                    traceback.print_exc(file=sys.stderr)
-                    pass
+                # Log workflow completion
+                _log_workflow_completion(state, logger)
             
             return next_node
             
@@ -538,8 +481,5 @@ Be direct and professional. Respond with ONLY the performance summary, no JSON o
         
     except Exception as e:
         # Fall back to deterministic routing
-        import sys
-        error_msg = f"LLM flexible routing failed: {str(e)[:100]}"
-        print(f"⚠️  {error_msg}. Falling back to deterministic routing.", file=sys.stderr)
         state.log_error("supervisor_llm_flexible", str(e), {"fallback": "deterministic routing"})
-        return route_workflow(state, config)
+        return route_workflow(state, config, logger)
