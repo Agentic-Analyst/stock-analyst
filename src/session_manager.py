@@ -2,11 +2,11 @@
 session_manager.py - Session Management for Supervisor Conversations
 
 Provides persistent conversation memory across workflow runs.
-Sessions are stored per-ticker and allow the supervisor to maintain context
-of previous analyses, queries, and routing decisions.
+Sessions are stored per-user and per-ticker, allowing the supervisor to maintain context
+of previous analyses, queries, and routing decisions for each user.
 
 Session Storage Structure:
-    data/sessions/{ticker}/{session_name}.json
+    data/{email}/sessions/{ticker}/{session_name}.json
 
 Session Data Format:
 {
@@ -37,22 +37,24 @@ from typing import Optional, Dict, List, Any
 class SessionManager:
     """Manages persistent conversation sessions for the supervisor."""
     
-    def __init__(self, ticker: str, session_name: Optional[str] = None):
+    def __init__(self, email: str, ticker: str, session_name: Optional[str] = None):
         """
         Initialize session manager.
         
         Args:
+            email: User email (for organizing sessions by user)
             ticker: Stock ticker symbol
             session_name: Name of the session (optional, defaults to 'default')
         """
+        self.email = email.lower()
         self.ticker = ticker.upper()
         self.session_name = session_name or "default"
         
-        # Session directory: data/sessions/{ticker}/
-        self.session_dir = Path("data") / "sessions" / self.ticker
+        # Session directory: data/{email}/sessions/{ticker}/
+        self.session_dir = Path("data") / self.email / "sessions" / self.ticker
         self.session_dir.mkdir(parents=True, exist_ok=True)
         
-        # Session file: data/sessions/{ticker}/{session_name}.json
+        # Session file: data/{email}/sessions/{ticker}/{session_name}.json
         self.session_file = self.session_dir / f"{self.session_name}.json"
         
         # Load existing session or create new one
@@ -88,7 +90,8 @@ class SessionManager:
                         routing_decisions: List[str],
                         completion_status: str,
                         key_findings: Optional[str] = None,
-                        statistics: Optional[Dict] = None) -> None:
+                        statistics: Optional[Dict] = None,
+                        error_message: Optional[str] = None) -> None:
         """
         Add a new conversation to the session history.
         
@@ -96,9 +99,10 @@ class SessionManager:
             user_query: The user's query/instructions for this run
             company_name: Company name
             routing_decisions: List of agents that were routed to
-            completion_status: Status of the workflow (completed, failed, etc.)
+            completion_status: Status of the workflow (completed, failed, in_progress, etc.)
             key_findings: Brief summary of findings (optional)
             statistics: Workflow statistics (optional)
+            error_message: Error message if the workflow failed (optional)
         """
         conversation_entry = {
             "timestamp": datetime.now().isoformat(),
@@ -106,7 +110,8 @@ class SessionManager:
             "routing_decisions": routing_decisions,
             "completion_status": completion_status,
             "key_findings": key_findings,
-            "statistics": statistics
+            "statistics": statistics,
+            "error_message": error_message
         }
         
         self.session_data["conversation_history"].append(conversation_entry)
@@ -114,6 +119,83 @@ class SessionManager:
         self.session_data["last_updated"] = datetime.now().isoformat()
         
         # Save to disk
+        self.save()
+    
+    def start_conversation(self, user_query: str, company_name: str) -> int:
+        """
+        Start a new conversation and save it immediately.
+        This ensures the user query is saved even if the program crashes.
+        
+        Args:
+            user_query: The user's query/instructions for this run
+            company_name: Company name
+            
+        Returns:
+            Index of the conversation in the history (0-based)
+        """
+        conversation_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "user_query": user_query,
+            "routing_decisions": [],
+            "completion_status": "in_progress",
+            "key_findings": None,
+            "statistics": None,
+            "error_message": None
+        }
+        
+        self.session_data["conversation_history"].append(conversation_entry)
+        self.session_data["company_name"] = company_name
+        self.session_data["last_updated"] = datetime.now().isoformat()
+        
+        # Save to disk immediately
+        self.save()
+        
+        return len(self.session_data["conversation_history"]) - 1
+    
+    def update_conversation(self, 
+                          conversation_index: int,
+                          routing_decisions: Optional[List[str]] = None,
+                          completion_status: Optional[str] = None,
+                          key_findings: Optional[str] = None,
+                          statistics: Optional[Dict] = None,
+                          error_message: Optional[str] = None,
+                          analysis_results: Optional[Dict] = None) -> None:
+        """
+        Update an in-progress conversation with new information.
+        This is called after each agent completes or when workflow state changes.
+        
+        Args:
+            conversation_index: Index of the conversation to update
+            routing_decisions: Updated list of agents (optional)
+            completion_status: Updated status (optional)
+            key_findings: Updated findings (optional)
+            statistics: Updated statistics (optional)
+            error_message: Error message if the workflow failed (optional)
+            analysis_results: Rich context about analysis results for LLM continuation (optional)
+        """
+        if conversation_index < 0 or conversation_index >= len(self.session_data["conversation_history"]):
+            print(f"⚠️  Warning: Invalid conversation index {conversation_index}")
+            return
+        
+        conversation = self.session_data["conversation_history"][conversation_index]
+        
+        # Update fields that are provided
+        if routing_decisions is not None:
+            conversation["routing_decisions"] = routing_decisions
+        if completion_status is not None:
+            conversation["completion_status"] = completion_status
+        if key_findings is not None:
+            conversation["key_findings"] = key_findings
+        if statistics is not None:
+            conversation["statistics"] = statistics
+        if error_message is not None:
+            conversation["error_message"] = error_message
+        if analysis_results is not None:
+            conversation["analysis_results"] = analysis_results
+        
+        self.session_data["last_updated"] = datetime.now().isoformat()
+        
+        # Save to disk immediately
         self.save()
     
     def get_conversation_history(self, limit: int = 3) -> List[Dict[str, Any]]:

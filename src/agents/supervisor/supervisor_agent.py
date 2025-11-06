@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-supervisor_agent.py - Supervisor Agent Entry Point
+supervisor_agent.py - Supervisor Agent for Chatbot Integration
 
 This is the main entry point for running the LLM-powered supervisor workflow
 that uses the Supervisor Agent to intelligently route between task agents.
 
 The supervisor system provides:
+- **Automatic ticker extraction** from natural language prompts
 - LLM-powered dynamic routing (non-sequential, intelligent decisions)
+- Session management for multi-turn chatbot conversations
 - Prerequisite validation (prevents invalid routing)
 - Deterministic fallback (when LLM fails or makes invalid choices)
 - Complete observability (routing decisions, agent execution, results)
@@ -14,6 +16,19 @@ The supervisor system provides:
 - Workflow completion detection (reaches __end__ node)
 
 Workflow Architecture:
+┌─────────────────────────────────────────────────────────────────┐
+│                User Prompt (Natural Language)                   │
+│        "Analyze Apple stock" or "What's NVDA's outlook?"        │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+        ┌────────────────────────────────────────┐
+        │      Ticker Extraction (LLM)           │
+        │  - Extracts ticker symbol (AAPL, NVDA) │
+        │  - Identifies company name             │
+        └────────────────────────────────────────┘
+                              │
+                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Supervisor Agent (LLM)                     │
 │  - Reads current state                                          │
@@ -40,42 +55,46 @@ Workflow Architecture:
         │  - Return to supervisor                │
         └────────────────────────────────────────┘
 
-▶ Usage Examples:
-    # Run LLM-powered workflow for a ticker (simplest)
-    python -m src.agents.supervisor.supervisor_agent AAPL
+▶ Usage (via main.py):
+    # Natural language prompt - ticker auto-extracted
+    python main.py --pipeline supervisor --prompt "Analyze Apple stock"
     
-    # With custom company name and email
-    python -m src.agents.supervisor.supervisor_agent NVDA --company "NVIDIA Corporation" --email user@example.com
+    # With email and timestamp
+    python main.py --pipeline supervisor --prompt "What's NVDA's outlook?" --email user@example.com --timestamp 20250105_120000
     
-    # Use Claude Sonnet for routing and analysis
-    python -m src.agents.supervisor.supervisor_agent AAPL --llm claude-3.5-sonnet
+    # Session management for chatbot continuity
+    python main.py --pipeline supervisor --prompt "Tell me about Tesla" --session my_session
+
+▶ Programmatic Usage (for chatbot):
+    from src.agents.supervisor.supervisor_agent import SupervisorWorkflowRunner
     
-    # Limit maximum iterations (default: 10)
-    python -m src.agents.supervisor.supervisor_agent MSFT --max-iterations 6
+    # First request (auto-generates session)
+    runner = SupervisorWorkflowRunner(
+        email="user@example.com",
+        timestamp="20250105_120000",
+        user_prompt="Analyze Apple stock"  # Ticker extracted automatically
+    )
+    results = await runner.run_workflow()
+    session_id = results["session_name"]  # Save for next request
     
-    # Custom timestamp for analysis folder
-    python -m src.agents.supervisor.supervisor_agent TSLA --timestamp 20250102_153000
-    
-    # List available LLM models
-    python -m src.agents.supervisor.supervisor_agent --list-llms
+    # Follow-up request (reuse session)
+    runner = SupervisorWorkflowRunner(
+        email="user@example.com",
+        timestamp="20250105_120500",
+        user_prompt="What about the earnings?",
+        session_name=session_id  # Resume conversation
+    )
+    results = await runner.run_workflow()
 """
 
 from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import json
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional
-
-# Load environment variables from .env file
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    print("⚠️  python-dotenv not installed. Environment variables from .env won't be loaded.")
-    print("   Install with: pip install python-dotenv")
-
 from src.logger import setup_logger
 from src.path_utils import get_analysis_path, ensure_analysis_paths
 from src.llms.config import init_llm, list_models, list_available_models
@@ -88,67 +107,48 @@ from src.agents.supervisor.task_agents.financial_data_agent import financial_dat
 from src.agents.supervisor.task_agents.news_analysis_agent import news_analysis_agent
 from src.agents.supervisor.task_agents.model_generation_agent import model_generation_agent
 from src.agents.supervisor.task_agents.report_generator_agent import report_generator_agent
+from src.llms.config import get_llm
+import yfinance as yf
 
+from dotenv import load_dotenv
+load_dotenv()
 
 class SupervisorWorkflowRunner:
     """
     Orchestrates the LLM-powered agentic workflow with supervisor routing.
     """
     
-    def __init__(self, 
-                 ticker: str, 
-                 company_name: str, 
+    def __init__(self,
                  email: str,
-                 user_query: Optional[str] = None,
-                 session_name: Optional[str] = None,
-                 timestamp: Optional[str] = None,
+                 timestamp: str,
+                 user_prompt: str,
+                 session_id: Optional[str] = None,
                  max_iterations: int = 10):
         """
         Initialize the supervisor workflow runner.
         
         Args:
-            ticker: Stock ticker symbol (e.g., 'NVDA')
-            company_name: Full company name (e.g., 'NVIDIA')
             email: User's email for data organization
-            user_query: Custom user query/instructions for the supervisor (optional)
-            session_name: Session name for persistent conversation (optional)
-            timestamp: Optional custom timestamp (YYYYMMDD_HHMMSS)
+            timestamp: Timestamp for this analysis run (YYYYMMDD_HHMMSS)
+            user_prompt: User's query/instructions (e.g., "Analyze Apple stock")
+            session_id: Session ID for persistent conversation (optional)
+                         If None, auto-generates unique session ID: {ticker}_{timestamp}
             max_iterations: Maximum workflow iterations to prevent infinite loops
         """
-        self.ticker = ticker.upper()
-        self.company_name = company_name
         self.email = email.lower()
         self.max_iterations = max_iterations
-        self.user_query = user_query or f"Analyze {self.ticker} ({self.company_name})"
-        self.session_name = session_name
+        self.user_prompt = user_prompt
+        self.timestamp = timestamp
+        self.session_name = session_id
         
-        # Initialize session manager if session provided
+        # Ticker and company will be extracted in first supervisor routing call
+        # These will be set by _initialize_after_ticker_extraction()
+        self.ticker = None
+        self.company_name = None
+        self.analysis_path = None
+        self.logger = None
+        self.state = None
         self.session_manager = None
-        if session_name:
-            self.session_manager = SessionManager(ticker=self.ticker, session_name=session_name)
-        
-        # Use provided timestamp or generate new one
-        if timestamp:
-            self.timestamp = timestamp
-        else:
-            self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Generate analysis path
-        self.analysis_path = get_analysis_path(self.email, self.ticker, self.timestamp)
-        ensure_analysis_paths(self.analysis_path)
-        
-        # Setup logging - single info.log
-        self.logger = setup_logger(self.ticker, base_path=self.analysis_path)
-        
-        # Initialize state (FinancialState requires: user_query, ticker, company_name, email)
-        self.state = FinancialState(
-            user_query=self.user_query,
-            ticker=self.ticker,
-            company_name=self.company_name,
-            email=self.email,
-            analysis_path=str(self.analysis_path),
-            timestamp=self.timestamp
-        )
         
         # Workflow statistics
         self.stats = {
@@ -159,6 +159,58 @@ class SupervisorWorkflowRunner:
             "completion_status": "not_started"
         }
         
+        # Track current conversation index for progressive saving
+        self.current_conversation_index = None
+    
+    def _initialize_after_ticker_extraction(self, ticker: str, company_name: str = None):
+        """
+        Complete initialization after ticker is extracted from first supervisor call.
+        
+        Args:
+            ticker: Stock ticker symbol (e.g., 'AAPL')
+            company_name: Company name (optional - will be fetched from yfinance if not provided)
+        """
+        self.ticker = ticker.upper()
+        
+        # Fetch company name from yfinance if not provided
+        if company_name is None:
+            try:
+                stock = yf.Ticker(self.ticker)
+                info = stock.info
+                self.company_name = info.get('longName') or info.get('shortName') or self.ticker
+                print(f"✅ Fetched company name from yfinance: {self.company_name}")
+            except Exception as e:
+                print(f"⚠️  Failed to fetch company name from yfinance: {e}")
+                self.company_name = self.ticker
+        else:
+            self.company_name = company_name
+        
+        # Auto-generate session name if not provided (for chatbot continuity)
+        if self.session_name is None:
+            # Generate unique session ID using the timestamp: ticker_timestamp
+            self.session_name = f"{self.ticker.lower()}_{self.timestamp}"
+        
+        # Initialize session manager (always enabled for chatbot support)
+        # Sessions stored under user's email: data/{email}/sessions/{ticker}/{session_name}.json
+        self.session_manager = SessionManager(email=self.email, ticker=self.ticker, session_name=self.session_name)
+        
+        # Generate analysis path
+        self.analysis_path = get_analysis_path(self.email, self.ticker, self.timestamp)
+        ensure_analysis_paths(self.analysis_path)
+        
+        # Setup logging - single info.log with session tracking
+        self.logger = setup_logger(self.ticker, base_path=self.analysis_path, session_name=self.session_name)
+        
+        # Initialize state (FinancialState requires: user_prompt, ticker, company_name, email)
+        self.state = FinancialState(
+            user_query=self.user_prompt,
+            ticker=self.ticker,
+            company_name=self.company_name,
+            email=self.email,
+            analysis_path=str(self.analysis_path),
+            timestamp=self.timestamp
+        )
+        
         self.logger.info("=" * 80)
         self.logger.info(f"[SUPERVISOR] 🎯 SUPERVISOR WORKFLOW INITIALIZED")
         self.logger.info("=" * 80)
@@ -167,11 +219,99 @@ class SupervisorWorkflowRunner:
         self.logger.info(f"[SUPERVISOR]    Analysis Path: {self.analysis_path}")
         self.logger.info(f"[SUPERVISOR]    Max Iterations: {self.max_iterations}")
         self.logger.info(f"[SUPERVISOR]    Timestamp: {self.timestamp}")
-        if self.session_name:
-            self.logger.info(f"[SUPERVISOR]    Session: {self.session_name}")
-            conversation_count = len(self.session_manager.session_data.get("conversation_history", []))
-            self.logger.info(f"[SUPERVISOR]    Previous Conversations: {conversation_count}")
+        self.logger.info(f"[SUPERVISOR]    Session: {self.session_name}")
+        conversation_count = len(self.session_manager.session_data.get("conversation_history", []))
+        if conversation_count > 0:
+            self.logger.info(f"[SUPERVISOR]    📚 Resuming session with {conversation_count} previous conversations")
+        else:
+            self.logger.info(f"[SUPERVISOR]    🆕 New session created")
         self.logger.info("=" * 80)
+        
+        # Start a new conversation immediately - saves user query even if program crashes
+        self.current_conversation_index = self.session_manager.start_conversation(
+            user_query=self.user_prompt,
+            company_name=self.company_name
+        )
+        self.logger.info(f"[SUPERVISOR] 💾 Session conversation started (will be saved progressively)")
+        self.logger.info("")
+    
+    def _extract_ticker_and_route(self, user_prompt: str, conversation_context: Optional[str] = None) -> tuple[str, Optional[str], str, str, Optional[str]]:
+        """
+        First supervisor call: Extract ticker from prompt AND decide first routing.
+        
+        Args:
+            user_prompt: User's natural language query
+            conversation_context: Previous conversation history (optional)
+            
+        Returns:
+            Tuple of (ticker, company_name, next_agent, reasoning, direct_answer)
+            Note: company_name will be None - fetched from yfinance in initialization
+                  direct_answer will be populated if next_agent is __end__
+        """
+        
+        # Load combined prompt for ticker extraction + routing
+        prompt_file = Path("prompts/ticker_extraction_and_routing.md")
+        prompt_template = prompt_file.read_text()
+        
+        # Format prompt
+        prompt = prompt_template.format(
+            user_prompt=user_prompt,
+            conversation_context=conversation_context or "No previous conversation"
+        )
+        
+        # Call LLM to extract ticker AND decide first agent
+        response, cost = get_llm()([
+            {"role": "system", "content": "You are a financial analysis supervisor. Extract ticker and decide first routing."},
+            {"role": "user", "content": prompt}
+        ], temperature=0)
+        
+        try:
+            # Try to extract JSON from response (LLM might wrap it in markdown code blocks)
+            response_text = response.strip()
+            
+            # Remove markdown code blocks if present
+            if response_text.startswith("```json"):
+                response_text = response_text[7:]  # Remove ```json
+            if response_text.startswith("```"):
+                response_text = response_text[3:]  # Remove ```
+            if response_text.endswith("```"):
+                response_text = response_text[:-3]  # Remove trailing ```
+            
+            response_text = response_text.strip()
+            
+            # Parse JSON response
+            result = json.loads(response_text)
+            
+            # Validate response - ticker and next_agent required
+            if "ticker" not in result or "next_agent" not in result:
+                raise ValueError("LLM response missing required fields (ticker, next_agent)")
+            
+            # Extract reasoning and direct_answer (will be logged after logger is initialized)
+            reasoning = result.get("reasoning", "No reasoning provided")
+            direct_answer = result.get("direct_answer", None)
+            
+            # Return ticker, next_agent, reasoning, and direct_answer
+            return result["ticker"], None, result["next_agent"], reasoning, direct_answer
+            
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Failed to parse LLM response as JSON. "
+                f"Error: {e}. "
+                f"Response: {response[:200]}"
+            )
+        except Exception as e:
+            raise ValueError(
+                f"Failed to extract ticker and route from prompt: '{user_prompt}'. "
+                f"Error: {e}. "
+                f"Please provide a clearer query mentioning the company name or ticker symbol."
+            )
+            
+        except Exception as e:
+            raise ValueError(
+                f"Failed to extract ticker and route from prompt: '{user_prompt}'. "
+                f"Error: {e}. "
+                f"Please provide a clearer query mentioning the company name or ticker symbol."
+            )
     
     async def run_workflow(self) -> Dict:
         """
@@ -185,81 +325,144 @@ class SupervisorWorkflowRunner:
         5. Repeat until __end__ or max iterations
         
         Returns:
-            Dictionary with workflow results and statistics
+            Dictionary with workflow results including:
+            - ticker: Stock ticker symbol
+            - company_name: Company name
+            - session_name: Session ID for chatbot continuity (frontend should save this)
+            - statistics: Workflow execution statistics
+            - final_state: Completion status of all pipeline stages
         """
-        self.logger.info("[SUPERVISOR] ▶ STARTING AGENTIC WORKFLOW")
-        self.logger.info("")
-        
-        # Show conversation history if in a session
-        if self.session_manager:
-            history_summary = self.session_manager.get_conversation_summary(limit=3)
-            if "No previous" not in history_summary:
-                self.logger.info("[SUPERVISOR] 📚 CONTINUING FROM PREVIOUS CONVERSATION:")
-                for line in history_summary.split('\n'):
-                    if line.strip():
-                        self.logger.info(f"[SUPERVISOR]    {line}")
-                self.logger.info("")
-        
-        # Log user query if custom
-        if self.user_query != f"Analyze {self.ticker} ({self.company_name})":
-            self.logger.info("[SUPERVISOR] 💬 USER QUERY:")
-            self.logger.info(f"[SUPERVISOR]    \"{self.user_query}\"")
-            self.logger.info("")
+        print(f"🔍 Starting workflow with prompt: '{self.user_prompt}'")
         
         iteration = 0
+        next_agent = None
         
         while iteration < self.max_iterations:
             iteration += 1
             self.stats["iterations"] = iteration
             
-            self.logger.info("─" * 80)
-            self.logger.info(f"[SUPERVISOR] 📍 ITERATION {iteration}/{self.max_iterations}")
-            self.logger.info("─" * 80)
-            
-            # Step 1: Supervisor routing decision
-            self.logger.info("[SUPERVISOR] 🧠 Supervisor evaluating current state...")
-            self.logger.info(f"[SUPERVISOR] 📍 ITERATION {iteration}/{self.max_iterations}")
-            self.logger.info(f"[SUPERVISOR] Current state: financial_data={self.state.is_financial_data_collected()}, model={self.state.is_model_generated()}, news={self.state.is_news_analyzed()}, report={self.state.is_report_generated()}")
-            
-            try:
-                # Use LLM-powered routing
-                # Pass conversation history if in a session
-                conversation_context = None
-                if self.session_manager:
-                    conversation_context = self.session_manager.get_conversation_summary(limit=3)
+            # FIRST ITERATION: Extract ticker + route in one LLM call
+            if iteration == 1:
+                # Print before logger is initialized (logger not available yet)
+                print("[SUPERVISOR] 📍 ITERATION 1: Extracting ticker and determining first agent...")
                 
-                next_agent = route_workflow_with_llm(
-                    self.state, 
-                    logger=self.logger,
-                    conversation_history=conversation_context
-                )
+                try:
+                    # Load conversation context BEFORE ticker extraction
+                    # This allows LLM to infer ticker from previous conversations
+                    conversation_context = None
+                    if self.session_name:
+                        try:
+                            # Extract ticker from session_id to load the session file
+                            # Format: ticker_timestamp (e.g., nvda_112)
+                            parts = self.session_name.split('_')
+                            if len(parts) >= 2:
+                                temp_ticker = parts[0].upper()
+                                # Create temporary session manager to load history
+                                from src.session_manager import SessionManager
+                                temp_session = SessionManager(
+                                    email=self.email,
+                                    ticker=temp_ticker,
+                                    session_name=self.session_name
+                                )
+                                conversation_context = temp_session.get_conversation_summary(limit=3)
+                                print(f"[SUPERVISOR] 📚 Loaded conversation context from session '{self.session_name}'")
+                        except Exception as e:
+                            print(f"[SUPERVISOR] ⚠️  Could not load session context: {e}")
+                    
+                    # Combined ticker extraction + routing
+                    # LLM will use conversation context to infer ticker if needed
+                    ticker, company_name, next_agent, reasoning, direct_answer = self._extract_ticker_and_route(
+                        self.user_prompt,
+                        conversation_context
+                    )
+                    
+                    # Validate ticker
+                    if not ticker or ticker.strip() == "":
+                        raise ValueError(
+                            "Unable to determine ticker. "
+                            "For follow-up questions, ensure you're using the same session-id and the session contains previous analysis."
+                        )
+                    
+                    # Initialize everything now that we have ticker
+                    # Note: company_name is None, will be fetched from yfinance
+                    print(f"[SUPERVISOR] ✅ Identified ticker: {ticker}")
+                    print(f"[SUPERVISOR] ✅ First agent: {next_agent}")
+                    
+                    self._initialize_after_ticker_extraction(ticker, company_name)
+                    
+                    # Now logger is available - log system messages and LLM reasoning
+                    self.logger.info("[SUPERVISOR] ▶ STARTING AGENTIC WORKFLOW")
+                    self.logger.info("")
+                    self.logger.info("[SUPERVISOR] 💬 USER QUERY:")
+                    self.logger.info(f"[SUPERVISOR]    \"{self.user_prompt}\"")
+                    self.logger.info("")
+                    self.logger.info("[SUPERVISOR] 🧠 Initial Analysis & Routing Decision:")
+                    self.logger.info(f"[LLM] {reasoning}")
+                    self.logger.info(f"[SUPERVISOR] → Routing to: {next_agent}")
+                    self.logger.info("")
+                    
+                    # If this is a direct answer (follow-up question), log it and end workflow
+                    if next_agent == "__end__" and direct_answer:
+                        self.logger.info("")
+                        self.logger.info("[SUPERVISOR] 💡 DIRECT RESPONSE (from conversation context):")
+                        self.logger.info("")
+                        self.logger.info(f"[LLM] {direct_answer}")
+                        self.logger.info("")
+                        self.stats["completion_status"] = "completed"
+                        # Mark this as completed immediately - no agents needed
+                        break
+                    
+                except Exception as e:
+                    print(f"[SUPERVISOR] ❌ Failed to extract ticker: {e}")
+                    raise
+                    
+            else:
+                # SUBSEQUENT ITERATIONS: Normal routing
+                self.logger.info("─" * 80)
+                self.logger.info(f"[SUPERVISOR] 📍 ITERATION {iteration}/{self.max_iterations}")
+                self.logger.info("─" * 80)
                 
-                routing_decision = {
-                    "iteration": iteration,
-                    "next_agent": next_agent,
-                    "timestamp": datetime.now().isoformat()
-                }
-                self.stats["routing_decisions"].append(routing_decision)
+                # Step 1: Supervisor routing decision (system log)
+                self.logger.info("[SUPERVISOR] 🧠 Supervisor evaluating current state...")
+                self.logger.info(f"[SUPERVISOR] Current state: financial_data={self.state.is_financial_data_collected()}, model={self.state.is_model_generated()}, news={self.state.is_news_analyzed()}, report={self.state.is_report_generated()}")
                 
-                self.logger.info(f"[SUPERVISOR] 📌 Routing to: {next_agent}")
-                
-            except Exception as e:
-                self.logger.warning(f"[SUPERVISOR] ⚠️  LLM routing failed: {e}")
-                self.logger.info("[SUPERVISOR] 🔄 Falling back to deterministic routing...")
-                
-                # Fallback to deterministic routing
-                next_agent = route_workflow(self.state, logger=self.logger)
-                
-                routing_decision = {
-                    "iteration": iteration,
-                    "next_agent": next_agent,
-                    "fallback": True,
-                    "error": str(e),
-                    "timestamp": datetime.now().isoformat()
-                }
-                self.stats["routing_decisions"].append(routing_decision)
-                
-                self.logger.info(f"[SUPERVISOR] 📌 Fallback routing to: {next_agent}")
+                try:
+                    # Use LLM-powered routing (will log [LLM] messages internally)
+                    # Pass conversation history if in a session
+                    conversation_context = None
+                    if self.session_manager:
+                        conversation_context = self.session_manager.get_conversation_summary(limit=3)
+                    
+                    next_agent = route_workflow_with_llm(
+                        self.state, 
+                        logger=self.logger,
+                        conversation_history=conversation_context
+                    )
+                    
+                    routing_decision = {
+                        "iteration": iteration,
+                        "next_agent": next_agent,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    self.stats["routing_decisions"].append(routing_decision)
+                    
+                except Exception as e:
+                    self.logger.warning(f"[SUPERVISOR] ⚠️  LLM routing failed: {e}")
+                    self.logger.info("[SUPERVISOR] 🔄 Falling back to deterministic routing...")
+                    
+                    # Fallback to deterministic routing
+                    next_agent = route_workflow(self.state, logger=self.logger)
+                    
+                    routing_decision = {
+                        "iteration": iteration,
+                        "next_agent": next_agent,
+                        "fallback": True,
+                        "error": str(e),
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    self.stats["routing_decisions"].append(routing_decision)
+                    
+                    self.logger.info(f"[SUPERVISOR] 📌 Fallback routing to: {next_agent}")
             
             # Step 2: Check for workflow completion
             if next_agent == "__end__":
@@ -291,7 +494,7 @@ class SupervisorWorkflowRunner:
                     self.stats["completion_status"] = "failed"
                     break
                 
-                # Log agent start
+                # Log agent start (system log)
                 self.logger.info(f"[SUPERVISOR] 🚀 Starting {next_agent} (iteration {iteration})")
                 
                 # Execute agent (async)
@@ -309,13 +512,25 @@ class SupervisorWorkflowRunner:
                 self.logger.info("")
                 self.logger.info(f"[SUPERVISOR] ✅ Agent {next_agent} completed in {agent_duration:.2f}s")
                 
-                # Log state after agent execution
+                # Log state after agent execution (system logs)
                 self.logger.info(f"[SUPERVISOR] 📊 State after {next_agent}:")
                 self.logger.info(f"[SUPERVISOR]    - Financial data collected: {self.state.is_financial_data_collected()}")
                 self.logger.info(f"[SUPERVISOR]    - Model generated: {self.state.is_model_generated()}")
                 self.logger.info(f"[SUPERVISOR]    - News analyzed: {self.state.is_news_analyzed()}")
                 self.logger.info(f"[SUPERVISOR]    - Report generated: {self.state.is_report_generated()}")
                 self.logger.info(f"[SUPERVISOR]    - Current stage: {self.state.current_stage.value}")
+                
+                # Update session with progress after each agent completes
+                routing_decisions = [agent["agent"] for agent in self.stats["agents_executed"]]
+                self.session_manager.update_conversation(
+                    conversation_index=self.current_conversation_index,
+                    routing_decisions=routing_decisions,
+                    completion_status="in_progress",
+                    statistics={
+                        "iterations": self.stats["iterations"],
+                        "agents_count": len(self.stats["agents_executed"])
+                    }
+                )
                 
                 # Check for errors in state
                 if self.state.last_error:
@@ -324,23 +539,51 @@ class SupervisorWorkflowRunner:
                 if self.state.current_stage == PipelineStage.FAILED:
                     self.logger.error(f"[SUPERVISOR] ❌ Workflow failed during {next_agent}")
                     self.stats["completion_status"] = "failed"
+                    
+                    # Save session with failure state
+                    if self.session_manager and self.current_conversation_index is not None:
+                        routing_decisions = [agent["agent"] for agent in self.stats["agents_executed"]]
+                        self.session_manager.update_conversation(
+                            conversation_index=self.current_conversation_index,
+                            routing_decisions=routing_decisions,
+                            completion_status="failed",
+                            error_message=self.state.last_error or f"Workflow failed during {next_agent}",
+                            statistics={
+                                "iterations": self.stats["iterations"],
+                                "agents_count": len(self.stats["agents_executed"])
+                            }
+                        )
                     break
                 
                 self.logger.info("")
                 
             except Exception as e:
-                self.logger.error(f"❌ Agent execution failed: {e}")
-                self.logger.error(f"   Agent: {next_agent}")
+                self.logger.error(f"[SUPERVISOR] ❌ Agent execution failed: {e}")
+                self.logger.error(f"[SUPERVISOR]    Agent: {next_agent}")
                 import traceback
-                self.logger.error(traceback.format_exc())
+                self.logger.error(f"[SUPERVISOR] {traceback.format_exc()}")
                 self.stats["completion_status"] = "failed"
+                
+                # Save session with error state
+                if self.session_manager and self.current_conversation_index is not None:
+                    routing_decisions = [agent["agent"] for agent in self.stats["agents_executed"]]
+                    self.session_manager.update_conversation(
+                        conversation_index=self.current_conversation_index,
+                        routing_decisions=routing_decisions,
+                        completion_status="failed",
+                        error_message=f"Agent {next_agent} execution failed: {str(e)}",
+                        statistics={
+                            "iterations": self.stats["iterations"],
+                            "agents_count": len(self.stats["agents_executed"])
+                        }
+                    )
                 break
         
         # Check if we hit max iterations
         if iteration >= self.max_iterations and next_agent != "__end__":
             self.logger.warning("")
             self.logger.warning("=" * 80)
-            self.logger.warning(f"⚠️  WORKFLOW STOPPED: Reached max iterations ({self.max_iterations})")
+            self.logger.warning(f"[SUPERVISOR] ⚠️  WORKFLOW STOPPED: Reached max iterations ({self.max_iterations})")
             self.logger.warning("=" * 80)
             self.stats["completion_status"] = "max_iterations_reached"
         
@@ -348,27 +591,74 @@ class SupervisorWorkflowRunner:
         self.stats["end_time"] = datetime.now()
         self.stats["total_duration"] = (self.stats["end_time"] - self.stats["start_time"]).total_seconds()
         
-        # Save session data if using sessions
-        if self.session_manager:
+        # Finalize session data with completion status
+        if self.session_manager and self.current_conversation_index is not None:
             # Extract routing decisions from stats
             routing_decisions = [agent["agent"] for agent in self.stats["agents_executed"]]
             
             # Generate key findings summary (brief)
             key_findings = None
+            error_message = None
+            analysis_results = None
+            
             if self.stats["completion_status"] == "completed":
                 key_findings = f"Completed analysis in {len(routing_decisions)} steps. "
                 if self.state.is_report_generated():
                     key_findings += "Generated comprehensive report. "
                 if self.state.is_news_analyzed():
                     key_findings += f"Analyzed {self.state.news_analysis.articles_count if self.state.news_analysis else 0} articles."
+                
+                # Extract rich context for LLM continuation
+                analysis_results = {
+                    "data_collected": {
+                        "financial_data": self.state.is_financial_data_collected(),
+                        "model_generated": self.state.is_model_generated(),
+                        "news_analyzed": self.state.is_news_analyzed(),
+                        "report_generated": self.state.is_report_generated()
+                    }
+                }
+                
+                # Add financial model details if available
+                if self.state.financial_model:
+                    analysis_results["valuation"] = {
+                        "model_type": self.state.financial_model.model_type,
+                        "fair_value": self.state.financial_model.fair_value,
+                        "current_price": self.state.financial_model.current_price,
+                        "upside_downside": self.state.financial_model.upside_downside_pct
+                    }
+                
+                # Add news analysis summary if available
+                if self.state.news_analysis:
+                    analysis_results["news_summary"] = {
+                        "articles_analyzed": self.state.news_analysis.articles_count,
+                        "overall_sentiment": self.state.news_analysis.overall_sentiment,
+                        "catalysts_count": len(self.state.news_analysis.catalysts) if self.state.news_analysis.catalysts else 0,
+                        "risks_count": len(self.state.news_analysis.risks) if self.state.news_analysis.risks else 0,
+                        "top_catalysts": self.state.news_analysis.catalysts[:3] if self.state.news_analysis.catalysts else [],
+                        "top_risks": self.state.news_analysis.risks[:3] if self.state.news_analysis.risks else []
+                    }
+                
+                # Add report details if available
+                if self.state.report:
+                    analysis_results["report"] = {
+                        "report_type": self.state.report.report_type,
+                        "report_path": self.state.report.report_path,
+                        "generated_at": self.state.report.generated_at.isoformat() if self.state.report.generated_at else None,
+                        "content_length": len(self.state.report.content) if self.state.report.content else 0
+                    }
+                
+            elif self.stats["completion_status"] == "failed":
+                error_message = self.state.last_error or "Workflow failed during execution"
+                key_findings = f"Failed after {len(routing_decisions)} steps"
             
-            # Add to session history
-            self.session_manager.add_conversation(
-                user_query=self.user_query,
-                company_name=self.company_name,
+            # Update the conversation with final state
+            self.session_manager.update_conversation(
+                conversation_index=self.current_conversation_index,
                 routing_decisions=routing_decisions,
                 completion_status=self.stats["completion_status"],
                 key_findings=key_findings,
+                error_message=error_message,
+                analysis_results=analysis_results,
                 statistics={
                     "iterations": self.stats["iterations"],
                     "duration": self.stats["total_duration"],
@@ -376,18 +666,25 @@ class SupervisorWorkflowRunner:
                 }
             )
             
-            self.logger.info(f"💾 Session '{self.session_name}' saved with conversation history")
+            conversation_count = len(self.session_manager.session_data.get("conversation_history", []))
+            self.logger.info(f"💾 Session '{self.session_name}' saved with {conversation_count} total conversations")
         
-        # Generate LLM-powered performance summary if workflow completed successfully
-        if self.stats["completion_status"] == "completed":
+        # Generate LLM-powered performance summary ONLY if:
+        # 1. Workflow completed successfully
+        # 2. At least one agent was executed (not a direct answer)
+        if self.stats["completion_status"] == "completed" and len(self.stats["agents_executed"]) > 0:
             self._generate_performance_summary()
         
         # Log final summary
         self._log_workflow_summary()
         
+        # Signal program completion with session ID for frontend
+        self.logger.program_end()
+        
         return {
             "ticker": self.ticker,
             "company_name": self.company_name,
+            "session_name": self.session_name,  # Return session ID for frontend tracking
             "statistics": self.stats,
             "final_state": {
                 "financial_data_collected": self.state.is_financial_data_collected(),
@@ -400,54 +697,63 @@ class SupervisorWorkflowRunner:
     def _generate_performance_summary(self):
         """Generate LLM-powered stock performance summary."""
         try:
-            from src.llms.config import get_llm
+            # Load prompt template from external file
+            prompt_file = Path("prompts/supervisor_performance_summary.md")
+            prompt_template = prompt_file.read_text()
+            
+            # Prepare data for template
+            financial_model_summary = (
+                f"Generated {self.state.financial_model.model_type} valuation model" 
+                if self.state.is_model_generated() 
+                else "Not available"
+            )
+            
+            news_analysis_summary = (
+                f"Analyzed {self.state.news_analysis.articles_count} articles - "
+                f"Overall sentiment: {self.state.news_analysis.overall_sentiment}. "
+                f"Found {len(self.state.news_analysis.catalysts)} catalysts and "
+                f"{len(self.state.news_analysis.risks)} risks."
+                if self.state.is_news_analyzed() 
+                else "Not available"
+            )
+            
+            report_summary = (
+                "Generated comprehensive analyst report with investment recommendation" 
+                if self.state.is_report_generated() 
+                else "Not available"
+            )
             
             # Build summary prompt with state information
-            summary_prompt = f"""You are a senior financial analyst who just completed a comprehensive analysis of {self.ticker} ({self.company_name}).
-
-Based on the analysis results:
-
-**Financial Model:**
-{f"Generated {self.state.financial_model.model_type} valuation model" if self.state.is_model_generated() else "Not available"}
-
-**News Analysis:**
-{f"Analyzed {self.state.news_analysis.articles_count} articles - Overall sentiment: {self.state.news_analysis.overall_sentiment}. Found {len(self.state.news_analysis.catalysts)} catalysts and {len(self.state.news_analysis.risks)} risks." if self.state.is_news_analyzed() else "Not available"}
-
-**Report:**
-{f"Generated comprehensive analyst report with investment recommendation" if self.state.is_report_generated() else "Not available"}
-
-Write a 5-6 sentence summary about how {self.ticker} is performing based on this analysis. Focus on:
-1. The investment outlook (positive/negative/mixed)
-2. Key drivers or concerns from the news
-3. Valuation insights
-4. Risk factors
-5. Overall investment recommendation
-
-Be direct and professional. Respond with ONLY the performance summary, no JSON or formatting."""
+            summary_prompt = prompt_template.format(
+                ticker=self.ticker,
+                company_name=self.company_name,
+                financial_model_summary=financial_model_summary,
+                news_analysis_summary=news_analysis_summary,
+                report_summary=report_summary
+            )
 
             # Call LLM to generate summary
             summary_response, summary_cost = get_llm()([
-                {"role": "system", "content": "You are a senior financial analyst providing a professional summary."},
+                {"role": "system", "content": "You are a senior financial analyst providing a concise analysis summary."},
                 {"role": "user", "content": summary_prompt}
             ], temperature=0.7)
             self.state.total_llm_cost += summary_cost
             
-            # Log the performance summary with [supervisor] prefix
+            # Log the analysis summary with [LLM] prefix for natural language
             self.logger.info("")
-            self.logger.info("[supervisor] " + "="*60)
-            self.logger.info("[supervisor] 🎉 ANALYSIS COMPLETE")
-            self.logger.info("[supervisor] " + "="*60)
+            self.logger.info("=" * 80)
+            self.logger.info(f"[SUPERVISOR] � {self.ticker} Analysis Summary")
+            self.logger.info("=" * 80)
             self.logger.info("")
-            self.logger.info(f"[supervisor] 📊 {self.ticker} Performance Summary:")
-            self.logger.info(f"[supervisor] {summary_response.strip()}")
+            self.logger.info(f"[LLM] {summary_response.strip()}")
             self.logger.info("")
-            self.logger.info(f"[supervisor] 📁 Full analysis saved to: {self.state.analysis_path}")
-            self.logger.info(f"[supervisor] 💰 Total LLM cost: ${self.state.total_llm_cost:.4f}")
+            self.logger.info(f"[SUPERVISOR] 📁 Full analysis saved to: {self.state.analysis_path}")
+            self.logger.info(f"[SUPERVISOR] 💰 Total LLM cost: ${self.state.total_llm_cost:.4f}")
             self.logger.info("")
             
         except Exception as e:
             # If LLM summary fails, log error but don't crash
-            self.logger.error(f"Failed to generate LLM performance summary: {str(e)}")
+            self.logger.error(f"Failed to generate LLM analysis summary: {str(e)}")
     
     def _log_workflow_summary(self):
         """Log a comprehensive workflow summary."""
@@ -476,228 +782,3 @@ Be direct and professional. Respond with ONLY the performance summary, no JSON o
         self.logger.info("=" * 80)
         self.logger.info("")
 
-
-def main():
-    """Main entry point for supervisor workflow."""
-    parser = argparse.ArgumentParser(
-        description="Supervisor Agent - LLM-Powered Agentic Workflow",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Run LLM-powered workflow for Apple
-  python supervisor_main.py AAPL
-  
-  # With custom user query/instructions
-  python supervisor_main.py AAPL --query "Focus on AI capabilities and competitive analysis"
-  
-  # Start or continue a conversation session
-  python supervisor_main.py AAPL --session deep-dive
-  python supervisor_main.py AAPL -s quarterly-review --query "How did Q4 earnings impact valuation?"
-  
-  # List all sessions for a ticker
-  python supervisor_main.py --list-sessions AAPL
-  
-  # View session information
-  python supervisor_main.py --session-info AAPL:deep-dive
-  
-  # Clear session history (keep session but remove conversations)
-  python supervisor_main.py --clear-session AAPL:deep-dive
-  
-  # Delete a session permanently
-  python supervisor_main.py --delete-session AAPL:old-session
-  
-  # With custom company name and email
-  python supervisor_main.py NVDA --company "NVIDIA Corporation" --email user@example.com
-  
-  # Use Claude Sonnet for routing and analysis
-  python supervisor_main.py AAPL --llm claude-3.5-sonnet
-  
-  # Complex query example
-  python supervisor_main.py TSLA --query "I want to understand Tesla's valuation and whether it's overpriced. Focus on comparing to traditional automakers."
-  
-  # Limit workflow iterations
-  python supervisor_main.py MSFT --max-iterations 6
-  
-  # List available LLM models
-  python supervisor_main.py --list-llms
-        """
-    )
-    
-    # Positional argument for ticker (optional for --list-llms)
-    parser.add_argument("ticker", nargs="?", help="Stock ticker symbol (e.g., AAPL, NVDA, TSLA)")
-    
-    # Optional arguments with defaults
-    parser.add_argument("--company", help="Company name (defaults to ticker if not provided)")
-    parser.add_argument("--email", default="default@analyst.com", 
-                       help="User email for data organization (default: default@analyst.com)")
-    parser.add_argument("--query", "-q", 
-                       help="Custom query or instructions for the supervisor (e.g., 'Focus on AI capabilities and valuation')")
-    
-    # Session management
-    parser.add_argument("--session", "-s",
-                       help="Session name for persistent conversation (e.g., 'deep-dive', 'quarterly-review')")
-    parser.add_argument("--list-sessions", 
-                       help="List all sessions for a ticker (provide ticker)")
-    parser.add_argument("--session-info",
-                       help="Show information about a specific session (format: TICKER:SESSION_NAME)")
-    parser.add_argument("--clear-session",
-                       help="Clear conversation history in a session (format: TICKER:SESSION_NAME)")
-    parser.add_argument("--delete-session",
-                       help="Delete a session permanently (format: TICKER:SESSION_NAME)")
-    
-    # Optional arguments
-    parser.add_argument("--timestamp", help="Custom timestamp for analysis folder (YYYYMMDD_HHMMSS)")
-    parser.add_argument("--max-iterations", type=int, default=10, 
-                       help="Maximum workflow iterations (default: 10)")
-    
-    # LLM selection
-    parser.add_argument("--llm", 
-                       choices=["gpt-4o-mini", "claude-3.5-sonnet", "claude-3.5-haiku", "claude-3-opus"], 
-                       default="gpt-4o-mini", 
-                       help="LLM model to use for routing and analysis (default: gpt-4o-mini)")
-    parser.add_argument("--list-llms", action="store_true", 
-                       help="List available LLM models and exit")
-    
-    args = parser.parse_args()
-    
-    # Handle session management commands
-    if args.list_sessions:
-        from session_manager import SessionManager
-        sessions = SessionManager.list_sessions(args.list_sessions)
-        
-        if not sessions:
-            print(f"No sessions found for {args.list_sessions}")
-        else:
-            print(f"\n📚 Sessions for {args.list_sessions}:")
-            for session_name in sessions:
-                info = SessionManager.get_session_info(args.list_sessions, session_name)
-                if info:
-                    conv_count = info.get("conversation_count", 0)
-                    last_updated = info.get("last_updated", "Unknown")
-                    print(f"  • {session_name} ({conv_count} conversations, last: {last_updated})")
-                else:
-                    print(f"  • {session_name}")
-        print()
-        return 0
-    
-    if args.session_info:
-        from session_manager import SessionManager
-        try:
-            ticker, session_name = args.session_info.split(":")
-            info = SessionManager.get_session_info(ticker, session_name)
-            
-            if not info:
-                print(f"❌ Session not found: {args.session_info}")
-                return 1
-            
-            print(f"\n📊 Session Information:")
-            print(f"  Ticker: {info.get('ticker')}")
-            print(f"  Company: {info.get('company_name')}")
-            print(f"  Session Name: {info.get('session_name')}")
-            print(f"  Created: {info.get('created_at')}")
-            print(f"  Last Updated: {info.get('last_updated')}")
-            print(f"  Conversations: {info.get('conversation_count')}")
-            print()
-            return 0
-        except ValueError:
-            print("❌ Invalid format. Use TICKER:SESSION_NAME (e.g., AAPL:deep-dive)")
-            return 1
-    
-    if args.clear_session:
-        from session_manager import SessionManager
-        try:
-            ticker, session_name = args.clear_session.split(":")
-            session_mgr = SessionManager(ticker, session_name)
-            session_mgr.clear_history()
-            print(f"✅ Cleared conversation history for session '{session_name}' ({ticker})")
-            return 0
-        except ValueError:
-            print("❌ Invalid format. Use TICKER:SESSION_NAME (e.g., AAPL:deep-dive)")
-            return 1
-        except Exception as e:
-            print(f"❌ Failed to clear session: {e}")
-            return 1
-    
-    if args.delete_session:
-        from session_manager import SessionManager
-        try:
-            ticker, session_name = args.delete_session.split(":")
-            session_mgr = SessionManager(ticker, session_name)
-            if session_mgr.delete_session():
-                print(f"✅ Deleted session '{session_name}' ({ticker})")
-                return 0
-            else:
-                print(f"❌ Session not found: {args.delete_session}")
-                return 1
-        except ValueError:
-            print("❌ Invalid format. Use TICKER:SESSION_NAME (e.g., AAPL:deep-dive)")
-            return 1
-        except Exception as e:
-            print(f"❌ Failed to delete session: {e}")
-            return 1
-    
-    # Handle --list-llms flag
-    if args.list_llms:
-        all_models = list_models()
-        available_models = list_available_models()
-        
-        print("Available LLM models:")
-        for model in all_models:
-            if model in available_models:
-                print(f"  ✅ {model}")
-            else:
-                print(f"  ❌ {model} (API key missing)")
-        
-        if not available_models:
-            print("\nNo models available. Set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variables.")
-        
-        return 0
-    
-    # Validate required ticker argument
-    if not args.ticker:
-        parser.error("ticker is required (e.g., python supervisor_main.py AAPL)")
-    
-    # Use ticker as company name if not provided
-    company_name = args.company if args.company else args.ticker
-    
-    try:
-        # Initialize LLM
-        init_llm(args.llm)
-        
-        # Initialize workflow runner
-        runner = SupervisorWorkflowRunner(
-            ticker=args.ticker,
-            company_name=company_name,
-            email=args.email,
-            user_query=args.query,
-            session_name=args.session,
-            timestamp=args.timestamp,
-            max_iterations=args.max_iterations
-        )
-        
-        # Run workflow (async)
-        results = asyncio.run(runner.run_workflow())
-        
-        # Exit with appropriate status
-        if results["statistics"]["completion_status"] == "completed":
-            print("\n✅ Workflow completed successfully")
-            return 0
-        elif results["statistics"]["completion_status"] == "max_iterations_reached":
-            print("\n⚠️  Workflow stopped: Max iterations reached")
-            return 1
-        else:
-            print("\n❌ Workflow failed")
-            return 1
-            
-    except KeyboardInterrupt:
-        print("\n⏹️  Workflow interrupted by user")
-        return 1
-    except Exception as e:
-        print(f"\n❌ Workflow failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

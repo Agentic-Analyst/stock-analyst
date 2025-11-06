@@ -105,11 +105,7 @@ def _log_workflow_completion(state: FinancialState, logger=None):
             
             # Log the completion message
             main_logger.info("")
-            main_logger.info("[SUPERVISOR] " + "="*60)
-            main_logger.info("[SUPERVISOR] 🎉 WORKFLOW COMPLETED SUCCESSFULLY")
-            main_logger.info("[SUPERVISOR] " + "="*60)
-            main_logger.info("")
-            main_logger.info(f"[SUPERVISOR] {summary_response.strip()}")
+            main_logger.info(f"[LLM] {summary_response.strip()}")
             main_logger.info("")
             main_logger.info(f"[SUPERVISOR] 📁 Analysis saved to: {state.analysis_path}")
             main_logger.info(f"[SUPERVISOR] 💰 Total LLM cost: ${state.total_llm_cost:.4f}")
@@ -399,11 +395,11 @@ def route_workflow_with_llm(state: FinancialState, config: dict = None, logger=N
             if next_node == AgentNode.REPORT_GENERATOR_AGENT.value and not state.is_financial_data_collected():
                 raise ValueError(f"LLM chose report_generator_agent but no financial data available yet. Need financial_data_agent first.")
             
-            # Write the LLM's conversational message to the main info.log with [SUPERVISOR] prefix
+            # Write the LLM's conversational message to the main info.log
             try:
                 main_logger = logger or get_logger()
                 if main_logger:
-                    # Add current state summary before supervisor message
+                    # Add current state summary with [SUPERVISOR] prefix (technical info)
                     main_logger.info("")
                     main_logger.info("[SUPERVISOR] 📊 Current State Summary:")
                     main_logger.info(f"[SUPERVISOR]    • Financial Data: {'✅ Collected' if state.is_financial_data_collected() else '❌ Not collected'}")
@@ -419,13 +415,13 @@ def route_workflow_with_llm(state: FinancialState, config: dict = None, logger=N
                         main_logger.info(f"[SUPERVISOR]    ⚠️  Missing prerequisites for report: {', '.join(missing)}")
                     main_logger.info("")
                     
-                    # If LLM provided a supervisor_message, log it with [SUPERVISOR] prefix
+                    # LLM response - use [LLM] prefix for natural language responses (UI display)
                     if supervisor_message:
-                        main_logger.info(f"[SUPERVISOR] {supervisor_message}")
+                        main_logger.info(f"[LLM] {supervisor_message}")
                         main_logger.info(f"[SUPERVISOR] → Next action: {next_node} (confidence: {confidence:.0%})")
                     else:
                         # Fallback to reasoning if no supervisor_message
-                        main_logger.info(f"[SUPERVISOR] {reasoning.strip()}")
+                        main_logger.info(f"[LLM] {reasoning.strip()}")
                         main_logger.info(f"[SUPERVISOR] → Next action: {next_node} (confidence: {confidence:.0%})")
                     main_logger.info("")
                     

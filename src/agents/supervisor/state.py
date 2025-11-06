@@ -75,7 +75,7 @@ class NewsAnalysis:
 class FinancialModel:
     """Structured container for generated financial model."""
     ticker: str
-    model_type: str = "dcf_perpetual_growth"  # Type of model generated
+    model_type: str = "comprehensive dcf"  # Type of model generated
     excel_path: Optional[str] = None  # Path to Excel file
     json_computed_values_path: Optional[str] = None  # Path to computed values JSON
     valuation_metrics: Dict[str, float] = field(default_factory=dict)  # {perpetual_price, exit_multiple_price, average_price, upside_vs_market}
@@ -101,7 +101,6 @@ class Report:
 class ComparisonReport:
     """Comparison report for multiple tickers (NEW)."""
     tickers: List[str]
-    comparison_type: str = "side_by_side"  # side_by_side, relative, ranking
     report_path: Optional[str] = None  # Path to comparison report
     content: Optional[str] = None  # Full comparison content
     generated_at: Optional[datetime] = None
@@ -129,10 +128,8 @@ class FinancialState:
     ticker: str  # Stock ticker (e.g., "NVDA")
     company_name: str  # Full company name (e.g., "NVIDIA")
     email: str  # User email for data organization
+    timestamp: str  # Timestamp for this analysis run
     objective: AnalysisObjective = AnalysisObjective.COMPREHENSIVE
-    
-    # Timestamp for this analysis run
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().strftime("%Y%m%d_%H%M%S"))
     
     # Analysis base path (where all outputs are saved)
     analysis_path: Optional[str] = None
@@ -158,10 +155,10 @@ class FinancialState:
     errors: List[Dict[str, Any]] = field(default_factory=list)  # List of errors encountered
     last_error: Optional[str] = None
     
-    # Configuration overrides
+    # Configuration overrides (match main.py defaults)
     max_articles: int = 80
-    min_score: float = 6.0
-    min_confidence: float = 0.6
+    min_score: float = 5.0  # Match main.py default
+    min_confidence: float = 0.5  # Match main.py default
     llm_model: str = "gpt-4o-mini"
     cost_limit_usd: Optional[float] = None  # Max budget for LLM calls
     
