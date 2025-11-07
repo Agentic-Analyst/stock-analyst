@@ -254,9 +254,11 @@ class SupervisorWorkflowRunner:
             try:
                 basic_info = self.state.financial_data.key_metrics.get("basic_info", {})
                 market_data = self.state.financial_data.key_metrics.get("market_data", {})
+                raw_data = self.state.financial_data.raw_data  # Full comprehensive data
                 
                 context_parts.append(f"**Financial Data for {self.ticker}:**")
                 
+                # Current market data
                 if market_data.get("current_price"):
                     context_parts.append(f"- Current Stock Price: ${market_data['current_price']:.2f}")
                 if market_data.get("market_cap"):
@@ -271,6 +273,69 @@ class SupervisorWorkflowRunner:
                     context_parts.append(f"- Sector: {basic_info['sector']}")
                 if basic_info.get("industry"):
                     context_parts.append(f"- Industry: {basic_info['industry']}")
+                
+                # Historical price data from raw_data (for price change calculations)
+                historical_prices = raw_data.get("market_data", {}).get("historical_prices", {})
+                
+                # The structure is: historical_prices["prices"] = {"2020-11-09": {"close": 113.34, ...}, ...}
+                if historical_prices and "prices" in historical_prices:
+                    prices_dict = historical_prices["prices"]
+                    if prices_dict and isinstance(prices_dict, dict):
+                        # Convert dict to sorted list of (date, price_data) tuples
+                        sorted_prices = sorted(prices_dict.items(), key=lambda x: x[0])
+                        
+                        if sorted_prices:
+                            context_parts.append(f"\n**Historical Price Data (Available for calculations):**")
+                            context_parts.append(f"- Total data points: {len(sorted_prices)}")
+                            context_parts.append(f"- Date range: {sorted_prices[0][0]} to {sorted_prices[-1][0]}")
+                            context_parts.append(f"- Price at start: ${sorted_prices[0][1]['close']:.2f}")
+                            context_parts.append(f"- Price at end (current): ${sorted_prices[-1][1]['close']:.2f}")
+                            
+                            # Calculate key price changes
+                            try:
+                                from datetime import datetime, timedelta
+                                current_date_str = sorted_prices[-1][0]
+                                current_price = sorted_prices[-1][1]['close']
+                                current_date = datetime.strptime(current_date_str, '%Y-%m-%d')
+                                
+                                # Find prices for different time periods
+                                prices_by_period = {}
+                                
+                                for period_name, days_back in [("1 month", 30), ("3 months", 90), ("6 months", 180), ("1 year", 365)]:
+                                    target_date = current_date - timedelta(days=days_back)
+                                    # Find closest date in prices_dict
+                                    closest_date = None
+                                    min_diff = float('inf')
+                                    
+                                    for date_str in prices_dict.keys():
+                                        price_date = datetime.strptime(date_str, '%Y-%m-%d')
+                                        diff = abs((price_date - target_date).days)
+                                        if diff < min_diff:
+                                            min_diff = diff
+                                            closest_date = date_str
+                                    
+                                    if closest_date and closest_date in prices_dict:
+                                        past_price = prices_dict[closest_date]['close']
+                                        change_dollar = current_price - past_price
+                                        change_pct = (change_dollar / past_price) * 100
+                                        prices_by_period[period_name] = {
+                                            "date": closest_date,
+                                            "price": past_price,
+                                            "change_pct": change_pct,
+                                            "change_dollar": change_dollar
+                                        }
+                                
+                                if prices_by_period:
+                                    context_parts.append(f"\n**Price Changes:**")
+                                    for period, data in prices_by_period.items():
+                                        context_parts.append(
+                                            f"- Past {period}: ${data['change_dollar']:+.2f} ({data['change_pct']:+.2f}%) "
+                                            f"from ${data['price']:.2f} on {data['date']}"
+                                        )
+                            except Exception as calc_error:
+                                self.logger.warning(f"[SUPERVISOR] ⚠️  Could not calculate price changes: {calc_error}")
+                                import traceback
+                                self.logger.warning(f"[SUPERVISOR] {traceback.format_exc()}")
                     
                 context_parts.append("")
             except Exception as e:
@@ -398,12 +463,16 @@ Provide a helpful, informative answer:"""
             
             response_text = response_text.strip()
             
+            # Additional cleanup: Find the first '{' and last '}' to extract pure JSON
+            # This handles cases where LLM adds extra text before/after JSON
+            start_idx = response_text.find('{')
+            end_idx = response_text.rfind('}')
+            
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                response_text = response_text[start_idx:end_idx+1]
+            
             # Parse JSON response
             result = json.loads(response_text)
-            
-            # DEBUG: Print what LLM returned
-            print(f"[SUPERVISOR] 🔍 DEBUG - LLM returned ticker: '{result.get('ticker', 'MISSING')}'")
-            print(f"[SUPERVISOR] 🔍 DEBUG - LLM full response: {json.dumps(result, indent=2)}")
             
             # Validate response - ticker and next_agent required
             if "ticker" not in result or "next_agent" not in result:
@@ -418,18 +487,15 @@ Provide a helpful, informative answer:"""
             return result["ticker"], None, result["next_agent"], reasoning, direct_answer, is_simple_query
             
         except json.JSONDecodeError as e:
+            # Log the raw response for debugging
+            print(f"[SUPERVISOR] ❌ JSON DECODE ERROR: {e}")
+            print(f"[SUPERVISOR] ❌ Raw LLM response (first 500 chars): {response[:500]}")
+            print(f"[SUPERVISOR] ❌ Cleaned response text (first 500 chars): {response_text[:500]}")
             raise ValueError(
                 f"Failed to parse LLM response as JSON. "
                 f"Error: {e}. "
-                f"Response: {response[:200]}"
+                f"Raw response: {response[:500]}"
             )
-        except Exception as e:
-            raise ValueError(
-                f"Failed to extract ticker and route from prompt: '{user_prompt}'. "
-                f"Error: {e}. "
-                f"Please provide a clearer query mentioning the company name or ticker symbol."
-            )
-            
         except Exception as e:
             raise ValueError(
                 f"Failed to extract ticker and route from prompt: '{user_prompt}'. "
