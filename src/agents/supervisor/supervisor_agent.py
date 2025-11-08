@@ -107,6 +107,8 @@ from src.agents.supervisor.task_agents.financial_data_agent import financial_dat
 from src.agents.supervisor.task_agents.news_analysis_agent import news_analysis_agent
 from src.agents.supervisor.task_agents.model_generation_agent import model_generation_agent
 from src.agents.supervisor.task_agents.report_generator_agent import report_generator_agent
+from src.agents.supervisor.task_agents.financial_summary_agent import financial_summary_agent
+from src.agents.supervisor.task_agents.news_summary_agent import news_summary_agent
 from src.llms.config import get_llm
 import yfinance as yf
 
@@ -700,7 +702,9 @@ Provide a helpful, informative answer:"""
                     "financial_data_agent": financial_data_agent,
                     "news_analysis_agent": news_analysis_agent,
                     "model_generation_agent": model_generation_agent,
-                    "report_generator_agent": report_generator_agent
+                    "report_generator_agent": report_generator_agent,
+                    "financial_summary_agent": financial_summary_agent,
+                    "news_summary_agent": news_summary_agent
                 }
                 
                 agent_func = agent_map.get(next_agent)

@@ -661,7 +661,7 @@ class ArticleScreener:
 
             # Filter by ticker and score, convert to screener format
             filtered_articles = []
-            for article in recent_articles[:30]:
+            for article in recent_articles[:5]:
                 # Convert database format to screener format
                 screener_article = {
                     "file_path": None,  # Not from file

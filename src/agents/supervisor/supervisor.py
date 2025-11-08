@@ -110,7 +110,7 @@ def _is_objective_achieved(state: FinancialState) -> bool:
     Check if the user's objective has been achieved.
     
     This is critical for stopping the workflow at the right point.
-    For example, if objective is MODEL_ONLY, stop after model_generation_agent.
+    For example, if objective is MODEL_ONLY, stop after model_generation_agent + financial_summary_agent.
     
     Args:
         state: Current FinancialState with objective
@@ -130,12 +130,19 @@ def _is_objective_achieved(state: FinancialState) -> bool:
         )
     
     elif objective == AnalysisObjective.MODEL_ONLY:
-        # Only need financial data + model
-        return state.is_financial_data_collected() and state.is_model_generated()
+        # Need financial data + model + financial summary
+        return (
+            state.is_financial_data_collected() and 
+            state.is_model_generated() and
+            state.is_financial_summary_generated()
+        )
     
     elif objective == AnalysisObjective.QUICK_NEWS:
-        # Only need news analysis (financial data is optional - ArticleScraper can work without it)
-        return state.is_news_analyzed()
+        # Need news analysis + news summary (financial data is optional - ArticleScraper can work without it)
+        return (
+            state.is_news_analyzed() and
+            state.is_news_summary_generated()
+        )
     
     elif objective == AnalysisObjective.CUSTOM:
         # Just financial data
@@ -342,6 +349,37 @@ def _resolve_dependencies(state: FinancialState, target_node: str, logger=None) 
                     main_logger.info(f"[DEPENDENCY RESOLVER] ✅ Auto-correcting path: news_analysis_agent → report_generator_agent")
                 return "news_analysis_agent", True, explanation
     
+    # Check prerequisites for summary agents
+    if target_node == "financial_summary_agent":
+        # Financial summary requires: financial_data + model
+        if not state.is_financial_data_collected():
+            explanation = "Cannot generate financial summary - missing financial data. Routing to financial_data_agent first."
+            if main_logger:
+                main_logger.warning(f"[DEPENDENCY RESOLVER] 🔀 LLM wanted financial_summary_agent, but financial data not collected yet.")
+                main_logger.info(f"[DEPENDENCY RESOLVER] ✅ Auto-correcting: financial_data_agent → model_generation_agent → financial_summary_agent")
+            return "financial_data_agent", True, explanation
+        elif not state.is_model_generated():
+            explanation = "Cannot generate financial summary - missing financial model. Routing to model_generation_agent first."
+            if main_logger:
+                main_logger.warning(f"[DEPENDENCY RESOLVER] 🔀 LLM wanted financial_summary_agent, but model not generated yet.")
+                main_logger.info(f"[DEPENDENCY RESOLVER] ✅ Auto-correcting: model_generation_agent → financial_summary_agent")
+            return "model_generation_agent", True, explanation
+        elif state.is_financial_summary_generated():
+            explanation = "Financial summary already generated - no need to run again."
+            return "__end__", True, explanation
+    
+    if target_node == "news_summary_agent":
+        # News summary requires: news_analysis
+        if not state.is_news_analyzed():
+            explanation = "Cannot generate news summary - missing news analysis. Routing to news_analysis_agent first."
+            if main_logger:
+                main_logger.warning(f"[DEPENDENCY RESOLVER] 🔀 LLM wanted news_summary_agent, but news analysis not complete yet.")
+                main_logger.info(f"[DEPENDENCY RESOLVER] ✅ Auto-correcting: news_analysis_agent → news_summary_agent")
+            return "news_analysis_agent", True, explanation
+        elif state.is_news_summary_generated():
+            explanation = "News summary already generated - no need to run again."
+            return "__end__", True, explanation
+    
     # Target node prerequisites are satisfied - can proceed
     return target_node, False, f"All prerequisites satisfied for {target_node}."
 
@@ -433,12 +471,15 @@ def route_workflow(state: FinancialState, config: dict = None, logger=None) -> L
     "news_analysis_agent", 
     "model_generation_agent",
     "report_generator_agent",
+    "financial_summary_agent",
+    "news_summary_agent",
     "__end__"
 ]:
     """
     Deterministic fallback routing function (not used by default).
     
     Kept for backward compatibility and fallback scenarios.
+    Respects user objectives and routes to summary agents for MODEL_ONLY and QUICK_NEWS.
     
     Args:
         state: Current FinancialState
@@ -455,11 +496,32 @@ def route_workflow(state: FinancialState, config: dict = None, logger=None) -> L
     if main_logger:
         main_logger.info("")
         main_logger.info("[SUPERVISOR] 📊 Current State Summary (Deterministic Mode):")
+        main_logger.info(f"[SUPERVISOR]    • Objective: {state.objective.value}")
         main_logger.info(f"[SUPERVISOR]    • Financial Data: {'✅ Collected' if state.is_financial_data_collected() else '⏳ Pending'}")
         main_logger.info(f"[SUPERVISOR]    • Financial Model: {'✅ Generated' if state.is_model_generated() else '⏳ Pending'}")
         main_logger.info(f"[SUPERVISOR]    • News Analysis: {'✅ Completed' if state.is_news_analyzed() else '⏳ Pending'}")
+        main_logger.info(f"[SUPERVISOR]    • Financial Summary: {'✅ Generated' if state.is_financial_summary_generated() else '⏳ Pending'}")
+        main_logger.info(f"[SUPERVISOR]    • News Summary: {'✅ Generated' if state.is_news_summary_generated() else '⏳ Pending'}")
         main_logger.info(f"[SUPERVISOR]    • Analyst Report: {'✅ Generated' if state.is_report_generated() else '⏳ Pending'}")
         main_logger.info("")
+    
+    # Check if objective is achieved
+    if _is_objective_achieved(state):
+        state.log_action(
+            agent="supervisor_fallback",
+            action="route_decision",
+            details={"reason": "objective achieved", "next": "__end__"}
+        )
+        state.current_stage = PipelineStage.COMPLETED
+        state.next_agent = AgentNode.END
+        
+        if main_logger:
+            main_logger.info(f"[SUPERVISOR] ✅ Objective '{state.objective.value}' achieved! Workflow complete.")
+        
+        # Log workflow completion
+        _log_workflow_completion(state, logger)
+        
+        return "__end__"
     
     if not state.is_financial_data_collected():
         state.log_action(
@@ -473,6 +535,69 @@ def route_workflow(state: FinancialState, config: dict = None, logger=None) -> L
             main_logger.info(f"[SUPERVISOR] → Next action: financial_data_agent")
         return "financial_data_agent"
     
+    # For QUICK_NEWS objective - skip model generation
+    if state.objective == AnalysisObjective.QUICK_NEWS:
+        if not state.is_news_analyzed():
+            state.log_action(
+                agent="supervisor_fallback",
+                action="route_decision",
+                details={"reason": "QUICK_NEWS: news analysis needed", "next": "news_analysis_agent"}
+            )
+            state.next_agent = AgentNode.NEWS_ANALYSIS_AGENT
+            if main_logger:
+                main_logger.info(f"[SUPERVISOR] Let me analyze recent news and market sentiment for {state.ticker}.")
+                main_logger.info(f"[SUPERVISOR] → Next action: news_analysis_agent")
+            return "news_analysis_agent"
+        
+        if not state.is_news_summary_generated():
+            state.log_action(
+                agent="supervisor_fallback",
+                action="route_decision",
+                details={"reason": "QUICK_NEWS: news summary needed", "next": "news_summary_agent"}
+            )
+            state.next_agent = AgentNode.NEWS_SUMMARY_AGENT
+            if main_logger:
+                main_logger.info(f"[SUPERVISOR] Great! Now let me generate a professional summary of the news analysis.")
+                main_logger.info(f"[SUPERVISOR] → Next action: news_summary_agent")
+            return "news_summary_agent"
+        
+        # QUICK_NEWS complete
+        return "__end__"
+    
+    # For MODEL_ONLY objective
+    if state.objective == AnalysisObjective.MODEL_ONLY:
+        if not state.is_model_generated():
+            state.log_action(
+                agent="supervisor_fallback",
+                action="route_decision",
+                details={"reason": "MODEL_ONLY: model not generated", "next": "model_generation_agent"}
+            )
+            state.next_agent = AgentNode.MODEL_GENERATION_AGENT
+            if main_logger:
+                main_logger.info(f"[SUPERVISOR] Great! Now that we have the financial data, let me build a comprehensive DCF model.")
+                main_logger.info(f"[SUPERVISOR] → Next action: model_generation_agent")
+            return "model_generation_agent"
+        
+        if not state.is_financial_summary_generated():
+            state.log_action(
+                agent="supervisor_fallback",
+                action="route_decision",
+                details={"reason": "MODEL_ONLY: financial summary needed", "next": "financial_summary_agent"}
+            )
+            state.next_agent = AgentNode.FINANCIAL_SUMMARY_AGENT
+            if main_logger:
+                main_logger.info(f"[SUPERVISOR] Perfect! Now let me generate a professional summary of the financial model.")
+                main_logger.info(f"[SUPERVISOR] → Next action: financial_summary_agent")
+            return "financial_summary_agent"
+        
+        # MODEL_ONLY complete
+        return "__end__"
+    
+    # For CUSTOM objective - just financial data
+    if state.objective == AnalysisObjective.CUSTOM:
+        return "__end__"
+    
+    # For COMPREHENSIVE objective - full workflow
     if not state.is_model_generated():
         state.log_action(
             agent="supervisor_fallback",
@@ -529,6 +654,8 @@ def route_workflow_with_llm(state: FinancialState, config: dict = None, logger=N
     "news_analysis_agent",
     "model_generation_agent",
     "report_generator_agent",
+    "financial_summary_agent",
+    "news_summary_agent",
     "__end__"
 ]:
     """
@@ -618,6 +745,8 @@ def route_workflow_with_llm(state: FinancialState, config: dict = None, logger=N
             has_financial_data=state.is_financial_data_collected(),
             has_news_analysis=state.is_news_analyzed(),
             has_model_generated=state.is_model_generated(),
+            has_financial_summary=state.is_financial_summary_generated(),
+            has_news_summary=state.is_news_summary_generated(),
             has_report_generated=state.is_report_generated(),
             pending_analysis=pending_analysis_str,
             available_data=available_data_str
@@ -697,6 +826,8 @@ def route_workflow_with_llm(state: FinancialState, config: dict = None, logger=N
                 AgentNode.NEWS_ANALYSIS_AGENT.value,
                 AgentNode.MODEL_GENERATION_AGENT.value,
                 AgentNode.REPORT_GENERATOR_AGENT.value,
+                AgentNode.FINANCIAL_SUMMARY_AGENT.value,  # NEW
+                AgentNode.NEWS_SUMMARY_AGENT.value,  # NEW
                 AgentNode.END.value
             ]
             

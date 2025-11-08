@@ -21,6 +21,8 @@ class AgentNode(str, Enum):
     NEWS_ANALYSIS_AGENT = "news_analysis_agent"
     MODEL_GENERATION_AGENT = "model_generation_agent"
     REPORT_GENERATOR_AGENT = "report_generator_agent"
+    FINANCIAL_SUMMARY_AGENT = "financial_summary_agent"  # NEW: Generate financial model summary
+    NEWS_SUMMARY_AGENT = "news_summary_agent"  # NEW: Generate news analysis summary
     END = "__end__"
 
 
@@ -146,6 +148,10 @@ class FinancialState:
     financial_model: Optional[FinancialModel] = None
     report: Optional[Report] = None
     
+    # Summary outputs (paths to generated summaries)
+    financial_summary_path: Optional[str] = None  # Path to financial model summary markdown
+    news_summary_path: Optional[str] = None  # Path to news analysis summary markdown
+    
     # Execution metadata
     execution_log: List[Dict[str, Any]] = field(default_factory=list)  # Log of agent actions
     routing_history: List[Dict[str, Any]] = field(default_factory=list)  # History of supervisor routing decisions
@@ -223,6 +229,14 @@ class FinancialState:
     def is_report_generated(self) -> bool:
         """Check if report has been generated."""
         return self.report is not None and self.report.error is None
+    
+    def is_financial_summary_generated(self) -> bool:
+        """Check if financial summary has been generated."""
+        return self.financial_summary_path is not None
+    
+    def is_news_summary_generated(self) -> bool:
+        """Check if news summary has been generated."""
+        return self.news_summary_path is not None
     
     def get_effective_logger(self, agent_name: Optional[str] = None):
         """
