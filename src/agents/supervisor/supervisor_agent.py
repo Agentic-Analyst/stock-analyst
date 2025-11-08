@@ -578,7 +578,7 @@ Provide a helpful, informative answer:"""
                     
                     # Store the query type
                     self.is_simple_query = is_simple_query
-                    
+
                     # Validate ticker
                     if not ticker or ticker.strip() == "":
                         raise ValueError(
@@ -586,9 +586,39 @@ Provide a helpful, informative answer:"""
                             "For follow-up questions, ensure you're using the same session-id and the session contains previous analysis."
                         )
                     
+                    print(f"[SUPERVISOR] ✅ Identified ticker: {ticker}")
+
+                    # 🆕 SPECIAL HANDLING FOR CONVERSATIONAL QUERIES
+                    # If ticker is "CHAT", this is a conversational query (e.g., "hi", "what can you do?")
+                    if ticker and ticker.upper() == "CHAT":
+                        print(f"[SUPERVISOR] 💬 Conversational query detected")
+                        print(f"[SUPERVISOR] 🤖 Providing introduction and guidance")
+                        
+                        # Initialize with CHAT ticker for logging purposes
+                        self._initialize_after_ticker_extraction("CHAT", "Conversational Mode")
+                        
+                        # Log the conversation
+                        self.logger.info("[SUPERVISOR] 💬 CONVERSATIONAL QUERY:")
+                        self.logger.info(f"[SUPERVISOR]    \"{self.user_prompt}\"")
+                        self.logger.info("")
+                        self.logger.info("[SUPERVISOR] 🤖 INTRODUCTION & GUIDANCE:")
+                        self.logger.info("")
+                        self.logger.info(f"[LLM] {direct_answer}")
+                        self.logger.info("")
+                        self.stats["completion_status"] = "conversational"
+                        
+                        # Return the conversational response
+                        return {
+                            "status": "conversational",
+                            "message": direct_answer,
+                            "ticker": "CHAT",
+                            "company_name": "Conversational Mode",
+                            "session_name": None,  # No session for conversational queries
+                            "statistics": self.stats
+                        }
+                    
                     # Initialize everything now that we have ticker
                     # Note: company_name is None, will be fetched from yfinance
-                    print(f"[SUPERVISOR] ✅ Identified ticker: {ticker}")
                     print(f"[SUPERVISOR] ✅ First agent: {next_agent}")
                     
                     self._initialize_after_ticker_extraction(ticker, company_name)
