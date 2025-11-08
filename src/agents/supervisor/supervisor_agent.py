@@ -101,7 +101,7 @@ from src.llms.config import init_llm, list_models, list_available_models
 from src.session_manager import SessionManager
 
 # Import supervisor workflow components
-from src.agents.supervisor.state import FinancialState, AgentNode, PipelineStage
+from src.agents.supervisor.state import FinancialState, AgentNode, PipelineStage, AnalysisObjective
 from src.agents.supervisor.supervisor import route_workflow_with_llm, route_workflow
 from src.agents.supervisor.task_agents.financial_data_agent import financial_data_agent
 from src.agents.supervisor.task_agents.news_analysis_agent import news_analysis_agent
@@ -202,6 +202,10 @@ class SupervisorWorkflowRunner:
         # Setup logging - single info.log with session tracking
         self.logger = setup_logger(self.ticker, base_path=self.analysis_path, session_name=self.session_name)
         
+        # 🔥 DETECT USER INTENT from their query
+        from src.agents.supervisor.supervisor import _detect_user_intent
+        detected_objective = _detect_user_intent(self.user_prompt)
+        
         # Initialize state (FinancialState requires: user_prompt, ticker, company_name, email)
         self.state = FinancialState(
             user_query=self.user_prompt,
@@ -209,7 +213,8 @@ class SupervisorWorkflowRunner:
             company_name=self.company_name,
             email=self.email,
             analysis_path=str(self.analysis_path),
-            timestamp=self.timestamp
+            timestamp=self.timestamp,
+            objective=detected_objective  # 🔥 Set objective based on user intent
         )
         
         self.logger.info("=" * 80)
@@ -217,6 +222,7 @@ class SupervisorWorkflowRunner:
         self.logger.info("=" * 80)
         self.logger.info(f"[SUPERVISOR]    Ticker: {self.ticker}")
         self.logger.info(f"[SUPERVISOR]    Company: {self.company_name}")
+        self.logger.info(f"[SUPERVISOR]    Objective: {detected_objective.value} {'🎯' if detected_objective.value != 'comprehensive' else '📊'}")
         self.logger.info(f"[SUPERVISOR]    Analysis Path: {self.analysis_path}")
         self.logger.info(f"[SUPERVISOR]    Max Iterations: {self.max_iterations}")
         self.logger.info(f"[SUPERVISOR]    Timestamp: {self.timestamp}")
@@ -607,6 +613,21 @@ Provide a helpful, informative answer:"""
                         # Mark this as completed immediately - no agents needed
                         break
                     
+                    # 🔥 CRITICAL FIX: Apply dependency resolution to first iteration too!
+                    # The LLM might suggest model_generation_agent without realizing financial_data is needed
+                    from src.agents.supervisor.supervisor import _resolve_dependencies
+                    actual_next_agent, was_redirected, resolution_explanation = _resolve_dependencies(
+                        self.state, next_agent, self.logger
+                    )
+                    
+                    if was_redirected:
+                        self.logger.warning(f"[DEPENDENCY RESOLVER] ⚠️  Initial LLM routing required correction")
+                        self.logger.info(f"[DEPENDENCY RESOLVER] 🎯 LLM wanted: {next_agent}")
+                        self.logger.info(f"[DEPENDENCY RESOLVER] ✅ Auto-corrected to: {actual_next_agent}")
+                        self.logger.info(f"[DEPENDENCY RESOLVER] 📝 Reason: {resolution_explanation}")
+                        self.logger.info("")
+                        next_agent = actual_next_agent
+                    
                 except Exception as e:
                     print(f"[SUPERVISOR] ❌ Failed to extract ticker: {e}")
                     raise
@@ -741,12 +762,56 @@ Provide a helpful, informative answer:"""
                         # Mark as completed and end workflow
                         break
                 
-                # Check for errors in state
+                # 🔥 ERROR RECOVERY: Check for errors and attempt recovery
                 if self.state.last_error:
                     self.logger.error(f"[SUPERVISOR] ⚠️  Agent reported error: {self.state.last_error}")
                 
                 if self.state.current_stage == PipelineStage.FAILED:
-                    self.logger.error(f"[SUPERVISOR] ❌ Workflow failed during {next_agent}")
+                    # 🚀 SMART ERROR RECOVERY: Detect prerequisite failures and auto-fix
+                    error_msg = self.state.last_error or ""
+                    
+                    # Pattern 1: Missing financial data for model generation
+                    if "financial_data not collected" in error_msg.lower() and next_agent == "model_generation_agent":
+                        self.logger.warning(f"[ERROR RECOVERY] 🔧 Detected missing prerequisite for {next_agent}")
+                        self.logger.info(f"[ERROR RECOVERY] ✅ Auto-routing to financial_data_agent first")
+                        self.logger.info("")
+                        
+                        # Reset the FAILED state - we're recovering
+                        self.state.current_stage = PipelineStage.INITIALIZED
+                        self.state.last_error = None
+                        
+                        # Force next iteration to go to financial_data_agent
+                        # We'll continue the loop and let normal routing handle it
+                        continue
+                    
+                    # Pattern 2: Missing financial data for news (though news can work without it for QUICK_NEWS)
+                    elif "financial_data not collected" in error_msg.lower() and next_agent == "news_analysis_agent":
+                        # Check if this is a QUICK_NEWS objective - if so, this shouldn't have failed
+                        if self.state.objective == AnalysisObjective.QUICK_NEWS:
+                            self.logger.error(f"[ERROR RECOVERY] ❌ news_analysis_agent failed for QUICK_NEWS (should not require financial_data!)")
+                            self.logger.error(f"[ERROR RECOVERY] This is a bug - news analysis should work without financial data for QUICK_NEWS")
+                        else:
+                            # For other objectives, route to financial_data_agent first
+                            self.logger.warning(f"[ERROR RECOVERY] 🔧 Detected missing prerequisite for {next_agent}")
+                            self.logger.info(f"[ERROR RECOVERY] ✅ Auto-routing to financial_data_agent first")
+                            self.logger.info("")
+                            
+                            self.state.current_stage = PipelineStage.INITIALIZED
+                            self.state.last_error = None
+                            continue
+                    
+                    # Pattern 3: Missing model for report generation
+                    elif "model not generated" in error_msg.lower() and next_agent == "report_generator_agent":
+                        self.logger.warning(f"[ERROR RECOVERY] 🔧 Detected missing prerequisite for {next_agent}")
+                        self.logger.info(f"[ERROR RECOVERY] ✅ Will route to model_generation_agent (which will cascade to financial_data if needed)")
+                        self.logger.info("")
+                        
+                        self.state.current_stage = PipelineStage.INITIALIZED
+                        self.state.last_error = None
+                        continue
+                    
+                    # If no recovery pattern matched, this is an unrecoverable error
+                    self.logger.error(f"[SUPERVISOR] ❌ Workflow failed during {next_agent} (no recovery available)")
                     self.stats["completion_status"] = "failed"
                     
                     # Save session with failure state
@@ -829,12 +894,20 @@ Provide a helpful, informative answer:"""
                 
                 # Add financial model details if available
                 if self.state.financial_model:
-                    analysis_results["valuation"] = {
-                        "model_type": self.state.financial_model.model_type,
-                        "fair_value": self.state.financial_model.fair_value,
-                        "current_price": self.state.financial_model.current_price,
-                        "upside_downside": self.state.financial_model.upside_downside_pct
-                    }
+                    valuation_metrics = self.state.financial_model.valuation_metrics
+                    if valuation_metrics:
+                        analysis_results["valuation"] = {
+                            "model_type": self.state.financial_model.model_type,
+                            "fair_value": valuation_metrics.get("fair_value"),
+                            "current_price": valuation_metrics.get("current_price"),
+                            "upside_downside": valuation_metrics.get("upside_vs_market")
+                        }
+                    else:
+                        # Model generated but metrics not yet extracted
+                        analysis_results["valuation"] = {
+                            "model_type": self.state.financial_model.model_type,
+                            "excel_path": self.state.financial_model.excel_path
+                        }
                 
                 # Add news analysis summary if available
                 if self.state.news_analysis:

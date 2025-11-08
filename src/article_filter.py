@@ -23,11 +23,13 @@ from llms.config import get_llm
 from dotenv import load_dotenv
 load_dotenv()
 
+# Import centralized configuration
+from config import MIN_SCORE
+
 # Import vynn_core for MongoDB integration
 try:
     from vynn_core import Article, init_indexes, upsert_articles, find_recent, get_article_by_url, utc_now
     VYNN_CORE_AVAILABLE = True
-    print("✅ vynn_core imported successfully for MongoDB integration")
 except ImportError as e:
     print(f"Warning: vynn_core not available: {e}")
     print("Please install vynn_core: pip install git+https://github.com/Agentic-Analyst/vynn-core.git")
@@ -49,6 +51,8 @@ class ArticleFilter:
         
         # Logger - will be set by pipeline if available
         self.logger = None
+        
+        self.min_score = MIN_SCORE
         
         # LLM tracking
         self.total_llm_cost = 0.0
@@ -111,19 +115,17 @@ class ArticleFilter:
         else:
             print(f"[{level.upper()}] {message}")
 
-    def filter_articles(self, max_filtered: int = 15, min_score: float = 5.0) -> dict:
+    def filter_articles(self) -> dict:
         """
         Filter articles using LLM intelligence based on the query.
         
-        Args:
-            max_filtered: Maximum number of articles to filter
-            min_score: Minimum LLM score threshold for article inclusion (1-10 scale)
-            
+        Uses configuration values from self.min_score.
+        
         Returns:
             Dictionary with filtering results and metadata
         """
         self._log(f"Starting LLM-powered filtering for {self.ticker}")
-        self._log(f"Query: {self.query}, Target articles: {max_filtered}, Min score: {min_score}")
+        self._log(f"Query: {self.query}, Min score: {self.min_score}")
         
         # Load and prepare articles
         searched_dir = self.company_dir / "searched"
@@ -145,12 +147,12 @@ class ArticleFilter:
         for i, article in enumerate(scored_articles, 1):
             score = article.get('llm_score', 0.0)
             title = article.get('title', 'Untitled')[:80]
-            status = "✅ PASS" if score >= min_score else "❌ FAIL"
+            status = "✅ PASS" if score >= self.min_score else "❌ FAIL"
             self._log(f"{i:2d}. [{score:.1f}/10] {status} - {title}")
         self._log("=" * 80)
         
         # Filter by minimum score and limit count
-        filtered_articles = self._select_final_articles(scored_articles, max_filtered, min_score)
+        filtered_articles = self._select_final_articles(scored_articles)
 
         # Copy filtered articles and generate index
         result = self._finalize_filtering(filtered_articles)
@@ -164,25 +166,25 @@ class ArticleFilter:
         })
         
         # Log filtering summary
-        passed_count = len([a for a in scored_articles if a.get('llm_score', 0) >= min_score])
+        passed_count = len([a for a in scored_articles if a.get('llm_score', 0) >= self.min_score])
         failed_count = len(scored_articles) - passed_count
         
         self._log("=" * 80)
         self._log(f"📋 FILTERING SUMMARY")
         self._log("=" * 80)
         self._log(f"Total articles processed: {len(articles_data)}")
-        self._log(f"Passed threshold (≥{min_score}): {passed_count}")
-        self._log(f"Failed threshold (<{min_score}): {failed_count}")
-        self._log(f"Final selected (top {max_filtered}): {len(result['filtered_articles'])}")
+        self._log(f"Passed threshold (≥{self.min_score}): {passed_count}")
+        self._log(f"Failed threshold (<{self.min_score}): {failed_count}")
+        self._log(f"Final selected: {len(result['filtered_articles'])}")
         self._log(f"LLM cost: ${self.total_llm_cost:.4f} ({self.llm_call_count} calls)")
         self._log("=" * 80)
         
         if failed_count > 0:
-            self._log(f"ℹ️  {failed_count} articles were below the minimum score threshold of {min_score}")
+            self._log(f"ℹ️  {failed_count} articles were below the minimum score threshold of {self.min_score}")
             avg_score = sum(a.get('llm_score', 0) for a in scored_articles) / len(scored_articles) if scored_articles else 0
             self._log(f"ℹ️  Average score across all articles: {avg_score:.2f}/10")
-            if avg_score < min_score:
-                self._log(f"💡 Consider lowering --min-score threshold (current: {min_score}) to get more results")
+            if avg_score < self.min_score:
+                self._log(f"💡 Consider lowering min_score threshold (current: {self.min_score}) to get more results")
         
         self._log(f"Filtering complete: {len(result['filtered_articles'])} articles selected")
         self._log(f"Total LLM cost: ${self.total_llm_cost:.4f} ({self.llm_call_count} calls)")
@@ -403,16 +405,16 @@ class ArticleFilter:
             
         return scores
 
-    def _select_final_articles(self, articles: list, max_filtered: int, min_score: float) -> list:
+    def _select_final_articles(self, articles: list) -> list:
         """Select final articles based on LLM score criteria."""
         # Filter by minimum score
         qualified_articles = [
-            article for article in articles 
-            if article['llm_score'] >= min_score
+            article for article in articles
+            if article['llm_score'] >= self.min_score
         ]
         
         # Take top N articles
-        return qualified_articles[:max_filtered]
+        return qualified_articles
 
     def _finalize_filtering(self, filtered_articles: list) -> dict:
         """Save filtered articles to MongoDB database (no local file storage needed)."""

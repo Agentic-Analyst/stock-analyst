@@ -16,8 +16,8 @@ class EvidenceExtractor:
     def build_evidence_pack(
         self,
         screening_data: Dict[str, Any],
-        max_catalysts: int = 6,
-        max_risks: int = 5
+        max_catalysts: int = 8,
+        max_risks: int = 8
     ) -> Dict[str, Any]:
         """
         Build evidence pack from screening data.

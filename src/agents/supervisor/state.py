@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 import json
 from src.logger import get_logger
+from src.config import MAX_ARTICLES, MIN_SCORE, MIN_CONFIDENCE
 
 
 class AgentNode(str, Enum):
@@ -155,10 +156,10 @@ class FinancialState:
     errors: List[Dict[str, Any]] = field(default_factory=list)  # List of errors encountered
     last_error: Optional[str] = None
     
-    # Configuration overrides (match main.py defaults)
-    max_articles: int = 80
-    min_score: float = 5.0  # Match main.py default
-    min_confidence: float = 0.5  # Match main.py default
+    # Configuration overrides (use centralized config defaults)
+    max_articles: int = MAX_ARTICLES
+    min_score: float = MIN_SCORE
+    min_confidence: float = MIN_CONFIDENCE
     llm_model: str = "gpt-4o-mini"
     cost_limit_usd: Optional[float] = None  # Max budget for LLM calls
     
@@ -326,11 +327,10 @@ class PipelineConfig:
     cost_limit_usd: Optional[float] = None  # Global budget cap
     timeout_seconds: int = 3600  # 1 hour max execution time
     
-    # Article scraping
-    max_articles_to_search: int = 80
-    min_filter_score: float = 6.0
-    max_filtered_articles: int = 15
-    min_confidence_for_insights: float = 0.6
+    # Article scraping (use centralized config defaults)
+    max_articles_to_search: int = MAX_ARTICLES
+    min_filter_score: float = MIN_SCORE
+    min_confidence_for_insights: float = MIN_CONFIDENCE
     
     # Model generation
     projection_years: int = 5
@@ -370,6 +370,5 @@ class PipelineConfig:
             "timeout_seconds": self.timeout_seconds,
             "max_articles_to_search": self.max_articles_to_search,
             "min_filter_score": self.min_filter_score,
-            "max_filtered_articles": self.max_filtered_articles,
             "min_confidence_for_insights": self.min_confidence_for_insights
         }

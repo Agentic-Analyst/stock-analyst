@@ -28,6 +28,11 @@ Features:
 
 from __future__ import annotations
 import os, csv, time, argparse, pathlib, json, re
+from typing import List, Dict, Optional, Any, Tuple
+from datetime import datetime
+
+# Import centralized configuration
+from config import MAX_ARTICLES
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 from slugify import slugify
@@ -56,6 +61,9 @@ class ArticleScraper:
 
         # Logger - will be set by pipeline if available
         self.logger = None
+        
+        # Load configuration
+        self.max_articles = MAX_ARTICLES
         
         # Statistics tracking
         self.scraped_count = 0
@@ -365,7 +373,7 @@ class ArticleScraper:
             "industry_trends": f"{self.company_name} industry market trends"
         }
     
-    def _serpapi_news_links(self, query: str, max_results: int = 20) -> List[Dict]:
+    def _serpapi_news_links(self, query: str) -> List[Dict]:
         """
         Return up to `max_results` news metadata from Google News via SerpAPI.
         
@@ -382,7 +390,7 @@ class ArticleScraper:
             search = GoogleSearch({
                 "q": query,
                 "tbm": "nws",
-                "num": max_results,
+                "num": self.max_articles,
                 "tbs": "qdr:d",  # Last 24 hours
                 "api_key": self.api_key
             })
@@ -414,7 +422,7 @@ class ArticleScraper:
                 return []
             
             enhanced_results = []
-            for item in news_results[:max_results]:
+            for item in news_results:
                 if not isinstance(item, dict):
                     self._log("warning", f"Unexpected news item type: {type(item)}")
                     continue
@@ -534,7 +542,7 @@ serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
         file_path.write_text(markdown_content, encoding="utf-8")
         return file_path
     
-    def scrape_articles(self, max_searched: int = 60, query_override: Optional[str] = None) -> Dict:
+    def scrape_articles(self, query_override: Optional[str] = None) -> Dict:
         """
         Scrape news articles for the configured company using comprehensive multi-aspect searching.
         
@@ -564,20 +572,10 @@ serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
         if query_override:
             queries["custom_query"] = query_override
             self._log("info", f"➕ Added custom query: '{query_override}'")
-        
-        # Distribute max_searched across all query types (including custom if present)
-        queries_per_type = max_searched // len(queries)
-        remainder = max_searched % len(queries)
-        
-        self._log("info", f"📊 Company Industry: {industry_info.get('primary_industry', 'Unknown')}")
-        self._log("info", f"🔍 Searching {queries_per_type}-{queries_per_type + (1 if remainder > 0 else 0)} articles per category")
-        
+
         for i, (category, query) in enumerate(queries.items()):
-            # Add remainder to first categories
-            current_max = queries_per_type + (1 if i < remainder else 0)
-            
             self._log("info", f"📰 {category.replace('_', ' ').title()}: '{query}'")
-            category_metadata = self._serpapi_news_links(query, max_results=current_max)
+            category_metadata = self._serpapi_news_links(query)
             # Store both metadata and category info
             for metadata in category_metadata:
                 all_urls.append((metadata, category))
@@ -688,12 +686,11 @@ serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
             "storage_info": self.get_storage_info()
         }
     
-    def run_comprehensive_scraping(self, max_articles: int = 80, query_override: Optional[str] = None) -> Dict:
+    def run_comprehensive_scraping(self, query_override: Optional[str] = None) -> Dict:
         """
         Run comprehensive multi-aspect news scraping with detailed reporting.
         
         Args:
-            max_articles: Maximum total articles to scrape across all categories
             query_override: Additional custom query to include alongside comprehensive search
             
         Returns:
@@ -702,7 +699,7 @@ serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
         self._log("info", f"🚀 Starting comprehensive news analysis for {self.company_name} ({self.ticker})")
         
         # Run comprehensive scraping
-        results = self.scrape_articles(max_searched=max_articles, query_override=query_override)
+        results = self.scrape_articles(query_override=query_override)
         
         # Get comprehensive statistics
         stats = self.get_comprehensive_stats()
@@ -712,7 +709,7 @@ serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
             **results,
             **stats,
             "scraping_mode": "comprehensive",
-            "max_articles_requested": max_articles
+            "max_articles_requested": self.max_articles
         }
         
         # Log summary

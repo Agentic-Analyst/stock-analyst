@@ -16,7 +16,8 @@ from pathlib import Path
 from src.agents.supervisor.state import (
     FinancialState, 
     AgentNode, 
-    PipelineStage
+    PipelineStage,
+    AnalysisObjective
 )
 from src.llms.config import get_llm
 from src.logger import get_logger
@@ -47,6 +48,302 @@ COMPLETION_SUMMARY_TEMPLATE = _load_completion_summary_prompt()
 def load_routing_prompt():
     """Public function to load and display the routing prompt."""
     return ROUTING_PROMPT_TEMPLATE
+
+
+def _detect_user_intent(user_query: str) -> AnalysisObjective:
+    """
+    Detect what the user actually wants from their natural language query.
+    
+    This prevents the system from doing more work than requested.
+    For example, if user says "generate a financial model", we should stop
+    after model_generation_agent, not continue to news_analysis and report.
+    
+    Args:
+        user_query: User's natural language request
+        
+    Returns:
+        AnalysisObjective enum indicating what the user wants
+    """
+    if not user_query:
+        return AnalysisObjective.COMPREHENSIVE
+    
+    query_lower = user_query.lower()
+    
+    # Check for model-only requests
+    model_keywords = [
+        "financial model", "build a model", "generate a model", "create a model",
+        "dcf model", "valuation model", "build model", "create model"
+    ]
+    if any(keyword in query_lower for keyword in model_keywords):
+        # Check if they ALSO want news/report
+        if "news" in query_lower or "report" in query_lower or "analysis" in query_lower:
+            return AnalysisObjective.COMPREHENSIVE
+        return AnalysisObjective.MODEL_ONLY
+    
+    # Check for news-only requests
+    news_keywords = [
+        "news", "latest news", "recent news", "articles", "headlines",
+        "sentiment", "catalysts", "risks"
+    ]
+    if any(keyword in query_lower for keyword in news_keywords):
+        # Check if they ALSO want model/report
+        if "model" in query_lower or "report" in query_lower:
+            return AnalysisObjective.COMPREHENSIVE
+        return AnalysisObjective.QUICK_NEWS
+    
+    # Check for data-only requests
+    data_keywords = [
+        "financial data", "get data", "fetch data", "collect data",
+        "financial statements", "financials"
+    ]
+    if any(keyword in query_lower for keyword in data_keywords):
+        if "model" not in query_lower and "news" not in query_lower and "report" not in query_lower:
+            # They just want data - set to MODEL_ONLY but we'll stop after data collection
+            return AnalysisObjective.CUSTOM
+    
+    # Default to comprehensive if unclear
+    return AnalysisObjective.COMPREHENSIVE
+
+
+def _is_objective_achieved(state: FinancialState) -> bool:
+    """
+    Check if the user's objective has been achieved.
+    
+    This is critical for stopping the workflow at the right point.
+    For example, if objective is MODEL_ONLY, stop after model_generation_agent.
+    
+    Args:
+        state: Current FinancialState with objective
+        
+    Returns:
+        True if objective achieved and workflow should end
+    """
+    objective = state.objective
+    
+    if objective == AnalysisObjective.COMPREHENSIVE:
+        # Need everything: data, model, news, report
+        return (
+            state.is_financial_data_collected() and
+            state.is_model_generated() and
+            state.is_news_analyzed() and
+            state.is_report_generated()
+        )
+    
+    elif objective == AnalysisObjective.MODEL_ONLY:
+        # Only need financial data + model
+        return state.is_financial_data_collected() and state.is_model_generated()
+    
+    elif objective == AnalysisObjective.QUICK_NEWS:
+        # Only need news analysis (financial data is optional - ArticleScraper can work without it)
+        return state.is_news_analyzed()
+    
+    elif objective == AnalysisObjective.CUSTOM:
+        # Just financial data
+        return state.is_financial_data_collected()
+    
+    # Default: not achieved
+    return False
+
+
+def _resolve_dependencies(state: FinancialState, target_node: str, logger=None) -> tuple[str, bool, str]:
+    """
+    Intelligent dependency resolution - determines the optimal path to reach target node.
+    
+    This function implements "path planning" - given a desired destination (target_node),
+    it checks if all prerequisites are met. If not, it returns the next required step
+    in the dependency chain to eventually reach the target.
+    
+    🔥 KEY FEATURE: Respects user's objective!
+    - If objective is MODEL_ONLY, stops after model generation (no news/report)
+    - If objective is QUICK_NEWS, stops after news analysis (no report)
+    - If objective is COMPREHENSIVE, completes full workflow
+    
+    Dependency Chain:
+    1. financial_data_agent (must run first - nothing else works without data)
+    2. model_generation_agent (requires financial_data)
+    3. news_analysis_agent (can run after financial_data)
+    4. report_generator_agent (requires all three above)
+    
+    Args:
+        state: Current FinancialState
+        target_node: The node that LLM wants to route to
+        logger: Optional logger for messages
+        
+    Returns:
+        tuple of (actual_next_node, was_redirected, explanation)
+        - actual_next_node: The node to actually route to (may differ from target)
+        - was_redirected: True if we had to redirect due to missing prerequisites
+        - explanation: Human-readable explanation of the routing decision
+    """
+    main_logger = logger or get_logger()
+    
+    # 🔥 CHECK IF OBJECTIVE ALREADY ACHIEVED
+    if _is_objective_achieved(state):
+        explanation = f"✅ User's objective ({state.objective.value}) has been achieved. Ending workflow."
+        if main_logger:
+            main_logger.info(f"[DEPENDENCY RESOLVER] {explanation}")
+        return "__end__", True if target_node != "__end__" else False, explanation
+    
+    # If target is __end__, check if objective is achieved
+    if target_node == "__end__":
+        if not _is_objective_achieved(state):
+            # Objective not achieved - determine what's still needed
+            if state.objective == AnalysisObjective.MODEL_ONLY:
+                if not state.is_financial_data_collected():
+                    explanation = f"Cannot end - MODEL_ONLY objective requires financial data + model. Routing to financial_data_agent."
+                    return "financial_data_agent", True, explanation
+                elif not state.is_model_generated():
+                    explanation = f"Cannot end - MODEL_ONLY objective requires model generation. Routing to model_generation_agent."
+                    return "model_generation_agent", True, explanation
+            
+            elif state.objective == AnalysisObjective.QUICK_NEWS:
+                if not state.is_news_analyzed():
+                    explanation = f"Cannot end - QUICK_NEWS objective requires news analysis. Routing to news_analysis_agent."
+                    return "news_analysis_agent", True, explanation
+            
+            elif state.objective == AnalysisObjective.COMPREHENSIVE:
+                # Use existing logic for comprehensive
+                missing = []
+                if not state.is_financial_data_collected():
+                    missing.append("financial data")
+                if not state.is_model_generated():
+                    missing.append("financial model")
+                if not state.is_news_analyzed():
+                    missing.append("news analysis")
+                if not state.is_report_generated():
+                    missing.append("final report")
+                
+                if missing:
+                    if not state.is_financial_data_collected():
+                        explanation = f"Cannot end workflow yet - missing {', '.join(missing)}. Routing to financial_data_agent first."
+                        return "financial_data_agent", True, explanation
+                    elif not state.is_model_generated():
+                        explanation = f"Cannot end workflow yet - missing {', '.join(missing)}. Routing to model_generation_agent next."
+                        return "model_generation_agent", True, explanation
+                    elif not state.is_news_analyzed():
+                        explanation = f"Cannot end workflow yet - missing {', '.join(missing)}. Routing to news_analysis_agent next."
+                        return "news_analysis_agent", True, explanation
+                    else:
+                        explanation = f"Cannot end workflow yet - missing {', '.join(missing)}. Routing to report_generator_agent to finish."
+                        return "report_generator_agent", True, explanation
+        
+        return "__end__", False, "Objective achieved - workflow can end."
+    
+    # 🔥 RESPECT OBJECTIVE: Don't route to agents not needed for objective
+    if state.objective == AnalysisObjective.MODEL_ONLY:
+        # For MODEL_ONLY, reject news_analysis and report_generator
+        if target_node == "news_analysis_agent":
+            explanation = f"MODEL_ONLY objective: User asked only for financial model, not news analysis. Ending workflow."
+            if main_logger:
+                main_logger.info(f"[DEPENDENCY RESOLVER] 🎯 {explanation}")
+            return "__end__", True, explanation
+        
+        if target_node == "report_generator_agent":
+            explanation = f"MODEL_ONLY objective: User asked only for financial model, not a report. Ending workflow."
+            if main_logger:
+                main_logger.info(f"[DEPENDENCY RESOLVER] 🎯 {explanation}")
+            return "__end__", True, explanation
+    
+    elif state.objective == AnalysisObjective.QUICK_NEWS:
+        # For QUICK_NEWS, reject model and report
+        if target_node == "model_generation_agent":
+            if state.is_financial_data_collected() and not state.is_news_analyzed():
+                explanation = f"QUICK_NEWS objective: User asked for news analysis, not model. Routing to news_analysis_agent."
+                if main_logger:
+                    main_logger.info(f"[DEPENDENCY RESOLVER] 🎯 {explanation}")
+                return "news_analysis_agent", True, explanation
+        
+        if target_node == "report_generator_agent":
+            explanation = f"QUICK_NEWS objective: User asked for news analysis, not a report. Ending workflow."
+            if main_logger:
+                main_logger.info(f"[DEPENDENCY RESOLVER] 🎯 {explanation}")
+            return "__end__", True, explanation
+    
+    elif state.objective == AnalysisObjective.CUSTOM:
+        # For CUSTOM, reject everything except financial_data
+        if target_node in ["model_generation_agent", "news_analysis_agent", "report_generator_agent"]:
+            explanation = f"CUSTOM objective: User only requested financial data. Ending workflow."
+            if main_logger:
+                main_logger.info(f"[DEPENDENCY RESOLVER] 🎯 {explanation}")
+            return "__end__", True, explanation
+    
+    # Check if target work is already done
+    if target_node == "financial_data_agent" and state.is_financial_data_collected():
+        explanation = "Financial data already collected - no need to run again."
+        # Route to next logical step
+        if not state.is_model_generated():
+            return "model_generation_agent", True, explanation + " Routing to model_generation_agent instead."
+        elif not state.is_news_analyzed():
+            return "news_analysis_agent", True, explanation + " Routing to news_analysis_agent instead."
+        elif not state.is_report_generated():
+            return "report_generator_agent", True, explanation + " Routing to report_generator_agent instead."
+        else:
+            return "__end__", True, explanation + " All work complete."
+    
+    if target_node == "model_generation_agent" and state.is_model_generated():
+        explanation = "Financial model already generated - no need to run again."
+        if not state.is_news_analyzed():
+            return "news_analysis_agent", True, explanation + " Routing to news_analysis_agent instead."
+        elif not state.is_report_generated():
+            return "report_generator_agent", True, explanation + " Routing to report_generator_agent instead."
+        else:
+            return "__end__", True, explanation + " All work complete."
+    
+    if target_node == "news_analysis_agent" and state.is_news_analyzed():
+        explanation = "News analysis already complete - no need to run again."
+        if not state.is_model_generated():
+            return "model_generation_agent", True, explanation + " Routing to model_generation_agent instead."
+        elif not state.is_report_generated():
+            return "report_generator_agent", True, explanation + " Routing to report_generator_agent instead."
+        else:
+            return "__end__", True, explanation + " All work complete."
+    
+    if target_node == "report_generator_agent" and state.is_report_generated():
+        explanation = "Report already generated - workflow complete."
+        return "__end__", True, explanation
+    
+    # Check prerequisites for target node
+    if target_node == "model_generation_agent":
+        if not state.is_financial_data_collected():
+            explanation = "Cannot generate financial model without data. Routing to financial_data_agent first (mandatory prerequisite)."
+            if main_logger:
+                main_logger.warning(f"[DEPENDENCY RESOLVER] 🔀 LLM wanted to route to model_generation_agent, but financial data not collected yet.")
+                main_logger.info(f"[DEPENDENCY RESOLVER] ✅ Auto-correcting: financial_data_agent → model_generation_agent")
+            return "financial_data_agent", True, explanation
+    
+    if target_node == "report_generator_agent":
+        # Report requires ALL three: financial data, model, news
+        missing = []
+        if not state.is_financial_data_collected():
+            missing.append("financial data")
+        if not state.is_model_generated():
+            missing.append("financial model")
+        if not state.is_news_analyzed():
+            missing.append("news analysis")
+        
+        if missing:
+            # Route to first missing prerequisite
+            if not state.is_financial_data_collected():
+                explanation = f"Cannot generate report - missing {', '.join(missing)}. Routing to financial_data_agent first."
+                if main_logger:
+                    main_logger.warning(f"[DEPENDENCY RESOLVER] 🔀 LLM wanted to route to report_generator_agent, but missing: {', '.join(missing)}")
+                    main_logger.info(f"[DEPENDENCY RESOLVER] ✅ Auto-correcting path: financial_data_agent → model_generation_agent → news_analysis_agent → report_generator_agent")
+                return "financial_data_agent", True, explanation
+            elif not state.is_model_generated():
+                explanation = f"Cannot generate report - missing {', '.join(missing)}. Routing to model_generation_agent next."
+                if main_logger:
+                    main_logger.warning(f"[DEPENDENCY RESOLVER] 🔀 LLM wanted to route to report_generator_agent, but missing: {', '.join(missing)}")
+                    main_logger.info(f"[DEPENDENCY RESOLVER] ✅ Auto-correcting path: model_generation_agent → news_analysis_agent → report_generator_agent")
+                return "model_generation_agent", True, explanation
+            else:  # News analysis missing
+                explanation = f"Cannot generate report - missing {', '.join(missing)}. Routing to news_analysis_agent next."
+                if main_logger:
+                    main_logger.warning(f"[DEPENDENCY RESOLVER] 🔀 LLM wanted to route to report_generator_agent, but missing: {', '.join(missing)}")
+                    main_logger.info(f"[DEPENDENCY RESOLVER] ✅ Auto-correcting path: news_analysis_agent → report_generator_agent")
+                return "news_analysis_agent", True, explanation
+    
+    # Target node prerequisites are satisfied - can proceed
+    return target_node, False, f"All prerequisites satisfied for {target_node}."
 
 
 def _log_workflow_completion(state: FinancialState, logger=None):
@@ -251,6 +548,42 @@ def route_workflow_with_llm(state: FinancialState, config: dict = None, logger=N
     """
     
     try:
+        # 🔥 CRITICAL FIX: Check if objective is already achieved BEFORE asking LLM
+        # This prevents the LLM from suggesting to continue when user's goal is met
+        main_logger = logger or get_logger()
+        
+        if _is_objective_achieved(state):
+            explanation = f"✅ User's objective ({state.objective.value}) has been achieved. Ending workflow."
+            if main_logger:
+                main_logger.info("")
+                main_logger.info("[SUPERVISOR] " + "=" * 80)
+                main_logger.info(f"[SUPERVISOR] 🎯 OBJECTIVE ACHIEVED: {state.objective.value}")
+                main_logger.info("[SUPERVISOR] " + "=" * 80)
+                main_logger.info(f"[SUPERVISOR] {explanation}")
+                
+                # Show what was completed
+                if state.objective == AnalysisObjective.MODEL_ONLY:
+                    main_logger.info(f"[SUPERVISOR]    ✅ Financial data collected")
+                    main_logger.info(f"[SUPERVISOR]    ✅ Financial model generated")
+                    main_logger.info(f"[SUPERVISOR]    ⏭️  News analysis skipped (not requested)")
+                    main_logger.info(f"[SUPERVISOR]    ⏭️  Report generation skipped (not requested)")
+                elif state.objective == AnalysisObjective.QUICK_NEWS:
+                    main_logger.info(f"[SUPERVISOR]    ✅ Financial data collected")
+                    main_logger.info(f"[SUPERVISOR]    ✅ News analysis completed")
+                    main_logger.info(f"[SUPERVISOR]    ⏭️  Financial model skipped (not requested)")
+                    main_logger.info(f"[SUPERVISOR]    ⏭️  Report generation skipped (not requested)")
+                elif state.objective == AnalysisObjective.CUSTOM:
+                    main_logger.info(f"[SUPERVISOR]    ✅ Financial data collected")
+                    main_logger.info(f"[SUPERVISOR]    ⏭️  Other tasks skipped (not requested)")
+                
+                main_logger.info("[SUPERVISOR] " + "=" * 80)
+                main_logger.info("")
+            
+            # Log workflow completion
+            _log_workflow_completion(state, logger)
+            
+            return "__end__"
+        
         # Build prompt with current state
         completed_stages_str = "\n".join([f"  - {stage.value}" for stage in state.completed_stages]) or "  (none yet)"
         
@@ -370,30 +703,33 @@ def route_workflow_with_llm(state: FinancialState, config: dict = None, logger=N
             if next_node not in valid_nodes:
                 raise ValueError(f"Invalid next_node from LLM: {next_node}")
             
-            # Validate that LLM isn't routing to an agent whose work is already complete
-            if next_node == AgentNode.MODEL_GENERATION_AGENT.value and state.is_model_generated():
-                raise ValueError(f"LLM chose model_generation_agent but models already generated. Rejecting.")
-            if next_node == AgentNode.NEWS_ANALYSIS_AGENT.value and state.is_news_analyzed():
-                raise ValueError(f"LLM chose news_analysis_agent but news already analyzed. Rejecting.")
-            if next_node == AgentNode.FINANCIAL_DATA_AGENT.value and state.is_financial_data_collected():
-                raise ValueError(f"LLM chose financial_data_agent but data already collected. Rejecting.")
-            if next_node == AgentNode.REPORT_GENERATOR_AGENT.value and state.is_report_generated():
-                raise ValueError(f"LLM chose report_generator_agent but report already generated. Rejecting.")
+            # 🔥 FIX #1: INTELLIGENT DEPENDENCY RESOLUTION
+            # Instead of rejecting bad routing decisions, auto-correct them with path planning
+            main_logger = logger or get_logger()
+            actual_next_node, was_redirected, resolution_explanation = _resolve_dependencies(state, next_node, logger)
             
-            # Validate prerequisites are met
-            if next_node == AgentNode.MODEL_GENERATION_AGENT.value and not state.is_financial_data_collected():
-                raise ValueError(f"LLM chose model_generation_agent but financial data not collected yet. Need financial_data_agent first.")
-            
-            # CRITICAL: Force model generation before report
-            if next_node == AgentNode.REPORT_GENERATOR_AGENT.value and not state.is_model_generated():
-                raise ValueError(f"LLM chose report_generator_agent but financial model not generated yet. Need model_generation_agent first.")
-            
-            # CRITICAL: Force news_analysis to run before report generation
-            if next_node == AgentNode.REPORT_GENERATOR_AGENT.value and not state.is_news_analyzed():
-                raise ValueError(f"LLM chose report_generator_agent but news_analysis not completed yet. Need news_analysis_agent first.")
-            
-            if next_node == AgentNode.REPORT_GENERATOR_AGENT.value and not state.is_financial_data_collected():
-                raise ValueError(f"LLM chose report_generator_agent but no financial data available yet. Need financial_data_agent first.")
+            if was_redirected:
+                # LLM made a bad routing decision - we auto-corrected it
+                state.log_action(
+                    agent="supervisor_dependency_resolver",
+                    action="auto_correct_routing",
+                    details={
+                        "llm_wanted": next_node,
+                        "actual_route": actual_next_node,
+                        "reason": resolution_explanation,
+                        "llm_reasoning": reasoning
+                    }
+                )
+                if main_logger:
+                    main_logger.warning(f"[DEPENDENCY RESOLVER] ⚠️  LLM routing required correction")
+                    main_logger.info(f"[DEPENDENCY RESOLVER] 🎯 LLM wanted: {next_node}")
+                    main_logger.info(f"[DEPENDENCY RESOLVER] ✅ Auto-corrected to: {actual_next_node}")
+                    main_logger.info(f"[DEPENDENCY RESOLVER] 📝 Reason: {resolution_explanation}")
+                
+                # Use the corrected node
+                next_node = actual_next_node
+                # Update reasoning to reflect the correction
+                reasoning = f"[AUTO-CORRECTED] {resolution_explanation} (Original LLM reasoning: {reasoning})"
             
             # Write the LLM's conversational message to the main info.log
             try:

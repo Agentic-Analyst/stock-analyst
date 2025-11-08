@@ -230,7 +230,7 @@ class CompanyDailyReportGenerator:
             return []
             return []
     
-    def _scrape_and_filter_fallback(self, max_articles: int = 20, min_score: float = 5.0, max_filtered: int = 15) -> bool:
+    def _scrape_and_filter_fallback(self) -> bool:
         """Fallback method to scrape and filter articles when database is empty.
         
         This replicates the 'search-news' pipeline logic:
@@ -238,11 +238,8 @@ class CompanyDailyReportGenerator:
         2. Filter articles using ArticleFilter
         3. Save to database
         
-        Args:
-            max_articles: Maximum articles to search/scrape
-            min_score: Minimum relevance score for filtering (0-10)
-            max_filtered: Maximum filtered articles to keep
-            
+        All configuration parameters are loaded from config.py by the respective classes.
+        
         Returns:
             True if scraping succeeded, False otherwise
         """
@@ -272,8 +269,8 @@ class CompanyDailyReportGenerator:
                 self.article_scraper.set_logger(self.logger)
             
             # Step 1: Scrape articles
-            self._log("info", f"🔍 Scraping up to {max_articles} articles...")
-            scraping_results = self.article_scraper.run_comprehensive_scraping(max_articles=max_articles)
+            self._log("info", f"🔍 Scraping articles (max from config: {self.article_scraper.max_articles})...")
+            scraping_results = self.article_scraper.run_comprehensive_scraping()
             
             scraped_count = scraping_results.get('scraped_count', 0)
             pre_existing = scraping_results.get('pre_existing', 0)
@@ -286,8 +283,6 @@ class CompanyDailyReportGenerator:
                 return False
             
             # Step 2: Filter articles
-            self._log("info", f"🔍 Filtering articles (min_score={min_score}, max={max_filtered})...")
-            
             if not self.article_filter:
                 # Get company name for query
                 try:
@@ -301,16 +296,16 @@ class CompanyDailyReportGenerator:
                 
                 self.article_filter = ArticleFilter(
                     ticker=self.ticker,
-                    analysis_path=self.logger.data_dir,  # Use logger's base path
-                    query=query,
-                    logger=self.logger
+                    base_path=self.logger.data_dir,  # Correct parameter name
+                    query=query
                 )
+                # Set logger separately
+                self.article_filter.set_logger(self.logger)
+            
+            self._log("info", f"🔍 Filtering articles (min_score={self.article_filter.min_score})...")
             
             # Perform filtering
-            filter_result = self.article_filter.filter_articles(
-                max_filtered=max_filtered,
-                min_score=min_score
-            )
+            filter_result = self.article_filter.filter_articles()
             
             filtered_count = len(filter_result.get("filtered_articles", []))
             self._log("info", f"✅ Filtering complete: {filtered_count} articles passed criteria")

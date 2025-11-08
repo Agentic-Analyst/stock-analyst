@@ -18,6 +18,9 @@ from typing import Dict, List, Tuple, Set, Optional
 from dataclasses import dataclass, asdict
 from collections import defaultdict, Counter
 import yaml
+
+# Import centralized configuration
+from config import MIN_CONFIDENCE
 import tiktoken
 from llms.config import get_llm
 from vynn_core import find_recent, get_article_by_url
@@ -128,6 +131,9 @@ class ArticleScreener:
         
         # Logger - will be set by pipeline if available
         self.logger = None
+        
+        # Load configuration
+        self.min_confidence = MIN_CONFIDENCE
         
         # Cost tracking for LLM usage
         self.total_llm_cost = 0.0
@@ -655,7 +661,7 @@ class ArticleScreener:
 
             # Filter by ticker and score, convert to screener format
             filtered_articles = []
-            for article in recent_articles:
+            for article in recent_articles[:30]:
                 # Convert database format to screener format
                 screener_article = {
                     "file_path": None,  # Not from file

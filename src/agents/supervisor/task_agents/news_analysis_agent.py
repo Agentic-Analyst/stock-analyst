@@ -22,6 +22,7 @@ from src.agents.supervisor.state import (
 from src.article_scraper import ArticleScraper
 from src.article_filter import ArticleFilter
 from src.article_screener import ArticleScreener
+from src.config import MIN_CONFIDENCE
 
 
 async def news_analysis_agent(
@@ -51,21 +52,10 @@ async def news_analysis_agent(
             f"Starting news analysis for {state.ticker}..."
         )
         
-        # Get parameters from config or use defaults
-        max_articles_to_search = 80
-        min_filter_score = 6.0
-        max_filtered = 15
-        min_confidence = 0.6
-        
-        if config:
-            max_articles_to_search = config.max_articles_to_search
-            min_filter_score = config.min_filter_score
-            min_confidence = config.min_confidence_for_insights
-        
         # ==================== PART 1: SCRAPING ====================
         state.log_action(
             "news_analysis_agent",
-            f"[1/3] Scraping news articles (max {max_articles_to_search})..."
+            "[1/3] Scraping news articles (using config defaults)..."
         )
         
         # Use state's analysis_path directly
@@ -83,8 +73,8 @@ async def news_analysis_agent(
         current_count = storage_info.get("total_articles", 0)
         state.log_action("news_analysis_agent", f"Articles currently in storage: {current_count}")
         
-        # Perform comprehensive scraping
-        scraping_results = scraper.run_comprehensive_scraping(max_articles=max_articles_to_search)
+        # Perform comprehensive scraping (uses config internally)
+        scraping_results = scraper.run_comprehensive_scraping()
         
         state.log_action(
             "news_analysis_agent",
@@ -95,7 +85,7 @@ async def news_analysis_agent(
         # ==================== PART 2: FILTERING ====================
         state.log_action(
             "news_analysis_agent",
-            f"[2/3] Filtering articles by relevance (min score: {min_filter_score})..."
+            "[2/3] Filtering articles by relevance (using config defaults)..."
         )
         
         # Generate search query
@@ -105,10 +95,7 @@ async def news_analysis_agent(
         if effective_logger:
             article_filter.set_logger(effective_logger)
         
-        filtering_results = article_filter.filter_articles(
-            max_filtered=max_filtered,
-            min_score=min_filter_score
-        )
+        filtering_results = article_filter.filter_articles()  # Uses config internally
         
         filtered_articles = filtering_results.get("filtered_articles", [])
         filter_llm_cost = filtering_results.get("llm_cost", 0.0)
@@ -140,10 +127,11 @@ async def news_analysis_agent(
             articles_data
         )
         
-        # Filter by confidence threshold
-        high_conf_catalysts = [c for c in catalysts if c.confidence >= min_confidence]
-        high_conf_risks = [r for r in risks if r.confidence >= min_confidence]
-        high_conf_mitigations = [m for m in mitigations if m.confidence >= min_confidence]
+        # Filter by confidence threshold (using config or PipelineConfig override)
+        min_confidence_threshold = config.min_confidence_for_insights if config else MIN_CONFIDENCE
+        high_conf_catalysts = [c for c in catalysts if c.confidence >= min_confidence_threshold]
+        high_conf_risks = [r for r in risks if r.confidence >= min_confidence_threshold]
+        high_conf_mitigations = [m for m in mitigations if m.confidence >= min_confidence_threshold]
         
         # Track screening LLM cost
         screener_cost = screener.total_llm_cost

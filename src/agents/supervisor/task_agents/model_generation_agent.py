@@ -121,12 +121,93 @@ async def model_generation_agent(
             state.current_stage = PipelineStage.FAILED
             return state
         
+        # Extract valuation metrics from computed values JSON
+        valuation_metrics = {}
+        assumptions = {}
+        if computed_values_path and Path(computed_values_path).exists():
+            try:
+                import json
+                with open(computed_values_path, 'r') as f:
+                    computed_data = json.load(f)
+                
+                # Extract Summary tab data
+                summary_cells = computed_data.get("Summary", {}).get("cells", {})
+                
+                # Extract key valuation metrics
+                current_price = None
+                perpetual_price = None
+                exit_multiple_price = None
+                average_price = None
+                upside_vs_market = None
+                wacc = None
+                terminal_growth = None
+                exit_multiple = None
+                
+                for cell_key, cell_value in summary_cells.items():
+                    # Get the corresponding label from one cell to the left
+                    row, col = eval(cell_key)
+                    label_key = f"({row}, 1)"
+                    label = summary_cells.get(label_key, "")
+                    
+                    if isinstance(label, str):
+                        if "Current Market Price" in label and col == 2:
+                            current_price = cell_value
+                        elif "Value per Share (Perpetual DCF)" in label and col == 2:
+                            perpetual_price = cell_value
+                        elif "Value per Share (Exit Multiple DCF)" in label and col == 2:
+                            exit_multiple_price = cell_value
+                        elif "Average of Methods (Per-Share)" in label and col == 2:
+                            average_price = cell_value
+                        elif "Upside vs Market" in label and col == 2:
+                            upside_vs_market = cell_value
+                        elif "WACC (Perpetual DCF)" in label and col == 2:
+                            wacc = cell_value
+                        elif "Terminal Growth g" in label and col == 2:
+                            terminal_growth = cell_value
+                        elif "Exit Multiple (EV/EBITDA)" in label and col == 2:
+                            exit_multiple = cell_value
+                
+                # Populate valuation_metrics dictionary
+                if average_price is not None:
+                    valuation_metrics["fair_value"] = average_price
+                if perpetual_price is not None:
+                    valuation_metrics["perpetual_price"] = perpetual_price
+                if exit_multiple_price is not None:
+                    valuation_metrics["exit_multiple_price"] = exit_multiple_price
+                if current_price is not None:
+                    valuation_metrics["current_price"] = current_price
+                if upside_vs_market is not None:
+                    valuation_metrics["upside_vs_market"] = upside_vs_market
+                
+                # Populate assumptions dictionary
+                if wacc is not None:
+                    assumptions["wacc"] = wacc
+                if terminal_growth is not None:
+                    assumptions["terminal_growth"] = terminal_growth
+                if exit_multiple is not None:
+                    assumptions["exit_multiple"] = exit_multiple
+                
+                state.log_action(
+                    "model_generation_agent",
+                    f"📊 Extracted valuation: Fair Value=${valuation_metrics.get('fair_value', 'N/A'):.2f}, "
+                    f"Current=${valuation_metrics.get('current_price', 'N/A'):.2f}, "
+                    f"Upside={valuation_metrics.get('upside_vs_market', 0)*100:.1f}%"
+                )
+                
+            except Exception as extract_error:
+                state.log_action(
+                    "model_generation_agent",
+                    f"⚠️  Could not extract valuation metrics from JSON: {extract_error}"
+                )
+        
         # Update FinancialState with generated model
         state.financial_model = FinancialModel(
             ticker=state.ticker,
             model_type="comprehensive_dcf",
             excel_path=str(output_file),
-            json_computed_values_path=computed_values_path
+            json_computed_values_path=computed_values_path,
+            valuation_metrics=valuation_metrics,
+            assumptions=assumptions
         )
         
         # Update pipeline stage
