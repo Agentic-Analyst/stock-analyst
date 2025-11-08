@@ -41,6 +41,8 @@ sys.path.insert(0, str(src_dir))
 from vynn_core.dao.articles import get_last_n_hours_news
 from llms.config import get_llm
 from logger import StockAnalystLogger
+from article_scraper import ArticleScraper
+from article_filter import ArticleFilter
 import yfinance as yf
 
 
@@ -162,6 +164,10 @@ class CompanyDailyReportGenerator:
         self.max_tokens_per_request = 15000
         self.prompt_overhead_tokens = 1000
         
+        # Initialize article scraper and filter for fallback (lazy initialization)
+        self.article_scraper = None
+        self.article_filter = None
+        
         self.logger.info(f"Initialized daily report generator for {self.ticker}")
     
     def _log(self, level: str, message: str):
@@ -173,16 +179,35 @@ class CompanyDailyReportGenerator:
         return len(self.encoding.encode(text))
     
     def fetch_last_24h_news(self) -> List[Dict[str, Any]]:
-        """Fetch last 24 hours of news for the company from database."""
-        self._log("info", f"📰 Fetching last 24 hours of news for {self.ticker}")
+        """Fetch last 24 hours of news for the company from database.
+        
+        If no articles found, falls back to scraping and filtering new articles.
+        """
+        self._log("info", f"📰 Fetching last 24 hours of news for {self.ticker} from database...")
         
         try:
-            articles = get_last_n_hours_news(collection_name=self.ticker, n_hours_ago=24)
-            self._log("info", f"✅ Found {len(articles)} articles from last 24 hours")
+            # First attempt: fetch from database
+            articles = get_last_n_hours_news(self.ticker, 24)  # Use positional args for compatibility
+            article_count = len(articles)
+            
+            self._log("info", f"📊 Database query result: {article_count} articles found")
             
             if not articles:
-                self._log("warning", f"No articles found for {self.ticker} in the last 24 hours")
-                return []
+                self._log("warning", f"⚠️  No articles found in database for {self.ticker} in last 24 hours")
+                self._log("info", "🔄 Triggering fallback: Scraping and filtering new articles...")
+                
+                # Fallback: scrape and filter articles
+                if self._scrape_and_filter_fallback():
+                    # Try fetching again after scraping
+                    self._log("info", "🔍 Retrying database query after fallback scraping...")
+                    articles = get_last_n_hours_news(self.ticker, 24)
+                    new_count = len(articles)
+                    self._log("info", f"✅ After fallback: Database now has {new_count} articles")
+                else:
+                    self._log("warning", "❌ Fallback scraping failed, no articles available")
+                    return []
+            else:
+                self._log("info", f"✅ Using {article_count} articles from database (no fallback needed)")
             
             # Convert to expected format
             formatted_articles = []
@@ -199,8 +224,105 @@ class CompanyDailyReportGenerator:
             return formatted_articles
             
         except Exception as e:
-            self._log("error", f"Error fetching articles: {e}")
+            self._log("error", f"❌ Error fetching articles: {e}")
+            import traceback
+            self._log("error", traceback.format_exc())
             return []
+            return []
+    
+    def _scrape_and_filter_fallback(self, max_articles: int = 20, min_score: float = 5.0, max_filtered: int = 15) -> bool:
+        """Fallback method to scrape and filter articles when database is empty.
+        
+        This replicates the 'search-news' pipeline logic:
+        1. Scrape articles using ArticleScraper
+        2. Filter articles using ArticleFilter
+        3. Save to database
+        
+        Args:
+            max_articles: Maximum articles to search/scrape
+            min_score: Minimum relevance score for filtering (0-10)
+            max_filtered: Maximum filtered articles to keep
+            
+        Returns:
+            True if scraping succeeded, False otherwise
+        """
+        try:
+            self._log("info", "📡 Fallback: Initializing article scraper...")
+            
+            # Lazy initialization of scraper and filter
+            if not self.article_scraper:
+                # Use the logger's base path (same structure as main pipeline)
+                # This will be data/{email}/{ticker}/{timestamp} if called from main.py
+                # or data/{ticker} if running standalone
+                analysis_path = self.logger.data_dir
+                
+                # Get company name for ArticleScraper
+                try:
+                    ticker_info = yf.Ticker(self.ticker)
+                    company_name = ticker_info.info.get('longName', self.ticker)
+                except Exception:
+                    company_name = self.ticker
+                
+                self.article_scraper = ArticleScraper(
+                    ticker=self.ticker,
+                    company_name=company_name,
+                    base_path=analysis_path
+                )
+                # Set the logger for the scraper
+                self.article_scraper.set_logger(self.logger)
+            
+            # Step 1: Scrape articles
+            self._log("info", f"🔍 Scraping up to {max_articles} articles...")
+            scraping_results = self.article_scraper.run_comprehensive_scraping(max_articles=max_articles)
+            
+            scraped_count = scraping_results.get('scraped_count', 0)
+            pre_existing = scraping_results.get('pre_existing', 0)
+            
+            self._log("info", f"✅ Scraping complete: {scraped_count} new articles, {pre_existing} pre-existing")
+            
+            # Check if we have articles to filter (either new or existing)
+            if scraped_count == 0 and pre_existing == 0:
+                self._log("warning", "No articles available to filter")
+                return False
+            
+            # Step 2: Filter articles
+            self._log("info", f"🔍 Filtering articles (min_score={min_score}, max={max_filtered})...")
+            
+            if not self.article_filter:
+                # Get company name for query
+                try:
+                    ticker_info = yf.Ticker(self.ticker)
+                    company_name = ticker_info.info.get('longName', self.ticker)
+                except Exception:
+                    company_name = self.ticker
+                
+                # Generate default query
+                query = f"{company_name} financial outlook earnings growth investment analysis"
+                
+                self.article_filter = ArticleFilter(
+                    ticker=self.ticker,
+                    analysis_path=self.logger.data_dir,  # Use logger's base path
+                    query=query,
+                    logger=self.logger
+                )
+            
+            # Perform filtering
+            filter_result = self.article_filter.filter_articles(
+                max_filtered=max_filtered,
+                min_score=min_score
+            )
+            
+            filtered_count = len(filter_result.get("filtered_articles", []))
+            self._log("info", f"✅ Filtering complete: {filtered_count} articles passed criteria")
+            
+            # Articles are automatically saved to database by ArticleFilter
+            return filtered_count > 0
+            
+        except Exception as e:
+            self._log("error", f"Error in scrape and filter fallback: {e}")
+            import traceback
+            self._log("error", traceback.format_exc())
+            return False
     
     def _format_articles_for_analysis(self, articles: List[Dict]) -> str:
         """Format articles for LLM analysis."""
@@ -469,7 +591,7 @@ class CompanyDailyReportGenerator:
         peer_context = {}
         for peer_ticker in peer_tickers:
             try:
-                articles = get_last_n_hours_news(collection_name=peer_ticker, n_hours_ago=24)
+                articles = get_last_n_hours_news(peer_ticker, 24)  # Use positional args for compatibility
                 
                 # Fetch peer price data if available
                 price_move = None
