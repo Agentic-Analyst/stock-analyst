@@ -11,7 +11,7 @@ class ArticleConfig:
     """Configuration for article scraping and filtering operations."""
     
     # Maximum number of articles to scrape/search
-    MAX_ARTICLES = 15
+    MAX_ARTICLES = 30
     
     # Minimum relevance score for article filtering (0-10 scale)
     MIN_SCORE = 5.0
