@@ -1024,27 +1024,188 @@ Provide a helpful, informative answer:"""
             completed_agents_list = [agent["agent"] for agent in self.stats["agents_executed"]]
             completed_agents_str = ", ".join(completed_agents_list) if completed_agents_list else "None"
             
-            # Prepare data for template
-            financial_model_summary = (
-                f"Generated {self.state.financial_model.model_type} valuation model" 
-                if self.state.is_model_generated() 
-                else "Not completed"
-            )
+            # ==================== FINANCIAL DATA SUMMARY ====================
+            financial_data_summary = "Not collected"
+            if self.state.is_financial_data_collected() and self.state.financial_data:
+                try:
+                    basic_info = self.state.financial_data.key_metrics.get("basic_info", {})
+                    market_data = self.state.financial_data.key_metrics.get("market_data", {})
+                    
+                    parts = []
+                    if basic_info.get("sector"):
+                        parts.append(f"Sector: {basic_info['sector']}")
+                    if basic_info.get("industry"):
+                        parts.append(f"Industry: {basic_info['industry']}")
+                    if market_data.get("market_cap"):
+                        parts.append(f"Market Cap: ${market_data['market_cap']:,.0f}")
+                    if market_data.get("current_price"):
+                        parts.append(f"Current Price: ${market_data['current_price']:.2f}")
+                    if market_data.get("trailing_pe"):
+                        parts.append(f"P/E: {market_data['trailing_pe']:.2f}")
+                    
+                    if parts:
+                        financial_data_summary = "Collected financial data. " + ", ".join(parts)
+                    else:
+                        financial_data_summary = "Collected financial data (basic metrics available)"
+                except Exception as e:
+                    self.logger.warning(f"[SUPERVISOR] Could not format financial data summary: {e}")
+                    financial_data_summary = "Collected financial data"
             
-            news_analysis_summary = (
-                f"Analyzed {self.state.news_analysis.articles_count} articles - "
-                f"Overall sentiment: {self.state.news_analysis.overall_sentiment}. "
-                f"Found {len(self.state.news_analysis.catalysts)} catalysts and "
-                f"{len(self.state.news_analysis.risks)} risks."
-                if self.state.is_news_analyzed() 
-                else "Not completed"
-            )
+            # ==================== FINANCIAL MODEL SUMMARY ====================
+            financial_model_summary = "Not completed"
+            if self.state.is_model_generated():
+                try:
+                    parts = []
+                    valuation_metrics = self.state.financial_model.valuation_metrics
+                    assumptions = self.state.financial_model.assumptions
+                    
+                    # Core valuation results
+                    if valuation_metrics and valuation_metrics.get("fair_value"):
+                        fair_value = valuation_metrics["fair_value"]
+                        current_price = valuation_metrics.get("current_price")
+                        upside_pct = valuation_metrics.get("upside_vs_market", 0) * 100
+                        
+                        parts.append(f"Generated {self.state.financial_model.model_type} valuation model")
+                        parts.append(f"Fair Value: ${fair_value:.2f}")
+                        
+                        if current_price:
+                            parts.append(f"Current Price: ${current_price:.2f}")
+                            if abs(upside_pct) > 0.1:  # Only mention if significant
+                                direction = "upside" if upside_pct > 0 else "downside"
+                                parts.append(f"{abs(upside_pct):.1f}% {direction}")
+                        
+                        # Key model assumptions
+                        if assumptions:
+                            assumption_parts = []
+                            if "wacc" in assumptions and assumptions["wacc"] is not None:
+                                assumption_parts.append(f"WACC: {assumptions['wacc']*100:.2f}%")
+                            if "terminal_growth" in assumptions and assumptions["terminal_growth"] is not None:
+                                assumption_parts.append(f"Terminal Growth: {assumptions['terminal_growth']*100:.2f}%")
+                            if "exit_multiple" in assumptions and assumptions["exit_multiple"] is not None:
+                                assumption_parts.append(f"Exit Multiple: {assumptions['exit_multiple']:.1f}x")
+                            
+                            # Add revenue growth rates if available
+                            if "revenue_growth_rates" in assumptions and assumptions["revenue_growth_rates"]:
+                                growth_rates = assumptions["revenue_growth_rates"]
+                                # Format as percentages
+                                growth_str = ", ".join([f"{rate*100:.1f}%" for rate in growth_rates[:5]])  # FY1-FY5
+                                assumption_parts.append(f"Revenue Growth (FY1-FY5): {growth_str}")
+                            
+                            if assumption_parts:
+                                parts.append("Key assumptions: " + ", ".join(assumption_parts))
+                        
+                        financial_model_summary = ". ".join(parts)
+                    else:
+                        # Model generated but metrics not extracted
+                        financial_model_summary = (
+                            f"Generated {self.state.financial_model.model_type} valuation model "
+                            f"(valuation metrics extraction pending)"
+                        )
+                except Exception as e:
+                    self.logger.warning(f"[SUPERVISOR] Could not format financial model summary: {e}")
+                    financial_model_summary = f"Generated {self.state.financial_model.model_type} valuation model"
             
-            report_summary = (
-                "Generated comprehensive analyst report with investment recommendation" 
-                if self.state.is_report_generated() 
-                else "Not completed"
-            )
+            # ==================== NEWS ANALYSIS SUMMARY ====================
+            news_analysis_summary = "Not completed"
+            if self.state.is_news_analyzed() and self.state.news_analysis:
+                try:
+                    parts = []
+                    
+                    # Basic counts and sentiment
+                    parts.append(f"Analyzed {self.state.news_analysis.articles_count} articles")
+                    parts.append(f"Overall sentiment: {self.state.news_analysis.overall_sentiment}")
+                    
+                    # Detailed catalyst information
+                    if self.state.news_analysis.catalysts:
+                        parts.append(f"Identified {len(self.state.news_analysis.catalysts)} growth catalysts")
+                        
+                        # Extract top 3 catalysts with full details
+                        for i, catalyst in enumerate(self.state.news_analysis.catalysts[:3], 1):
+                            if isinstance(catalyst, dict):
+                                cat_type = catalyst.get("type", "unknown")
+                                cat_desc = catalyst.get("description", "")
+                                cat_timeline = catalyst.get("timeline", "")
+                                cat_confidence = catalyst.get("confidence", 0.0)
+                                cat_impact = catalyst.get("potential_impact", "")
+                                
+                                catalyst_detail = f"Catalyst #{i}: {cat_type.upper()}"
+                                if cat_desc:
+                                    catalyst_detail += f" - {cat_desc[:150]}"
+                                if cat_timeline:
+                                    catalyst_detail += f" (Timeline: {cat_timeline})"
+                                if cat_confidence > 0:
+                                    catalyst_detail += f" [Confidence: {cat_confidence:.0%}]"
+                                if cat_impact:
+                                    catalyst_detail += f" (Impact: {cat_impact[:100]})"
+                                
+                                parts.append(catalyst_detail)
+                    
+                    # Detailed risk information
+                    if self.state.news_analysis.risks:
+                        parts.append(f"Identified {len(self.state.news_analysis.risks)} risks")
+                        
+                        # Extract top 3 risks with full details
+                        for i, risk in enumerate(self.state.news_analysis.risks[:3], 1):
+                            if isinstance(risk, dict):
+                                risk_type = risk.get("type", "unknown")
+                                risk_desc = risk.get("description", "")
+                                risk_severity = risk.get("severity", "unknown")
+                                risk_confidence = risk.get("confidence", 0.0)
+                                risk_impact = risk.get("potential_impact", "")
+                                
+                                risk_detail = f"Risk #{i}: {risk_type.upper()}"
+                                if risk_desc:
+                                    risk_detail += f" - {risk_desc[:150]}"
+                                if risk_severity:
+                                    risk_detail += f" (Severity: {risk_severity})"
+                                if risk_confidence > 0:
+                                    risk_detail += f" [Confidence: {risk_confidence:.0%}]"
+                                if risk_impact:
+                                    risk_detail += f" (Impact: {risk_impact[:100]})"
+                                
+                                parts.append(risk_detail)
+                    
+                    # Add mitigation count if available
+                    if self.state.news_analysis.mitigations:
+                        parts.append(f"Found {len(self.state.news_analysis.mitigations)} mitigation strategies")
+                    
+                    # Include screening data path if available
+                    if self.state.news_analysis.screening_data_path:
+                        screening_path = Path(self.state.news_analysis.screening_data_path)
+                        if screening_path.exists():
+                            parts.append(f"Screening data saved to: {screening_path.name}")
+                    
+                    news_analysis_summary = ". ".join(parts) + "."
+                    
+                except Exception as e:
+                    self.logger.warning(f"[SUPERVISOR] Could not format news analysis summary: {e}")
+                    news_analysis_summary = (
+                        f"Analyzed {self.state.news_analysis.articles_count} articles - "
+                        f"Overall sentiment: {self.state.news_analysis.overall_sentiment}"
+                    )
+            
+            # ==================== REPORT SUMMARY ====================
+            report_summary = "Not completed"
+            if self.state.is_report_generated() and self.state.report:
+                try:
+                    parts = ["Generated comprehensive analyst report"]
+                    
+                    if self.state.report.content:
+                        content_length = len(self.state.report.content)
+                        parts.append(f"{content_length:,} characters")
+                    
+                    if self.state.report.report_path:
+                        report_path = Path(self.state.report.report_path)
+                        parts.append(f"Saved to: {report_path.name}")
+                    
+                    if self.state.report.generated_at:
+                        parts.append(f"Generated at: {self.state.report.generated_at.strftime('%Y-%m-%d %H:%M:%S')}")
+                    
+                    report_summary = ". ".join(parts)
+                    
+                except Exception as e:
+                    self.logger.warning(f"[SUPERVISOR] Could not format report summary: {e}")
+                    report_summary = "Generated comprehensive analyst report with investment recommendation"
             
             # Build summary prompt with state information
             summary_prompt = prompt_template.format(
@@ -1052,6 +1213,7 @@ Provide a helpful, informative answer:"""
                 company_name=self.company_name,
                 user_query=self.user_prompt,
                 completed_agents=completed_agents_str,
+                financial_data_summary=financial_data_summary,
                 financial_model_summary=financial_model_summary,
                 news_analysis_summary=news_analysis_summary,
                 report_summary=report_summary

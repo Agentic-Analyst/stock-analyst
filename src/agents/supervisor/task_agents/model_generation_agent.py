@@ -142,6 +142,7 @@ async def model_generation_agent(
                 wacc = None
                 terminal_growth = None
                 exit_multiple = None
+                revenue_growth_rates = []
                 
                 for cell_key, cell_value in summary_cells.items():
                     # Get the corresponding label from one cell to the left
@@ -167,6 +168,18 @@ async def model_generation_agent(
                         elif "Exit Multiple (EV/EBITDA)" in label and col == 2:
                             exit_multiple = cell_value
                 
+                # Extract revenue growth rates from LLM_Inferred tab
+                llm_inferred_cells = computed_data.get("LLM_Inferred", {}).get("cells", {})
+                for cell_key, cell_value in llm_inferred_cells.items():
+                    row, col = eval(cell_key)
+                    label_key = f"({row}, 1)"
+                    label = llm_inferred_cells.get(label_key, "")
+                    
+                    if isinstance(label, str) and "Revenue Growth Rate" in label:
+                        # Collect FY1-FY5 growth rates (columns 2-6)
+                        if col >= 2 and col <= 6 and isinstance(cell_value, (int, float)):
+                            revenue_growth_rates.append(cell_value)
+                
                 # Populate valuation_metrics dictionary
                 if average_price is not None:
                     valuation_metrics["fair_value"] = average_price
@@ -186,6 +199,8 @@ async def model_generation_agent(
                     assumptions["terminal_growth"] = terminal_growth
                 if exit_multiple is not None:
                     assumptions["exit_multiple"] = exit_multiple
+                if revenue_growth_rates:
+                    assumptions["revenue_growth_rates"] = revenue_growth_rates
                 
                 state.log_action(
                     "model_generation_agent",
