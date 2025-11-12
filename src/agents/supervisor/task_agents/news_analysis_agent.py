@@ -1,15 +1,16 @@
 """
 News Analysis Agent Node
 
-Performs comprehensive news analysis: Scraping → Filtering → Screening
+Performs comprehensive news analysis: Database Check → Scraping (if needed) → Filtering → Screening
 
 This agent:
-1. Scrapes news articles using ArticleScraper
-2. Filters articles by relevance using ArticleFilter
-3. Screens articles for insights using ArticleScreener
-4. Extracts catalysts, risks, and mitigations
-5. Updates state.news_analysis
-6. Marks pipeline stage as NEWS_ANALYSIS_COMPLETED
+1. Checks database for existing articles first
+2. Scrapes news articles using ArticleScraper (if database has insufficient articles)
+3. Filters articles by relevance using ArticleFilter (if scraping was triggered)
+4. Screens articles for insights using ArticleScreener
+5. Extracts catalysts, risks, and mitigations
+6. Updates state.news_analysis
+7. Marks pipeline stage as NEWS_ANALYSIS_COMPLETED
 """
 
 from pathlib import Path
@@ -23,6 +24,28 @@ from src.article_scraper import ArticleScraper
 from src.article_filter import ArticleFilter
 from src.article_screener import ArticleScreener
 from src.config import MIN_CONFIDENCE
+from src.config import MAX_ARTICLES
+from vynn_core import find_recent
+
+
+def _check_database_for_articles(ticker: str) -> int:
+    """
+    Check if database has sufficient recent articles for the ticker.
+    
+    Args:
+        ticker: Stock ticker symbol
+        min_articles: Minimum number of articles required
+        
+    Returns:
+        Number of articles found in database
+    """
+    try:
+        recent_articles = find_recent(limit=MAX_ARTICLES, collection_name=ticker)
+        article_count = len(recent_articles) if recent_articles else 0
+        return article_count
+    except Exception as e:
+        # If database check fails, return 0 to trigger fallback
+        return 0
 
 
 async def news_analysis_agent(
@@ -52,61 +75,104 @@ async def news_analysis_agent(
             f"Starting news analysis for {state.ticker}..."
         )
         
-        # ==================== PART 1: SCRAPING ====================
-        state.log_action(
-            "news_analysis_agent",
-            "[1/3] Scraping news articles (using config defaults)..."
-        )
-        
         # Use state's analysis_path directly
         analysis_path = Path(state.analysis_path) if isinstance(state.analysis_path, str) else state.analysis_path
         
         # Use effective logger from state
         effective_logger = state.get_effective_logger("news_analysis_agent")
         
-        scraper = ArticleScraper(state.ticker, state.company_name, analysis_path)
-        if effective_logger:
-            scraper.set_logger(effective_logger)
+        # ==================== PART 0: DATABASE CHECK ====================
+        state.log_action(
+            "news_analysis_agent",
+            "[0/3] Checking database for existing articles..."
+        )
         
-        # Check current storage
-        storage_info = scraper.get_storage_info()
-        current_count = storage_info.get("total_articles", 0)
-        state.log_action("news_analysis_agent", f"Articles currently in storage: {current_count}")
-        
-        # Perform comprehensive scraping (uses config internally)
-        scraping_results = scraper.run_comprehensive_scraping()
+        # Check if we have sufficient articles in database
+        min_articles_threshold = 15  # Configurable threshold
+        db_article_count = _check_database_for_articles(state.ticker)
         
         state.log_action(
             "news_analysis_agent",
-            f"Scraped: {scraping_results.get('scraped_count', 0)} new articles, "
-            f"Duplicates skipped: {scraping_results.get('duplicate_count', 0)}"
+            f"📊 Database check: Found {db_article_count} articles for {state.ticker}"
         )
         
-        # ==================== PART 2: FILTERING ====================
-        state.log_action(
-            "news_analysis_agent",
-            "[2/3] Filtering articles by relevance (using config defaults)..."
-        )
+        # Determine if scraping is needed
+        needs_scraping = db_article_count < min_articles_threshold
         
-        # Generate search query
-        filter_query = f"{state.company_name} financial outlook earnings growth investment analysis"
+        if needs_scraping:
+            state.log_action(
+                "news_analysis_agent",
+                f"⚠️  Insufficient articles in database ({db_article_count} < {min_articles_threshold})"
+            )
+            state.log_action(
+                "news_analysis_agent",
+                "🔄 Triggering fallback: Scraping and filtering new articles..."
+            )
+        else:
+            state.log_action(
+                "news_analysis_agent",
+                f"✅ Sufficient articles in database ({db_article_count} >= {min_articles_threshold})"
+            )
+            state.log_action(
+                "news_analysis_agent",
+                "⏭️  Skipping scraping and filtering, using existing database articles"
+            )
         
-        article_filter = ArticleFilter(state.ticker, filter_query, analysis_path)
-        if effective_logger:
-            article_filter.set_logger(effective_logger)
-        
-        filtering_results = article_filter.filter_articles()  # Uses config internally
-        
-        filtered_articles = filtering_results.get("filtered_articles", [])
-        filter_llm_cost = filtering_results.get("llm_cost", 0.0)
-        
-        state.log_action(
-            "news_analysis_agent",
-            f"Filtered articles: {len(filtered_articles)}, LLM cost: ${filter_llm_cost:.4f}"
-        )
-        
-        # Track filtering LLM cost
-        state.total_llm_cost += filter_llm_cost
+        # ==================== PART 1: SCRAPING (CONDITIONAL) ====================
+        if needs_scraping:
+            state.log_action(
+                "news_analysis_agent",
+                "[1/3] Scraping news articles (using config defaults)..."
+            )
+            
+            scraper = ArticleScraper(state.ticker, state.company_name, analysis_path)
+            if effective_logger:
+                scraper.set_logger(effective_logger)
+            
+            # Check current storage
+            storage_info = scraper.get_storage_info()
+            current_count = storage_info.get("total_articles", 0)
+            state.log_action("news_analysis_agent", f"Articles currently in local storage: {current_count}")
+            
+            # Perform comprehensive scraping (uses config internally)
+            scraping_results = scraper.run_comprehensive_scraping()
+            
+            state.log_action(
+                "news_analysis_agent",
+                f"Scraped: {scraping_results.get('scraped_count', 0)} new articles, "
+                f"Duplicates skipped: {scraping_results.get('duplicate_count', 0)}"
+            )
+            
+            # ==================== PART 2: FILTERING (CONDITIONAL) ====================
+            state.log_action(
+                "news_analysis_agent",
+                "[2/3] Filtering articles by relevance (using config defaults)..."
+            )
+            
+            # Generate search query
+            filter_query = f"{state.company_name} financial outlook earnings growth investment analysis"
+            
+            article_filter = ArticleFilter(state.ticker, filter_query, analysis_path)
+            if effective_logger:
+                article_filter.set_logger(effective_logger)
+            
+            filtering_results = article_filter.filter_articles()  # Uses config internally
+            
+            filtered_articles = filtering_results.get("filtered_articles", [])
+            filter_llm_cost = filtering_results.get("llm_cost", 0.0)
+            
+            state.log_action(
+                "news_analysis_agent",
+                f"Filtered articles: {len(filtered_articles)}, LLM cost: ${filter_llm_cost:.4f}"
+            )
+            
+            # Track filtering LLM cost
+            state.total_llm_cost += filter_llm_cost
+        else:
+            state.log_action(
+                "news_analysis_agent",
+                "[1-2/3] Scraping and filtering skipped (using database articles)"
+            )
         
         # ==================== PART 3: SCREENING ====================
         state.log_action(
