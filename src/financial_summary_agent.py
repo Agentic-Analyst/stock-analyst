@@ -267,8 +267,10 @@ def generate_financial_summary(
     metrics_table += "|--------|-------|\n"
     metrics_table += f"| Current Price | {format_number(company['current_price'], 2)} |\n"
     metrics_table += f"| Market Cap | {format_number(company['market_cap'])} |\n"
-    metrics_table += f"| P/E Ratio (TTM) | {company['pe_trailing']:.2f}x |\n"
-    metrics_table += f"| EV/EBITDA | {company['ev_to_ebitda']:.2f}x |\n"
+    pe_trailing_str = f"{company['pe_trailing']:.2f}x" if company['pe_trailing'] else "N/A"
+    ev_to_ebitda_str = f"{company['ev_to_ebitda']:.2f}x" if company['ev_to_ebitda'] else "N/A"
+    metrics_table += f"| P/E Ratio (TTM) | {pe_trailing_str} |\n"
+    metrics_table += f"| EV/EBITDA | {ev_to_ebitda_str} |\n"
     metrics_table += f"| Gross Margin | {format_percent(company['gross_margin'])} |\n"
     metrics_table += f"| EBITDA Margin | {format_percent(company['ebitda_margin'])} |\n"
     metrics_table += f"| Net Margin | {format_percent(company['net_margin'])} |\n"
@@ -343,6 +345,9 @@ Format your response in clear sections with markdown headers (###).
     if logger:
         logger.info(f"✅ Summary generated (cost: ${cost:.4f})")
     
+    # Handle None values for pe_trailing
+    pe_trailing_display = f"{company['pe_trailing']:.2f}x" if company['pe_trailing'] else "N/A"
+    
     # Build final summary with both tables and narrative
     summary = f"""# Financial Model & Data Summary: {company['company_name']} ({company['ticker']})
 
@@ -358,7 +363,7 @@ Format your response in clear sections with markdown headers (###).
 | Model Fair Value | {format_number(valuation['average_intrinsic'], 2)} |
 | Implied Upside/Downside | {format_percent(valuation['upside'])} |
 | Market Cap | {format_number(company['market_cap'])} |
-| P/E Ratio | {company['pe_trailing']:.2f}x |
+| P/E Ratio | {pe_trailing_display} |
 
 ---
 

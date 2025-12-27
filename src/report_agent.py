@@ -312,6 +312,9 @@ def generate_section_company_overview(data: Dict[str, Any], llm) -> Tuple[str, f
     """Generate Company Overview section."""
     company = data['company_overview']
     
+    # Handle None values for employees
+    employees_str = f"{company['employees']:,}" if company['employees'] else "N/A"
+    
     # Load prompt template and fill in variables
     prompt_template = load_prompt("report_company_overview")
     prompt = prompt_template.format(
@@ -319,8 +322,8 @@ def generate_section_company_overview(data: Dict[str, Any], llm) -> Tuple[str, f
         ticker=company['ticker'],
         sector=company['sector'],
         industry=company['industry'],
-        description=company['description'][:500] + "...",
-        employees=f"{company['employees']:,}",
+        description=company['description'][:500] + "..." if company['description'] else "N/A",
+        employees=employees_str,
         market_cap=format_number(company['market_cap']),
         current_price=format_number(company['current_price'], 2),
         week_52_low=format_number(company['week_52_low'], 2),
@@ -423,7 +426,9 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     # DCF Exit Multiple results
     dcf_exit_table = "| Metric | Value |\n"
     dcf_exit_table += "|--------|-------|\n"
-    dcf_exit_table += f"| Exit Multiple (EV/EBITDA) | {valuation['dcf_exit']['exit_multiple']:.1f}x |\n"
+    exit_multiple = valuation['dcf_exit']['exit_multiple']
+    exit_multiple_str = f"{exit_multiple:.1f}x" if exit_multiple else "N/A"
+    dcf_exit_table += f"| Exit Multiple (EV/EBITDA) | {exit_multiple_str} |\n"
     dcf_exit_table += f"| Terminal Enterprise Value | {format_number(valuation['dcf_exit']['terminal_ev'])} |\n"
     dcf_exit_table += f"| Enterprise Value | {format_number(valuation['dcf_exit']['enterprise_value'])} |\n"
     dcf_exit_table += f"| Equity Value | {format_number(valuation['dcf_exit']['equity_value'])} |\n"

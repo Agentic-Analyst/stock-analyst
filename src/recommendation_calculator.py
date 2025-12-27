@@ -73,6 +73,22 @@ class RecommendationCalculator:
         Returns a complete FixedNumbers payload that LLM cannot modify.
         """
         
+        # Handle None values for ETFs or missing data
+        if current_price is None or current_price == 0:
+            current_price = 0.01  # Avoid division by zero
+        if dcf_perpetual is None:
+            dcf_perpetual = 0
+        if dcf_exit is None:
+            dcf_exit = 0
+        if catalyst_score_pct is None:
+            catalyst_score_pct = 0
+        if risk_score_pct is None:
+            risk_score_pct = 0
+        if momentum_score_pct is None:
+            momentum_score_pct = 0
+        if hist_vol_annual_pct is None:
+            hist_vol_annual_pct = 18.0
+        
         # 1. DCF average
         dcf_avg = (dcf_perpetual + dcf_exit) / 2 if dcf_perpetual and dcf_exit else 0
         
@@ -287,6 +303,14 @@ class RecommendationCalculator:
         
         Capped at ±10%
         """
+        # Handle None values for ETFs or missing data
+        if current_price is None:
+            current_price = 0
+        if week_52_low is None:
+            week_52_low = current_price
+        if week_52_high is None:
+            week_52_high = current_price
+            
         # Price position momentum (0-10%)
         if week_52_high > week_52_low:
             price_range = week_52_high - week_52_low

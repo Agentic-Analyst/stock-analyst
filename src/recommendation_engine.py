@@ -74,12 +74,14 @@ class RecommendationEngineV3:
         # Step 1: Extract required data
         ticker = company_data.get('ticker', 'UNKNOWN')
         current_price = company_data.get('current_price', 0)
-        week_52_low = company_data.get('week_52_low', current_price)
-        week_52_high = company_data.get('week_52_high', current_price)
+        week_52_low = company_data.get('week_52_low') or current_price
+        week_52_high = company_data.get('week_52_high') or current_price
         
-        # DCF values
-        dcf_perpetual = valuation_data.get('dcf_perpetual', {}).get('intrinsic_value_per_share', 0)
-        dcf_exit = valuation_data.get('dcf_exit', {}).get('intrinsic_value_per_share', 0)
+        # DCF values - handle None explicitly
+        dcf_perpetual_raw = valuation_data.get('dcf_perpetual', {}).get('intrinsic_value_per_share')
+        dcf_exit_raw = valuation_data.get('dcf_exit', {}).get('intrinsic_value_per_share')
+        dcf_perpetual = dcf_perpetual_raw if dcf_perpetual_raw is not None else 0
+        dcf_exit = dcf_exit_raw if dcf_exit_raw is not None else 0
         
         # Estimate volatility from company data or use default
         # TODO: Calculate actual historical volatility from price data
