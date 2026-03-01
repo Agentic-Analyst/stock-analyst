@@ -1,6 +1,6 @@
-# Vynn AI Proprietary License
+# VYNN AI Proprietary License
 
-Copyright (c) 2025 Vynn AI. All rights reserved.
+Copyright (c) 2026 VYNN AI. All rights reserved.
 
 ## License Grant
 Vynn AI grants you (the "Licensee") a limited, non-exclusive, non-transferable, and revocable license to view and reference this software (the "Software") solely for evaluation and educational purposes.
