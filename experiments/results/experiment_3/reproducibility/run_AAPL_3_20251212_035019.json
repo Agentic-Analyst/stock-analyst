@@ -1,0 +1,19 @@
+{
+  "ticker": "AAPL",
+  "run_number": 3,
+  "total_run_number": 6,
+  "prompt": "Analyze AAPL stock and provide investment recommendation",
+  "timestamp": "20251212_035019_repro_AAPL_3",
+  "duration_seconds": 839.915353000164,
+  "success": true,
+  "return_code": 0,
+  "completion_status": "unknown",
+  "output": {
+    "directory_exists": true,
+    "file_count": 6,
+    "has_financials": true,
+    "has_reports": true,
+    "has_news": true,
+    "has_log": true
+  }
+}

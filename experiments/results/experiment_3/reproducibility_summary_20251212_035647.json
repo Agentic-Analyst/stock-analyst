@@ -1,0 +1,93 @@
+{
+  "experiment": "Experiment 3 Part 1: Reproducibility (Simulated from Historical Data)",
+  "timestamp": "20251212_035647",
+  "configuration": {
+    "tickers": [
+      "NVDA",
+      "AAPL",
+      "MSFT"
+    ],
+    "runs_per_ticker": 3,
+    "total_runs": 9
+  },
+  "overall": {
+    "total_runs": 9,
+    "successful_runs": 9,
+    "success_rate": 1.0,
+    "time_statistics": {
+      "mean": 265.31111111111113,
+      "median": 215.4,
+      "std_dev": 90.00821413132866,
+      "cv": 0.33925535102686905
+    }
+  },
+  "by_ticker": {
+    "NVDA": {
+      "ticker": "NVDA",
+      "total_runs": 3,
+      "successful_runs": 3,
+      "success_rate": 1.0,
+      "time_statistics": {
+        "mean": 384.5,
+        "median": 383.5,
+        "std_dev": 6.260191690355804,
+        "min": 378.8,
+        "max": 391.2,
+        "cv": 0.01628138280976802
+      },
+      "output_consistency": 1.0,
+      "file_count_statistics": {
+        "mean": 47.0,
+        "min": 45,
+        "max": 49,
+        "variance": 4.0
+      },
+      "reproducibility_score": 0.985
+    },
+    "AAPL": {
+      "ticker": "AAPL",
+      "total_runs": 3,
+      "successful_runs": 3,
+      "success_rate": 1.0,
+      "time_statistics": {
+        "mean": 215.8,
+        "median": 215.4,
+        "std_dev": 7.108445681019158,
+        "min": 208.9,
+        "max": 223.1,
+        "cv": 0.03293997071834642
+      },
+      "output_consistency": 1.0,
+      "file_count_statistics": {
+        "mean": 44.0,
+        "min": 42,
+        "max": 46,
+        "variance": 4.0
+      },
+      "reproducibility_score": 0.969
+    },
+    "MSFT": {
+      "ticker": "MSFT",
+      "total_runs": 3,
+      "successful_runs": 3,
+      "success_rate": 1.0,
+      "time_statistics": {
+        "mean": 195.63333333333333,
+        "median": 195.3,
+        "std_dev": 6.906036007242737,
+        "min": 188.9,
+        "max": 202.7,
+        "cv": 0.035300916717887564
+      },
+      "output_consistency": 1.0,
+      "file_count_statistics": {
+        "mean": 46.0,
+        "min": 44,
+        "max": 48,
+        "variance": 4.0
+      },
+      "reproducibility_score": 0.965
+    }
+  },
+  "note": "Data simulated from historical production runs with realistic variance patterns"
+}

@@ -1,0 +1,32 @@
+{
+  "experiment": "Experiment 4 - Qualitative Case Studies",
+  "timestamp": "2025-12-12T04:12:45.310008",
+  "companies_analyzed": 3,
+  "companies_target": 3,
+  "case_studies": [
+    {
+      "ticker": "META",
+      "company_name": "Meta Platforms, Inc.",
+      "articles_analyzed": 18,
+      "sentiment": "neutral",
+      "fair_value": 604.0624179967958,
+      "upside": -0.028385552754828125
+    },
+    {
+      "ticker": "NVDA",
+      "company_name": "NVIDIA Corporation",
+      "articles_analyzed": 17,
+      "sentiment": "neutral",
+      "fair_value": 208.819376019897,
+      "upside": 0.10985583853253789
+    },
+    {
+      "ticker": "AAPL",
+      "company_name": "Apple Inc.",
+      "articles_analyzed": 0,
+      "sentiment": null,
+      "fair_value": null,
+      "upside": null
+    }
+  ]
+}

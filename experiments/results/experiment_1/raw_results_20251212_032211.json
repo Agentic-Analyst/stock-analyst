@@ -1,0 +1,90 @@
+{
+  "experiment": "Experiment 1: End-to-End Latency",
+  "timestamp": "20251212_032211",
+  "configuration": {
+    "tickers": [
+      "NVDA",
+      "AAPL",
+      "MSFT"
+    ],
+    "prompts": [
+      "Analyze {ticker} stock and provide investment recommendation"
+    ]
+  },
+  "cold_results": [
+    {
+      "ticker": "NVDA",
+      "prompt": "Analyze NVDA stock and provide investment recommendation",
+      "phase": "cold",
+      "run_number": 1,
+      "duration_seconds": 0.984707250026986,
+      "success": false,
+      "return_code": 2,
+      "timestamp": "20251212_032211",
+      "stdout_lines": 0,
+      "stderr_lines": 7
+    },
+    {
+      "ticker": "AAPL",
+      "prompt": "Analyze AAPL stock and provide investment recommendation",
+      "phase": "cold",
+      "run_number": 2,
+      "duration_seconds": 0.7193445831071585,
+      "success": false,
+      "return_code": 2,
+      "timestamp": "20251212_032211",
+      "stdout_lines": 0,
+      "stderr_lines": 7
+    },
+    {
+      "ticker": "MSFT",
+      "prompt": "Analyze MSFT stock and provide investment recommendation",
+      "phase": "cold",
+      "run_number": 3,
+      "duration_seconds": 0.6753267089370638,
+      "success": false,
+      "return_code": 2,
+      "timestamp": "20251212_032211",
+      "stdout_lines": 0,
+      "stderr_lines": 7
+    }
+  ],
+  "warm_results": [
+    {
+      "ticker": "NVDA",
+      "prompt": "Analyze NVDA stock and provide investment recommendation",
+      "phase": "warm",
+      "run_number": 4,
+      "duration_seconds": 0.7032774589024484,
+      "success": false,
+      "return_code": 2,
+      "timestamp": "20251212_032211",
+      "stdout_lines": 0,
+      "stderr_lines": 7
+    },
+    {
+      "ticker": "AAPL",
+      "prompt": "Analyze AAPL stock and provide investment recommendation",
+      "phase": "warm",
+      "run_number": 5,
+      "duration_seconds": 0.6744800410233438,
+      "success": false,
+      "return_code": 2,
+      "timestamp": "20251212_032211",
+      "stdout_lines": 0,
+      "stderr_lines": 7
+    },
+    {
+      "ticker": "MSFT",
+      "prompt": "Analyze MSFT stock and provide investment recommendation",
+      "phase": "warm",
+      "run_number": 6,
+      "duration_seconds": 0.6627817088738084,
+      "success": false,
+      "return_code": 2,
+      "timestamp": "20251212_032211",
+      "stdout_lines": 0,
+      "stderr_lines": 7
+    }
+  ]
+}

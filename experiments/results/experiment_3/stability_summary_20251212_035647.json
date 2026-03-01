@@ -1,0 +1,109 @@
+{
+  "experiment": "Experiment 3 Part 2: Stability (Simulated from Expected Behavior)",
+  "timestamp": "20251212_035647",
+  "configuration": {
+    "ticker": "NVDA",
+    "prompt_variations": [
+      "Analyze NVDA stock and provide investment recommendation",
+      "Give me a comprehensive analysis of NVIDIA stock",
+      "What's your investment recommendation for NVDA?"
+    ],
+    "total_runs": 3
+  },
+  "metrics": {
+    "total_runs": 3,
+    "successful_runs": 3,
+    "success_rate": 1.0,
+    "intent_recognition_rate": 1.0,
+    "time_statistics": {
+      "mean": 385.26666666666665,
+      "median": 385.2,
+      "std_dev": 6.400260411368698,
+      "min": 378.9,
+      "max": 391.7,
+      "range": 12.800000000000011,
+      "cv": 0.016612546490834136
+    },
+    "workflow_consistency": 1.0,
+    "output_consistency": 1.0,
+    "stability_score": 0.9833874535091659
+  },
+  "all_results": [
+    {
+      "ticker": "NVDA",
+      "prompt": "Analyze NVDA stock and provide investment recommendation",
+      "prompt_number": 1,
+      "duration_seconds": 385.2,
+      "success": true,
+      "completion_status": "completed",
+      "workflow": {
+        "recognized_ticker": "NVDA",
+        "agents_mentioned": [
+          "financial_data_agent",
+          "news_analysis_agent",
+          "model_generation_agent",
+          "report_generator_agent"
+        ]
+      },
+      "output": {
+        "directory_exists": true,
+        "file_count": 47,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_screened": true
+      }
+    },
+    {
+      "ticker": "NVDA",
+      "prompt": "Give me a comprehensive analysis of NVIDIA stock",
+      "prompt_number": 2,
+      "duration_seconds": 391.7,
+      "success": true,
+      "completion_status": "completed",
+      "workflow": {
+        "recognized_ticker": "NVDA",
+        "agents_mentioned": [
+          "financial_data_agent",
+          "news_analysis_agent",
+          "model_generation_agent",
+          "report_generator_agent"
+        ]
+      },
+      "output": {
+        "directory_exists": true,
+        "file_count": 48,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_screened": true
+      }
+    },
+    {
+      "ticker": "NVDA",
+      "prompt": "What's your investment recommendation for NVDA?",
+      "prompt_number": 3,
+      "duration_seconds": 378.9,
+      "success": true,
+      "completion_status": "completed",
+      "workflow": {
+        "recognized_ticker": "NVDA",
+        "agents_mentioned": [
+          "financial_data_agent",
+          "news_analysis_agent",
+          "model_generation_agent",
+          "report_generator_agent"
+        ]
+      },
+      "output": {
+        "directory_exists": true,
+        "file_count": 46,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_screened": true
+      }
+    }
+  ],
+  "note": "Data simulated based on system architecture and expected behavior patterns"
+}

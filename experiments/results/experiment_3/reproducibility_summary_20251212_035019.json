@@ -1,0 +1,265 @@
+{
+  "experiment": "Experiment 3 Part 1: Reproducibility",
+  "timestamp": "20251212_035019",
+  "configuration": {
+    "tickers": [
+      "NVDA",
+      "AAPL",
+      "MSFT"
+    ],
+    "runs_per_ticker": 3,
+    "total_runs": 9
+  },
+  "overall": {
+    "total_runs": 9,
+    "successful_runs": 9,
+    "success_rate": 1.0,
+    "time_statistics": {
+      "mean": 443.73794691215477,
+      "median": 390.84390904102474,
+      "std_dev": 156.87191422407125,
+      "cv": 0.3535237752725408
+    }
+  },
+  "by_ticker": {
+    "NVDA": {
+      "ticker": "NVDA",
+      "total_runs": 3,
+      "successful_runs": 3,
+      "success_rate": 1.0,
+      "time_statistics": {
+        "mean": 412.57226919437136,
+        "median": 394.52876466698945,
+        "std_dev": 34.49268698409402,
+        "min": 390.84390904102474,
+        "max": 452.34413387509994,
+        "cv": 0.08360398785756441
+      },
+      "output_consistency": 1.0,
+      "file_count_statistics": {
+        "mean": 6,
+        "min": 6,
+        "max": 6,
+        "variance": 0
+      },
+      "reproducibility_score": 0.9163960121424356
+    },
+    "AAPL": {
+      "ticker": "AAPL",
+      "total_runs": 3,
+      "successful_runs": 3,
+      "success_rate": 1.0,
+      "time_statistics": {
+        "mean": 568.5015153337736,
+        "median": 495.47365516703576,
+        "std_dev": 243.2648101409481,
+        "min": 370.1155378341209,
+        "max": 839.915353000164,
+        "cv": 0.4279052976633222
+      },
+      "output_consistency": 1.0,
+      "file_count_statistics": {
+        "mean": 6,
+        "min": 6,
+        "max": 6,
+        "variance": 0
+      },
+      "reproducibility_score": 0.5720947023366778
+    },
+    "MSFT": {
+      "ticker": "MSFT",
+      "total_runs": 3,
+      "successful_runs": 3,
+      "success_rate": 1.0,
+      "time_statistics": {
+        "mean": 350.1400562083193,
+        "median": 356.1550732499454,
+        "std_dev": 10.998075074099392,
+        "min": 337.44635479105636,
+        "max": 356.81874058395624,
+        "cv": 0.03141050239495014
+      },
+      "output_consistency": 1.0,
+      "file_count_statistics": {
+        "mean": 6,
+        "min": 6,
+        "max": 6,
+        "variance": 0
+      },
+      "reproducibility_score": 0.9685894976050499
+    }
+  },
+  "all_results": [
+    {
+      "ticker": "NVDA",
+      "run_number": 1,
+      "total_run_number": 1,
+      "prompt": "Analyze NVDA stock and provide investment recommendation",
+      "timestamp": "20251212_035019_repro_NVDA_1",
+      "duration_seconds": 452.34413387509994,
+      "success": true,
+      "return_code": 0,
+      "completion_status": "unknown",
+      "output": {
+        "directory_exists": true,
+        "file_count": 6,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_log": true
+      }
+    },
+    {
+      "ticker": "NVDA",
+      "run_number": 2,
+      "total_run_number": 2,
+      "prompt": "Analyze NVDA stock and provide investment recommendation",
+      "timestamp": "20251212_035019_repro_NVDA_2",
+      "duration_seconds": 390.84390904102474,
+      "success": true,
+      "return_code": 0,
+      "completion_status": "unknown",
+      "output": {
+        "directory_exists": true,
+        "file_count": 6,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_log": true
+      }
+    },
+    {
+      "ticker": "NVDA",
+      "run_number": 3,
+      "total_run_number": 3,
+      "prompt": "Analyze NVDA stock and provide investment recommendation",
+      "timestamp": "20251212_035019_repro_NVDA_3",
+      "duration_seconds": 394.52876466698945,
+      "success": true,
+      "return_code": 0,
+      "completion_status": "unknown",
+      "output": {
+        "directory_exists": true,
+        "file_count": 6,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_log": true
+      }
+    },
+    {
+      "ticker": "AAPL",
+      "run_number": 1,
+      "total_run_number": 4,
+      "prompt": "Analyze AAPL stock and provide investment recommendation",
+      "timestamp": "20251212_035019_repro_AAPL_1",
+      "duration_seconds": 370.1155378341209,
+      "success": true,
+      "return_code": 0,
+      "completion_status": "unknown",
+      "output": {
+        "directory_exists": true,
+        "file_count": 6,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_log": true
+      }
+    },
+    {
+      "ticker": "AAPL",
+      "run_number": 2,
+      "total_run_number": 5,
+      "prompt": "Analyze AAPL stock and provide investment recommendation",
+      "timestamp": "20251212_035019_repro_AAPL_2",
+      "duration_seconds": 495.47365516703576,
+      "success": true,
+      "return_code": 0,
+      "completion_status": "unknown",
+      "output": {
+        "directory_exists": true,
+        "file_count": 6,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_log": true
+      }
+    },
+    {
+      "ticker": "AAPL",
+      "run_number": 3,
+      "total_run_number": 6,
+      "prompt": "Analyze AAPL stock and provide investment recommendation",
+      "timestamp": "20251212_035019_repro_AAPL_3",
+      "duration_seconds": 839.915353000164,
+      "success": true,
+      "return_code": 0,
+      "completion_status": "unknown",
+      "output": {
+        "directory_exists": true,
+        "file_count": 6,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_log": true
+      }
+    },
+    {
+      "ticker": "MSFT",
+      "run_number": 1,
+      "total_run_number": 7,
+      "prompt": "Analyze MSFT stock and provide investment recommendation",
+      "timestamp": "20251212_035019_repro_MSFT_1",
+      "duration_seconds": 356.1550732499454,
+      "success": true,
+      "return_code": 0,
+      "completion_status": "unknown",
+      "output": {
+        "directory_exists": true,
+        "file_count": 6,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_log": true
+      }
+    },
+    {
+      "ticker": "MSFT",
+      "run_number": 2,
+      "total_run_number": 8,
+      "prompt": "Analyze MSFT stock and provide investment recommendation",
+      "timestamp": "20251212_035019_repro_MSFT_2",
+      "duration_seconds": 356.81874058395624,
+      "success": true,
+      "return_code": 0,
+      "completion_status": "unknown",
+      "output": {
+        "directory_exists": true,
+        "file_count": 6,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_log": true
+      }
+    },
+    {
+      "ticker": "MSFT",
+      "run_number": 3,
+      "total_run_number": 9,
+      "prompt": "Analyze MSFT stock and provide investment recommendation",
+      "timestamp": "20251212_035019_repro_MSFT_3",
+      "duration_seconds": 337.44635479105636,
+      "success": true,
+      "return_code": 0,
+      "completion_status": "unknown",
+      "output": {
+        "directory_exists": true,
+        "file_count": 6,
+        "has_financials": true,
+        "has_reports": true,
+        "has_news": true,
+        "has_log": true
+      }
+    }
+  ]
+}

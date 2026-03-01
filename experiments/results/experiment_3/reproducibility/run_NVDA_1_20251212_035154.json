@@ -1,0 +1,19 @@
+{
+  "ticker": "NVDA",
+  "run_number": 1,
+  "total_run_number": 1,
+  "prompt": "Analyze NVDA stock and provide investment recommendation",
+  "timestamp": "20251212_035154_repro_NVDA_1",
+  "duration_seconds": 390.9082310840022,
+  "success": true,
+  "return_code": 0,
+  "completion_status": "unknown",
+  "output": {
+    "directory_exists": true,
+    "file_count": 6,
+    "has_financials": true,
+    "has_reports": true,
+    "has_news": true,
+    "has_log": true
+  }
+}
