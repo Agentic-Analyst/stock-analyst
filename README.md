@@ -14,6 +14,12 @@
 
 *An autonomous, multi-agent system that performs institutional-quality equity research — from financial data collection and DCF modeling to news intelligence and professional analyst report generation — in under 7 minutes.*
 
+### 🎥 Demo Video
+
+[![VYNN AI Agent Demo](https://img.youtube.com/vi/aXR1ZIEdezs/maxresdefault.jpg)](https://www.youtube.com/watch?v=aXR1ZIEdezs)
+
+▶️ *Click to watch the full demo — agentic chatbot and broker-style dashboard*
+
 </div>
 
 ---
