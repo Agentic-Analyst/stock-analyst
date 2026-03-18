@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🏦 Agentic Stock Analyst
+<img src="assets/vynnai-logo.jpg" alt="VYNN AI logo" width="120">
+
+# 🏦 Agentic Financial Analyst
 
 ### AI-Powered Equity Research Platform with Multi-Agent Orchestration
 
@@ -50,7 +52,7 @@
 
 ## Why This Project
 
-Traditional equity research is manual, time-consuming, and expensive — a single analyst report at an investment bank takes hours to days. **Agentic Stock Analyst** automates the entire pipeline end-to-end:
+Traditional equity research is manual, time-consuming, and expensive — a single analyst report at an investment bank takes hours to days. **VYNN AI Agentic Financial Analyst** automates the entire pipeline end-to-end:
 
 | Capability | Traditional Analyst | This System |
 |---|---|---|
