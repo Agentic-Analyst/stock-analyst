@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/vynnai-logo.jpg" alt="VYNN AI logo" width="120">
+<img src="assets/vynnai-logo.jpg" alt="VYNN AI logo" width="200">
 
 # 🏦 Agentic Financial Analyst
 
