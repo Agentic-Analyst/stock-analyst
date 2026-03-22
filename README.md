@@ -8,6 +8,8 @@
 
 Multi-agent equity research system built on [LangGraph](https://github.com/langchain-ai/langgraph). Autonomous pipeline from financial data collection through DCF modeling, news intelligence, and report generation -- end-to-end in ~6 minutes.
 
+The system automates what a human equity analyst does manually: pull financial statements, build a valuation model in Excel, read and synthesize dozens of news articles, identify catalysts and risks, and write an investment recommendation with price targets -- all from a single natural language prompt.
+
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-Agentic_Workflow-orange.svg)](https://github.com/langchain-ai/langgraph)
 [![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED.svg)](https://hub.docker.com/r/fuzanwenn/stock-analyst)
@@ -432,6 +434,8 @@ Paraphrased prompts ("Analyze NVDA stock...", "Give me a comprehensive analysis 
 AAPL was tested separately with a simple query ("What happened to Apple stock?") and demonstrated the supervisor routing to a single news agent instead of the full 4-agent pipeline -- optimizing both cost and latency.
 
 **Estimated API cost per comprehensive analysis:** ~$0.50-1.50 depending on model choice and article count (primarily LLM calls in news screening and report generation). SerpAPI costs ~$0.01 per search query.
+
+**Caching impact:** Subsequent runs for the same ticker complete ~72% faster (~107s vs. ~383s) due to MongoDB article caching -- the news scraping and filtering stages are skipped entirely when recent articles exist in the database. Only the screening, model generation, and report stages re-execute.
 
 ---
 
