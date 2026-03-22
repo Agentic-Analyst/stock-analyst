@@ -53,7 +53,7 @@ Multi-agent equity research system built on [LangGraph](https://github.com/langc
 
 Running a comprehensive analysis produces three artifacts:
 
-**1. 10-tab Excel DCF Model** ([download AAPL sample](samples/AAPL_Financial_Model.xlsx) · [download META sample](samples/META_Financial_Model.xlsx))
+**1. 10-tab Excel DCF Model** ([download AAPL sample](samples/AAPL_financial_model.xlsx) · [download META sample](samples/META_financial_model.xlsx))
 
 All formulas are live -- not static values. The Assumptions tab pulls from LLM-inferred projections; Projections references Assumptions; Valuation references Projections; Summary cross-references everything with QA flags. Opening the workbook and changing a single assumption (e.g., FY3 revenue growth) cascades through projections, valuation, sensitivity, and summary automatically.
 
