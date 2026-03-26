@@ -13,7 +13,7 @@ The system automates what a human equity analyst does manually: pull financial s
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-Agentic_Workflow-orange.svg)](https://github.com/langchain-ai/langgraph)
 [![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED.svg)](https://hub.docker.com/r/fuzanwenn/stock-analyst)
-[![License: Proprietary](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ### Demo
 
