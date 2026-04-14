@@ -21,6 +21,7 @@ from security.build_dataset import (
     load_direction_overrides,
     load_direction_records,
     resolve_target_direction,
+    trim_seed_pool,
 )
 from security.dataset import load_cases, validate_case_paths, write_article, write_cases
 from security.models import ArticleRecord, SecurityCase
@@ -133,6 +134,23 @@ class DatasetTests(unittest.TestCase):
         self.assertFalse(has_title_company_match(title, "META", "Meta"))
         self.assertFalse(has_strong_company_match(title, text, "META", "Meta"))
         self.assertLess(compute_relevance_score(title, text, "META", "Meta"), 6)
+
+    def test_trim_seed_pool_keeps_top_ranked_slice(self) -> None:
+        articles = [
+            ArticleRecord(
+                article_id=f"article_{index}",
+                title=f"Article {index}",
+                source_url="",
+                publish_date="2026-01-01",
+                source_type="seed",
+                text="body",
+            )
+            for index in range(25)
+        ]
+        trimmed = trim_seed_pool(articles, scenarios_per_ticker=5, bundle_size=4)
+        self.assertEqual(len(trimmed), 20)
+        self.assertEqual(trimmed[0].article_id, "article_0")
+        self.assertEqual(trimmed[-1].article_id, "article_19")
 
 
 if __name__ == "__main__":

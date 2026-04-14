@@ -12,6 +12,7 @@ from typing import Dict, List
 
 from .dataset import append_jsonl, load_cases, validate_case_paths
 from .executor import deserialize_run_result, run_case_worker
+from .governance import DEFAULT_RUN_VALIDITY, RUN_VALIDITY_CHOICES, resolve_run_governance
 from .metrics import summarize_results, write_summary_markdown
 from .models import SecurityCase, SecurityConfig, SecurityRunResult
 from .pipeline import run_case
@@ -136,6 +137,17 @@ def parse_args() -> argparse.Namespace:
         help="Disable the disk-backed LLM cache for benchmark calls",
     )
     parser.set_defaults(cache_llm=None)
+    parser.add_argument(
+        "--run-validity",
+        choices=sorted(RUN_VALIDITY_CHOICES),
+        default=DEFAULT_RUN_VALIDITY,
+        help="Label the intended validity of this run for later reporting",
+    )
+    parser.add_argument(
+        "--notes",
+        default="",
+        help="Optional experiment notes to record in benchmark artifacts",
+    )
     return parser.parse_args()
 
 
@@ -277,6 +289,20 @@ def main() -> None:
     args = parse_args()
     config = apply_flag_overrides(SecurityConfig.from_name(args.config), args)
     manifest_path = args.cases.resolve()
+    governance = resolve_run_governance(
+        manifest_path=manifest_path,
+        target_model=config.target_model,
+        config_name=config.name,
+        run_validity=args.run_validity,
+        notes=args.notes,
+    )
+    config.corpus_version = governance["corpus_version"]
+    config.direction_map_version = governance["direction_map_version"]
+    config.attack_template_version = governance["attack_template_version"]
+    config.metric_version = governance["metric_version"]
+    config.code_commit = governance["code_commit"]
+    config.run_validity = governance["run_validity"]
+    config.notes = governance["notes"]
     cases = load_cases(manifest_path)
 
     for case in cases:

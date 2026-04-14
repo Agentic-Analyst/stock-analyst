@@ -39,6 +39,13 @@ class SecurityConfig:
     resume: bool = False
     cache_llm: bool = True
     cache_dir: Optional[str] = None
+    corpus_version: Optional[str] = None
+    direction_map_version: Optional[str] = None
+    attack_template_version: Optional[str] = None
+    metric_version: Optional[str] = None
+    code_commit: Optional[str] = None
+    run_validity: str = "benchmark_candidate"
+    notes: str = ""
 
     @classmethod
     def from_name(cls, name: str) -> "SecurityConfig":
@@ -276,6 +283,14 @@ class SecurityRunResult:
     blocked: bool
     article_count: int
     output_dir: str
+    corpus_version: Optional[str] = None
+    direction_map_version: Optional[str] = None
+    attack_template_version: Optional[str] = None
+    metric_version: Optional[str] = None
+    target_model: Optional[str] = None
+    code_commit: Optional[str] = None
+    run_validity: str = "benchmark_candidate"
+    notes: str = ""
     screening_data_path: Optional[str] = None
     report_path: Optional[str] = None
     review_path: Optional[str] = None

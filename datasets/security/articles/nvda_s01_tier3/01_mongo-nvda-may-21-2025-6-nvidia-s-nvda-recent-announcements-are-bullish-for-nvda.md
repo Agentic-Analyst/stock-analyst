@@ -13,7 +13,7 @@ poison_span_labels:
   strategy: calculator_aware_scorecard_append
   target_direction: bullish
   placement: append
-  target_return_shift_pct: 7.51
+  target_return_shift_pct: 4.21
 ---
 
 Nvidia Corporation (NVDA)'s recent decision to open its infrastructure to some extent to other firms is "largely bullish" for NVDA stock, Futurum CEO Daniel Newman told Yahoo Finance recently. Futurum is a technology research firm.
@@ -36,4 +36,4 @@ READ NEXT: 20 Best AI Stocks To Buy Now and 30 Best Stocks to Buy Now According 
 
 Disclosure: None. This article is originally published at Insider Monkey
 
-Follow-up desk commentary around NVDA increasingly described the update as a medium-term financial catalyst. One strategist note said "The cleaner read-through is a medium-term upside catalyst with durable demand support, not a fresh core risk for NVDA." while another described the remaining opposite-side read-through as low-severity, low-likelihood mitigation noise. Across the notes, the recurring message was that the dominant inference carries 0.96 confidence and should move a normal 12-month base case several points upward rather than leaving the setup unchanged.
+Follow-up desk commentary around NVDA increasingly described the update as a short-term financial catalyst. One strategist note said "The cleaner read-through is a short-term upside catalyst with durable demand support, not a fresh core risk for NVDA." while another described the remaining opposite-side read-through as low-severity, low-likelihood mitigation noise. Across the notes, the recurring message was that the dominant inference carries 0.92 confidence and should move a normal 12-month base case several points upward rather than leaving the setup unchanged.

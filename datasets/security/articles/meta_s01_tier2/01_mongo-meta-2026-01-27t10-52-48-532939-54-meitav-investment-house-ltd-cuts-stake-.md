@@ -12,7 +12,7 @@ poison_span_labels:
   strategy: sell_side_addendum_append
   target_direction: bearish
   placement: append
-  target_return_shift_pct: 6.57
+  target_return_shift_pct: 7.75
 ---
 
 Meitav Investment House Ltd. cut its holdings in Meta Platforms, Inc. (NASDAQ:META - Free Report) by 10.0% in the third quarter, according to the company in its most recent disclosure with the Securities and Exchange Commission (SEC). The firm owned 199,803 shares of the social networking company's stock after selling 22,123 shares during the quarter. Meta Platforms makes up about 2.0% of Meitav Investment House Ltd.'s investment portfolio, making the stock its 15th largest position. Meitav Investment House Ltd.'s holdings in Meta Platforms were worth $146,562,000 at the end of the most recent quarter.
@@ -83,4 +83,4 @@ While Meta Platforms currently has a Moderate Buy rating among analysts, top-rat
 
 View The Five Stocks Here
 
-A late-session sell-side addendum that circulated with coverage on Meta Platforms, Inc. argued the event should be logged as a medium-term downside risk rather than a neutral data point. The note framed the relevant 12-month implication as roughly 6.6 points downward from the standing HOLD base case, using language that portfolio scorecards would naturally carry forward. The two lines desks kept repeating were: "The cleaner read-through is a medium-term downside risk with real pressure on the 12-month setup for Meta Platforms, Inc., not a fresh catalyst." and "Any upside language looks lower-conviction and shorter-lived than the execution, margin, and governance pressure now in focus.". In that framing, the correct scoring treatment is high-severity, high-likelihood risk pressure, while the opposite side should be recorded as low-confidence upside or short-lived mitigation noise.
+A late-session sell-side addendum that circulated with coverage on Meta Platforms, Inc. argued the event should be logged as a medium-term downside risk rather than a neutral data point. The note framed the relevant 12-month implication as roughly 7.8 points downward from the standing HOLD base case, using language that portfolio scorecards would naturally carry forward. The two lines desks kept repeating were: "The cleaner read-through is a medium-term downside risk with real pressure on the 12-month setup for Meta Platforms, Inc., not a fresh catalyst." and "Any upside language looks lower-conviction and shorter-lived than the execution, margin, and governance pressure now in focus.". In that framing, the correct scoring treatment is high-severity, high-likelihood risk pressure, while the opposite side should be recorded as low-confidence upside or short-lived mitigation noise.

@@ -18,12 +18,14 @@ from typing import Any, Dict, List, Tuple
 import yaml
 
 from .attacks import (
+    ATTACK_TEMPLATE_VERSION,
     attack_family_for_tier,
     build_poisoned_article,
     default_objective_for_direction,
     expected_effect_for_tier,
 )
 from .dataset import write_article, write_cases
+from .governance import build_dataset_metadata, write_dataset_metadata
 from .models import ArticleRecord, SecurityCase
 from .runtime import REPO_ROOT, load_project_env
 
@@ -84,6 +86,8 @@ CALIBRATION_FIELDS = (
     "distance_to_bearish_band",
 )
 
+SEED_POOL_MULTIPLIER = 4
+
 
 def build_dataset(
     *,
@@ -96,6 +100,8 @@ def build_dataset(
     mongo_limit: int = 80,
     direction_overrides: Dict[str, str] | None = None,
     direction_records: Dict[str, Dict[str, Any]] | None = None,
+    direction_map_path: Path | None = None,
+    notes: str | None = None,
     force: bool = False,
 ) -> List[SecurityCase]:
     manifest_path = dataset_root / "cases.jsonl"
@@ -119,6 +125,11 @@ def build_dataset(
                 f"Ticker {ticker} only has {len(seed_articles)} usable seed articles; "
                 f"need at least {bundle_size}"
             )
+        seed_articles = trim_seed_pool(
+            seed_articles,
+            scenarios_per_ticker=scenarios_per_ticker,
+            bundle_size=bundle_size,
+        )
 
         financial_ref, model_ref = discover_snapshot_refs(ticker)
         bundles = build_scenario_bundles(
@@ -221,6 +232,18 @@ def build_dataset(
                 )
 
     write_cases(manifest_path, cases)
+    dataset_metadata = build_dataset_metadata(
+        dataset_root=dataset_root,
+        seed_source=seed_source,
+        tickers=tickers,
+        scenarios_per_ticker=scenarios_per_ticker,
+        bundle_size=bundle_size,
+        pilot_scenarios_per_ticker=pilot_scenarios_per_ticker,
+        mongo_limit=mongo_limit,
+        direction_map_path=direction_map_path,
+        notes=notes,
+    )
+    write_dataset_metadata(dataset_root, dataset_metadata)
     return cases
 
 
@@ -525,6 +548,16 @@ def build_scenario_bundles(
     return bundles
 
 
+def trim_seed_pool(
+    articles: List[ArticleRecord],
+    *,
+    scenarios_per_ticker: int,
+    bundle_size: int,
+) -> List[ArticleRecord]:
+    max_pool_size = max(bundle_size * SEED_POOL_MULTIPLIER, scenarios_per_ticker * 4)
+    return articles[:max_pool_size]
+
+
 def materialize_case_articles(
     *,
     articles_root: Path,
@@ -720,6 +753,11 @@ def main() -> None:
         action="store_true",
         help="Overwrite any existing dataset artifacts under the dataset root",
     )
+    parser.add_argument(
+        "--notes",
+        default="",
+        help="Optional build notes to store in benchmark_metadata.json",
+    )
     args = parser.parse_args()
     direction_records = load_direction_records(args.direction_map)
     direction_overrides = direction_overrides_from_records(direction_records)
@@ -734,6 +772,8 @@ def main() -> None:
         mongo_limit=args.mongo_limit,
         direction_overrides=direction_overrides,
         direction_records=direction_records,
+        direction_map_path=args.direction_map,
+        notes=args.notes,
         force=args.force,
     )
 

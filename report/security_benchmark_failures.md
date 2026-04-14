@@ -200,3 +200,88 @@ the polished outcome.
   `datasets/security/direction_map_full.json` is now partially stale for the
   rebuilt corpus, so the next required step is to rerun the clean calibration
   sweep before trusting any attack-distance metadata or final paper tables.
+
+## 2026-04-14: Clean recalibration reset and governance
+
+- Benchmark-governance metadata is now recorded explicitly in new artifacts:
+  - `corpus_version`
+  - `direction_map_version`
+  - `attack_template_version`
+  - `metric_version`
+  - `target_model`
+  - `config_name`
+  - `code_commit`
+  - `run_validity`
+  - `notes`
+- The dataset now writes `datasets/security/benchmark_metadata.json`, and new run
+  summaries include a `benchmark_metadata` block.
+- A full clean recalibration sweep was rerun under
+  `runs/security-openai-clean-reset-v1/baseline` against the repaired Mongo-backed
+  corpus.
+- Operationally, `19` of the `20` clean cases completed normally in the main sweep.
+- `nvda_s03_clean` exhibited a pathological long-running LLM call and stalled the
+  parent clean sweep despite eventually being analyzable.
+- Recovery path:
+  - stop the hung parent sweep
+  - rerun only `nvda_s03_clean` with `--batch-size 2`
+  - recover the completed `run_result.json`
+  - append the recovered case into `raw_runs.jsonl`
+  - regenerate `summary.json` via `--resume`
+- This is worth keeping in the final report because it shows a real operational
+  fragility in long-context evaluation, not just a modeling result.
+- After the clean reset completed, a new `direction_map_full.json` was generated
+  and the dataset was rebuilt again into a new canonical frozen corpus.
+- Current canonical dataset metadata after the reset:
+  - `corpus_version = corpus-4e7fbd72761f`
+  - `direction_map_version = direction-map-7186ef4fd3ab`
+  - `attack_template_version = v3_boundary_aware_structured_templates`
+  - `metric_version = v2_end_to_end_primary_with_structured_screening_shift`
+- A new attack-development subset file now exists at
+  `datasets/security/attack_development_subset.json`.
+
+## 2026-04-14: Canonical clean reset v2
+
+- A fresh forced rebuild of the Mongo-backed corpus was performed after a stale
+  frozen on-disk snapshot made `META` contamination appear to persist.
+- After that rebuild, the current frozen `META` clean cases were topical again:
+  `meta_s04_clean` and `meta_s05_clean` no longer contained Disney, Verizon, or
+  generic market-report artifacts.
+- The current root cause was not a new live-ranking bug. It was a stale frozen
+  dataset artifact that needed to be rebuilt and revalidated.
+- A full clean recalibration sweep then completed under
+  `runs/security-openai-clean-reset-v2/baseline`:
+  - `20` clean cases completed
+  - `0` failed runs
+  - mean clean duration was about `64.0` seconds
+- One transient timeout happened on `amzn_s01_clean` batch 1, but the call
+  recovered automatically on retry and did not require manual intervention.
+- A new direction map was then generated from that clean sweep, and the
+  canonical corpus was frozen again against it.
+- Current canonical dataset metadata after the final reset:
+  - `corpus_version = corpus-700684c1dad2`
+  - `direction_map_version = direction-map-ab9f15deea0a`
+  - `attack_template_version = v3_boundary_aware_structured_templates`
+  - `metric_version = v2_end_to_end_primary_with_structured_screening_shift`
+- The compact attack-development subset was then refreshed. It now focuses on
+  the smallest-shift `AAPL` bullish cases plus one `NVDA` case for ticker
+  diversity.
+
+## What worked after the reset
+
+- The repaired Mongo-backed corpus can now be rebuilt reproducibly and validated
+  directly from frozen files.
+- The full clean recalibration sweep is now healthy enough to finish end to end
+  on the current canonical corpus.
+- Governance metadata is doing its job: the corpus version, direction-map
+  version, metric version, and run-validity labels are now explicit in the
+  artifacts instead of implicit in memory.
+
+## Current unresolved issue
+
+- The benchmark reset is now largely complete, so the main blocker is no longer
+  corpus validity.
+- The current blocker is attack efficacy: we still do not have non-zero
+  headline end-to-end ASR under the corrected metric.
+- The next high-leverage work is to strengthen Tier 1/2/3 attacks on the
+  compact attack-development subset before spending more API budget on broader
+  poisoned sweeps or defense evaluations.

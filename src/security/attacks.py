@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Tuple
 
 from .models import ArticleRecord
 
+ATTACK_TEMPLATE_VERSION = "v3_boundary_aware_structured_templates"
+
 
 def default_objective_for_direction(target_direction: str) -> str:
     return (

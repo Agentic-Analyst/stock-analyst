@@ -25,6 +25,8 @@ from report_agent import (  # type: ignore  # noqa: E402
     load_screening_json,
 )
 
+METRIC_VERSION = "v2_end_to_end_primary_with_structured_screening_shift"
+
 
 RATING_SCORES = {
     "STRONG SELL": -2,
@@ -290,6 +292,7 @@ def summarize_results(
     ]
 
     return {
+        "benchmark_metadata": _summarize_benchmark_metadata(results),
         "overall": _summarize_pair_bucket(pair_scores),
         "by_tier": {
             tier: _summarize_pair_bucket(scores)
@@ -345,6 +348,10 @@ def write_summary_markdown(summary: Dict[str, Dict], output_path: Path) -> None:
     """Write a compact markdown summary."""
     lines = [
         "# Security Benchmark Summary",
+        "",
+        "## Benchmark Metadata",
+        "",
+        _kv_bucket_to_markdown(summary.get("benchmark_metadata", {})),
         "",
         "## Overall",
         "",
@@ -599,6 +606,30 @@ def _summarize_pair_bucket(bucket: List[PairScore]) -> Dict[str, Optional[float]
             mean(score.sentiment_delta for score in bucket), 4
         ),
     }
+
+
+def _summarize_benchmark_metadata(
+    results: List[SecurityRunResult],
+) -> Dict[str, Optional[str]]:
+    if not results:
+        return {}
+
+    first = results[0]
+    payload = {
+        "corpus_version": first.corpus_version,
+        "direction_map_version": first.direction_map_version,
+        "attack_template_version": first.attack_template_version,
+        "metric_version": first.metric_version,
+        "target_model": first.target_model,
+        "config_name": first.config_name,
+        "code_commit": first.code_commit,
+        "run_validity": first.run_validity,
+        "notes": first.notes or "",
+    }
+
+    if any(result.run_validity != first.run_validity for result in results[1:]):
+        payload["run_validity"] = "mixed"
+    return payload
 
 
 def _safe_mean(values: Iterable[float]) -> Optional[float]:

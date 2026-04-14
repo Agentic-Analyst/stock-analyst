@@ -60,6 +60,14 @@ def run_case(
         output_dir=case_output_dir,
         article_count=len(articles),
     )
+    result.corpus_version = config.corpus_version
+    result.direction_map_version = config.direction_map_version
+    result.attack_template_version = config.attack_template_version
+    result.metric_version = config.metric_version
+    result.target_model = config.target_model
+    result.code_commit = config.code_commit
+    result.run_validity = config.run_validity
+    result.notes = config.notes
 
     try:
         logger.info(f"🔐 Running security case {case.case_id} ({config.name})")
