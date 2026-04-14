@@ -1,0 +1,23 @@
+---
+article_id: 03_mongo-aapl-3-weeks-ago-80-apple-s-ceo-is-reportedly-getting-ready-to-step-down
+title: Apple’s CEO is Reportedly Getting Ready to Step Down
+source_url: https://cordcuttersnews.com/apples-ceo-is-reportedly-getting-ready-to-step-down/
+publish_date: 3 weeks ago
+source_type: seed_mongo
+---
+
+Apple is entering a pivotal leadership transition, its most significant in over a decade, as several senior executives prepare to exit and CEO Tim Cook works to define the company’s next generation of leaders. This shift, detailed in Bloomberg’s Mark Gurman’s recent “Power On” newsletter, signals a new era for the tech giant, which has enjoyed relative stability at its highest ranks for years. The departure of key figures and the rise of new talent, particularly in artificial intelligence and hardware, underscore Apple’s efforts to stay competitive in an evolving industry.
+
+Jeff Williams, long considered a potential successor to Cook, has already relinquished his role as chief operating officer and is set to leave Apple later this year. His exit marks the first major leadership change since 2019, when Chief Design Officer Jony Ive and retail head Angela Ahrendts departed. Williams’s departure opens the door to a broader reshuffling of Apple’s executive team, many of whom have held their positions for over a decade and are now contemplating retirement or reduced roles.
+
+Among the executives under scrutiny is John Giannandrea, Apple’s senior vice president of machine learning and AI strategy. Recruited from Google in 2018, Giannandrea has driven Apple’s AI initiatives, including the launch of Apple Intelligence. However, his role has faced uncertainty due to challenges in redeveloping Siri and internal debates over the company’s AI strategy. Some of his responsibilities have shifted to Mike Rockwell, previously the leader of the Vision Pro project, who is now tasked with enhancing Siri’s capabilities. Apple is also exploring external talent to bolster its AI leadership, with a senior AI executive from Meta Platforms and Scale AI founder Alexandr Wang being considered for key roles. The creation of a new Superintelligence Labs division further signals Apple’s commitment to advancing its AI capabilities.
+
+The hardware division, a cornerstone of Apple’s success, may also see changes. Johny Srouji, senior vice president of hardware technologies, has been instrumental in Apple’s shift to custom silicon, overseeing the development of A-series and M-series chips and the company’s first in-house cellular modem. Srouji is reportedly evaluating his future, with potential successors including Zongjian Chen, who leads modem and wireless teams, and Sri Santhanam, who oversees processor design.
+
+Lisa Jackson, Apple’s vice president for environment, policy, and social initiatives, is another executive rumored to be considering retirement. Since joining Apple in 2013 after serving as an EPA administrator under President Barack Obama, Jackson has expanded her portfolio to include government affairs and accessibility. Her deputies now handle most of Apple’s federal government interactions, and she has maintained a lower profile in recent years.
+
+At the center of this transition is Tim Cook, who turns 65 next month. With no clear second-in-command following Williams’s exit, speculation about Cook’s eventual successor has intensified. Cook may transition to a chairman role, similar to moves by other tech titans like Jeff Bezos and Bill Gates. The leading candidate to succeed him is John Ternus, Apple’s senior vice president of hardware engineering. At 50, Ternus is seen as a natural fit, having joined Apple in 2001 and risen to oversee the design and engineering of the iPhone, iPad, and Mac. His growing visibility, including leading the iPhone Air launch last month and appearing prominently in Apple’s marketing, suggests the company is grooming him for the top role.
+
+Apple’s public relations efforts have increasingly highlighted Ternus, signaling a deliberate strategy to prepare for a leadership handoff. His age mirrors Cook’s when he became CEO in 2011, and his technical expertise aligns with Apple’s desire for a leader focused on innovation in AI, mixed reality, and home automation. As Apple navigates this transition, the company is poised to balance continuity with fresh perspectives to maintain its position as a global technology leader.
+
+Please add Cord Cutters News as a source for your Google News feed HERE. Please follow us on Facebook and X for more news, tips, and reviews. Need cord cutting tech support? Join our Cord Cutting Tech Support Facebook Group for help.

@@ -1,0 +1,66 @@
+% usenix.sty - to be used with latex2e for USENIX.
+% To use this style file, look at the template usenix_template.tex
+%
+% $Id: usenix.sty,v 1.2 2005/02/16 22:30:47 maniatis Exp $
+%
+% The following definitions are modifications of standard article.sty
+% definitions, arranged to do a better job of matching the USENIX
+% guidelines.
+% It will automatically select two-column mode and the Times-Roman
+% font.
+
+%
+% USENIX papers are two-column.
+% Times-Roman font is nice if you can get it (requires NFSS,
+% which is in latex2e.
+
+\if@twocolumn\else\input twocolumn.sty\fi
+\usepackage{mathptmx}  % times roman, including math (where possible)
+
+%
+% USENIX wants margins of: 1" sides, 1" bottom, and 1" top.
+% 0.25" gutter between columns.
+% Gives active areas of 6.5" x 9"
+%
+\setlength{\textheight}{9.0in}
+\setlength{\columnsep}{0.25in}
+\setlength{\textwidth}{6.50in}
+
+\setlength{\topmargin}{0.0in}
+
+\setlength{\headheight}{0.0in}
+
+\setlength{\headsep}{0.0in}
+
+% Usenix wants no page numbers for camera-ready paper
+%\thispagestyle{empty}
+
+% Usenix titles are in 14-point bold type, with no date, and with no
+% change in the empty page headers.  The whol author section is 12 point
+% italic
+\def\@maketitle{%
+  \newpage
+  \null
+  \vskip 2em%
+  \begin{center}%
+  \let \footnote \thanks
+    {\Large\bf \@title \par}%
+    \vskip 1.5em%
+    {\large
+      \lineskip .5em%
+      \begin{tabular}[t]{c}%
+        \@author
+      \end{tabular}\par}%
+    \vskip 1em%
+    {\large \@date}%
+  \end{center}%
+  \par
+  \vskip 1.5em}
+
+%
+% Usenix wants no page numbers for submitted papers, so that
+% reviewers can more easily print papers on both sides of a page.
+% Having no page numbers also makes the paper a wee bit more anonymous.
+%
+
+\pagestyle{empty}

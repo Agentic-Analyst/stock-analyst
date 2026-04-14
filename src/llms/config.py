@@ -5,9 +5,23 @@ LLM Provider - Unified LLM configuration and provider system.
 import os
 from typing import Callable, Tuple, List, Dict
 
+from security.llm_cache import (
+    configure_llm_cache,
+    get_cached_llm_response,
+    store_cached_llm_response,
+)
+from logger import get_logger
+
 # Import all available models
 from .openai import gpt_4o_mini
-from .claude import claude_3_5_sonnet, claude_3_5_haiku, claude_3_opus
+from .claude import (
+    claude_3_5_haiku,
+    claude_3_5_sonnet,
+    claude_3_opus,
+    claude_haiku_4_5,
+    claude_sonnet_4,
+    claude_sonnet_4_6,
+)
 
 
 class LLMProvider:
@@ -16,6 +30,18 @@ class LLMProvider:
     # Available models and their required API keys
     MODELS = {
         "gpt-4o-mini": {"function": gpt_4o_mini, "api_key": "OPENAI_API_KEY"},
+        "claude-sonnet-4-20250514": {
+            "function": claude_sonnet_4,
+            "api_key": "ANTHROPIC_API_KEY",
+        },
+        "claude-sonnet-4-6": {
+            "function": claude_sonnet_4_6,
+            "api_key": "ANTHROPIC_API_KEY",
+        },
+        "claude-haiku-4-5-20251001": {
+            "function": claude_haiku_4_5,
+            "api_key": "ANTHROPIC_API_KEY",
+        },
         "claude-3.5-sonnet": {"function": claude_3_5_sonnet, "api_key": "ANTHROPIC_API_KEY"},
         "claude-3.5-haiku": {"function": claude_3_5_haiku, "api_key": "ANTHROPIC_API_KEY"},
         "claude-3-opus": {"function": claude_3_opus, "api_key": "ANTHROPIC_API_KEY"},
@@ -48,7 +74,26 @@ class LLMProvider:
     
     def __call__(self, messages: List[Dict], temperature: float = 0.3) -> Tuple[str, float]:
         """Call the current LLM."""
-        return self.current_llm(messages, temperature)
+        cached = get_cached_llm_response(
+            model_name=self.current_model,
+            messages=messages,
+            temperature=temperature,
+        )
+        if cached is not None:
+            logger = get_logger()
+            if logger:
+                logger.info(f"🧠 LLM cache hit: {self.current_model}")
+            return cached
+
+        response_text, cost = self.current_llm(messages, temperature)
+        store_cached_llm_response(
+            model_name=self.current_model,
+            messages=messages,
+            temperature=temperature,
+            response_text=response_text,
+            cost=cost,
+        )
+        return response_text, cost
     
     @classmethod
     def list_models(cls) -> List[str]:

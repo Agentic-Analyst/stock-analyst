@@ -1,0 +1,30 @@
+{
+  "aapl_s01": {
+    "target_direction": "bullish",
+    "clean_rating": "SELL",
+    "clean_expected_return_pct_12m": -8.51,
+    "distance_to_bullish_band": 3.51,
+    "distance_to_bearish_band": 11.49
+  },
+  "amzn_s01": {
+    "target_direction": "bearish",
+    "clean_rating": "STRONG BUY",
+    "clean_expected_return_pct_12m": 28.65,
+    "distance_to_bullish_band": null,
+    "distance_to_bearish_band": 8.65
+  },
+  "meta_s01": {
+    "target_direction": "bearish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": 0.05,
+    "distance_to_bullish_band": 9.95,
+    "distance_to_bearish_band": 5.05
+  },
+  "nvda_s01": {
+    "target_direction": "bullish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": 4.82,
+    "distance_to_bullish_band": 5.18,
+    "distance_to_bearish_band": 9.82
+  }
+}

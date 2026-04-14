@@ -43,6 +43,7 @@ Anaconda3-*.sh
 
 # OS
 .DS_Store
+runs/
 .DS_Store?
 ._*
 .Spotlight-V100
