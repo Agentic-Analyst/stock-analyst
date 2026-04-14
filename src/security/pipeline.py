@@ -16,7 +16,7 @@ from .dataset import copy_snapshot_file, load_article, resolve_path
 from .defenses import (
     SecurityArticleScreener,
     transform_articles_for_security,
-    verify_screening_output,
+    verify_screening_output_detailed,
 )
 from .metrics import compute_recommendation_snapshot
 from .models import SecurityCase, SecurityConfig, SecurityRunResult
@@ -162,12 +162,13 @@ def run_case(
         result.metadata["screening_llm_cost"] = round(screener.total_llm_cost, 6)
 
         screening_data = json.loads(screening_path.read_text(encoding="utf-8"))
-        verification = verify_screening_output(
+        verification, verifier_debug = verify_screening_output_detailed(
             articles=transformed_articles,
             screening_data=screening_data,
             config=config,
         )
         result.verifier = verification
+        result.metadata["verifier_debug"] = verifier_debug
 
         if verification.flagged and config.block_on_flag:
             review_payload = {

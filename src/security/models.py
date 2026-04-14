@@ -52,6 +52,11 @@ class SecurityConfig:
         """Build a preset config by name."""
         presets = {
             "baseline": cls(name="baseline"),
+            "verifier-only": cls(
+                name="verifier-only",
+                verifier=True,
+                block_on_flag=True,
+            ),
             "struq-lite": cls(
                 name="struq-lite",
                 input_separation=True,

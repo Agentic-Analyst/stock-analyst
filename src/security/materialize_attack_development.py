@@ -11,7 +11,7 @@ import argparse
 import json
 import shutil
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from .attacks import ATTACK_TEMPLATE_VERSION, build_poisoned_article
 from .dataset import load_article, load_cases, resolve_path, write_article, write_cases
@@ -64,12 +64,46 @@ def parse_args() -> argparse.Namespace:
         default="calculator-first attack development manifest rematerialized from canonical corpus",
         help="Notes recorded in benchmark_metadata.json",
     )
+    parser.add_argument(
+        "--anchor-index",
+        action="append",
+        default=[],
+        help=(
+            "Optional 1-based anchor override for a poisoned case, formatted as "
+            "CASE_ID=INDEX. Example: nvda_s01_tier2=2"
+        ),
+    )
     return parser.parse_args()
 
 
 def load_selected_case_ids(selection_path: Path) -> List[str]:
     payload = json.loads(selection_path.read_text(encoding="utf-8"))
     return [item["case_id"] for item in payload.get("selected_cases", []) if item.get("case_id")]
+
+
+def parse_anchor_overrides(raw_overrides: Sequence[str]) -> Dict[str, int]:
+    overrides: Dict[str, int] = {}
+    for raw in raw_overrides:
+        if "=" not in raw:
+            raise ValueError(
+                f"Invalid --anchor-index '{raw}'. Expected CASE_ID=INDEX."
+            )
+        case_id, raw_index = raw.split("=", 1)
+        case_id = case_id.strip()
+        if not case_id:
+            raise ValueError(f"Invalid --anchor-index '{raw}': missing case id")
+        try:
+            index = int(raw_index)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid --anchor-index '{raw}': index must be an integer"
+            ) from exc
+        if index < 1:
+            raise ValueError(
+                f"Invalid --anchor-index '{raw}': index must be 1-based and >= 1"
+            )
+        overrides[case_id] = index - 1
+    return overrides
 
 
 def _load_case_articles(case: SecurityCase, manifest_path: Path) -> List[ArticleRecord]:
@@ -89,12 +123,13 @@ def _display_path(path: Path) -> str:
 def _copy_articles_for_case(
     *,
     case: SecurityCase,
+    ordered_source_refs: Sequence[str],
     articles: Sequence[ArticleRecord],
     manifest_path: Path,
     output_root: Path,
 ) -> List[str]:
     refs: List[str] = []
-    for ref, article in zip(case.article_refs, articles):
+    for ref, article in zip(ordered_source_refs, articles):
         source_path = resolve_path(ref, base_dir=manifest_path.parent)
         destination = output_root / "articles" / case.case_id / source_path.name
         write_article(destination, article)
@@ -111,6 +146,7 @@ def _copy_clean_case(
     articles = _load_case_articles(source_case, manifest_path)
     refs = _copy_articles_for_case(
         case=source_case,
+        ordered_source_refs=source_case.article_refs,
         articles=articles,
         manifest_path=manifest_path,
         output_root=output_root,
@@ -120,19 +156,85 @@ def _copy_clean_case(
     return copied
 
 
+def _article_matches_anchor(article: ArticleRecord, anchor_seed_article_id: str) -> bool:
+    article_ids = [article.article_id]
+    if article.seed_article_id:
+        article_ids.append(article.seed_article_id)
+    for candidate in article_ids:
+        if candidate == anchor_seed_article_id:
+            return True
+        if candidate.endswith(anchor_seed_article_id):
+            return True
+        if "_" in candidate and candidate.split("_", 1)[1] == anchor_seed_article_id:
+            return True
+    return False
+
+
+def _choose_anchor_index(
+    *,
+    source_case: SecurityCase,
+    clean_articles: Sequence[ArticleRecord],
+    anchor_override_index: Optional[int],
+) -> int:
+    if not clean_articles:
+        raise ValueError(f"{source_case.case_id} has no clean articles to anchor")
+    if anchor_override_index is not None:
+        if anchor_override_index < 0 or anchor_override_index >= len(clean_articles):
+            raise ValueError(
+                f"Anchor override for {source_case.case_id} is out of range: "
+                f"{anchor_override_index + 1} (bundle has {len(clean_articles)} articles)"
+            )
+        return anchor_override_index
+
+    anchor_seed_article_id = source_case.metadata.get("anchor_seed_article_id")
+    if anchor_seed_article_id:
+        for index, article in enumerate(clean_articles):
+            if _article_matches_anchor(article, str(anchor_seed_article_id)):
+                return index
+
+    dev_anchor_index = source_case.metadata.get("dev_poison_anchor_index")
+    if dev_anchor_index is not None:
+        try:
+            normalized_index = int(dev_anchor_index)
+        except (TypeError, ValueError):
+            normalized_index = 0
+        if 0 <= normalized_index < len(clean_articles):
+            return normalized_index
+
+    return 0
+
+
 def _materialize_poisoned_case(
     *,
     source_case: SecurityCase,
     clean_case: SecurityCase,
     manifest_path: Path,
     output_root: Path,
+    anchor_override_index: Optional[int] = None,
 ) -> SecurityCase:
     clean_articles = _load_case_articles(clean_case, manifest_path)
     if not clean_articles:
         raise ValueError(f"{clean_case.case_id} has no articles to poison")
 
-    anchor_article = clean_articles[0]
-    context_articles = list(clean_articles[1:])
+    anchor_index = _choose_anchor_index(
+        source_case=source_case,
+        clean_articles=clean_articles,
+        anchor_override_index=anchor_override_index,
+    )
+    anchor_article = clean_articles[anchor_index]
+    context_articles = [
+        article
+        for index, article in enumerate(clean_articles)
+        if index != anchor_index
+    ]
+    ordered_source_refs = [
+        clean_case.article_refs[anchor_index],
+        *[
+            ref
+            for index, ref in enumerate(clean_case.article_refs)
+            if index != anchor_index
+        ],
+    ]
     company_name = str(source_case.metadata.get("company_name", source_case.ticker))
     attack_context = dict(source_case.metadata)
     poisoned_anchor, labels = build_poisoned_article(
@@ -146,6 +248,7 @@ def _materialize_poisoned_case(
     materialized_articles = [poisoned_anchor] + context_articles
     refs = _copy_articles_for_case(
         case=source_case,
+        ordered_source_refs=ordered_source_refs,
         articles=materialized_articles,
         manifest_path=manifest_path,
         output_root=output_root,
@@ -159,6 +262,8 @@ def _materialize_poisoned_case(
         "dev_materialized_from_case_id": source_case.case_id,
         "dev_materialized_from_clean_case_id": clean_case.case_id,
         "dev_attack_template_version": ATTACK_TEMPLATE_VERSION,
+        "dev_poison_anchor_index": anchor_index,
+        "dev_poison_anchor_article_id": anchor_article.article_id,
     }
     return copied
 
@@ -169,6 +274,7 @@ def materialize_attack_development_manifest(
     selection_path: Path,
     output_root: Path,
     selected_case_ids: Sequence[str] | None = None,
+    anchor_overrides: Dict[str, int] | None = None,
     force: bool = False,
     notes: str = "",
 ) -> Dict[str, object]:
@@ -182,6 +288,7 @@ def materialize_attack_development_manifest(
 
     source_cases = {case.case_id: case for case in load_cases(source_manifest)}
     selected_ids = list(selected_case_ids or load_selected_case_ids(selection_path))
+    anchor_overrides = dict(anchor_overrides or {})
     if not selected_ids:
         raise ValueError("No attack-development cases were selected")
 
@@ -219,6 +326,7 @@ def materialize_attack_development_manifest(
                 clean_case=clean_case_lookup[poisoned_case.base_case_id],
                 manifest_path=source_manifest,
                 output_root=output_root,
+                anchor_override_index=anchor_overrides.get(poisoned_case.case_id),
             )
         )
 
@@ -239,6 +347,7 @@ def materialize_attack_development_manifest(
         "parent_attack_template_version": source_metadata.get("attack_template_version"),
         "selected_poisoned_case_ids": selected_ids,
         "selected_clean_case_ids": [f"{base_case_id}_clean" for base_case_id in selected_base_case_ids],
+        "anchor_overrides": {case_id: index + 1 for case_id, index in anchor_overrides.items()},
     }
     metadata["corpus_version"] = compute_dataset_corpus_version(output_root)
     write_dataset_metadata(output_root, metadata)
@@ -260,6 +369,7 @@ def main() -> None:
         selection_path=args.selection,
         output_root=args.output_root,
         selected_case_ids=args.case_id or None,
+        anchor_overrides=parse_anchor_overrides(args.anchor_index),
         force=args.force,
         notes=args.notes,
     )
