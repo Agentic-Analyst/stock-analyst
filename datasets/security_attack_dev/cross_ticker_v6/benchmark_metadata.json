@@ -1,0 +1,23 @@
+{
+  "corpus_version": "corpus-c21ca6bcd328",
+  "direction_map_version": "direction-map-ab9f15deea0a",
+  "attack_template_version": "v6_calculator_first_cross_ticker_templates",
+  "metric_version": "v2_end_to_end_primary_with_structured_screening_shift",
+  "code_commit": "fadb0e7a25fc500754941e38586775af2b0e6bd9",
+  "notes": "cross-ticker dev manifest for nvda bullish and meta bearish with v6 templates",
+  "source_manifest": "datasets/security/cases.jsonl",
+  "selection_path": "datasets/security/attack_development_subset.json",
+  "parent_corpus_version": "corpus-700684c1dad2",
+  "parent_attack_template_version": "v3_boundary_aware_structured_templates",
+  "selected_poisoned_case_ids": [
+    "nvda_s01_tier2",
+    "nvda_s01_tier3",
+    "meta_s04_tier1",
+    "meta_s04_tier2",
+    "meta_s04_tier3"
+  ],
+  "selected_clean_case_ids": [
+    "nvda_s01_clean",
+    "meta_s04_clean"
+  ]
+}
