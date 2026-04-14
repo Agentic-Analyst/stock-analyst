@@ -247,6 +247,21 @@ Dataset shape remains:
 - `60` poisoned
 - `80` total
 
+One important nuance is now explicitly preserved for the calculator-first phase:
+
+- the current frozen dataset metadata points at the post-reset canonical corpus
+  above
+- the latest completed clean-run artifact slice under
+  `runs/security-openai-clean-reset-v2/baseline/` still records the earlier
+  run-level metadata:
+  - `corpus_version = corpus-ac1f03a3e0d5`
+  - `direction_map_version = direction-map-7186ef4fd3ab`
+
+This means the white-box calculator analysis should be treated as grounded in
+the clean-reset run artifacts themselves, not silently merged with the later
+canonical dataset freeze. That distinction is acceptable for attack-development
+work, but it should remain explicit in the paper.
+
 ## 4. Implementation Status
 
 ### Benchmark harness
@@ -297,6 +312,35 @@ Implemented:
 - resumable benchmark runs
 - process-based parallel case execution
 - raw-run reuse for cheap summary regeneration
+
+### Calculator-first analysis
+
+Implemented:
+
+- a white-box calculator-analysis utility at `src/security/analyze_calculator.py`
+- per-case attackability records with synthetic one-document perturbations
+- aggregate and per-case attack-surface JSON artifacts
+- an analyst-facing markdown summary at `report/calculator_attack_surface.md`
+
+What it now gives us:
+
+- the true numeric attack surface for the deterministic calculator
+- boundary distance to the next rating band per clean case
+- first-attack recommendations grounded in calculator-consumed fields
+- a principled Stage 1 target list:
+  - `aapl_s05_clean`
+  - `aapl_s01_clean`
+  - `nvda_s01_clean`
+  - first bearish re-entry: `meta_s04_clean`
+
+Important scope note:
+
+- the attack-template code has now been redesigned toward
+  `v4_calculator_first_evidence_templates`
+- the frozen canonical poisoned corpus is still materialized from the older
+  `v3_boundary_aware_structured_templates`
+- this is intentional for the current phase: the calculator-first loop should
+  guide the next targeted dev attacks before any broader corpus regeneration
 
 ### Defense scaffolding
 
@@ -452,6 +496,28 @@ Partially implemented / not yet central:
   - the canonical benchmark can now advance to attack redesign on the compact
     dev subset without another corpus-validity detour
 
+### `calculator-attack-surface`
+
+- Purpose:
+  - switch from broad benchmark iteration to a white-box, calculator-first
+    attack-development program
+- Validity:
+  - `analysis_only`
+- Result:
+  - generated
+    `runs/security-openai-clean-reset-v2/baseline/calculator_attack_surface.json`
+  - generated per-case `calculator_attack_surface.json` artifacts under each
+    clean case directory
+  - generated `report/calculator_attack_surface.md`
+- What we learned:
+  - the deterministic calculator only uses valuation gap, catalyst score, risk
+    score, and momentum
+  - risk type and mitigations do not move the numeric recommendation
+  - low-confidence items are filtered before the calculator sees them
+  - `AAPL` and `NVDA` near-boundary bullish cases are the highest-leverage next
+    targets
+  - `META` is a more plausible first bearish re-entry case than `AMZN`
+
 ## 6. Failures and Root Causes
 
 ### Stale OpenAI key
@@ -562,6 +628,21 @@ Effect:
 - full clean sweep stalled at `19/20`
 - required targeted retry with smaller batch size and summary recovery
 
+### Run-metadata drift between clean-reset artifacts and later canonical freeze
+
+Root cause:
+
+- the benchmark was rebuilt again after the clean-reset run artifacts were
+  already produced, so the dataset metadata file advanced while the completed
+  clean-run slice still carried older corpus and direction-map version IDs
+
+Effect:
+
+- calculator-first analysis is currently tied to the clean-run artifact slice
+  rather than the latest dataset metadata file
+- this is acceptable for attack development, but it should not be glossed over
+  in the final report
+
 ## 7. What Worked and Why
 
 ### Real corpus freezing
@@ -609,6 +690,15 @@ Worked because:
 - it finally synchronized the repaired corpus, the clean baselines, and the
   direction map in one consistent experimental slice
 
+### White-box calculator review
+
+Worked because:
+
+- it cut through benchmark noise and showed exactly which extracted fields can
+  and cannot move the deterministic recommendation
+- it replaced guesswork about Tier 2 and Tier 3 efficacy with concrete boundary
+  and contribution analysis
+
 ## 8. What Failed and Why
 
 ### Weak attack templates
@@ -640,6 +730,15 @@ Failed because:
   result
 - it mostly increases cost and history complexity
 
+### Treating all structured fields as equally important
+
+Failed because:
+
+- the screener emits many fields, but the calculator only consumes a small
+  subset of them
+- this let earlier attack design spend effort on mitigations, risk type, and
+  other fields that do not change the numeric recommendation
+
 ### Misreading stale frozen artifacts as live-builder regressions
 
 Failed because:
@@ -654,7 +753,7 @@ Failed because:
 
 The next real milestone is not more full sweeps. It is:
 
-- redesign attacks on the compact attack-development subset in
+- run a calculator-first attack-development loop on the compact subset in
   `datasets/security/attack_development_subset.json`
 
 Current selected subset:
@@ -671,6 +770,26 @@ This subset is intentionally small and high leverage:
 - mostly near-boundary `AAPL` bullish cases with the smallest required return
   shift
 - one `NVDA` bullish case for cross-ticker diversity
+
+Calculator-first Stage 1 priorities are now:
+
+- `aapl_s05_clean`
+- `aapl_s01_clean`
+- `nvda_s01_clean`
+
+First bearish re-entry after the first bullish wins:
+
+- `meta_s04_clean`
+
+Practical attack-design constraints for the next loop:
+
+- optimize primarily for catalyst type, catalyst timeline, catalyst confidence,
+  risk severity, risk likelihood, risk confidence, and count
+- treat sentiment as a secondary lever
+- do not spend more time targeting mitigations or risk type as if they move the
+  numeric rating
+- keep full report generation off during attack development; use recommendation
+  snapshots plus screening JSON
 
 ### Breakthrough gate
 
@@ -694,6 +813,7 @@ Do not scale beyond the dev subset until:
 
 ### Remaining project work
 
+- operationalize the calculator-first dev loop on the Stage 1 target cases
 - strengthen attack templates against the real screener and calculator
 - produce non-zero baseline headline ASR
 - implement and evaluate defenses fairly
@@ -710,6 +830,7 @@ Do not scale beyond the dev subset until:
 - No final paper tables from contaminated or stale-calibration runs.
 - No claiming screening compromise as end-to-end compromise.
 - No more silent run-history assumptions; use the recorded benchmark metadata.
+- No more attack effort on fields that the calculator does not consume.
 
 ## 11. Current Canonical Versions and Commands
 
@@ -753,6 +874,13 @@ Regenerate the direction map:
 PYTHONPATH=src conda run -n stock-analyst python -m src.security.calibrate_directions \
   --raw-runs runs/security-openai-clean-reset-v2/baseline/raw_runs.jsonl \
   --output datasets/security/direction_map_full.json
+```
+
+Generate the calculator-first attack-surface analysis:
+
+```bash
+PYTHONPATH=src conda run -n stock-analyst python -m src.security.analyze_calculator \
+  --runs runs/security-openai-clean-reset-v2/baseline/raw_runs.jsonl
 ```
 
 Select the attack-development subset:

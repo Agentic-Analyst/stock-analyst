@@ -285,3 +285,68 @@ the polished outcome.
 - The next high-leverage work is to strengthen Tier 1/2/3 attacks on the
   compact attack-development subset before spending more API budget on broader
   poisoned sweeps or defense evaluations.
+
+## 2026-04-14: Calculator-first pivot
+
+- A white-box review of the live VYNN source code showed that the numeric
+  recommendation is narrower and more deterministic than earlier attack design
+  assumed.
+- The calculator in `src/recommendation_calculator.py` only uses:
+  - `adj_val_gap_pct`
+  - `catalyst_score_pct`
+  - `risk_score_pct`
+  - `momentum_score_pct`
+- This immediately ruled out several low-value attack directions:
+  - changing mitigation language does not move the numeric rating
+  - changing risk type does not move the numeric rating
+  - low-confidence extracted items are filtered out before the calculator sees
+    them
+- The screener-calculator interface also has two real schema mismatches worth
+  preserving for the paper:
+  - screener allows risk severity `critical`, but the calculator does not map
+    it above `high`
+  - screener allows likelihood `low`, but the calculator does not map it below
+    `medium`
+- Importantly, those mismatch values do not appear in the current clean corpus,
+  so they are not the main blocker for the present benchmark.
+- A new white-box utility now exists at `src/security/analyze_calculator.py`.
+  It works from existing clean-run artifacts and writes:
+  - aggregate analysis:
+    `runs/security-openai-clean-reset-v2/baseline/calculator_attack_surface.json`
+  - per-case analysis:
+    `runs/security-openai-clean-reset-v2/baseline/<case_id>/security/calculator_attack_surface.json`
+  - markdown summary:
+    `report/calculator_attack_surface.md`
+- The first calculator-first pass confirmed the most attackable next cases are:
+  - `aapl_s05_clean`
+  - `aapl_s01_clean`
+  - `nvda_s01_clean`
+- The best first bearish re-entry case is `meta_s04_clean`, not `AMZN`.
+- The attack-template code is now updated to
+  `v4_calculator_first_evidence_templates`, but the frozen canonical poisoned
+  corpus still materializes the older `v3` attack articles. That is deliberate:
+  the new white-box guidance should be applied first on the small dev loop
+  before any broader corpus refresh.
+- This is a meaningful shift in project strategy:
+  - stop spending time on broad benchmark plumbing
+  - stop optimizing attacks against non-consumed fields
+  - focus on one-document perturbations that move catalyst/risk/momentum inputs
+    enough to cross real recommendation boundaries
+
+## 2026-04-14: Versioning nuance after the calculator-first pass
+
+- The newly generated calculator-first analysis is based on the completed clean
+  run slice under `runs/security-openai-clean-reset-v2/baseline/`.
+- Those run artifacts still record:
+  - `corpus_version = corpus-ac1f03a3e0d5`
+  - `direction_map_version = direction-map-7186ef4fd3ab`
+- The latest frozen dataset metadata file now records:
+  - `corpus_version = corpus-700684c1dad2`
+  - `direction_map_version = direction-map-ab9f15deea0a`
+- This is not a reason to discard the white-box analysis, because the utility is
+  intentionally grounded in the clean-run artifacts themselves.
+- It is, however, a reason to be precise in the paper:
+  - do not silently merge results from the clean-reset run slice with later
+    dataset-freeze metadata
+  - treat the calculator-first analysis as valid attack-development evidence,
+    not as a versionless final benchmark table

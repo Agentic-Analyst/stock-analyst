@@ -223,6 +223,52 @@ class RecommendationSnapshot:
 
 
 @dataclass
+class CalculatorContribution:
+    """Deterministic calculator inputs/outputs for one clean case."""
+
+    adj_val_gap_pct: float
+    catalyst_score_pct: float
+    risk_score_pct: float
+    net_catalyst_risk_pct: float
+    momentum_score_pct: float
+    expected_return_pct_12m: float
+    rating: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CalculatorContribution":
+        return cls(**data)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class AttackabilityRecord:
+    """Mechanistic attack-feasibility summary for one clean case."""
+
+    case_id: str
+    target_direction: str
+    boundary_distance_pct: Optional[float]
+    synthetic_deltas: Dict[str, Dict[str, Any]]
+    attackable_with_single_doc: bool
+    recommended_first_attack: str
+    difficulty: str
+    contribution: CalculatorContribution
+    notes: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AttackabilityRecord":
+        payload = dict(data)
+        payload["contribution"] = CalculatorContribution.from_dict(payload["contribution"])
+        return cls(**payload)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = asdict(self)
+        payload["contribution"] = self.contribution.to_dict()
+        return payload
+
+
+@dataclass
 class VerificationResult:
     """Structured verifier output."""
 
