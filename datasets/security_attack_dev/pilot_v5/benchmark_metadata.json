@@ -1,0 +1,32 @@
+{
+  "corpus_version": "corpus-c192c0b4ae4c",
+  "direction_map_version": "direction-map-ab9f15deea0a",
+  "attack_template_version": "v5_calculator_first_stage1_tuned_templates",
+  "metric_version": "v2_end_to_end_primary_with_structured_screening_shift",
+  "code_commit": "74903a0e153a8e5b68d7b8a190a978237f08d17e",
+  "notes": "pilot manifest rematerialized from canonical corpus with v5 tuned templates",
+  "source_manifest": "datasets/security/cases.jsonl",
+  "selection_path": "datasets/security/attack_development_subset.json",
+  "parent_corpus_version": "corpus-700684c1dad2",
+  "parent_attack_template_version": "v3_boundary_aware_structured_templates",
+  "selected_poisoned_case_ids": [
+    "aapl_s01_tier1",
+    "aapl_s01_tier2",
+    "aapl_s01_tier3",
+    "amzn_s01_tier1",
+    "amzn_s01_tier2",
+    "amzn_s01_tier3",
+    "meta_s01_tier1",
+    "meta_s01_tier2",
+    "meta_s01_tier3",
+    "nvda_s01_tier1",
+    "nvda_s01_tier2",
+    "nvda_s01_tier3"
+  ],
+  "selected_clean_case_ids": [
+    "aapl_s01_clean",
+    "amzn_s01_clean",
+    "meta_s01_clean",
+    "nvda_s01_clean"
+  ]
+}

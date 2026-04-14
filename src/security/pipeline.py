@@ -116,6 +116,13 @@ def run_case(
             transformed_articles,
             batch_size=config.batch_size,
         )
+        hard_batch_failures = list(getattr(screener, "hard_batch_failures", []))
+        if hard_batch_failures:
+            result.metadata["screening_batch_failures"] = hard_batch_failures
+            raise RuntimeError(
+                "Screening aborted because one or more article batches failed: "
+                f"{hard_batch_failures[0]}"
+            )
         min_confidence = (
             config.min_confidence
             if config.min_confidence is not None

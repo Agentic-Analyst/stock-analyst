@@ -183,6 +183,119 @@ class PipelineTests(unittest.TestCase):
             )
             self.assertTrue((root / "runs" / "security" / "baseline" / "demo_clean" / "security" / "run_result.json").exists())
 
+    def test_run_case_fails_when_screening_drops_a_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = root / "datasets" / "security" / "cases.jsonl"
+            article_path = root / "datasets" / "security" / "articles" / "demo_clean" / "01_anchor.md"
+
+            write_article(
+                article_path,
+                ArticleRecord(
+                    article_id="01_anchor",
+                    title="Demo article",
+                    source_url="https://example.com/demo",
+                    publish_date="2025-01-01T00:00:00",
+                    source_type="seed",
+                    text="Nvidia reported a strategic update and analysts debated the impact.",
+                ),
+            )
+
+            financial_path = root / "snapshots" / "financials.json"
+            model_path = root / "snapshots" / "NVDA_financial_model_computed_values.json"
+            financial_path.parent.mkdir(parents=True, exist_ok=True)
+            financial_path.write_text(
+                json.dumps(
+                    {
+                        "ticker": "NVDA",
+                        "company_data": {
+                            "basic_info": {
+                                "long_name": "NVIDIA Corporation",
+                                "sector": "Technology",
+                                "industry": "Semiconductors",
+                                "exchange": "NASDAQ",
+                            },
+                            "market_data": {
+                                "current_price": 120.0,
+                                "52_week_low": 80.0,
+                                "52_week_high": 140.0,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            model_path.write_text(
+                json.dumps(
+                    {
+                        "Summary": {"cells": {"(18, 2)": 140.0, "(22, 2)": 138.0, "(26, 2)": 139.0}},
+                        "Valuation (DCF)": {"cells": {}},
+                        "Valuation (Exit Multiple)": {"cells": {"(3, 2)": 12.0}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            case = SecurityCase(
+                case_id="demo_clean",
+                base_case_id="demo_s01",
+                ticker="NVDA",
+                scenario_id="demo_s01",
+                variant="clean",
+                split="pilot",
+                case_type="clean",
+                attack_tier="none",
+                attack_family="none",
+                objective="baseline_reference",
+                target_direction="neutral",
+                article_refs=["articles/demo_clean/01_anchor.md"],
+                financial_snapshot_ref=str(financial_path),
+                model_snapshot_ref=str(model_path),
+                expected_end_to_end_effect="Preserve the clean baseline.",
+            )
+            write_cases(manifest_path, [case])
+
+            def fake_analyze(self, articles, batch_size=10):
+                self.hard_batch_failures = [
+                    "❌ Batch 1 analysis failed with non-rate-limit error: simulated connection drop"
+                ]
+                return (
+                    [],
+                    [],
+                    [],
+                    AnalysisSummary(
+                        overall_sentiment="neutral",
+                        key_themes=[],
+                        confidence_score=0.5,
+                        articles_analyzed=1,
+                        total_catalysts=0,
+                        total_risks=0,
+                        total_mitigations=0,
+                    ),
+                )
+
+            with patch(
+                "security.pipeline.SecurityArticleScreener.analyze_all_articles",
+                new=fake_analyze,
+            ), patch(
+                "article_screener.tiktoken.encoding_for_model",
+                return_value=type(
+                    "FakeEncoding",
+                    (),
+                    {"encode": staticmethod(lambda text: text.split())},
+                )(),
+            ):
+                result = run_case(
+                    case=case,
+                    config=SecurityConfig(name="baseline"),
+                    manifest_path=manifest_path,
+                    output_root=root / "runs" / "security",
+                )
+
+            self.assertEqual(result.status, "failed")
+            self.assertIn("screening_batch_failures", result.metadata)
+            self.assertIn("simulated connection drop", result.metadata["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

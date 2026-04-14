@@ -145,6 +145,16 @@ class SecurityArticleScreener(ArticleScreener):
     def __init__(self, ticker, base_path, security_config: SecurityConfig):
         super().__init__(ticker=ticker, base_path=base_path)
         self.security_config = security_config
+        self.hard_batch_failures: List[str] = []
+
+    def _log(self, level: str, message: str):
+        if (
+            level == "error"
+            and "analysis failed with non-rate-limit error" in message
+            and message not in self.hard_batch_failures
+        ):
+            self.hard_batch_failures.append(message)
+        super()._log(level, message)
 
     def _create_batch_analysis_prompt(
         self,
@@ -333,4 +343,3 @@ def _dedupe(items: List[str]) -> List[str]:
         seen.add(item)
         result.append(item)
     return result
-
