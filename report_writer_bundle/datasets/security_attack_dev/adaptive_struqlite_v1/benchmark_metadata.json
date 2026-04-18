@@ -1,0 +1,22 @@
+{
+  "corpus_version": "corpus-588ae98d2a97",
+  "direction_map_version": "direction-map-ab9f15deea0a",
+  "attack_template_version": "v8_calculator_first_native_defense_ladder_templates",
+  "metric_version": "v2_end_to_end_primary_with_structured_screening_shift",
+  "code_commit": "6e299f5e6e951d2dfb1a96be3b4d460125991693",
+  "notes": "adaptive reattack set against struq-lite using v8 native-defense ladder templates",
+  "source_manifest": "datasets/security/cases.jsonl",
+  "selection_path": "datasets/security/attack_development_subset.json",
+  "parent_corpus_version": "corpus-700684c1dad2",
+  "parent_attack_template_version": "v3_boundary_aware_structured_templates",
+  "selected_poisoned_case_ids": [
+    "aapl_s01_tier2",
+    "aapl_s01_tier3",
+    "aapl_s05_tier3"
+  ],
+  "selected_clean_case_ids": [
+    "aapl_s01_clean",
+    "aapl_s05_clean"
+  ],
+  "anchor_overrides": {}
+}

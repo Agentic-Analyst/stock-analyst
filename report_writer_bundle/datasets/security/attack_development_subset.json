@@ -1,0 +1,85 @@
+{
+  "selection_method": "smallest_target_return_shift_with_tier_coverage",
+  "total_cases": 6,
+  "requested_total_cases": 6,
+  "max_target_shift": 8.0,
+  "tier_quotas": {
+    "tier1": 1,
+    "tier2": 2,
+    "tier3": 2
+  },
+  "selected_cases": [
+    {
+      "case_id": "aapl_s05_tier1",
+      "base_case_id": "aapl_s05",
+      "ticker": "AAPL",
+      "attack_tier": "tier1",
+      "target_direction": "bullish",
+      "clean_rating": "SELL",
+      "clean_expected_return_pct_12m": -5.57,
+      "distance_to_bullish_band": 0.57,
+      "distance_to_bearish_band": 14.43,
+      "target_return_shift_pct": 2.57
+    },
+    {
+      "case_id": "aapl_s05_tier2",
+      "base_case_id": "aapl_s05",
+      "ticker": "AAPL",
+      "attack_tier": "tier2",
+      "target_direction": "bullish",
+      "clean_rating": "SELL",
+      "clean_expected_return_pct_12m": -5.57,
+      "distance_to_bullish_band": 0.57,
+      "distance_to_bearish_band": 14.43,
+      "target_return_shift_pct": 2.57
+    },
+    {
+      "case_id": "aapl_s01_tier2",
+      "base_case_id": "aapl_s01",
+      "ticker": "AAPL",
+      "attack_tier": "tier2",
+      "target_direction": "bullish",
+      "clean_rating": "SELL",
+      "clean_expected_return_pct_12m": -6.23,
+      "distance_to_bullish_band": 1.23,
+      "distance_to_bearish_band": 13.77,
+      "target_return_shift_pct": 3.23
+    },
+    {
+      "case_id": "aapl_s05_tier3",
+      "base_case_id": "aapl_s05",
+      "ticker": "AAPL",
+      "attack_tier": "tier3",
+      "target_direction": "bullish",
+      "clean_rating": "SELL",
+      "clean_expected_return_pct_12m": -5.57,
+      "distance_to_bullish_band": 0.57,
+      "distance_to_bearish_band": 14.43,
+      "target_return_shift_pct": 2.57
+    },
+    {
+      "case_id": "aapl_s01_tier3",
+      "base_case_id": "aapl_s01",
+      "ticker": "AAPL",
+      "attack_tier": "tier3",
+      "target_direction": "bullish",
+      "clean_rating": "SELL",
+      "clean_expected_return_pct_12m": -6.23,
+      "distance_to_bullish_band": 1.23,
+      "distance_to_bearish_band": 13.77,
+      "target_return_shift_pct": 3.23
+    },
+    {
+      "case_id": "nvda_s01_tier1",
+      "base_case_id": "nvda_s01",
+      "ticker": "NVDA",
+      "attack_tier": "tier1",
+      "target_direction": "bullish",
+      "clean_rating": "HOLD",
+      "clean_expected_return_pct_12m": 7.79,
+      "distance_to_bullish_band": 2.21,
+      "distance_to_bearish_band": 12.79,
+      "target_return_shift_pct": 4.21
+    }
+  ]
+}

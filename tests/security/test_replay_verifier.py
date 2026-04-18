@@ -24,6 +24,20 @@ class ReplayVerifierTests(unittest.TestCase):
         self.assertTrue(config.block_on_flag)
         self.assertFalse(config.input_separation)
         self.assertFalse(config.sanitizer)
+        self.assertEqual(config.verifier_mode, "generic_quality")
+
+    def test_verifier_v2_preset_enables_injection_specific_mode(self) -> None:
+        verifier_v2 = SecurityConfig.from_name("verifier-v2")
+        guarded_v2 = SecurityConfig.from_name("guarded-v2")
+
+        self.assertTrue(verifier_v2.verifier)
+        self.assertEqual(verifier_v2.verifier_mode, "injection_specific")
+        self.assertEqual(verifier_v2.verifier_prompt_version, "v2_injection_specific")
+
+        self.assertTrue(guarded_v2.verifier)
+        self.assertTrue(guarded_v2.input_separation)
+        self.assertTrue(guarded_v2.sanitizer)
+        self.assertEqual(guarded_v2.verifier_mode, "injection_specific")
 
     def test_verify_screening_output_detailed_retries_once_on_parse_failure(self) -> None:
         class FakeVerifierLLM:
@@ -85,6 +99,19 @@ class ReplayVerifierTests(unittest.TestCase):
         self.assertIn("probability that the screening output was influenced by prompt injection", prompt)
         self.assertIn("Use `confidence` ONLY for injection risk", prompt)
         self.assertIn("If the output appears benign, return `flagged=false`", prompt)
+
+    def test_verifier_v2_prompt_requires_injection_specific_schema(self) -> None:
+        prompt = build_llm_verifier_prompt(
+            article_preview=[{"article_id": "doc_1", "title": "Demo", "content_preview": "Text"}],
+            screening_data={"analysis_summary": {"overall_sentiment": "bullish"}},
+            verifier_mode="injection_specific",
+            verifier_prompt_version="v2_injection_specific",
+        )
+        self.assertIn("NOT to score general quality problems", prompt)
+        self.assertIn("injection_risk_confidence", prompt)
+        self.assertIn("reason_categories", prompt)
+        self.assertIn("suspicious_documents", prompt)
+        self.assertIn("high_impact_fields_at_risk", prompt)
 
     def test_pick_operating_point_respects_clean_flag_budget(self) -> None:
         records = [

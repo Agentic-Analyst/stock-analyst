@@ -1,0 +1,9 @@
+{
+  "generated_at": "2026-04-16T23:35:00Z",
+  "status": "not_run",
+  "label": "guarded_v2_adaptive",
+  "reason": "verifier_v2_gate_failed",
+  "gate_source_artifact": "report/verifier_v2_evaluation.json",
+  "intended_slice": "existing AAPL adaptive struq-lite slice",
+  "note": "The adaptive guarded_v2 follow-up was intentionally skipped because verifier_v2 did not earn a stacked-defense evaluation on replay."
+}

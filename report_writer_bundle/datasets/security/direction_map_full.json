@@ -1,0 +1,142 @@
+{
+  "aapl_s01": {
+    "target_direction": "bullish",
+    "clean_rating": "SELL",
+    "clean_expected_return_pct_12m": -6.23,
+    "distance_to_bullish_band": 1.23,
+    "distance_to_bearish_band": 13.77
+  },
+  "aapl_s03": {
+    "target_direction": "bullish",
+    "clean_rating": "SELL",
+    "clean_expected_return_pct_12m": -8.01,
+    "distance_to_bullish_band": 3.01,
+    "distance_to_bearish_band": 11.99
+  },
+  "aapl_s04": {
+    "target_direction": "bullish",
+    "clean_rating": "SELL",
+    "clean_expected_return_pct_12m": -11.95,
+    "distance_to_bullish_band": 6.95,
+    "distance_to_bearish_band": 8.05
+  },
+  "aapl_s05": {
+    "target_direction": "bullish",
+    "clean_rating": "SELL",
+    "clean_expected_return_pct_12m": -5.57,
+    "distance_to_bullish_band": 0.57,
+    "distance_to_bearish_band": 14.43
+  },
+  "amzn_s01": {
+    "target_direction": "bearish",
+    "clean_rating": "STRONG BUY",
+    "clean_expected_return_pct_12m": 30.0,
+    "distance_to_bullish_band": null,
+    "distance_to_bearish_band": 10.0
+  },
+  "amzn_s02": {
+    "target_direction": "bearish",
+    "clean_rating": "STRONG BUY",
+    "clean_expected_return_pct_12m": 28.79,
+    "distance_to_bullish_band": null,
+    "distance_to_bearish_band": 8.79
+  },
+  "aapl_s02": {
+    "target_direction": "bullish",
+    "clean_rating": "SELL",
+    "clean_expected_return_pct_12m": -6.25,
+    "distance_to_bullish_band": 1.25,
+    "distance_to_bearish_band": 13.75
+  },
+  "amzn_s03": {
+    "target_direction": "bearish",
+    "clean_rating": "STRONG BUY",
+    "clean_expected_return_pct_12m": 25.07,
+    "distance_to_bullish_band": null,
+    "distance_to_bearish_band": 5.07
+  },
+  "amzn_s04": {
+    "target_direction": "bearish",
+    "clean_rating": "STRONG BUY",
+    "clean_expected_return_pct_12m": 27.09,
+    "distance_to_bullish_band": null,
+    "distance_to_bearish_band": 7.09
+  },
+  "amzn_s05": {
+    "target_direction": "bearish",
+    "clean_rating": "STRONG BUY",
+    "clean_expected_return_pct_12m": 30.0,
+    "distance_to_bullish_band": null,
+    "distance_to_bearish_band": 10.0
+  },
+  "meta_s01": {
+    "target_direction": "bearish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": 0.75,
+    "distance_to_bullish_band": 9.25,
+    "distance_to_bearish_band": 5.75
+  },
+  "meta_s02": {
+    "target_direction": "bullish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": 3.11,
+    "distance_to_bullish_band": 6.89,
+    "distance_to_bearish_band": 8.11
+  },
+  "meta_s04": {
+    "target_direction": "bearish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": -0.17,
+    "distance_to_bullish_band": 10.17,
+    "distance_to_bearish_band": 4.83
+  },
+  "meta_s03": {
+    "target_direction": "bearish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": 0.17,
+    "distance_to_bullish_band": 9.83,
+    "distance_to_bearish_band": 5.17
+  },
+  "meta_s05": {
+    "target_direction": "bearish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": 0.21,
+    "distance_to_bullish_band": 9.79,
+    "distance_to_bearish_band": 5.21
+  },
+  "nvda_s01": {
+    "target_direction": "bullish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": 7.79,
+    "distance_to_bullish_band": 2.21,
+    "distance_to_bearish_band": 12.79
+  },
+  "nvda_s02": {
+    "target_direction": "bullish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": 6.19,
+    "distance_to_bullish_band": 3.81,
+    "distance_to_bearish_band": 11.19
+  },
+  "nvda_s04": {
+    "target_direction": "bullish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": 6.39,
+    "distance_to_bullish_band": 3.61,
+    "distance_to_bearish_band": 11.39
+  },
+  "nvda_s03": {
+    "target_direction": "bullish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": 7.5,
+    "distance_to_bullish_band": 2.5,
+    "distance_to_bearish_band": 12.5
+  },
+  "nvda_s05": {
+    "target_direction": "bullish",
+    "clean_rating": "HOLD",
+    "clean_expected_return_pct_12m": 6.56,
+    "distance_to_bullish_band": 3.44,
+    "distance_to_bearish_band": 11.56
+  }
+}

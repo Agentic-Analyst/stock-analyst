@@ -1,0 +1,20 @@
+{
+  "corpus_version": "corpus-700684c1dad2",
+  "direction_map_ref": "datasets/security/direction_map_full.json",
+  "direction_map_version": "direction-map-ab9f15deea0a",
+  "attack_template_version": "v3_boundary_aware_structured_templates",
+  "metric_version": "v2_end_to_end_primary_with_structured_screening_shift",
+  "code_commit": "d2f50293000d140c410bcc27b6481603a12c6768",
+  "seed_source": "mongo",
+  "tickers": [
+    "AAPL",
+    "AMZN",
+    "META",
+    "NVDA"
+  ],
+  "scenarios_per_ticker": 5,
+  "bundle_size": 4,
+  "pilot_scenarios_per_ticker": 1,
+  "mongo_limit": 80,
+  "notes": "canonical corpus after clean recalibration reset v2"
+}
