@@ -1,9 +1,0 @@
-{
-  "generated_at": "2026-04-16T23:35:00Z",
-  "status": "not_run",
-  "label": "guarded_v2_static",
-  "reason": "verifier_v2_gate_failed",
-  "gate_source_artifact": "report/verifier_v2_evaluation.json",
-  "intended_slice": "same 9-case no-AMZN static slice used for frozen struq-lite evaluation",
-  "note": "The verifier-v2 replay did not detect the known AAPL success cases and calibration collapsed to a threshold of 1.0, so guarded_v2 was intentionally not run."
-}
