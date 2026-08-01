@@ -152,6 +152,7 @@ class SupervisorWorkflowRunner:
         self.state = None
         self.session_manager = None
         self.is_simple_query = False  # Track if this is a simple query vs comprehensive analysis
+        self._answer_emitted = False  # Whether a user-facing answer has already been produced
         
         # Workflow statistics
         self.stats = {
@@ -602,9 +603,8 @@ Provide a helpful, informative answer:"""
                         self.logger.info(f"[SUPERVISOR]    \"{self.user_prompt}\"")
                         self.logger.info("")
                         self.logger.info("[SUPERVISOR] 🤖 INTRODUCTION & GUIDANCE:")
-                        self.logger.info("")
-                        self.logger.info(f"[LLM] {direct_answer}")
-                        self.logger.info("")
+                        self._emit_answer(direct_answer)
+                        self._answer_emitted = True
                         self.stats["completion_status"] = "conversational"
                         
                         # Return the conversational response
@@ -634,13 +634,14 @@ Provide a helpful, informative answer:"""
                     self.logger.info(f"[SUPERVISOR] → Routing to: {next_agent}")
                     self.logger.info("")
                     
-                    # If this is a direct answer (follow-up question), log it and end workflow
+                    # If this is a direct answer (follow-up question), emit it on the
+                    # structured channel and end. Setting _answer_emitted prevents the
+                    # final synthesis step from producing a second, redundant answer.
                     if next_agent == "__end__" and direct_answer:
                         self.logger.info("")
                         self.logger.info("[SUPERVISOR] 💡 DIRECT RESPONSE (from conversation context):")
-                        self.logger.info("")
-                        self.logger.info(f"[LLM] {direct_answer}")
-                        self.logger.info("")
+                        self._emit_answer(direct_answer)
+                        self._answer_emitted = True
                         self.stats["completion_status"] = "completed"
                         # Mark this as completed immediately - no agents needed
                         break
@@ -786,12 +787,12 @@ Provide a helpful, informative answer:"""
                 if self.is_simple_query:
                     immediate_answer = self._check_for_immediate_answer(next_agent)
                     if immediate_answer:
-                        self.logger.info("")
-                        self.logger.info("=" * 80)
-                        self.logger.info("[SUPERVISOR] 💡 IMMEDIATE ANSWER:")
-                        self.logger.info("=" * 80)
-                        self.logger.info(f"[LLM] {immediate_answer}")
-                        self.logger.info("")
+                        # Emit on the same structured channel as full-run synthesis
+                        # so the frontend renders it identically (and it persists to
+                        # answer.md). No separate final synthesis will run for this
+                        # query — the immediate answer IS the answer.
+                        self._emit_answer(immediate_answer)
+                        self._answer_emitted = True
                         self.stats["completion_status"] = "completed"
                         # Mark as completed and end workflow
                         break
@@ -985,13 +986,14 @@ Provide a helpful, informative answer:"""
             conversation_count = len(self.session_manager.session_data.get("conversation_history", []))
             self.logger.info(f"💾 Session '{self.session_name}' saved with {conversation_count} total conversations")
         
-        # Generate LLM-powered performance summary ONLY if:
-        # 1. Workflow completed successfully
-        # 2. At least one agent was executed (not a direct answer)
-        # 3. NOT a simple query (comprehensive analysis only)
-        if (self.stats["completion_status"] == "completed" and 
-            len(self.stats["agents_executed"]) > 0 and 
-            not self.is_simple_query):
+        # Synthesize the final user-facing answer if the workflow completed, at
+        # least one agent ran, and we haven't ALREADY produced an answer (simple
+        # queries answer inline via _check_for_immediate_answer). This now covers
+        # every completed multi-agent run — comprehensive, MODEL_ONLY, QUICK_NEWS,
+        # CUSTOM — so the user always gets a direct reply, not just artifacts.
+        if (self.stats["completion_status"] == "completed" and
+                len(self.stats["agents_executed"]) > 0 and
+                not self._answer_emitted):
             self._generate_performance_summary()
         
         # Log final summary
@@ -1014,10 +1016,22 @@ Provide a helpful, informative answer:"""
         }
     
     def _generate_performance_summary(self):
-        """Generate LLM-powered stock performance summary."""
+        """
+        Synthesize a DIRECT answer to the user's question from the gathered data.
+
+        This is the run's final, user-facing reply. It replaces the old
+        "here's what I did" performance narration: instead of describing the
+        process, it answers the literal question ({user_query}) grounded in the
+        financial data / model / news that was collected, and emits it on a
+        structured channel the frontend reads as the primary assistant message
+        (wrapped in [ANSWER]…[/ANSWER], also persisted to answer.md).
+        """
         try:
-            # Load prompt template from external file
-            prompt_file = Path("prompts/supervisor_performance_summary.md")
+            # Load the answer-synthesis prompt (falls back to the legacy summary
+            # prompt if the new one is somehow missing, so a partial deploy is safe).
+            prompt_file = Path("prompts/answer_synthesis.md")
+            if not prompt_file.exists():
+                prompt_file = Path("prompts/supervisor_performance_summary.md")
             prompt_template = prompt_file.read_text()
             
             # Build list of completed agents for context
@@ -1219,28 +1233,55 @@ Provide a helpful, informative answer:"""
                 report_summary=report_summary
             )
 
-            # Call LLM to generate summary
+            # Call LLM to synthesize the direct answer.
             summary_response, summary_cost = get_llm()([
-                {"role": "system", "content": "You are a senior financial analyst providing a contextual analysis summary."},
+                {"role": "system", "content": "You are a senior equity research analyst answering the user's question directly, grounded in the data provided."},
                 {"role": "user", "content": summary_prompt}
-            ], temperature=0.7)
+            ], temperature=0.6)
             self.state.total_llm_cost += summary_cost
-            
-            # Log the analysis summary with [LLM] prefix for natural language
-            self.logger.info("")
-            self.logger.info("=" * 80)
-            self.logger.info(f"[SUPERVISOR] {self.ticker} Analysis Summary")
-            self.logger.info("=" * 80)
-            self.logger.info("")
-            self.logger.info(f"[LLM] {summary_response.strip()}")
-            self.logger.info("")
+            answer_text = summary_response.strip()
+
+            # Persist + emit the answer. It is emitted on a STRUCTURED channel:
+            #   * [ANSWER]…[/ANSWER] markers so the frontend can render it as the
+            #     primary assistant reply (not scraped from routing narration), and
+            #   * still on the [LLM] line inside the markers for backward-compat
+            #     with the existing extractNLContent() path during rollout.
+            self._emit_answer(answer_text)
+            self._answer_emitted = True
             self.logger.info(f"[SUPERVISOR] 📁 Full analysis saved to: {self.state.analysis_path}")
             self.logger.info(f"[SUPERVISOR] 💰 Total LLM cost: ${self.state.total_llm_cost:.4f}")
             self.logger.info("")
-            
+
         except Exception as e:
-            # If LLM summary fails, log error but don't crash
-            self.logger.error(f"Failed to generate LLM analysis summary: {str(e)}")
+            # If synthesis fails, log error but don't crash the run.
+            self.logger.error(f"Failed to synthesize answer: {str(e)}")
+
+    def _emit_answer(self, answer_text: str):
+        """
+        Emit the final user-facing answer on the structured channel and persist it.
+
+        Writes ``answer.md`` into the run directory (durable, read by the admin
+        run-detail view and any future API) and logs the answer bracketed by
+        [ANSWER]…[/ANSWER] markers, with the text also on an [LLM] line so the
+        existing frontend keeps working during the transition.
+        """
+        if not answer_text:
+            return
+        # Persist to answer.md (best-effort — never break the run on I/O error).
+        try:
+            answer_path = Path(self.state.analysis_path) / "answer.md"
+            answer_path.parent.mkdir(parents=True, exist_ok=True)
+            answer_path.write_text(answer_text, encoding="utf-8")
+        except Exception as e:
+            self.logger.warning(f"[SUPERVISOR] Could not write answer.md: {e}")
+
+        self.logger.info("")
+        self.logger.info("[ANSWER_BEGIN]")
+        # Emit each line under [LLM] so multi-line answers survive log-line parsing.
+        for line in answer_text.split("\n"):
+            self.logger.info(f"[LLM] {line}")
+        self.logger.info("[ANSWER_END]")
+        self.logger.info("")
     
     def _log_workflow_summary(self):
         """Log a comprehensive workflow summary."""
