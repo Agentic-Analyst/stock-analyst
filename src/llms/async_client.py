@@ -134,7 +134,7 @@ _MODEL_TO_ANTHROPIC_ID = {
     "claude-3.5-haiku": "claude-3-5-haiku-20241022",
     "claude-3-opus": "claude-3-opus-20240229",
 }
-_OPENAI_MODELS = {"gpt-4o-mini"}
+_OPENAI_MODELS = {"gpt-4o-mini", "gpt-5.4-mini", "gpt-5-mini"}
 
 
 def _is_rate_limit_like(exc: Exception) -> bool:
@@ -189,6 +189,121 @@ async def _call_openai_async(
     return response.choices[0].message.content, cost
 
 
+# ---------------------------------------------------------------------------
+# Tool-calling (native function calling) — used by the generalizable ReAct agent
+# ---------------------------------------------------------------------------
+class ToolCall:
+    """One tool invocation requested by the model."""
+
+    __slots__ = ("id", "name", "arguments")
+
+    def __init__(self, id: str, name: str, arguments: dict):
+        self.id = id
+        self.name = name
+        self.arguments = arguments or {}
+
+    def __repr__(self):
+        return f"ToolCall(name={self.name!r}, args={self.arguments!r})"
+
+
+class LLMToolResponse:
+    """
+    Normalized response from a tool-calling turn, uniform across providers.
+
+    * ``text``       — any assistant prose in the turn (may be empty when the
+                       model only requested tools).
+    * ``tool_calls`` — list[ToolCall] the model wants executed (empty → it's done).
+    * ``cost``       — USD for the turn.
+    * ``raw``        — the provider-native assistant message, so the caller can
+                       append it verbatim to the running transcript (important for
+                       Anthropic, whose tool_use/tool_result blocks must round-trip).
+    """
+
+    __slots__ = ("text", "tool_calls", "cost", "raw")
+
+    def __init__(self, text, tool_calls, cost, raw):
+        self.text = text or ""
+        self.tool_calls = tool_calls or []
+        self.cost = cost
+        self.raw = raw
+
+    @property
+    def has_tool_calls(self) -> bool:
+        return len(self.tool_calls) > 0
+
+
+async def _call_anthropic_tools(model_id, messages, tools, temperature, tool_choice=None):
+    """
+    One Anthropic tool-calling turn. `messages` is the running transcript in
+    Anthropic shape (list of {role, content}); `tools` is a list of
+    anthropic tool schemas (name/description/input_schema). Returns LLMToolResponse.
+    """
+    system_message = None
+    conv = []
+    for m in messages:
+        if m["role"] == "system":
+            system_message = m["content"]
+        else:
+            conv.append({"role": m["role"], "content": m["content"]})
+
+    kwargs = {
+        "model": model_id,
+        "messages": conv,
+        "temperature": temperature,
+        "max_tokens": 4096,
+    }
+    if tools:  # omit an empty tools array — Anthropic rejects it
+        kwargs["tools"] = tools
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
+    if system_message:
+        kwargs["system"] = system_message
+
+    client = _get_async_anthropic()
+    resp = await client.messages.create(**kwargs)
+    cost = _claude_cost(resp, model_id)
+
+    text_parts, calls = [], []
+    for block in resp.content:
+        if block.type == "text":
+            text_parts.append(block.text)
+        elif block.type == "tool_use":
+            calls.append(ToolCall(id=block.id, name=block.name, arguments=dict(block.input or {})))
+    # The raw assistant message (list of content blocks) must be appended verbatim.
+    raw_assistant = {"role": "assistant", "content": resp.content}
+    return LLMToolResponse("\n".join(text_parts).strip(), calls, cost, raw_assistant)
+
+
+async def _call_openai_tools(model_id, messages, tools, temperature, tool_choice=None):
+    """One OpenAI tool-calling turn. `tools` is a list of openai function schemas."""
+    import json as _json
+
+    client = _get_async_openai()
+    kwargs = {
+        "model": model_id,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if tools:  # omit empty tools array
+        kwargs["tools"] = tools
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
+    resp = await client.chat.completions.create(**kwargs)
+    cost = _openai_cost(resp, model_id)
+
+    msg = resp.choices[0].message
+    calls = []
+    for tc in (msg.tool_calls or []):
+        try:
+            args = _json.loads(tc.function.arguments or "{}")
+        except Exception:
+            args = {}
+        calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
+    # Raw assistant message for transcript round-tripping.
+    raw_assistant = {"role": "assistant", "content": msg.content or "", "tool_calls": msg.tool_calls}
+    return LLMToolResponse(msg.content or "", calls, cost, raw_assistant)
+
+
 class AsyncLLMProvider:
     """
     Async mirror of ``LLMProvider``. Resolves the currently-selected model name
@@ -198,6 +313,15 @@ class AsyncLLMProvider:
 
     def __init__(self, model_name: str):
         self.model_name = model_name
+
+    @property
+    def is_openai(self) -> bool:
+        return self.model_name in _OPENAI_MODELS
+
+    def resolved_model_id(self) -> str:
+        if self.is_openai:
+            return self.model_name
+        return _MODEL_TO_ANTHROPIC_ID.get(self.model_name, self.model_name)
 
     async def __call__(
         self, messages: List[Dict], temperature: float = 0.3, *, max_retries: int = 4
@@ -243,6 +367,62 @@ class AsyncLLMProvider:
 
         raise Exception(
             f"Async LLM call failed after {max_retries} attempts. "
+            f"Last error: {type(last_error).__name__}: {last_error}"
+        )
+
+    async def call_with_tools(
+        self,
+        messages: List[Dict],
+        tools: List[Dict],
+        temperature: float = 0.3,
+        *,
+        tool_choice=None,
+        max_retries: int = 4,
+    ) -> "LLMToolResponse":
+        """
+        One tool-calling turn (the primitive the ReAct loop drives).
+
+        ``messages`` and ``tools`` must already be in the shape the selected
+        provider expects (the caller builds them per provider — see the agent).
+        Same backoff + circuit-breaker behaviour as ``__call__``.
+        """
+        logger = get_logger()
+        if _breaker.is_open():
+            raise CircuitOpenError(
+                "LLM circuit breaker is open (too many consecutive failures)."
+            )
+
+        last_error: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                if self.is_openai:
+                    resp = await _call_openai_tools(
+                        self.model_name, messages, tools, temperature, tool_choice
+                    )
+                else:
+                    resp = await _call_anthropic_tools(
+                        self.resolved_model_id(), messages, tools, temperature, tool_choice
+                    )
+                _breaker.record_success()
+                if logger:
+                    logger.llm_call(self.model_name, resp.cost, 0)
+                return resp
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                retryable = _is_rate_limit_like(exc)
+                if logger:
+                    logger.error(
+                        f"[async-llm/tools] {type(exc).__name__} attempt "
+                        f"{attempt + 1}/{max_retries} (retryable={retryable}): {exc}"
+                    )
+                if not retryable or attempt == max_retries - 1:
+                    _breaker.record_failure()
+                    break
+                base = 0.5 * (2 ** attempt)
+                await asyncio.sleep(base + random.uniform(0, base))
+
+        raise Exception(
+            f"Async tool call failed after {max_retries} attempts. "
             f"Last error: {type(last_error).__name__}: {last_error}"
         )
 

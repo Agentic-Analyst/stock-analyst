@@ -35,6 +35,7 @@ Enhanced Features:
 
 from __future__ import annotations
 import argparse
+import os
 import pathlib
 import sys
 from dataclasses import asdict
@@ -927,8 +928,47 @@ Examples:
             results = pipeline.run_sector_daily_report_stage()
         
         elif args.pipeline == "chat":
-            # Supervisor agentic pipeline: AI-powered multi-agent stock analysis workflow
-            # The supervisor will automatically extract ticker from the prompt and initialize everything
+            # Generalizable agent (default): a ReAct tool-use loop that reasons about
+            # ANY financial request and calls tools (our 4 pipeline agents wrapped as
+            # tools + keyless data tools) — no ticker-centric bottleneck. Set
+            # USE_LEGACY_SUPERVISOR=1 to fall back to the old supervisor.
+            if os.getenv("USE_LEGACY_SUPERVISOR", "").strip() not in ("1", "true", "yes"):
+                from src.agents.generalist_agent import GeneralistAgent
+                # The generalizable chat agent uses a stronger model for reasoning +
+                # tool selection (overridable via CHAT_MODEL). This governs both the
+                # sync and async providers for the chat path.
+                chat_model = os.getenv("CHAT_MODEL", "gpt-5.4-mini").strip()
+                try:
+                    init_llm(chat_model)
+                except Exception as _e:
+                    print(f"[chat] Could not init '{chat_model}' ({_e}); using {args.llm}")
+                # Load prior conversation context for follow-ups (best-effort).
+                conversation_context = None
+                if args.session_id:
+                    try:
+                        from src.session_manager import SessionManager
+                        _sm = SessionManager(email=args.email, ticker="CHAT", session_name=args.session_id)
+                        conversation_context = _sm.get_conversation_summary(limit=3)
+                    except Exception:
+                        conversation_context = None
+                agent = GeneralistAgent(
+                    email=args.email,
+                    timestamp=args.timestamp,
+                    user_prompt=args.user_prompt,
+                    session_id=args.session_id,
+                    conversation_context=conversation_context,
+                )
+                try:
+                    results = asyncio.run(agent.run())
+                except Exception as e:
+                    print(f"❌ Generalist agent failed: {e}")
+                    import traceback; traceback.print_exc()
+                    time.sleep(3)
+                    return 1
+                time.sleep(3)
+                return 0
+
+            # Supervisor agentic pipeline (legacy fallback)
             supervisor_runner = None
             try:
                 supervisor_runner = SupervisorWorkflowRunner(
@@ -937,7 +977,7 @@ Examples:
                     user_prompt=args.user_prompt,
                     session_id=args.session_id
                 )
-                    
+
                 results = asyncio.run(supervisor_runner.run_workflow())
             except Exception as e:
                 # If error happens before initialization, supervisor_runner.logger won't exist

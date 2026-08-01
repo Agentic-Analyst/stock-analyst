@@ -12,12 +12,15 @@ def calculate_cost(response, model_name):
     prompt_tokens = usage.prompt_tokens
     completion_tokens = usage.completion_tokens
 
-    # Updated prices as of January 2025 (per 1K tokens)
+    # Prices per 1K tokens.
     prices = {
         "gpt-4o-mini": {"prompt": 0.000150, "completion": 0.000600},
         "gpt-4o": {"prompt": 0.005, "completion": 0.015},
         "gpt-4": {"prompt": 0.03, "completion": 0.06},
         "gpt-3.5-turbo": {"prompt": 0.0005, "completion": 0.0015},
+        # gpt-5.4-mini (approx; used for lightweight cost logging only).
+        "gpt-5.4-mini": {"prompt": 0.00025, "completion": 0.00200},
+        "gpt-5-mini": {"prompt": 0.00025, "completion": 0.00200},
     }
 
     if model_name not in prices:
@@ -30,40 +33,28 @@ def calculate_cost(response, model_name):
     return cost
 
 
-def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, float]:
-    """
-    Call OpenAI GPT-4o-mini with retry logic and error handling.
-    
-    Args:
-        messages: List of message dictionaries with 'role' and 'content'
-        temperature: Sampling temperature (0.0 to 1.0)
-        
-    Returns:
-        Tuple of (Generated text response, Cost in USD)
-        
-    Raises:
-        Exception: If all retry attempts fail
-    """
+def _call_openai_model(model_name: str, messages: List[Dict], temperature: float = 0.3) -> Tuple[str, float]:
+    """Call an OpenAI chat model with retry logic. Backs the per-model wrappers."""
     max_retries = 3
     logger = get_logger()
     last_error = None
-    
+
     for attempt in range(max_retries):
         try:
             client = OpenAI()
-            
+
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=model_name,
                 messages=messages,
                 temperature=temperature,
                 timeout=60
             )
-            
+
             # Calculate cost
-            cost = calculate_cost(response, "gpt-4o-mini")
+            cost = calculate_cost(response, model_name)
             if logger:
                 logger.info(f"LLM call succeeded (attempt {attempt + 1}/{max_retries})")
-                logger.llm_call("gpt-4o-mini", cost, response.usage.total_tokens)
+                logger.llm_call(model_name, cost, response.usage.total_tokens)
             else:
                 print(f"[llm] LLM call succeeded (attempt {attempt + 1}/{max_retries})")
 
@@ -105,4 +96,14 @@ def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, fl
             else:
                 print(f"[llm] All {max_retries} attempts failed")
             raise Exception(error_msg)
+
+
+def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, float]:
+    """Call OpenAI GPT-4o-mini. Returns (text, cost)."""
+    return _call_openai_model("gpt-4o-mini", messages, temperature)
+
+
+def gpt_5_4_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, float]:
+    """Call OpenAI gpt-5.4-mini. Returns (text, cost)."""
+    return _call_openai_model("gpt-5.4-mini", messages, temperature)
 
