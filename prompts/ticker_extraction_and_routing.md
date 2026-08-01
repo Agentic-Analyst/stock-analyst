@@ -177,6 +177,7 @@ Return a JSON object with:
 {{{{
   "ticker": "AAPL",
   "next_agent": "financial_data_agent",
+  "objective": "comprehensive",
   "is_simple_query": false,
   "reasoning": "Brief explanation of your routing decision",
   "direct_answer": "Optional: If next_agent is __end__, provide a direct answer based on conversation context"
@@ -186,6 +187,12 @@ Return a JSON object with:
 **Field Descriptions:**
 - `ticker`: Stock ticker symbol (NVDA, AAPL, etc.)
 - `next_agent`: Which agent to route to first
+- **`objective`**: How much work the question needs. Pick the SMALLEST scope that fully answers it — do NOT default to comprehensive for a narrow question:
+  - `custom` = a specific data point or quick factual question (price, P/E, market cap, "how did it move this year", "how many employees"). Fastest path — usually just financial data, then a direct answer.
+  - `model_only` = they want a valuation / DCF / fair value / financial model, but not news or a full report.
+  - `quick_news` = they want news, sentiment, catalysts, or risks — but not a valuation model.
+  - `comprehensive` = they want a full analysis, an investment recommendation, "should I buy/sell", or explicitly ask for the whole picture. This is the ONLY objective that runs the full 5-minute pipeline (data → model → news → report). Choose it only when the question genuinely calls for everything.
+  - When truly ambiguous, prefer the lighter scope (`custom` or `quick_news`) and let the user ask for more — never silently run the full pipeline for a one-line question.
 - **`is_simple_query`**: 
   - `true` = User wants ONE specific data point (stock price, P/E ratio, etc.) - Provide immediate answer after first agent
   - `false` = User wants comprehensive analysis (full workflow with valuation + news + report)
@@ -336,6 +343,7 @@ Conversation Context: Shows current price but NO historical price data
 Output: {{
   "ticker": "AAPL",
   "next_agent": "financial_data_agent",
+  "objective": "custom",
   "is_simple_query": true,
   "reasoning": "User is asking about historical price change but the conversation context doesn't contain historical price data. Need to collect financial data first.",
   "direct_answer": null
@@ -349,6 +357,7 @@ Conversation Context: Empty (no previous analysis)
 Output: {{
   "ticker": "AAPL",
   "next_agent": "financial_data_agent",
+  "objective": "custom",
   "is_simple_query": true,
   "reasoning": "User wants a specific data point (current stock price). This is a simple query requiring only financial data.",
   "direct_answer": null
@@ -356,3 +365,45 @@ Output: {{
 ```
 - Company name will be fetched automatically from yfinance
 - **Set `is_simple_query` carefully** - this controls whether to provide immediate answer or continue full workflow
+
+**Example 4: Comprehensive analysis (first request)**
+```
+User: "Analyze Apple and tell me if I should buy"
+Conversation Context: Empty
+Output: {{
+  "ticker": "AAPL",
+  "next_agent": "financial_data_agent",
+  "objective": "comprehensive",
+  "is_simple_query": false,
+  "reasoning": "User wants a full investment recommendation, which needs valuation, news, and a report. Full pipeline.",
+  "direct_answer": null
+}}
+```
+
+**Example 5: Valuation model only**
+```
+User: "build a DCF model for Meta"
+Conversation Context: Empty
+Output: {{
+  "ticker": "META",
+  "next_agent": "financial_data_agent",
+  "objective": "model_only",
+  "is_simple_query": false,
+  "reasoning": "User explicitly wants a valuation model, not news or a full report. Stop after the model + summary.",
+  "direct_answer": null
+}}
+```
+
+**Example 6: News only**
+```
+User: "what's the latest sentiment and catalysts for NVDA?"
+Conversation Context: Empty
+Output: {{
+  "ticker": "NVDA",
+  "next_agent": "news_analysis_agent",
+  "objective": "quick_news",
+  "is_simple_query": false,
+  "reasoning": "User wants news sentiment and catalysts, not a valuation model. Run the news path, then a summary.",
+  "direct_answer": null
+}}
+```

@@ -153,6 +153,7 @@ class SupervisorWorkflowRunner:
         self.session_manager = None
         self.is_simple_query = False  # Track if this is a simple query vs comprehensive analysis
         self._answer_emitted = False  # Whether a user-facing answer has already been produced
+        self._llm_objective = None  # Objective chosen by the iteration-1 triage LLM (if any)
         
         # Workflow statistics
         self.stats = {
@@ -165,7 +166,52 @@ class SupervisorWorkflowRunner:
         
         # Track current conversation index for progressive saving
         self.current_conversation_index = None
-    
+
+    def _resolve_objective(self, llm_objective):
+        """
+        Map the iteration-1 triage LLM's objective string to an AnalysisObjective.
+
+        The LLM sees the full query, so its classification is the primary signal.
+        We validate it against the enum; anything missing/invalid falls back to the
+        deterministic keyword detector so a malformed LLM response can never leave
+        us without an objective. Accepts common synonyms the model might emit.
+        """
+        from src.agents.supervisor.supervisor import _detect_user_intent
+
+        if llm_objective:
+            key = str(llm_objective).strip().lower().replace("-", "_")
+            # Synonyms → canonical objective values.
+            synonyms = {
+                "comprehensive": AnalysisObjective.COMPREHENSIVE,
+                "full": AnalysisObjective.COMPREHENSIVE,
+                "full_analysis": AnalysisObjective.COMPREHENSIVE,
+                "deep": AnalysisObjective.COMPREHENSIVE,
+                "report": AnalysisObjective.COMPREHENSIVE,
+                "model_only": AnalysisObjective.MODEL_ONLY,
+                "model": AnalysisObjective.MODEL_ONLY,
+                "financial_model": AnalysisObjective.MODEL_ONLY,
+                "valuation": AnalysisObjective.MODEL_ONLY,
+                "quick_news": AnalysisObjective.QUICK_NEWS,
+                "news": AnalysisObjective.QUICK_NEWS,
+                "news_only": AnalysisObjective.QUICK_NEWS,
+                "sentiment": AnalysisObjective.QUICK_NEWS,
+                "custom": AnalysisObjective.CUSTOM,
+                "data": AnalysisObjective.CUSTOM,
+                "data_only": AnalysisObjective.CUSTOM,
+                "financial_data": AnalysisObjective.CUSTOM,
+                "quote": AnalysisObjective.CUSTOM,
+                "price": AnalysisObjective.CUSTOM,
+            }
+            if key in synonyms:
+                return synonyms[key]
+            # Also accept an exact enum value string.
+            try:
+                return AnalysisObjective(key)
+            except ValueError:
+                pass  # fall through to keyword detection
+
+        return _detect_user_intent(self.user_prompt)
+
     def _initialize_after_ticker_extraction(self, ticker: str, company_name: str = None):
         """
         Complete initialization after ticker is extracted from first supervisor call.
@@ -205,9 +251,12 @@ class SupervisorWorkflowRunner:
         # Setup logging - single info.log with session tracking
         self.logger = setup_logger(self.ticker, base_path=self.analysis_path, session_name=self.session_name)
         
-        # 🔥 DETECT USER INTENT from their query
-        from src.agents.supervisor.supervisor import _detect_user_intent
-        detected_objective = _detect_user_intent(self.user_prompt)
+        # 🔥 DETECT USER INTENT (triage). Prefer the LLM's classification from the
+        # iteration-1 call — it reads the whole query, so it handles paraphrases and
+        # ambiguity far better than substring matching, and it stops ambiguous
+        # questions from silently defaulting to the full 6-minute comprehensive run.
+        # Fall back to the keyword detector if the LLM didn't return a valid one.
+        detected_objective = self._resolve_objective(self._llm_objective)
         
         # Initialize state (FinancialState requires: user_prompt, ticker, company_name, email)
         self.state = FinancialState(
@@ -491,9 +540,12 @@ Provide a helpful, informative answer:"""
             reasoning = result.get("reasoning", "No reasoning provided")
             direct_answer = result.get("direct_answer", None)
             is_simple_query = result.get("is_simple_query", False)
-            
-            # Return ticker, next_agent, reasoning, direct_answer, and is_simple_query
-            return result["ticker"], None, result["next_agent"], reasoning, direct_answer, is_simple_query
+            # LLM-chosen objective (the triage decision). Validated + mapped by the
+            # caller; None here means "LLM didn't classify → fall back to keywords".
+            objective = result.get("objective", None)
+
+            # Return ticker, next_agent, reasoning, direct_answer, is_simple_query, objective
+            return result["ticker"], None, result["next_agent"], reasoning, direct_answer, is_simple_query, objective
             
         except json.JSONDecodeError as e:
             # Log the raw response for debugging
@@ -570,15 +622,18 @@ Provide a helpful, informative answer:"""
                         except Exception as e:
                             print(f"[SUPERVISOR] ⚠️  Could not load session context: {e}")
                     
-                    # Combined ticker extraction + routing
-                    # LLM will use conversation context to infer ticker if needed
-                    ticker, company_name, next_agent, reasoning, direct_answer, is_simple_query = self._extract_ticker_and_route(
+                    # Combined ticker extraction + routing + intent triage.
+                    # The LLM (which already reads the query) also picks the
+                    # objective, replacing brittle keyword matching.
+                    ticker, company_name, next_agent, reasoning, direct_answer, is_simple_query, llm_objective = self._extract_ticker_and_route(
                         self.user_prompt,
                         conversation_context
                     )
-                    
+
                     # Store the query type
                     self.is_simple_query = is_simple_query
+                    # Stash the LLM's triage objective so initialization can use it.
+                    self._llm_objective = llm_objective
 
                     # Validate ticker
                     if not ticker or ticker.strip() == "":
