@@ -156,7 +156,8 @@ async def news_analysis_agent(
             if effective_logger:
                 article_filter.set_logger(effective_logger)
             
-            filtering_results = article_filter.filter_articles()  # Uses config internally
+            # Parallel relevance-scoring fan-out (async agent → async filter).
+            filtering_results = await article_filter.filter_articles_async()  # Uses config internally
             
             filtered_articles = filtering_results.get("filtered_articles", [])
             filter_llm_cost = filtering_results.get("llm_cost", 0.0)
@@ -187,9 +188,12 @@ async def news_analysis_agent(
         # Load articles from database
         articles_data = screener.load_articles_from_db(limit=50)
         state.log_action("news_analysis_agent", f"Analyzing {len(articles_data)} articles...")
-        
-        # Extract insights using LLM
-        catalysts, risks, mitigations, analysis_summary = screener.analyze_all_articles(
+
+        # Extract insights using LLM — PARALLEL fan-out. This agent is already
+        # async, so we await the concurrent screener path (batches dispatched via
+        # asyncio.gather under a semaphore) instead of the old serial loop. Wall
+        # clock collapses from ~sum-of-batches to ~slowest-batch.
+        catalysts, risks, mitigations, analysis_summary = await screener.analyze_all_articles_async(
             articles_data
         )
         

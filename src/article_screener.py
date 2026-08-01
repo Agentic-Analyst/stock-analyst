@@ -12,7 +12,7 @@ and mitigation strategies.
 """
 
 from __future__ import annotations
-import os, csv, argparse, pathlib, re, json
+import os, csv, argparse, pathlib, re, json, asyncio
 from datetime import datetime
 from typing import Dict, List, Tuple, Set, Optional
 from dataclasses import dataclass, asdict
@@ -227,9 +227,42 @@ class ArticleScreener:
             self.total_llm_cost += cost
             self.llm_call_count += 1
             
-            # Parse response
+            # Parse response into structured insights (shared by sync + async paths)
             analysis_data = self._parse_llm_json_response(response, "batch_analysis")
-            
+            catalysts, risks, mitigations = self._parse_batch_analysis_data(analysis_data)
+
+            # Display batch results
+            self._log("info", f"✅ Batch {batch_num} complete: {len(catalysts)}🚀 {len(risks)}⚠️ {len(mitigations)}🛡️")
+            self._log("info", f"💰 Batch cost: ${cost:.4f} USD | Running total: ${self.total_llm_cost:.4f} USD")
+
+            # Show top insight from batch
+            if catalysts:
+                top_catalyst = max(catalysts, key=lambda x: x.confidence)
+                self._log("info", f"   🚀 Top Catalyst: {top_catalyst.type.title()} ({top_catalyst.confidence:.1%}) - {top_catalyst.description[:60]}...")
+
+            if risks:
+                top_risk = max(risks, key=lambda x: x.confidence)
+                self._log("info", f"   ⚠️  Top Risk: {top_risk.type.title()} [{top_risk.severity.upper()}] ({top_risk.confidence:.1%}) - {top_risk.description[:60]}...")
+
+            return catalysts, risks, mitigations
+
+        except Exception as e:
+            return self._handle_batch_error(e, articles, batch_num, depth)
+
+    def _parse_batch_analysis_data(
+        self, analysis_data: Dict
+    ) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+        """
+        Convert parsed batch-analysis JSON into Catalyst/Risk/Mitigation objects.
+
+        Pure/deterministic — no LLM, no I/O — so it is safely reused by both the
+        synchronous ``_analyze_article_batch`` and the async fan-out variant.
+        """
+        catalysts: List[Catalyst] = []
+        risks: List[Risk] = []
+        mitigations: List[Mitigation] = []
+
+        if analysis_data:
             # Extract catalysts with enhanced information
             for cat_data in analysis_data.get("catalysts", []):
                 # Parse direct quotes
@@ -241,7 +274,7 @@ class ArticleScreener:
                         source_url=quote_data.get("source_url", ""),
                         context=quote_data.get("context", "")
                     ))
-                
+
                 # Parse source articles
                 source_articles = []
                 for source_data in cat_data.get("source_articles", []):
@@ -349,83 +382,53 @@ class ArticleScreener:
                 )
                 mitigations.append(mitigation)
 
-            # Display batch results
-            self._log("info", f"✅ Batch {batch_num} complete: {len(catalysts)}🚀 {len(risks)}⚠️ {len(mitigations)}🛡️")
-            self._log("info", f"💰 Batch cost: ${cost:.4f} USD | Running total: ${self.total_llm_cost:.4f} USD")
-            
-            # Show top insight from batch
-            if catalysts:
-                top_catalyst = max(catalysts, key=lambda x: x.confidence)
-                self._log("info", f"   🚀 Top Catalyst: {top_catalyst.type.title()} ({top_catalyst.confidence:.1%}) - {top_catalyst.description[:60]}...")
-            
-            if risks:
-                top_risk = max(risks, key=lambda x: x.confidence)
-                self._log("info", f"   ⚠️  Top Risk: {top_risk.type.title()} [{top_risk.severity.upper()}] ({top_risk.confidence:.1%}) - {top_risk.description[:60]}...")
-
-        except Exception as e:
-            error_message = str(e).lower()
-            
-            # Check if error is due to rate limiting or token limits
-            is_rate_limit_error = any(keyword in error_message for keyword in [
-                'rate limit',
-                'rate_limit',
-                'ratelimit',
-                'too many tokens',
-                'context length',
-                'maximum context',
-                'token limit',
-                'tokens exceeded',
-                'timeout',
-                '413',  # Payload Too Large
-                '429',  # Too Many Requests
-            ])
-            
-            if is_rate_limit_error:
-                self._log("warning", f"{indent}⚠️  Batch {batch_num} failed due to rate limit/token limit: {e}")
-                
-                # Intelligently split and retry
-                if batch_size == 1:
-                    # Check if article was already truncated to prevent infinite loop
-                    if articles[0].get('already_truncated', False):
-                        self._log("error", f"{indent}❌ Article was already truncated but still failed - giving up")
-                        return [], [], []
-                    
-                    # Single article is too large - truncate it
-                    self._log("warning", f"{indent}📄 Single article too large, truncating content...")
-                    return self._analyze_truncated_article(articles[0], batch_num, depth)
-                
-                # Split batch in half and process recursively
-                mid_point = batch_size // 2
-                self._log("info", f"{indent}✂️  Splitting batch {batch_num} into 2 sub-batches: [{mid_point}] + [{batch_size - mid_point}] articles")
-                
-                # Process first half
-                catalysts_1, risks_1, mitigations_1 = self._analyze_article_batch(
-                    articles[:mid_point], 
-                    f"{batch_num}a", 
-                    depth + 1
-                )
-                
-                # Process second half
-                catalysts_2, risks_2, mitigations_2 = self._analyze_article_batch(
-                    articles[mid_point:], 
-                    f"{batch_num}b", 
-                    depth + 1
-                )
-                
-                # Combine results
-                all_catalysts = catalysts_1 + catalysts_2
-                all_risks = risks_1 + risks_2
-                all_mitigations = mitigations_1 + mitigations_2
-                
-                self._log("info", f"{indent}✅ Batch {batch_num} complete (split after rate limit): {len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️")
-                return all_catalysts, all_risks, all_mitigations
-            else:
-                # Non-rate-limit error - log and return empty results
-                self._log("error", f"{indent}❌ Batch {batch_num} analysis failed with non-rate-limit error: {e}")
-                return [], [], []
-
         return catalysts, risks, mitigations
-    
+
+    def _is_rate_limit_error(self, error_message: str) -> bool:
+        """True if an error string looks like a rate-limit / token-limit failure."""
+        error_message = error_message.lower()
+        return any(keyword in error_message for keyword in [
+            'rate limit', 'rate_limit', 'ratelimit',
+            'too many tokens', 'context length', 'maximum context',
+            'token limit', 'tokens exceeded', 'timeout',
+            '413',  # Payload Too Large
+            '429',  # Too Many Requests
+        ])
+
+    def _handle_batch_error(
+        self, e: Exception, articles: List[Dict], batch_num, depth: int
+    ) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+        """
+        Shared error handler for the SYNC batch path: on a rate/token-limit error,
+        recursively split the batch (or truncate a lone oversized article) and
+        retry synchronously; otherwise log and return empty. The async path has its
+        own analogue (``_handle_batch_error_async``) so it can await sub-batches.
+        """
+        batch_size = len(articles)
+        indent = "  " * depth
+        if self._is_rate_limit_error(str(e)):
+            self._log("warning", f"{indent}⚠️  Batch {batch_num} failed due to rate limit/token limit: {e}")
+
+            if batch_size == 1:
+                if articles[0].get('already_truncated', False):
+                    self._log("error", f"{indent}❌ Article was already truncated but still failed - giving up")
+                    return [], [], []
+                self._log("warning", f"{indent}📄 Single article too large, truncating content...")
+                return self._analyze_truncated_article(articles[0], batch_num, depth)
+
+            mid_point = batch_size // 2
+            self._log("info", f"{indent}✂️  Splitting batch {batch_num} into 2 sub-batches: [{mid_point}] + [{batch_size - mid_point}] articles")
+            catalysts_1, risks_1, mitigations_1 = self._analyze_article_batch(articles[:mid_point], f"{batch_num}a", depth + 1)
+            catalysts_2, risks_2, mitigations_2 = self._analyze_article_batch(articles[mid_point:], f"{batch_num}b", depth + 1)
+            all_catalysts = catalysts_1 + catalysts_2
+            all_risks = risks_1 + risks_2
+            all_mitigations = mitigations_1 + mitigations_2
+            self._log("info", f"{indent}✅ Batch {batch_num} complete (split after rate limit): {len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️")
+            return all_catalysts, all_risks, all_mitigations
+
+        self._log("error", f"{indent}❌ Batch {batch_num} analysis failed with non-rate-limit error: {e}")
+        return [], [], []
+
     def _analyze_truncated_article(self, article: Dict, batch_num: int, depth: int = 0) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
         """
         Analyze a single article that's too large by truncating its content to fit token limits.
@@ -732,20 +735,203 @@ class ArticleScreener:
         self._log("info", f"✅ Batch analysis complete! Raw insights: {len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️")
         # self._log("info", f"🔍 After LLM deduplication: {len(merged_catalysts)}🚀 {len(merged_risks)}⚠️ {len(merged_mitigations)}🛡️")
         self._log("info", f"💰 Total LLM cost: ${self.total_llm_cost:.4f} USD across {self.llm_call_count} calls")
-        
-        # Create overall analysis summary
-        overall_summary = AnalysisSummary(
+
+        overall_summary = self._build_analysis_summary(
+            all_catalysts, all_risks, all_mitigations, len(articles)
+        )
+        return all_catalysts, all_risks, all_mitigations, overall_summary
+
+    def _build_analysis_summary(
+        self,
+        all_catalysts: List[Catalyst],
+        all_risks: List[Risk],
+        all_mitigations: List[Mitigation],
+        articles_analyzed: int,
+    ) -> AnalysisSummary:
+        """Build the aggregate AnalysisSummary. Shared by sync + async orchestrators."""
+        return AnalysisSummary(
             overall_sentiment=self._determine_overall_sentiment(all_catalysts, all_risks),
             key_themes=self._extract_key_themes(all_catalysts, all_risks),
             confidence_score=self._calculate_overall_confidence(all_catalysts, all_risks, all_mitigations),
-            articles_analyzed=len(articles),
+            articles_analyzed=articles_analyzed,
             total_catalysts=len(all_catalysts),
             total_risks=len(all_risks),
-            total_mitigations=len(all_mitigations)
+            total_mitigations=len(all_mitigations),
         )
 
+    # ============= ASYNC (PARALLEL) BATCH PROCESSING =============
+
+    async def analyze_all_articles_async(
+        self,
+        articles: List[Dict],
+        batch_size: int = 10,
+        max_concurrency: int = 5,
+    ) -> Tuple[List[Catalyst], List[Risk], List[Mitigation], AnalysisSummary]:
+        """
+        Parallel counterpart to ``analyze_all_articles``.
+
+        Splits the articles into the same batches, but dispatches them
+        concurrently with ``asyncio.gather`` under a semaphore (``max_concurrency``)
+        so wall-clock time collapses to roughly the slowest batch instead of the
+        sum of all batches. Batch results are independent and simply concatenated,
+        exactly as in the sync path, so output is equivalent (ordering across
+        batches aside, which does not matter — everything is re-sorted downstream).
+
+        Falls back to identical semantics: same cost tracking, same
+        recursive rate-limit splitting (awaited), same summary building.
+        """
+        all_catalysts: List[Catalyst] = []
+        all_risks: List[Risk] = []
+        all_mitigations: List[Mitigation] = []
+
+        total_batches = (len(articles) + batch_size - 1) // batch_size
+        self._log("info", f"🚀 Starting PARALLEL batch analysis for {len(articles)} articles")
+        self._log(
+            "info",
+            f"⚡ Dispatching {total_batches} batch(es) of up to {batch_size} "
+            f"articles, concurrency={max_concurrency}...",
+        )
+
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def run_batch(batch_num: int):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, len(articles))
+            batch_articles = articles[start_idx:end_idx]
+            async with semaphore:
+                self._log(
+                    "info",
+                    f"📦 Batch {batch_num + 1}/{total_batches}: articles {start_idx + 1}-{end_idx}",
+                )
+                return await self._analyze_article_batch_async(
+                    batch_articles, batch_num + 1, depth=0
+                )
+
+        # Fan out. return_exceptions=True so one failed batch can't sink the rest;
+        # a failure degrades to empty insights for that batch (same as sync).
+        results = await asyncio.gather(
+            *(run_batch(i) for i in range(total_batches)), return_exceptions=True
+        )
+
+        for i, res in enumerate(results):
+            if isinstance(res, Exception):
+                self._log("error", f"❌ Batch {i + 1} raised and was skipped: {res}")
+                continue
+            batch_catalysts, batch_risks, batch_mitigations = res
+            all_catalysts.extend(batch_catalysts)
+            all_risks.extend(batch_risks)
+            all_mitigations.extend(batch_mitigations)
+
+        self._log(
+            "info",
+            f"✅ Parallel batch analysis complete! Raw insights: "
+            f"{len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️",
+        )
+        self._log(
+            "info",
+            f"💰 Total LLM cost: ${self.total_llm_cost:.4f} USD across "
+            f"{self.llm_call_count} calls",
+        )
+
+        overall_summary = self._build_analysis_summary(
+            all_catalysts, all_risks, all_mitigations, len(articles)
+        )
         return all_catalysts, all_risks, all_mitigations, overall_summary
-    
+
+    async def _analyze_article_batch_async(
+        self, articles: List[Dict], batch_num, depth: int = 0
+    ) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+        """
+        Async mirror of ``_analyze_article_batch``: one awaited LLM call, shared
+        parsing, and recursive rate-limit splitting (awaited). Cost/parse logic is
+        identical to the sync path — only the LLM call and the sub-batch recursion
+        are awaited.
+        """
+        from llms.async_client import get_async_llm
+
+        batch_size = len(articles)
+        indent = "  " * depth
+        self._log("info", f"{indent}🔍 Analyzing batch {batch_num} with {batch_size} article(s)...")
+
+        batch_content = self._format_articles_for_batch(articles)
+        total_tokens = self._count_tokens(batch_content)
+        self._log("info", f"{indent}📊 Batch {batch_num} size: {total_tokens:,} tokens")
+
+        try:
+            batch_prompt = self._create_batch_analysis_prompt(batch_content, self.ticker, batch_size)
+            self._log("info", f"{indent}🤖 Processing batch {batch_num} - extracting insights across {batch_size} article(s)...")
+            response, cost = await get_async_llm()(batch_prompt)
+            self.total_llm_cost += cost
+            self.llm_call_count += 1
+
+            analysis_data = self._parse_llm_json_response(response, "batch_analysis")
+            catalysts, risks, mitigations = self._parse_batch_analysis_data(analysis_data)
+
+            self._log("info", f"{indent}✅ Batch {batch_num} complete: {len(catalysts)}🚀 {len(risks)}⚠️ {len(mitigations)}🛡️")
+            self._log("info", f"{indent}💰 Batch cost: ${cost:.4f} USD | Running total: ${self.total_llm_cost:.4f} USD")
+            if catalysts:
+                top = max(catalysts, key=lambda x: x.confidence)
+                self._log("info", f"   🚀 Top Catalyst: {top.type.title()} ({top.confidence:.1%}) - {top.description[:60]}...")
+            return catalysts, risks, mitigations
+
+        except Exception as e:
+            return await self._handle_batch_error_async(e, articles, batch_num, depth)
+
+    async def _handle_batch_error_async(
+        self, e: Exception, articles: List[Dict], batch_num, depth: int
+    ) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+        """Async analogue of ``_handle_batch_error`` — awaits sub-batch retries."""
+        batch_size = len(articles)
+        indent = "  " * depth
+        if self._is_rate_limit_error(str(e)):
+            self._log("warning", f"{indent}⚠️  Batch {batch_num} failed due to rate limit/token limit: {e}")
+            if batch_size == 1:
+                if articles[0].get('already_truncated', False):
+                    self._log("error", f"{indent}❌ Article was already truncated but still failed - giving up")
+                    return [], [], []
+                # Truncation path reuses the (sync, CPU-only) truncator, then re-runs async.
+                self._log("warning", f"{indent}📄 Single article too large, truncating content...")
+                article = articles[0]
+                truncated = self._truncate_article_for_retry(article)
+                if truncated is None:
+                    return [], [], []
+                return await self._analyze_article_batch_async([truncated], batch_num, depth)
+
+            mid_point = batch_size // 2
+            self._log("info", f"{indent}✂️  Splitting batch {batch_num} into 2 sub-batches: [{mid_point}] + [{batch_size - mid_point}] articles")
+            # Sub-batches are independent → run them concurrently too.
+            res1, res2 = await asyncio.gather(
+                self._analyze_article_batch_async(articles[:mid_point], f"{batch_num}a", depth + 1),
+                self._analyze_article_batch_async(articles[mid_point:], f"{batch_num}b", depth + 1),
+            )
+            all_catalysts = res1[0] + res2[0]
+            all_risks = res1[1] + res2[1]
+            all_mitigations = res1[2] + res2[2]
+            self._log("info", f"{indent}✅ Batch {batch_num} complete (split after rate limit): {len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️")
+            return all_catalysts, all_risks, all_mitigations
+
+        self._log("error", f"{indent}❌ Batch {batch_num} analysis failed with non-rate-limit error: {e}")
+        return [], [], []
+
+    def _truncate_article_for_retry(self, article: Dict) -> Optional[Dict]:
+        """
+        Return a token-truncated copy of an oversized article (flagged to prevent
+        re-truncation), or None if it cannot be salvaged. Pure/CPU-only so it is
+        shared by the sync (`_analyze_truncated_article`) and async retry paths.
+        """
+        available_tokens = self.max_tokens_per_request - self.prompt_overhead_tokens - 500
+        text_tokens = self.encoding.encode(article['text'])
+        if len(text_tokens) <= available_tokens:
+            return article  # Fits after all.
+        truncated_text = self.encoding.decode(text_tokens[:available_tokens])
+        out = article.copy()
+        out['text'] = truncated_text
+        out['truncated'] = True
+        out['original_word_count'] = len(article['text'].split())
+        out['already_truncated'] = True
+        self._log("warning", f"✂️  Truncated oversized article to ~{available_tokens:,} tokens for retry")
+        return out
+
     def _determine_overall_sentiment(self, catalysts: List[Catalyst], risks: List[Risk]) -> str:
         """Determine overall sentiment based on catalyst and risk balance."""
         if not catalysts and not risks:

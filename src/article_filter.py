@@ -16,7 +16,7 @@ Features:
 """
 
 from __future__ import annotations
-import os, argparse, pathlib, re, json, logging
+import os, argparse, pathlib, re, json, logging, asyncio
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from llms.config import get_llm
@@ -320,18 +320,103 @@ class ArticleFilter:
             return None
 
     def _score_articles_with_llm(self, articles: list) -> list:
-        """Score all articles using LLM intelligence."""
+        """Score all articles using LLM intelligence (serial — sync path)."""
         self._log(f"Scoring {len(articles)} articles with LLM")
-        
+
         # Process in batches to optimize API usage
         scored_articles = []
         for i in range(0, len(articles), self.batch_size):
             batch = articles[i:i + self.batch_size]
             batch_results = self._process_llm_batch(batch)
             scored_articles.extend(batch_results)
-            
+
         # Sort by LLM score
         return sorted(scored_articles, key=lambda x: x['llm_score'], reverse=True)
+
+    async def _score_articles_with_llm_async(self, articles: list, max_concurrency: int = 5) -> list:
+        """
+        Parallel scorer: dispatch relevance-scoring batches concurrently under a
+        semaphore. Each batch is independent (scores applied in place per batch),
+        so this is equivalent to the serial path but wall-clock ≈ slowest batch.
+        """
+        self._log(f"Scoring {len(articles)} articles with LLM (parallel, concurrency={max_concurrency})")
+        semaphore = asyncio.Semaphore(max_concurrency)
+        batches = [articles[i:i + self.batch_size] for i in range(0, len(articles), self.batch_size)]
+
+        async def run(batch):
+            async with semaphore:
+                return await self._process_llm_batch_async(batch)
+
+        results = await asyncio.gather(*(run(b) for b in batches), return_exceptions=True)
+        scored_articles = []
+        for i, res in enumerate(results):
+            if isinstance(res, Exception):
+                self._log(f"Scoring batch {i} failed, defaulting to 5.0: {res}", "warning")
+                for article in batches[i]:
+                    article['llm_score'] = 5.0
+                scored_articles.extend(batches[i])
+            else:
+                scored_articles.extend(res)
+        return sorted(scored_articles, key=lambda x: x['llm_score'], reverse=True)
+
+    async def _process_llm_batch_async(self, batch: list) -> list:
+        """Async mirror of ``_process_llm_batch`` — one awaited LLM call per batch."""
+        from llms.async_client import get_async_llm
+        try:
+            prompt = self._build_relevance_prompt(batch)
+            messages = [
+                {"role": "system", "content": "You are a senior financial analyst filtering investment articles."},
+                {"role": "user", "content": prompt},
+            ]
+            response, cost = await get_async_llm()(messages, temperature=0.1)
+            self.llm_call_count += 1
+            self.total_llm_cost += cost
+            scores = self._parse_llm_scores(response, len(batch))
+            for i, article in enumerate(batch):
+                article['llm_score'] = scores[i] if i < len(scores) else 5.0
+        except Exception as e:
+            self._log(f"LLM scoring failed: {e}", "warning")
+            for article in batch:
+                article['llm_score'] = 5.0
+        return batch
+
+    async def filter_articles_async(self) -> dict:
+        """
+        Async mirror of ``filter_articles`` — identical pipeline, but the LLM
+        scoring step fans out concurrently. Used from the (async) news agent so
+        the filter stage no longer blocks the event loop or runs serially.
+        """
+        self._log(f"Starting LLM-powered filtering for {self.ticker} (parallel)")
+        self._log(f"Query: {self.query}, Min score: {self.min_score}")
+
+        searched_dir = self.company_dir / "searched"
+        articles_data = self._load_articles_metadata(searched_dir)
+        if not articles_data:
+            self._log("No articles found to filter")
+            return {"filtered_articles": [], "total_processed": 0, "llm_cost": 0.0}
+
+        self._log(f"Found {len(articles_data)} articles to process")
+        scored_articles = await self._score_articles_with_llm_async(articles_data)
+
+        self._log("=" * 80)
+        self._log(f"📊 LLM SCORING RESULTS (All {len(scored_articles)} articles)")
+        self._log("=" * 80)
+        for i, article in enumerate(scored_articles, 1):
+            score = article.get('llm_score', 0.0)
+            title = article.get('title', 'Untitled')[:80]
+            status = "✅ PASS" if score >= self.min_score else "❌ FAIL"
+            self._log(f"{i:2d}. [{score:.1f}/10] {status} - {title}")
+        self._log("=" * 80)
+
+        filtered_articles = self._select_final_articles(scored_articles)
+        result = self._finalize_filtering(filtered_articles)
+        result.update({
+            "query": self.query,
+            "total_processed": len(articles_data),
+            "llm_cost": self.total_llm_cost,
+            "llm_calls": self.llm_call_count,
+        })
+        return result
 
     def _process_llm_batch(self, batch: list) -> list:
         """Process a batch of articles with LLM for relevance scoring."""
