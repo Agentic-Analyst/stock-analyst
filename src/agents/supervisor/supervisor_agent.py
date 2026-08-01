@@ -167,6 +167,86 @@ class SupervisorWorkflowRunner:
         # Track current conversation index for progressive saving
         self.current_conversation_index = None
 
+    async def _run_model_and_news_concurrently(self, iteration: int) -> bool:
+        """
+        Run model_generation ∥ news_analysis concurrently (comprehensive fast-path).
+
+        Precondition (checked by caller): financial data is collected and both the
+        model and news are still pending. These two agents are independent — model
+        reads the financials file and produces state.financial_model; news reads the
+        ticker and produces state.news_analysis.
+
+        Concurrency model: news_analysis is genuinely async (it awaits the parallel
+        screener), while model_generation has no await points (CPU/IO-bound), so we
+        run the model on a SHALLOW COPY of the state inside a worker thread and
+        merge just its outputs back afterward. That keeps the two from racing on
+        shared scalar fields (current_stage, total_llm_cost) — each writes its own
+        copy — while still overlapping ~60s of modelling with ~44s of news.
+
+        Returns True if it ran (both agents attempted); False to fall back to the
+        normal single-agent dispatch (on any setup error).
+        """
+        import copy as _copy
+        try:
+            self.logger.info("")
+            self.logger.info("[SUPERVISOR] ⚡ CONCURRENT: running model_generation ∥ news_analysis")
+            self.logger.info("")
+
+            start = datetime.now()
+            model_state = _copy.copy(self.state)  # shallow: model only sets financial_model
+            cost_before = self.state.total_llm_cost
+
+            async def run_model():
+                # model_generation_agent is async but blocking; drive it in a thread
+                # so it doesn't stall the event loop while news awaits concurrently.
+                def _drive():
+                    return asyncio.run(model_generation_agent(model_state))
+                return await asyncio.to_thread(_drive)
+
+            async def run_news():
+                return await news_analysis_agent(self.state)
+
+            model_result, news_result = await asyncio.gather(
+                run_model(), run_news(), return_exceptions=True
+            )
+
+            # Merge model outputs back onto the primary state.
+            if isinstance(model_result, FinancialState):
+                self.state.financial_model = model_result.financial_model
+                # account for the model's LLM spend (it ran on the copy)
+                self.state.total_llm_cost += max(0.0, model_result.total_llm_cost - cost_before)
+                if model_result.last_error and not self.state.last_error:
+                    self.state.last_error = model_result.last_error
+            elif isinstance(model_result, Exception):
+                self.logger.error(f"[SUPERVISOR] ❌ concurrent model_generation failed: {model_result}")
+            # news_result already mutated self.state in place; surface exceptions.
+            if isinstance(news_result, Exception):
+                self.logger.error(f"[SUPERVISOR] ❌ concurrent news_analysis failed: {news_result}")
+
+            # Reconcile stage: if both produced their artifact, we're past both.
+            if self.state.is_model_generated() and self.state.is_news_analyzed():
+                self.state.current_stage = PipelineStage.NEWS_ANALYSIS_COMPLETED
+
+            dur = (datetime.now() - start).total_seconds()
+            self.logger.info(
+                f"[SUPERVISOR] ✅ Concurrent model+news done in {dur:.1f}s "
+                f"(model={self.state.is_model_generated()}, news={self.state.is_news_analyzed()})"
+            )
+            # Record both in agent history for the summary/session.
+            for name in ("model_generation_agent", "news_analysis_agent"):
+                self.stats["agents_executed"].append({
+                    "agent": name, "iteration": iteration,
+                    "duration": dur, "timestamp": datetime.now().isoformat(),
+                    "concurrent": True,
+                })
+            return True
+        except Exception as e:
+            self.logger.warning(
+                f"[SUPERVISOR] ⚠️  Concurrent model+news path errored ({e}); "
+                f"falling back to sequential."
+            )
+            return False
+
     def _resolve_objective(self, llm_objective):
         """
         Map the iteration-1 triage LLM's objective string to an AnalysisObjective.
@@ -777,11 +857,31 @@ Provide a helpful, informative answer:"""
                 self.stats["completion_status"] = "completed"
                 break
             
+            # Step 2.5: CONCURRENT FAST-PATH (comprehensive runs).
+            # Once financial data is collected, model_generation and news_analysis
+            # are fully independent — model reads the financials file and writes
+            # state.financial_model; news reads the ticker and writes
+            # state.news_analysis. If the router picks either one while BOTH are
+            # still pending (the normal comprehensive case), run them together so
+            # ~60s of modelling overlaps ~44s of news instead of summing.
+            if (
+                next_agent in ("model_generation_agent", "news_analysis_agent")
+                and self.state.objective == AnalysisObjective.COMPREHENSIVE
+                and self.state.is_financial_data_collected()
+                and not self.state.is_model_generated()
+                and not self.state.is_news_analyzed()
+            ):
+                ran = await self._run_model_and_news_concurrently(iteration)
+                if ran:
+                    # Both agents accounted for; continue to next routing decision.
+                    self.logger.info("")
+                    continue
+
             # Step 3: Execute chosen agent
             self.logger.info("")
             self.logger.info(f"[SUPERVISOR] ▶ EXECUTING AGENT: {next_agent}")
             self.logger.info("")
-            
+
             try:
                 # Map agent names to agent functions (no separate loggers - all use main logger)
                 agent_map = {
@@ -792,7 +892,7 @@ Provide a helpful, informative answer:"""
                     "financial_summary_agent": financial_summary_agent,
                     "news_summary_agent": news_summary_agent
                 }
-                
+
                 agent_func = agent_map.get(next_agent)
                 
                 if agent_func is None:
@@ -805,8 +905,26 @@ Provide a helpful, informative answer:"""
                 
                 # Execute agent (async)
                 agent_start = datetime.now()
-                self.state = await agent_func(self.state)
+                prev_state = self.state
+                returned = await agent_func(self.state)
                 agent_duration = (datetime.now() - agent_start).total_seconds()
+
+                # Defensive: an agent MUST return a FinancialState. If it returns
+                # a dict / None / anything else (a bug in that agent), keep the
+                # prior state and record the error instead of crashing the whole
+                # run with "'dict' object has no attribute 'last_error'" downstream.
+                if isinstance(returned, FinancialState):
+                    self.state = returned
+                else:
+                    self.logger.error(
+                        f"[SUPERVISOR] ❌ {next_agent} returned {type(returned).__name__}, "
+                        f"expected FinancialState — keeping prior state and marking failed."
+                    )
+                    self.state = prev_state
+                    self.state.current_stage = PipelineStage.FAILED
+                    self.state.last_error = (
+                        f"{next_agent} returned an invalid state ({type(returned).__name__})"
+                    )
                 
                 self.stats["agents_executed"].append({
                     "agent": next_agent,

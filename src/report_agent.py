@@ -16,6 +16,7 @@ Output: Professional analyst report in markdown format
 """
 
 from __future__ import annotations
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -982,11 +983,136 @@ def generate_professional_report(
         logger.info("Integrating all sections into final report...")
     
     final_report = integrate_report_sections(sections, data)
-    
+
     if logger:
         logger.info(f"✅ Report integrated (total cost: ${total_cost:.4f})")
-    
+
     return final_report
+
+
+async def generate_professional_report_async(
+    financial_json_path: Path,
+    computed_values_json_path: Path,
+    screening_json_path: Path,
+    logger: Optional[StockAnalystLogger] = None
+) -> str:
+    """
+    Parallel counterpart to generate_professional_report.
+
+    Sections 1-6 (company overview, financial performance, valuation, news,
+    investment thesis, recommendation) are INDEPENDENT — each is a self-contained
+    LLM call over the same `data`. We run them concurrently (each sync section
+    function offloaded to a worker thread via asyncio.to_thread), then generate
+    section 7 (executive summary), which depends on the others, and integrate.
+
+    Output is identical to the serial version; only wall-clock changes
+    (~sum-of-sections down to ~slowest-section + executive summary).
+    """
+    if logger:
+        logger.info("=" * 70)
+        logger.info("Generating Financial Report (parallel sections)")
+        logger.info("=" * 70)
+
+    financial_data = load_financial_json(financial_json_path)
+    computed_values = load_computed_values_json(computed_values_json_path)
+    screening_data = load_screening_json(screening_json_path)
+
+    data = {
+        'company_overview': extract_company_overview(financial_data),
+        'historical': extract_historical_financials(financial_data),
+        'assumptions': extract_model_assumptions(computed_values),
+        'projections': extract_projections(computed_values),
+        'valuation': extract_valuation(computed_values),
+        'news': extract_news_analysis(screening_data),
+    }
+
+    llm = get_llm()
+    sections: Dict[str, Any] = {}
+    total_cost = 0.0
+
+    if logger:
+        logger.info("Generating sections 1-6 concurrently...")
+
+    # Fan out the six independent sections. Each returns (section_text, cost),
+    # except recommendation which returns (text, cost, evidence_pack).
+    results = await asyncio.gather(
+        asyncio.to_thread(generate_section_company_overview, data, llm),
+        asyncio.to_thread(generate_section_financial_performance, data, llm),
+        asyncio.to_thread(generate_section_valuation, data, llm),
+        asyncio.to_thread(generate_section_news_analysis, data, llm),
+        asyncio.to_thread(generate_section_investment_thesis, data, llm),
+        asyncio.to_thread(generate_section_recommendation, data, llm, logger),
+        return_exceptions=True,
+    )
+
+    keys = [
+        "company_overview", "financial_performance", "valuation",
+        "news_analysis", "investment_thesis", "recommendation",
+    ]
+    for key, res in zip(keys, results):
+        if isinstance(res, Exception):
+            # A failed section degrades gracefully to a short placeholder rather
+            # than sinking the whole report (mirrors the sync path's resilience).
+            if logger:
+                logger.error(f"     ❌ Section '{key}' failed: {res}")
+            sections[key] = f"_Section unavailable ({key})._"
+            continue
+        if key == "recommendation":
+            section, cost, evidence_pack = res
+            sections["recommendation"] = section
+            sections["evidence_pack"] = evidence_pack
+        else:
+            section, cost = res
+            sections[key] = section
+        total_cost += cost
+        if logger:
+            logger.info(f"     ✅ {key} complete (cost: ${cost:.4f})")
+
+    # Section 7: Executive Summary — depends on the others, so run it after.
+    if logger:
+        logger.info("  Generating Executive Summary (depends on 1-6)...")
+    section, cost = await asyncio.to_thread(generate_executive_summary, sections, data, llm)
+    sections["executive_summary"] = section
+    total_cost += cost
+
+    final_report = integrate_report_sections(sections, data)
+    if logger:
+        logger.info(f"✅ Report integrated (total cost: ${total_cost:.4f})")
+    return final_report
+
+
+async def generate_and_save_professional_report_async(
+    analysis_path: Path,
+    ticker: str,
+    logger: Optional[StockAnalystLogger] = None
+) -> Tuple[str, Path]:
+    """Async entry point: generate (parallel sections) + save the report."""
+    financials_path = analysis_path / "financials" / "financials_annual_modeling_latest.json"
+    computed_values_path = analysis_path / "models" / f"{ticker}_financial_model_computed_values.json"
+    screening_path = analysis_path / "screened" / "screening_data.json"
+    report_output_dir = analysis_path / "reports"
+
+    if not financials_path.exists():
+        raise FileNotFoundError(f"Financial data not found: {financials_path}")
+    if not computed_values_path.exists():
+        raise FileNotFoundError(f"Computed values not found: {computed_values_path}")
+    if not screening_path.exists():
+        raise FileNotFoundError(f"Screening data not found: {screening_path}")
+
+    report = await generate_professional_report_async(
+        financial_json_path=financials_path,
+        computed_values_json_path=computed_values_path,
+        screening_json_path=screening_path,
+        logger=logger,
+    )
+    report_path = save_professional_report(
+        report=report, output_dir=report_output_dir, ticker=ticker, logger=logger
+    )
+    if logger:
+        logger.info("=" * 70)
+        logger.info("✅ PROFESSIONAL REPORT GENERATION COMPLETE")
+        logger.info("=" * 70)
+    return report, report_path
 
 
 def save_professional_report(

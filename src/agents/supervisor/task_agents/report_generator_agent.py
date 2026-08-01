@@ -16,7 +16,10 @@ from typing import Optional
 from datetime import datetime
 
 from src.agents.supervisor.state import FinancialState, Report, PipelineStage, PipelineConfig
-from src.report_agent import generate_and_save_professional_report
+from src.report_agent import (
+    generate_and_save_professional_report,
+    generate_and_save_professional_report_async,
+)
 
 
 async def report_generator_agent(
@@ -81,8 +84,11 @@ async def report_generator_agent(
         # Use state's analysis_path directly
         analysis_path = Path(state.analysis_path) if isinstance(state.analysis_path, str) else state.analysis_path
         
-        # Generate professional report
-        report_text, report_path = generate_and_save_professional_report(
+        # Generate professional report. This agent is async, so we await the
+        # parallel-section version: the 6 independent report sections are
+        # generated concurrently (then the executive summary), instead of the
+        # old serial loop that also blocked the event loop.
+        report_text, report_path = await generate_and_save_professional_report_async(
             analysis_path,
             state.ticker,
             logger=effective_logger
