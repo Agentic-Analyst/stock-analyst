@@ -76,6 +76,16 @@ class AgentContext:
         ticker = (ticker or "").strip().upper()
         if not ticker:
             raise ValueError("ticker is required")
+        # Guard: never let the conversational pseudo-tickers become a real
+        # analysis target. Otherwise a vague "analyze this" with no company in
+        # context would build a garbage model/report for the literal ticker
+        # "CHAT" (yfinance returns nothing → fair value 0.0). The tools surface a
+        # clean error the agent must handle by resolving a real company first.
+        if ticker in ("CHAT", "PENDING", "UNKNOWN", "NONE", "N/A"):
+            raise ValueError(
+                f"'{ticker}' is not a real ticker. Resolve the actual company "
+                f"(resolve_symbol) or ask the user which company they mean before analyzing."
+            )
 
         # If we already have state for this ticker, reuse it (chain continuity).
         if self.state is not None and self.ticker == ticker:
@@ -95,9 +105,11 @@ class AgentContext:
         if not self.session_name:
             self.session_name = f"{ticker.lower()}_{self.timestamp}"
 
-        # Set up (or reuse) the run logger, anchored to this ticker's folder.
-        if self.logger is None:
-            self.logger = setup_logger(ticker, base_path=analysis_path, session_name=self.session_name)
+        # Anchor the run logger to this ticker's folder. If we'd previously set up
+        # a placeholder CHAT logger (before a ticker was known), REPOINT to the
+        # ticker folder now so all subsequent logs (and the pipeline's own logging)
+        # consolidate in one place instead of splitting CHAT/ vs TICKER/.
+        self.logger = setup_logger(ticker, base_path=analysis_path, session_name=self.session_name)
 
         self.state = FinancialState(
             user_query=self.user_prompt,

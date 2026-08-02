@@ -46,10 +46,20 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 - **Multiple companies** ("compare NVDA and AMD"): call the tools for each and compare.
 - **Genuine chit-chat only** ("hi", "who are you", "thanks"): reply briefly and warmly in 1-2 sentences, and invite their question. Do NOT dump a capabilities list. Only true small talk counts as chit-chat — a company name, a market question, or a strategy is NEVER chit-chat.
 
+## CRITICAL: never analyze without a real company
+- The analysis tools (get_financials, build_model, analyze_news, write_report) need a REAL ticker. NEVER call them with a placeholder like "CHAT", "PENDING", or a guess.
+- If the user asks for analysis but you don't yet know which company (e.g. a vague "give me a detailed analysis" with no company mentioned and nothing in the conversation context), DO NOT run any analysis tool. Instead, ask them which company/ticker they want — briefly and helpfully. A wrong or empty analysis is far worse than a quick clarifying question.
+- Only after you have a concrete company (from the user, the conversation context, or resolve_symbol) do you call the analysis tools.
+
+## Depth: answer well, then offer to go deeper
+- Give a genuinely useful answer — not a shallow one-liner. Bring in the relevant angles (numbers, drivers, risks, context) the question deserves.
+- BUT for anything that could warrant a fuller treatment, END by offering a concrete next step the user can take: e.g. "Want me to build the full DCF model and report for X?", "I can pull the live technicals and news to confirm — want that?", "I can break this into a bull/base/bear scenario table." Make the offer specific to what you'd actually do.
+- Match effort to the question: a factual lookup stays short; "analyze X" / "should I buy" deserves the full pipeline (write_report) and a thorough synthesis.
+
 ## Style
 - Answer the user's ACTUAL question directly and first. Lead with the point.
 - Ground claims in the data your tools return — cite real numbers (price, fair value, upside %, RSI, sentiment, macro values).
-- Be concise for simple questions, thorough for deep ones. Warm, precise, second person.
+- Warm, precise, second person.
 - If a tool fails or data is missing, say so honestly and answer with what you have — never fabricate numbers.
 - When you've produced a downloadable artifact (model/report), reference its FINDINGS, not the file.
 
@@ -84,6 +94,29 @@ class GeneralistAgent:
         else:
             print(msg)
 
+    def _friendly_progress(self, tool_name: str, args: dict) -> str:
+        """
+        Human-readable progress line for a tool call, shown live in the UI status
+        area (matched by api-runner's progress extractor). Returns "" if the tool
+        needs no announcement.
+        """
+        t = (args or {}).get("ticker") or (args or {}).get("query") or (args or {}).get("indicator") or ""
+        t = str(t).upper() if t else ""
+        # Emoji chosen from the set the frontend's progress extractor recognizes
+        # (📊📈📉🔍💰🎯⚡🚀📋📄📑💹🏢📰) so these surface in the live status area.
+        mapping = {
+            "resolve_symbol": f"🔍 Looking up {args.get('query', 'the company')}",
+            "get_financials": f"📊 Fetching financial data for {t}",
+            "build_model": f"💹 Building the DCF valuation model for {t} (takes ~30s)",
+            "analyze_news": f"📰 Analyzing news for {t}, screening articles in parallel",
+            "write_report": f"📋 Running the full analysis for {t}: financials, model, news, and report",
+            "get_prices": f"📈 Pulling price history for {t}",
+            "get_technicals": f"📉 Computing technical indicators for {t}",
+            "get_global_news": "🔍 Checking the latest market news",
+            "get_macro": f"🏢 Fetching macro data {args.get('indicator', '')}".strip(),
+        }
+        return mapping.get(tool_name, "")
+
     def _emit_answer(self, answer_text: str):
         """Emit on the Phase 2 structured answer channel + persist answer.md."""
         answer_text = (answer_text or "").strip()
@@ -111,6 +144,12 @@ class GeneralistAgent:
         """
         Run the tool-use loop and emit the final answer. Returns a small result dict.
         """
+        # Ensure a logger + folder exist up front (CHAT folder until/unless a
+        # ticker is committed) so ALL reasoning + tool-call lines land in
+        # info.log — not just stdout. Restores the observability the old
+        # supervisor had.
+        self.ctx.ensure_base_logger()
+
         provider = get_async_llm()
         is_openai = provider.is_openai
 
@@ -167,11 +206,25 @@ class GeneralistAgent:
             messages.append(resp.raw)
 
             # Execute the requested tools (sequentially — simplest + safe; the heavy
-            # tools already parallelize internally).
+            # tools already parallelize internally). For each, emit a HUMAN-FRIENDLY
+            # progress line the frontend surfaces live (so the user sees "Building
+            # the valuation model…" instead of a silent wait), plus the technical
+            # detail line for the collapsible log.
             tool_result_blocks = []  # anthropic
             for call in resp.tool_calls:
+                friendly = self._friendly_progress(call.name, call.arguments)
+                if friendly:
+                    self._log(friendly)  # picked up by the progress extractor
                 self._log(f"[SUPERVISOR] 🔧 {call.name}({json.dumps(call.arguments, ensure_ascii=False)})")
                 result_json = await self.registry.execute(call.name, call.arguments)
+                # Log a one-line result status so the log shows what each tool returned.
+                try:
+                    _rd = json.loads(result_json)
+                    _status = _rd.get("status", "ok")
+                    _note = _rd.get("note") or _rd.get("error") or ""
+                    self._log(f"[SUPERVISOR]    ↳ {call.name}: {_status}{(' — ' + str(_note)[:120]) if _note else ''}")
+                except Exception:
+                    pass
                 if is_openai:
                     messages.append({
                         "role": "tool",
