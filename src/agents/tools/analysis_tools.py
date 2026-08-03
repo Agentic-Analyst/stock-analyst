@@ -33,7 +33,8 @@ class AgentContext:
     for the duration of a chat turn.
     """
 
-    def __init__(self, email: str, timestamp: str, user_prompt: str, logger=None):
+    def __init__(self, email: str, timestamp: str, user_prompt: str, logger=None,
+                 session_id: Optional[str] = None):
         self.email = email
         self.timestamp = timestamp
         self.user_prompt = user_prompt
@@ -41,7 +42,13 @@ class AgentContext:
         self.state = None            # FinancialState, created when a ticker is set
         self.ticker: Optional[str] = None
         self.company_name: Optional[str] = None
-        self.session_name: Optional[str] = None
+        # When continuing an existing chat, pin the session identity to the
+        # incoming session_id so the run logger (and the SESSION_ID it emits on
+        # completion) stays STABLE across every turn. Otherwise each turn would
+        # derive a fresh per-turn name (chat_<ts> / <ticker>_<ts>), the emitted
+        # SESSION_ID would drift, and the next follow-up would read the wrong
+        # session file. A fresh chat leaves this None and derives a name lazily.
+        self.session_name: Optional[str] = session_id or None
         self.base_path = None        # run folder (ticker folder, or a CHAT folder)
         self._ticker_announced = False
 
@@ -58,7 +65,10 @@ class AgentContext:
         base = get_analysis_path(self.email, "CHAT", self.timestamp)
         ensure_analysis_paths(base)
         self.base_path = base
-        self.session_name = f"chat_{self.timestamp}"
+        # Keep a pinned session_name (a continuing chat's session_id); only
+        # derive a fresh one for a brand-new chat.
+        if not self.session_name:
+            self.session_name = f"chat_{self.timestamp}"
         self.logger = setup_logger("CHAT", base_path=base, session_name=self.session_name)
         return self.logger
 

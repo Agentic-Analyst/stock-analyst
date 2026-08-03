@@ -80,7 +80,7 @@ class GeneralistAgent:
         self.conversation_context = conversation_context
         self.max_iterations = max_iterations
 
-        self.ctx = AgentContext(email, timestamp, user_prompt)
+        self.ctx = AgentContext(email, timestamp, user_prompt, session_id=session_id)
         self.registry = ToolRegistry()
         self.registry.register_all(build_analysis_tools(self.ctx))
         self.registry.register_all(build_data_tools())
@@ -271,15 +271,20 @@ class GeneralistAgent:
     def _save_session(self, answer_text: str):
         """
         Append this turn to the on-disk session (best-effort, additive) so a
-        follow-up in the same session_id gets conversation context. Uses the same
-        SessionManager format the supervisor path uses.
+        follow-up in the same session_id gets conversation context.
+
+        The session is keyed by a FIXED "CHAT" namespace + the session_id, NOT by
+        the ticker this turn happened to resolve. A chat can move between tickers
+        turn to turn (ask about AAPL, then a macro question); keying the thread by
+        the per-turn ticker would scatter it across ticker folders and break the
+        reload. Read (main.py chat branch) uses the exact same key.
         """
         try:
             from src.session_manager import SessionManager
-            ticker = self.ctx.ticker or "CHAT"
+            session_name = self.session_id or self.ctx.session_name or f"chat_{self.timestamp}"
             sm = SessionManager(
-                email=self.email, ticker=ticker,
-                session_name=self.ctx.session_name or (self.session_id or f"chat_{self.timestamp}"),
+                email=self.email, ticker="CHAT",
+                session_name=session_name,
             )
             idx = sm.start_conversation(user_query=self.user_prompt, company_name=self.ctx.company_name)
             sm.update_conversation(

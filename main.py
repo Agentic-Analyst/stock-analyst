@@ -943,6 +943,11 @@ Examples:
                 except Exception as _e:
                     print(f"[chat] Could not init '{chat_model}' ({_e}); using {args.llm}")
                 # Load prior conversation context for follow-ups (best-effort).
+                # Must use the SAME key the agent writes with in _save_session:
+                # a fixed "CHAT" namespace + the session_id as session_name. This
+                # is decoupled from whatever ticker each turn resolves, so a
+                # follow-up ("yes, pull the data") reliably reloads the thread
+                # even when turn 1 resolved a real ticker like AAPL.
                 conversation_context = None
                 if args.session_id:
                     try:
