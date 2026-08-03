@@ -268,12 +268,29 @@ class WriteReportTool(_CtxTool):
         "company, synthesizing financials, valuation, and news into an investment "
         "recommendation. Requires financial data, a model, and news analysis — this "
         "will run whichever are missing first. Use for 'analyze X comprehensively', "
-        "'full report', or 'should I buy X'. Returns the report path and length."
+        "'full report', or 'should I buy X'. If the user asked for the output in a "
+        "specific language (e.g. Chinese, Japanese, Spanish), pass it as "
+        "output_language so the report narrative is written in that language. "
+        "Returns the report path and length."
     )
-    parameters = {"type": "object", "properties": _TICKER_PARAM, "required": ["ticker"]}
+    parameters = {
+        "type": "object",
+        "properties": {
+            **_TICKER_PARAM,
+            "output_language": {
+                "type": "string",
+                "description": (
+                    "Optional. The language to write the report narrative in, as a "
+                    "plain name (e.g. 'Chinese', '日本語', 'Spanish'). Only set this "
+                    "if the user asked for a non-English report. Omit for English."
+                ),
+            },
+        },
+        "required": ["ticker"],
+    }
     is_readonly = False
 
-    async def execute(self, ticker: str) -> str:
+    async def execute(self, ticker: str, output_language: str = "") -> str:
         from src.agents.supervisor.task_agents.financial_data_agent import financial_data_agent
         from src.agents.supervisor.task_agents.model_generation_agent import model_generation_agent
         from src.agents.supervisor.task_agents.news_analysis_agent import news_analysis_agent
@@ -282,6 +299,8 @@ class WriteReportTool(_CtxTool):
         import asyncio
         import copy as _copy
         state = self.ctx.ensure_state_for_ticker(ticker)
+        if output_language and output_language.strip():
+            state.output_language = output_language.strip()
         if not state.is_financial_data_collected():
             state = await financial_data_agent(state)
             self.ctx.state = state
@@ -342,11 +361,135 @@ class WriteReportTool(_CtxTool):
         )
 
 
+class ReadReportTool(_CtxTool):
+    name = "read_report"
+    description = (
+        "Read the full markdown of a report ALREADY generated for a company earlier "
+        "in this conversation. Use this to answer follow-ups like 'summarize the "
+        "report', 'break out the bull/base/bear cases', 'what were the key risks', or "
+        "'explain the valuation' WITHOUT re-running write_report. Always prefer this "
+        "over regenerating when a report for the ticker already exists. Returns the "
+        "report text (or an error if none exists yet)."
+    )
+    parameters = {"type": "object", "properties": _TICKER_PARAM, "required": ["ticker"]}
+    is_readonly = True
+
+    async def execute(self, ticker: str) -> str:
+        import asyncio
+        ticker = (ticker or "").strip().upper()
+        if not ticker or ticker in ("CHAT", "PENDING", "UNKNOWN", "NONE", "N/A"):
+            return tool_error("read_report needs a real ticker.", ticker=ticker)
+
+        def _read() -> Optional[str]:
+            from path_utils import get_latest_analysis_path
+            base = get_latest_analysis_path(self.ctx.email, ticker)
+            if not base:
+                return None
+            candidate = base / f"{ticker}_Professional_Analysis_Report.md"
+            if candidate.exists():
+                return candidate.read_text(encoding="utf-8", errors="ignore")
+            # Fallback: any *Report*.md in the folder (filename conventions may vary).
+            for p in sorted(base.glob("*Report*.md")) + sorted(base.glob("*report*.md")):
+                if p.exists():
+                    return p.read_text(encoding="utf-8", errors="ignore")
+            return None
+
+        try:
+            content = await asyncio.to_thread(_read)
+        except Exception as e:
+            return tool_error(f"Could not read the report for {ticker}: {e}", ticker=ticker)
+        if not content:
+            return tool_error(
+                f"No existing report found for {ticker}. Generate one with write_report first.",
+                ticker=ticker,
+            )
+        # Cap the payload so a huge report doesn't blow the context; the model gets
+        # plenty to summarize / extract cases from.
+        MAX = 24000
+        truncated = len(content) > MAX
+        return tool_ok(
+            ticker=ticker,
+            report_markdown=content[:MAX],
+            truncated=truncated,
+            note="Existing report loaded. Answer the user's follow-up from THIS content; do not regenerate.",
+        )
+
+
+class CompareTickersTool(_CtxTool):
+    name = "compare_tickers"
+    description = (
+        "Quickly compare 2-5 companies side by side on the fundamentals that matter "
+        "for relative value: price, market cap, P/E, margins, growth, and sector. Use "
+        "for 'compare NVDA with its peers', 'NVDA vs AMD vs AVGO', or peer/relative-value "
+        "questions. This is LIGHTWEIGHT (no full DCF per name) — prefer it over running "
+        "write_report on each peer. Returns a metrics table for all tickers."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "tickers": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "2-5 ticker symbols to compare, e.g. ['NVDA','AMD','AVGO'].",
+                "minItems": 2,
+                "maxItems": 5,
+            }
+        },
+        "required": ["tickers"],
+    }
+    is_readonly = True
+
+    async def execute(self, tickers) -> str:
+        import asyncio
+        if isinstance(tickers, str):
+            tickers = [t.strip() for t in tickers.replace(",", " ").split() if t.strip()]
+        tickers = [t.strip().upper() for t in (tickers or []) if t and t.strip()][:5]
+        if len(tickers) < 2:
+            return tool_error("compare_tickers needs at least 2 tickers.", tickers=tickers)
+
+        def _one(tkr: str) -> dict:
+            try:
+                import yfinance as yf
+                info = yf.Ticker(tkr).info or {}
+            except Exception as e:
+                return {"ticker": tkr, "error": f"lookup failed: {e}"}
+            if not info.get("regularMarketPrice") and not info.get("currentPrice"):
+                return {"ticker": tkr, "error": "no data (unknown ticker?)"}
+
+            def _pct(x):
+                return round(x * 100, 1) if isinstance(x, (int, float)) else None
+            return {
+                "ticker": tkr,
+                "company": info.get("longName") or info.get("shortName"),
+                "sector": info.get("sector"),
+                "price": info.get("currentPrice") or info.get("regularMarketPrice"),
+                "market_cap": info.get("marketCap"),
+                "trailing_pe": info.get("trailingPE"),
+                "forward_pe": info.get("forwardPE"),
+                "gross_margin_pct": _pct(info.get("grossMargins")),
+                "operating_margin_pct": _pct(info.get("operatingMargins")),
+                "revenue_growth_pct": _pct(info.get("revenueGrowth")),
+                "profit_margin_pct": _pct(info.get("profitMargins")),
+            }
+
+        try:
+            rows = await asyncio.gather(*[asyncio.to_thread(_one, t) for t in tickers])
+        except Exception as e:
+            return tool_error(f"Comparison failed: {e}", tickers=tickers)
+        return tool_ok(
+            tickers=tickers,
+            comparison=list(rows),
+            note="Lightweight peer comparison (yfinance fundamentals). Synthesize the relative-value read for the user; no full model was run.",
+        )
+
+
 def build_analysis_tools(ctx: AgentContext):
-    """Instantiate the four wrapped-agent tools bound to one run context."""
+    """Instantiate the wrapped-agent tools + memory/comparison tools bound to one run context."""
     return [
         GetFinancialsTool(ctx),
         BuildModelTool(ctx),
         AnalyzeNewsTool(ctx),
         WriteReportTool(ctx),
+        ReadReportTool(ctx),
+        CompareTickersTool(ctx),
     ]

@@ -91,7 +91,8 @@ async def report_generator_agent(
         report_text, report_path = await generate_and_save_professional_report_async(
             analysis_path,
             state.ticker,
-            logger=effective_logger
+            logger=effective_logger,
+            output_language=getattr(state, "output_language", "") or "",
         )
         
         state.log_action(

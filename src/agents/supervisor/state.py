@@ -133,7 +133,11 @@ class FinancialState:
     email: str  # User email for data organization
     timestamp: str  # Timestamp for this analysis run
     objective: AnalysisObjective = AnalysisObjective.COMPREHENSIVE
-    
+    # Free-text output language for the generated report (e.g. "Chinese",
+    # "日本語"). Empty means English (the template default). Set by the agent
+    # when the user asks for a specific language; no enum, any language works.
+    output_language: str = ""
+
     # Analysis base path (where all outputs are saved)
     analysis_path: Optional[str] = None
     

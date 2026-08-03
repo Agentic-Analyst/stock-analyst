@@ -33,6 +33,8 @@ from llms.async_client import get_async_llm
 from agents.tools.base import ToolRegistry
 from agents.tools.analysis_tools import AgentContext, build_analysis_tools
 from agents.tools.data_tools import build_data_tools
+from agents.tools.capital_markets_tools import build_capital_markets_tools
+from agents.tools.prediction_market_tools import build_prediction_market_tools
 
 
 SYSTEM_PROMPT = """You are VYNN, a sharp, friendly senior equity research analyst and financial assistant. You help users with ANY financial or market question — analyzing companies, valuation, news, macro, trading strategy, portfolios, or general market questions.
@@ -43,8 +45,16 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 - **A specific company** ("analyze NVDA", "分析诺普信", "build a model for the green-coffee company"): identify the company and its ticker. If you're not 100% sure of the ticker (especially non-English names or descriptions), call `resolve_symbol`. CRITICAL: `resolve_symbol` searches in Latin script — so you MUST translate/transliterate the name to English or pinyin BEFORE calling it. For "分析诺普信" you already know 诺普信 = "Noposion", so call resolve_symbol with query="Noposion" (NOT the Chinese characters). For "贵州茅台" call it with "Kweichow Moutai". For "腾讯" call it with "Tencent". Use your own knowledge to do this translation. If you already know the exact ticker from your knowledge (e.g. Apple = AAPL), you may skip resolve_symbol and use it directly. Then use the analysis tools: `get_financials`, `build_model`, `analyze_news`, or `write_report`. For "analyze X comprehensively" or "should I buy X", use `write_report` (it runs the full pipeline). For a quick data point, use the lighter tool.
 - **A market/macro question** ("how would falling rates affect banks?", "what happened in markets today?"): answer as an expert. Pull live data when it sharpens the answer — `get_macro` for rates/inflation/yield-curve, `get_global_news` for today's market news, `get_prices`/`get_technicals` for specific names. If a data tool isn't available, answer from your own knowledge and say it isn't live.
 - **A trading strategy / watchlist** ("the market looks weak, flag breakdowns on my names — losing the 200-day"): ENGAGE with it as a strategist. Discuss the setup, and if names are given, use `get_technicals` to check the actual levels (200-day, RSI, etc.). Be honest that you don't place live alerts, but still give real value.
-- **Multiple companies** ("compare NVDA and AMD"): call the tools for each and compare.
+- **Options / derivatives** ("price a 30-day NVDA 150 call", "what's the delta on this put"): use `price_option` for Black-Scholes value + Greeks. It fetches spot and estimates volatility from history if you don't supply them.
+- **Portfolio / risk** ("what's AAPL's Sharpe / max drawdown", "how should I weight these names"): use `compute_risk_metrics` for risk-adjusted performance, and `optimize_portfolio` for suggested weights (max-Sharpe or risk-parity). Explain trade-offs; don't present weights as guaranteed.
+- **Forward-looking event odds** ("is the market pricing a Fed rate cut", "odds of a recession"): use `get_prediction_markets` for live market-implied probabilities. Great alongside `get_macro` and news for macro/political/crypto events (not single stocks).
+- **Multiple companies / peers** ("compare NVDA and AMD", "NVDA vs its peers"): use `compare_tickers` for a fast side-by-side on the fundamentals. Do NOT run write_report on each name — that is slow and wasteful. Only build a full model for a peer if the user explicitly asks for one.
 - **Genuine chit-chat only** ("hi", "who are you", "thanks"): reply briefly and warmly in 1-2 sentences, and invite their question. Do NOT dump a capabilities list. Only true small talk counts as chit-chat — a company name, a market question, or a strategy is NEVER chit-chat.
+
+## CRITICAL: reuse prior work — do NOT regenerate what already exists
+- If the conversation context shows a report was ALREADY generated for a company this session (look for "Report Generated" or a prior valuation/news block), and the user asks a follow-up about it ("summarize the report", "break out the bull/base/bear cases", "what were the risks", "explain the valuation") — call `read_report` for that ticker and answer from its content. Do NOT call write_report again; regenerating produces the identical file and wastes a minute of the user's time.
+- Only run write_report / build_model again if the user explicitly asks for a fresh run, or if no prior analysis for that company exists in the context.
+- The follow-ups you offer at the end of an answer (summarize, break out cases, compare peers) must be ones you can actually deliver cheaply next turn via read_report / compare_tickers — so when the user takes you up on them, DELIVER, don't re-run the pipeline.
 
 ## CRITICAL: never analyze without a real company
 - The analysis tools (get_financials, build_model, analyze_news, write_report) need a REAL ticker. NEVER call them with a placeholder like "CHAT", "PENDING", or a guess.
@@ -55,6 +65,10 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 - Give a genuinely useful answer — not a shallow one-liner. Bring in the relevant angles (numbers, drivers, risks, context) the question deserves.
 - BUT for anything that could warrant a fuller treatment, END by offering a concrete next step the user can take: e.g. "Want me to build the full DCF model and report for X?", "I can pull the live technicals and news to confirm — want that?", "I can break this into a bull/base/bear scenario table." Make the offer specific to what you'd actually do.
 - Match effort to the question: a factual lookup stays short; "analyze X" / "should I buy" deserves the full pipeline (write_report) and a thorough synthesis.
+
+## Language
+- Reply in the SAME language the user wrote in. If they ask in Chinese, answer in Chinese; Japanese, answer in Japanese; and so on. Match their language naturally for your conversational reply.
+- If the user asks for a full report AND wants it in a specific language (e.g. "分析英伟达并用中文写报告" / "analyze NVDA, report in Chinese"), pass that language to `write_report` via `output_language` (e.g. output_language="Chinese") so the report itself is written in that language. Keep numbers, tickers, and currency values unchanged.
 
 ## Style
 - Answer the user's ACTUAL question directly and first. Lead with the point.
@@ -84,8 +98,11 @@ class GeneralistAgent:
         self.registry = ToolRegistry()
         self.registry.register_all(build_analysis_tools(self.ctx))
         self.registry.register_all(build_data_tools())
+        self.registry.register_all(build_capital_markets_tools())
+        self.registry.register_all(build_prediction_market_tools())
         self.total_cost = 0.0
         self._called_once = set()  # for non-repeatable dedup (none currently, future-proof)
+        self._tools_used = set()   # tool names invoked this turn (persisted for follow-up context)
 
     # -- logging that mirrors the supervisor's channels --
     def _log(self, msg: str):
@@ -216,6 +233,7 @@ class GeneralistAgent:
                 if friendly:
                     self._log(friendly)  # picked up by the progress extractor
                 self._log(f"[SUPERVISOR] 🔧 {call.name}({json.dumps(call.arguments, ensure_ascii=False)})")
+                self._tools_used.add(call.name)
                 result_json = await self.registry.execute(call.name, call.arguments)
                 # Log a one-line result status so the log shows what each tool returned.
                 try:
@@ -287,10 +305,61 @@ class GeneralistAgent:
                 session_name=session_name,
             )
             idx = sm.start_conversation(user_query=self.user_prompt, company_name=self.ctx.company_name)
+            # Capture the rich analysis this turn produced so a FOLLOW-UP can
+            # answer "summarize the report / break out the cases / compare" from
+            # stored results instead of re-running the whole pipeline. Without
+            # this, the next turn only sees a 500-char snippet and regenerates.
+            analysis_results = self._collect_analysis_results()
             sm.update_conversation(
                 conversation_index=idx,
                 completion_status="completed",
-                key_findings=answer_text[:500],
+                routing_decisions=sorted(self._tools_used) if self._tools_used else None,
+                key_findings=answer_text[:800],
+                analysis_results=analysis_results or None,
             )
         except Exception:
             pass  # session persistence must never break the answer
+
+    def _collect_analysis_results(self) -> dict:
+        """
+        Pull the rich results this turn produced off the shared state, in the
+        shape get_conversation_summary() renders (valuation / news_summary /
+        report). Also records the on-disk report path so a follow-up can
+        read_report instead of regenerating. Best-effort; returns {} if nothing
+        substantive ran (e.g. a plain macro answer with no ticker).
+        """
+        results: dict = {}
+        state = getattr(self.ctx, "state", None)
+        if state is None:
+            return results
+        try:
+            fm = getattr(state, "financial_model", None)
+            vm = getattr(fm, "valuation_metrics", None) if fm else None
+            if isinstance(vm, dict) and vm:
+                results["valuation"] = {
+                    "current_price": vm.get("current_price"),
+                    "fair_value": vm.get("fair_value"),
+                    "upside_downside": vm.get("upside_vs_market"),
+                    "model_type": vm.get("model_type") or "DCF",
+                }
+        except Exception:
+            pass
+        try:
+            na = getattr(state, "news_analysis", None)
+            if na is not None:
+                catalysts = [getattr(c, "title", str(c)) for c in (getattr(na, "catalysts", None) or [])][:5]
+                risks = [getattr(r, "title", str(r)) for r in (getattr(na, "risks", None) or [])][:5]
+                results["news_summary"] = {
+                    "overall_sentiment": getattr(na, "overall_sentiment", None),
+                    "top_catalysts": catalysts,
+                    "top_risks": risks,
+                }
+        except Exception:
+            pass
+        try:
+            report = getattr(state, "report", None)
+            if report is not None and getattr(report, "report_path", None):
+                results["report"] = {"path": str(report.report_path)}
+        except Exception:
+            pass
+        return results

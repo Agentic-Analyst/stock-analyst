@@ -17,6 +17,7 @@ Output: Professional analyst report in markdown format
 
 from __future__ import annotations
 import asyncio
+import contextvars
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -27,18 +28,54 @@ from logger import StockAnalystLogger
 from recommendation_engine import RecommendationEngineV3
 
 
+# Free-text output language for the report narrative. Set once per report run
+# (from the user's request, e.g. "Chinese", "日本語", "Spanish"). Empty/"English"
+# means no directive. A contextvar avoids threading a param through ~10 nested
+# report functions and keeps the change generalizable — ANY language works, no
+# enum. load_prompt() appends the directive to every section prompt so all
+# LLM-written sections honor it automatically.
+_OUTPUT_LANGUAGE: contextvars.ContextVar[str] = contextvars.ContextVar("report_output_language", default="")
+
+
+def set_report_language(language: Optional[str]) -> None:
+    """Set the target output language for the current report run (best-effort)."""
+    lang = (language or "").strip()
+    # Treat English (the template default) as "no directive".
+    if lang.lower() in ("", "english", "en", "en-us", "default"):
+        _OUTPUT_LANGUAGE.set("")
+    else:
+        _OUTPUT_LANGUAGE.set(lang)
+
+
+def _language_directive() -> str:
+    """Instruction appended to each section prompt so the LLM writes in the
+    requested language. Numbers, tickers, and cited figures stay as-is."""
+    lang = _OUTPUT_LANGUAGE.get()
+    if not lang:
+        return ""
+    return (
+        f"\n\n---\nIMPORTANT: Write your ENTIRE response in {lang}. Translate all "
+        f"prose, section prose, and analysis into {lang}. Keep tickers, currency "
+        f"symbols, and numeric values exactly as given (do not translate or convert "
+        f"numbers). If a table's column labels were provided in English, you may keep "
+        f"them or translate them, but keep the data values unchanged."
+    )
+
+
 def load_prompt(prompt_name: str) -> str:
     """Load a prompt template from the prompts folder.
-    
+
     Args:
         prompt_name: Name of the prompt file (without .md extension)
-        
+
     Returns:
-        Prompt template string
+        Prompt template string (with a language directive appended when the
+        current report run requested a non-English output language)
     """
     prompt_path = Path(__file__).parent.parent / "prompts" / f"{prompt_name}.md"
     with open(prompt_path, 'r') as f:
-        return f.read()
+        template = f.read()
+    return template + _language_directive()
 
 
 def load_financial_json(json_path: Path) -> Dict[str, Any]:
@@ -1084,9 +1121,11 @@ async def generate_professional_report_async(
 async def generate_and_save_professional_report_async(
     analysis_path: Path,
     ticker: str,
-    logger: Optional[StockAnalystLogger] = None
+    logger: Optional[StockAnalystLogger] = None,
+    output_language: Optional[str] = None,
 ) -> Tuple[str, Path]:
     """Async entry point: generate (parallel sections) + save the report."""
+    set_report_language(output_language)
     financials_path = analysis_path / "financials" / "financials_annual_modeling_latest.json"
     computed_values_path = analysis_path / "models" / f"{ticker}_financial_model_computed_values.json"
     screening_path = analysis_path / "screened" / "screening_data.json"
