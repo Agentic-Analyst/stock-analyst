@@ -110,16 +110,21 @@ class PriceOptionTool(Tool):
 
         def _fetch_spot_vol():
             import numpy as np
-            import yfinance as yf
+            from .yf_resilience import fetch_history, fetch_spot
             s, v = spot, volatility
             if (s is None or v is None) and ticker:
-                hist = yf.Ticker(ticker.upper()).history(period="6mo")
-                if not hist.empty:
+                hist = fetch_history(ticker.upper(), "6mo")
+                if hist is not None and not hist.empty:
                     if s is None:
                         s = float(hist["Close"].iloc[-1])
                     if v is None:
                         rets = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
                         v = float(rets.std() * np.sqrt(252)) if len(rets) > 5 else 0.4
+                if s is None:
+                    # History throttled: a fast_info spot still lets us price.
+                    s = fetch_spot(ticker.upper())
+                if v is None and s is not None:
+                    v = 0.4  # conservative default when history is unavailable
             return s, v
 
         try:

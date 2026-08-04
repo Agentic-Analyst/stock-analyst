@@ -55,9 +55,10 @@ class GetCryptoTool(Tool):
 
         def _snapshot():
             import yfinance as yf
+            from .yf_resilience import fetch_history
 
             t = yf.Ticker(symbol)
-            df = t.history(period="1y")
+            df = fetch_history(symbol, "1y")
             if df is None or df.empty:
                 return None
             close = df["Close"]

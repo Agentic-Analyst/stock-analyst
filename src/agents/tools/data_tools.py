@@ -144,10 +144,24 @@ class GetPricesTool(Tool):
             period = "1y"
 
         def _hist():
-            import yfinance as yf
-            t = yf.Ticker(ticker)
-            df = t.history(period=period)
+            from .yf_resilience import fetch_history, fetch_spot
+            df = fetch_history(ticker, period)
             if df is None or df.empty:
+                # Degraded-but-useful: a throttled history call shouldn't turn
+                # into "price unavailable" when a spot quote is still fetchable.
+                spot = fetch_spot(ticker)
+                if spot is not None:
+                    return {
+                        "latest_close": round(spot, 2),
+                        "period_start_close": None,
+                        "pct_change": None,
+                        "period_high": None,
+                        "period_low": None,
+                        "start_date": None,
+                        "end_date": None,
+                        "note": ("Live spot price only — period history was "
+                                 "temporarily unavailable from the data source."),
+                    }
                 return None
             first = float(df["Close"].iloc[0])
             last = float(df["Close"].iloc[-1])
@@ -192,8 +206,8 @@ class GetTechnicalsTool(Tool):
         ticker = normalize_crypto_symbol(ticker) or ticker
 
         def _calc():
-            import yfinance as yf
-            df = yf.Ticker(ticker).history(period="1y")
+            from .yf_resilience import fetch_history
+            df = fetch_history(ticker, "1y")
             if df is None or df.empty or len(df) < 30:
                 return None
             close = df["Close"]
