@@ -36,6 +36,7 @@ from agents.tools.data_tools import build_data_tools
 from agents.tools.capital_markets_tools import build_capital_markets_tools
 from agents.tools.prediction_market_tools import build_prediction_market_tools
 from agents.tools.crypto_tools import build_crypto_tools
+from agents.tools.ui_tools import build_ui_tools
 
 
 SYSTEM_PROMPT = """You are VYNN, a sharp, friendly senior equity research analyst and financial assistant. You help users with ANY financial or market question — analyzing companies, valuation, news, macro, trading strategy, portfolios, or general market questions.
@@ -60,6 +61,10 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 - **Forward-looking event odds** ("is the market pricing a Fed rate cut", "odds of a recession"): use `get_prediction_markets` for live market-implied probabilities. Great alongside `get_macro` and news for macro/political/crypto events (not single stocks).
 - **Multiple companies / peers** ("compare NVDA and AMD", "NVDA vs its peers"): use `compare_tickers` for a fast side-by-side on the fundamentals. Do NOT run write_report on each name — that is slow and wasteful. Only build a full model for a peer if the user explicitly asks for one.
 - **Genuine chit-chat only** ("hi", "who are you", "thanks"): reply briefly and warmly in 1-2 sentences, and invite their question. Do NOT dump a capabilities list. Only true small talk counts as chit-chat — a company name, a market question, or a strategy is NEVER chit-chat.
+
+## Visuals: show a live chart when it helps
+- Whenever your answer is about a price, trend, performance, momentum, or a "how has X done" question — for a stock OR a coin — call `show_chart` (symbol like "NVDA" or "BTC-USD", pick the timeframe that matches the question: 1D for today, 1M for recent, 1Y for the year). Do it BEFORE writing the final answer, then reference it naturally ("as the chart shows…"). It renders an interactive live chart for the user right in the chat.
+- One chart per subject; for a comparison of two names, two charts is fine. Skip charts for pure fundamentals/valuation questions where a price line adds nothing.
 
 ## CRITICAL: reuse prior work — do NOT regenerate what already exists
 - If the conversation context shows a report was ALREADY generated for a company this session (look for "Report Generated" or a prior valuation/news block), and the user asks a follow-up about it ("summarize the report", "break out the bull/base/bear cases", "what were the risks", "explain the valuation") — call `read_report` for that ticker and answer from its content. Do NOT call write_report again; regenerating produces the identical file and wastes a minute of the user's time.
@@ -111,6 +116,7 @@ class GeneralistAgent:
         self.registry.register_all(build_capital_markets_tools())
         self.registry.register_all(build_prediction_market_tools())
         self.registry.register_all(build_crypto_tools())
+        self.registry.register_all(build_ui_tools(self.ctx))
         self.total_cost = 0.0
         self._called_once = set()  # for non-repeatable dedup (none currently, future-proof)
         self._tools_used = set()   # tool names invoked this turn (persisted for follow-up context)
@@ -142,6 +148,8 @@ class GeneralistAgent:
             "get_technicals": f"📉 Computing technical indicators for {t}",
             "get_global_news": "🔍 Checking the latest market news",
             "get_macro": f"🏢 Fetching macro data {args.get('indicator', '')}".strip(),
+            "get_crypto": f"💰 Fetching crypto market data for {args.get('asset', '')}".strip(),
+            "show_chart": f"📈 Rendering the live chart for {args.get('symbol', '')}".strip(),
         }
         return mapping.get(tool_name, "")
 
