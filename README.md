@@ -120,7 +120,7 @@ Tools self-register through a minimal `Tool` base and `ToolRegistry` that emit b
 | Tool | Kind | What it does |
 |---|---|---|
 | `resolve_symbol` | data | Any-language company name or description → ticker (the model transliterates; search confirms). Detects crypto and returns its `-USD` symbol |
-| `get_prices` | data | OHLCV history and % change over a period |
+| `get_prices` | data | Live quote (today's $/% change vs previous close) + history over any period, incl. the 1d intraday session |
 | `get_technicals` | data | RSI, 50/200-day SMA, MACD, Bollinger — computed locally from price data (works on equities and crypto) |
 | `get_global_news` | data | Market-wide headlines ("what moved today") |
 | `get_macro` | data | FRED series — rates, CPI, yield curve, VIX (self-excludes without its free key) |

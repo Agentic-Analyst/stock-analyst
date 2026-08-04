@@ -120,16 +120,18 @@ class ResolveSymbolTool(Tool):
 class GetPricesTool(Tool):
     name = "get_prices"
     description = (
-        "Get recent price history and performance for a ticker: latest price, and "
-        "percentage change over a period. Use for 'how did X do this year', 'how much "
-        "did X move in 3 months', 'is X up or down'. period is one of: 1mo, 3mo, 6mo, "
-        "1y, ytd, 5y. Returns latest close, period start/end, % change, and high/low."
+        "Get live price and performance for a ticker. ALWAYS returns the current "
+        "quote (latest price, previous close, TODAY's $ and % change, day range) "
+        "plus stats over the requested period. Use period='1d' for 'how is X "
+        "doing TODAY / why did X move today' (adds the intraday session: open, "
+        "high, low, latest). Longer periods for 'how did X do this year': 1d, "
+        "5d, 1mo, 3mo, 6mo, 1y, ytd, 5y. Works for stocks and crypto (-USD)."
     )
     parameters = {
         "type": "object",
         "properties": {
             "ticker": {"type": "string", "description": "Ticker symbol (resolve non-US names first)."},
-            "period": {"type": "string", "description": "1mo|3mo|6mo|1y|ytd|5y", "default": "1y"},
+            "period": {"type": "string", "description": "1d|5d|1mo|3mo|6mo|1y|ytd|5y — use 1d for today's move", "default": "1y"},
         },
         "required": ["ticker"],
     }
@@ -140,45 +142,71 @@ class GetPricesTool(Tool):
         # Accept bare crypto symbols/names (BTC, Bitcoin) → Yahoo BTC-USD pair.
         ticker = normalize_crypto_symbol(ticker) or ticker
         period = (period or "1y").strip().lower()
-        if period not in ("1mo", "3mo", "6mo", "1y", "ytd", "5y", "2y", "max"):
+        if period not in ("1d", "5d", "1mo", "3mo", "6mo", "1y", "ytd", "5y", "2y", "max"):
             period = "1y"
 
-        def _hist():
+        def _quote():
+            """Today's quote: latest vs previous close. Daily bars are the most
+            reliable path; fast_info fills gaps when history is throttled."""
             from .yf_resilience import fetch_history, fetch_spot
-            df = fetch_history(ticker, period)
+            import yfinance as yf
+            latest = prev_close = None
+            df = fetch_history(ticker, "5d")
+            if df is not None and len(df) >= 1:
+                closes = df["Close"].dropna()
+                if len(closes) >= 1:
+                    latest = float(closes.iloc[-1])
+                if len(closes) >= 2:
+                    prev_close = float(closes.iloc[-2])
+            if latest is None:
+                latest = fetch_spot(ticker)
+            if prev_close is None:
+                try:
+                    pc = yf.Ticker(ticker).fast_info.previous_close
+                    prev_close = float(pc) if pc else None
+                except Exception:
+                    pass
+            q = {"latest_price": round(latest, 2) if latest is not None else None,
+                 "previous_close": round(prev_close, 2) if prev_close is not None else None}
+            if latest is not None and prev_close:
+                q["day_change"] = round(latest - prev_close, 2)
+                q["day_change_pct"] = round((latest - prev_close) / prev_close * 100, 2)
+            return q
+
+        def _period_stats():
+            from .yf_resilience import fetch_history
+            if period in ("1d", "5d"):
+                # Intraday bars for the session view.
+                df = fetch_history(ticker, period, interval="5m" if period == "1d" else "30m")
+            else:
+                df = fetch_history(ticker, period)
             if df is None or df.empty:
-                # Degraded-but-useful: a throttled history call shouldn't turn
-                # into "price unavailable" when a spot quote is still fetchable.
-                spot = fetch_spot(ticker)
-                if spot is not None:
-                    return {
-                        "latest_close": round(spot, 2),
-                        "period_start_close": None,
-                        "pct_change": None,
-                        "period_high": None,
-                        "period_low": None,
-                        "start_date": None,
-                        "end_date": None,
-                        "note": ("Live spot price only — period history was "
-                                 "temporarily unavailable from the data source."),
-                    }
                 return None
-            first = float(df["Close"].iloc[0])
-            last = float(df["Close"].iloc[-1])
+            closes = df["Close"].dropna()
+            if closes.empty:
+                return None
+            first, last = float(closes.iloc[0]), float(closes.iloc[-1])
             return {
-                "latest_close": round(last, 2),
-                "period_start_close": round(first, 2),
-                "pct_change": round((last - first) / first * 100, 2) if first else None,
+                "period_open": round(first, 2),
+                "period_latest": round(last, 2),
+                "period_pct_change": round((last - first) / first * 100, 2) if first else None,
                 "period_high": round(float(df["High"].max()), 2),
                 "period_low": round(float(df["Low"].min()), 2),
-                "start_date": str(df.index[0].date()),
-                "end_date": str(df.index[-1].date()),
+                "start": str(df.index[0]),
+                "end": str(df.index[-1]),
             }
 
-        data = await asyncio.to_thread(_hist)
-        if not data:
-            return tool_error(f"No price data for {ticker} over {period}.", ticker=ticker)
-        return tool_ok(ticker=ticker, period=period, **data)
+        quote, stats = await asyncio.gather(
+            asyncio.to_thread(_quote), asyncio.to_thread(_period_stats)
+        )
+        if quote.get("latest_price") is None and not stats:
+            return tool_error(f"No price data for {ticker} right now.", ticker=ticker)
+        payload = {"ticker": ticker, "period": period, **quote}
+        if stats:
+            payload["period_stats"] = stats
+        else:
+            payload["note"] = "Period history temporarily unavailable; quote fields are live."
+        return tool_ok(**payload)
 
 
 # ---------------------------------------------------------------------------
@@ -259,45 +287,73 @@ class GetTechnicalsTool(Tool):
 class GetGlobalNewsTool(Tool):
     name = "get_global_news"
     description = (
-        "Get recent broad market / world financial news headlines (not specific to "
-        "one company). Use for 'what happened in the markets today', 'what's moving "
-        "markets', general market context. Returns a list of recent headlines with "
-        "sources and links."
+        "Get recent financial news headlines — market-wide OR for one company. "
+        "Pass `ticker` for COMPANY-SPECIFIC headlines: the fast way to answer "
+        "'why did AAPL drop today', 'any news on NVDA' (much faster than the "
+        "full analyze_news pipeline). Omit ticker for broad market context: "
+        "'what happened in the markets today', 'what's moving markets'. "
+        "Returns recent headlines with sources, timestamps, and links."
     )
     parameters = {
         "type": "object",
         "properties": {
             "topic": {"type": "string",
-                      "description": "Optional focus, e.g. 'stock market', 'Federal Reserve', 'oil'. Default broad market.",
-                      "default": "stock market today"}
+                      "description": "Optional focus for market-wide news, e.g. 'Federal Reserve', 'oil'. Default broad market.",
+                      "default": "stock market today"},
+            "ticker": {"type": "string",
+                       "description": "Optional ticker for company-specific headlines, e.g. 'AAPL'."},
         },
     }
+    repeatable = True  # ticker news + market news in one turn is legitimate
 
-    async def execute(self, topic: str = "stock market today") -> str:
+    async def execute(self, topic: str = "stock market today", ticker: str = "") -> str:
         import asyncio
         topic = (topic or "stock market today").strip()
+        ticker = (ticker or "").strip().upper()
+        if ticker:
+            ticker = normalize_crypto_symbol(ticker) or ticker
+
+        def _extract(n: dict) -> Optional[dict]:
+            # yfinance news items come in two shapes: flat (older) and nested
+            # under "content" (newer). Handle both.
+            c = n.get("content") if isinstance(n.get("content"), dict) else n
+            title = c.get("title")
+            if not title:
+                return None
+            provider = c.get("provider") if isinstance(c.get("provider"), dict) else {}
+            link = c.get("canonicalUrl", {}).get("url") if isinstance(c.get("canonicalUrl"), dict) else c.get("link")
+            return {
+                "title": title,
+                "publisher": c.get("publisher") or provider.get("displayName"),
+                "link": link,
+                "published": c.get("pubDate") or _fmt_ts(c.get("providerPublishTime")),
+            }
 
         def _news():
             import yfinance as yf
             items = []
             try:
-                res = yf.Search(topic, news_count=10)
-                for n in (res.news or []):
-                    items.append({
-                        "title": n.get("title"),
-                        "publisher": n.get("publisher"),
-                        "link": n.get("link"),
-                        "published": _fmt_ts(n.get("providerPublishTime")),
-                    })
+                if ticker:
+                    raw = yf.Ticker(ticker).news or []
+                    # Fallback: search by symbol when .news is empty.
+                    if not raw:
+                        raw = yf.Search(ticker, news_count=10).news or []
+                else:
+                    raw = yf.Search(topic, news_count=10).news or []
+                for n in raw:
+                    item = _extract(n)
+                    if item:
+                        items.append(item)
             except Exception:
                 pass
             return items
 
         news = await asyncio.to_thread(_news)
+        subject = ticker or topic
         if not news:
-            return tool_ok(topic=topic, headlines=[],
+            return tool_ok(subject=subject, headlines=[],
                            note="No fresh headlines retrieved; answer from your general knowledge and say it's not live.")
-        return tool_ok(topic=topic, headlines=news[:8])
+        return tool_ok(subject=subject, headlines=news[:8])
 
 
 # ---------------------------------------------------------------------------
