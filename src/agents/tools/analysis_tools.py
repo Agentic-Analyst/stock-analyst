@@ -150,6 +150,33 @@ _TICKER_PARAM = {
 }
 
 
+def _valuation_warning(fair_value, upside):
+    """
+    Sanity rail on DCF output. An FCF-projection DCF on a deeply FCF-negative
+    or freshly listed company produces mathematically valid nonsense (negative
+    fair value, -100% "upside") — e.g. SpaceX right after its IPO with -$14B
+    FCF. Flag it so the agent leads with the caveat instead of the number.
+    """
+    try:
+        fv = float(fair_value) if fair_value is not None else None
+        up = float(upside) if upside is not None else None
+    except (TypeError, ValueError):
+        return None
+    if fv is not None and fv <= 0:
+        return ("UNRELIABLE VALUATION: the DCF produced a non-positive fair value, "
+                "which means the company's free cash flow profile (heavy investment / "
+                "negative FCF, common for growth or recently listed names) breaks this "
+                "method. Do NOT present this number as the company's worth. Say the DCF "
+                "is not meaningful for this profile and analyze via growth, unit "
+                "economics, and market pricing instead.")
+    if up is not None and up <= -70:
+        return ("SUSPECT VALUATION: the DCF implies more than 70% downside vs the "
+                "market price. That can be real, but with negative or thin FCF history "
+                "it usually means the method fits this company poorly. Present it with "
+                "that caveat, not as a headline conclusion.")
+    return None
+
+
 class _CtxTool(Tool):
     """Base for tools that share the run's AgentContext."""
     is_readonly = True
@@ -221,13 +248,19 @@ class BuildModelTool(_CtxTool):
             return tool_error(f"Could not build the valuation model for {ticker}.",
                               ticker=ticker, detail=state.last_error)
         vm = state.financial_model.valuation_metrics if state.financial_model else {}
+        fair_value = vm.get("fair_value") if isinstance(vm, dict) else None
+        current_price = vm.get("current_price") if isinstance(vm, dict) else None
+        upside = vm.get("upside_vs_market") if isinstance(vm, dict) else None
+        warning = _valuation_warning(fair_value, upside)
+
         return tool_ok(
             ticker=ticker,
             model_type=state.financial_model.model_type if state.financial_model else None,
-            fair_value=vm.get("fair_value") if isinstance(vm, dict) else None,
-            current_price=vm.get("current_price") if isinstance(vm, dict) else None,
-            upside_vs_market=vm.get("upside_vs_market") if isinstance(vm, dict) else None,
+            fair_value=fair_value,
+            current_price=current_price,
+            upside_vs_market=upside,
             excel_path=state.financial_model.excel_path if state.financial_model else None,
+            **({"data_quality_warning": warning} if warning else {}),
             note="DCF model built and saved (downloadable).",
         )
 
@@ -350,13 +383,17 @@ class WriteReportTool(_CtxTool):
                               ticker=ticker, detail=state.last_error)
         vm = state.financial_model.valuation_metrics if state.financial_model else {}
         na = state.news_analysis
+        fair_value = vm.get("fair_value") if isinstance(vm, dict) else None
+        upside = vm.get("upside_vs_market") if isinstance(vm, dict) else None
+        warning = _valuation_warning(fair_value, upside)
         return tool_ok(
             ticker=ticker,
             report_path=state.report.report_path,
             content_length=len(state.report.content) if state.report.content else 0,
-            fair_value=vm.get("fair_value") if isinstance(vm, dict) else None,
-            upside_vs_market=vm.get("upside_vs_market") if isinstance(vm, dict) else None,
+            fair_value=fair_value,
+            upside_vs_market=upside,
             overall_sentiment=na.overall_sentiment if na else None,
+            **({"data_quality_warning": warning} if warning else {}),
             note="Full report generated (downloadable). Summarize its findings for the user.",
         )
 
