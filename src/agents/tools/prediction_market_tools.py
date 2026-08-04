@@ -39,42 +39,31 @@ class GetPredictionMarketsTool(Tool):
     description = (
         "Get live, market-implied probabilities for forward-looking events from "
         "Polymarket: Fed rate decisions, recession odds, elections, geopolitics, "
-        "crypto, and other macro/political events. Use when the user asks 'what are "
-        "the odds of X', 'is the market pricing a rate cut', or forward-looking "
-        "macro/event questions. Complements news (what happened) and get_macro (where "
-        "things stand). Coverage is macro/political/crypto — a specific single stock "
-        "usually has no market. Returns the top markets with implied probability, "
-        "traded volume, resolution date, and 1-week move."
+        "crypto, and other macro/political events. Two modes: pass `topic` for a "
+        "SPECIFIC event ('Fed rate cut', 'recession 2026'); OMIT topic for the "
+        "TRENDING view — the biggest open markets right now, for broad questions "
+        "like 'what's happening in prediction markets' or 'what are the odds "
+        "lately'. Complements news (what happened) and get_macro (where things "
+        "stand). Coverage is macro/political/crypto — a specific single stock "
+        "usually has no market. Returns markets with implied probability, traded "
+        "volume, resolution date, and 1-week move."
     )
     parameters = {
         "type": "object",
         "properties": {
-            "topic": {"type": "string", "description": "Event keyword(s), e.g. 'Fed rate cut', 'recession 2026', 'US election'."},
+            "topic": {"type": "string", "description": "Optional event keyword(s), e.g. 'Fed rate cut'. OMIT for the trending/biggest markets overview."},
             "limit": {"type": "integer", "description": "Max markets to return (ranked by volume). Default 6.", "minimum": 1, "maximum": 15},
         },
-        "required": ["topic"],
     }
     is_readonly = True
 
-    async def execute(self, topic: str, limit: Optional[int] = None) -> str:
+    async def execute(self, topic: str = "", limit: Optional[int] = None) -> str:
         topic = (topic or "").strip()
-        if not topic:
-            return tool_error("A topic is required, e.g. 'Fed rate cut'.")
         lim = limit or DEFAULT_LIMIT
 
         def _fetch() -> dict:
             from datetime import datetime, timezone
             import requests
-            try:
-                resp = requests.get(
-                    f"{GAMMA_BASE}/public-search",
-                    params={"q": topic, "limit_per_type": 20},
-                    timeout=REQUEST_TIMEOUT,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            except requests.RequestException as e:
-                return {"_error": f"Polymarket unavailable (network error: {e})."}
 
             now = datetime.now(timezone.utc)
 
@@ -90,31 +79,78 @@ class GetPredictionMarketsTool(Tool):
                         pass
                 return bool(_parse_json_list(m.get("outcomePrices"))) and bool(_parse_json_list(m.get("outcomes")))
 
-            candidates = [
-                m for event in data.get("events", [])
-                for m in event.get("markets", [])
-                if _forward(m)
-            ]
-            candidates.sort(key=lambda m: m.get("volumeNum") or 0, reverse=True)
+            def _extract(candidates: list) -> list:
+                candidates.sort(key=lambda m: m.get("volumeNum") or 0, reverse=True)
+                markets = []
+                for m in candidates[:lim]:
+                    prices = _parse_json_list(m.get("outcomePrices"))
+                    outcomes = _parse_json_list(m.get("outcomes"))
+                    try:
+                        prob = float(prices[0])
+                    except (ValueError, IndexError):
+                        continue
+                    wk = m.get("oneWeekPriceChange")
+                    markets.append({
+                        "question": m.get("question"),
+                        "outcome": outcomes[0] if outcomes else "Yes",
+                        "implied_probability_pct": round(prob * 100, 1),
+                        "volume_usd": round(float(m.get("volumeNum") or 0), 0),
+                        "resolves": (m.get("endDate") or "")[:10],
+                        "one_week_change_pp": round(wk * 100, 1) if isinstance(wk, (int, float)) and wk else None,
+                    })
+                return markets
 
-            markets = []
-            for m in candidates[:lim]:
-                prices = _parse_json_list(m.get("outcomePrices"))
-                outcomes = _parse_json_list(m.get("outcomes"))
-                try:
-                    prob = float(prices[0])
-                except (ValueError, IndexError):
-                    continue
-                wk = m.get("oneWeekPriceChange")
-                markets.append({
-                    "question": m.get("question"),
-                    "outcome": outcomes[0] if outcomes else "Yes",
-                    "implied_probability_pct": round(prob * 100, 1),
-                    "volume_usd": round(float(m.get("volumeNum") or 0), 0),
-                    "resolves": (m.get("endDate") or "")[:10],
-                    "one_week_change_pp": round(wk * 100, 1) if isinstance(wk, (int, float)) and wk else None,
-                })
-            return {"markets": markets}
+            def _search(query: str) -> list:
+                resp = requests.get(
+                    f"{GAMMA_BASE}/public-search",
+                    params={"q": query, "limit_per_type": 20},
+                    timeout=REQUEST_TIMEOUT,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return [
+                    m for event in data.get("events", [])
+                    for m in event.get("markets", [])
+                    if _forward(m)
+                ]
+
+            # Sports/esports dominate raw volume rankings but are noise for a
+            # finance product — drop them from the trending view.
+            _SKIP_TAGS = {"sports", "esports", "games"}
+
+            def _trending() -> list:
+                resp = requests.get(
+                    f"{GAMMA_BASE}/events",
+                    params={"closed": "false", "order": "volume24hr",
+                            "ascending": "false", "limit": 40},
+                    timeout=REQUEST_TIMEOUT,
+                )
+                resp.raise_for_status()
+                out = []
+                for event in resp.json():
+                    tags = {(t.get("label") or "").lower() for t in (event.get("tags") or [])}
+                    if tags & _SKIP_TAGS:
+                        continue
+                    # One market per event (its most-traded forward market), so
+                    # a single multi-strike event can't crowd out the list.
+                    fwd = [m for m in (event.get("markets") or []) if _forward(m)]
+                    if fwd:
+                        fwd.sort(key=lambda m: m.get("volumeNum") or 0, reverse=True)
+                        out.append(fwd[0])
+                return out
+
+            try:
+                mode = "search" if topic else "trending"
+                candidates = _search(topic) if topic else _trending()
+                # A miss on a vague search still deserves a useful answer:
+                # fall back to what the crowd is actually trading right now.
+                if not candidates and topic:
+                    candidates = _trending()
+                    mode = "trending_fallback"
+            except requests.RequestException as e:
+                return {"_error": f"Polymarket unavailable (network error: {e})."}
+
+            return {"markets": _extract(candidates), "mode": mode}
 
         try:
             result = await asyncio.to_thread(_fetch)
@@ -123,15 +159,24 @@ class GetPredictionMarketsTool(Tool):
         if "_error" in result:
             return tool_error(result["_error"], topic=topic)
         markets = result.get("markets", [])
+        mode = result.get("mode", "search")
         if not markets:
             return tool_ok(
-                topic=topic, markets=[],
-                note=f"No open prediction markets matched '{topic}'. Polymarket coverage is macro/political/geopolitical/crypto; a specific equity may have none. Answer from news/macro instead.",
+                topic=topic or "trending", markets=[],
+                note="No open prediction markets found right now. Answer from news/macro instead.",
             )
+        note = "Implied probabilities are the crowd's priced odds (higher volume = deeper/more reliable), not certainties. Weave the relevant ones into your answer."
+        if mode == "trending_fallback":
+            note = (f"No market matched '{topic}' specifically, so these are the "
+                    "BIGGEST open markets by 24h volume instead (sports excluded). "
+                    "Present them as what the crowd is trading right now. " + note)
+        elif mode == "trending":
+            note = ("These are the biggest open markets by 24h volume right now "
+                    "(sports excluded). " + note)
         return tool_ok(
-            topic=topic,
+            topic=topic or "trending",
             markets=markets,
-            note="Implied probabilities are the crowd's priced odds (higher volume = deeper/more reliable), not certainties. Weave the relevant ones into your answer.",
+            note=note,
         )
 
 
