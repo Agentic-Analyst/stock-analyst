@@ -480,7 +480,11 @@ class ArticleScraper:
                 "title": art.title or "Untitled",
                 "publish_date": art.publish_date.isoformat() if art.publish_date else "",
                 "text": art.text,
-                "word_count": len(art.text.split()) if art.text else 0
+                "word_count": len(art.text.split()) if art.text else 0,
+                # Full-resolution publisher image (og:image / twitter:image).
+                # newspaper3k already computed these during parse() — the
+                # SerpAPI thumbnail is a ~100px Google cache, useless for UI.
+                "top_image": art.meta_img or art.top_image or "",
             }
         except Exception as e:
             self._log("warning", f"Could not scrape {url}: {e}")
@@ -534,6 +538,7 @@ serpapi_authors: {article_data.get('serpapi_authors', [])}
 serpapi_snippet: "{snippet}"
 serpapi_thumbnail: "{article_data.get('serpapi_thumbnail', '')}"
 serpapi_source_icon: "{article_data.get('serpapi_source_icon', '')}"
+og_image: "{article_data.get('top_image', '')}"
 ---
 
 {article_data['text']}
