@@ -12,7 +12,7 @@ A generalizable tool-use agent for equity research. It resolves a company in any
 [![Tool-Use Agent](https://img.shields.io/badge/Architecture-Tool--Use_Agent-orange.svg)](#architecture)
 [![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED.svg)](https://hub.docker.com/r/fuzanwenn/stock-analyst)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Agentic-Analyst/stock-analyst)
-[![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-PolyForm_Noncommercial-blue.svg)](LICENSE)
 
 ### Demo
 
@@ -486,4 +486,4 @@ Issues and pull requests welcome. The codebase is organized so that tools (`src/
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+PolyForm Noncommercial 1.0.0 — see [LICENSE](LICENSE). The source is available to read, learn from, and use noncommercially; commercial use requires a license from VYNN AI (zanwen.fu@duke.edu).
