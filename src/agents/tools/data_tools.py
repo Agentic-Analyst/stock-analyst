@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any, List, Optional
 
 from .base import Tool, tool_ok, tool_error
+from .crypto_utils import detect_crypto_in_query, normalize_crypto_symbol
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,21 @@ class ResolveSymbolTool(Tool):
         query = (query or "").strip()
         if not query:
             return tool_error("Empty query.")
+
+        # Crypto short-circuit: if the query names a coin, hand back its Yahoo
+        # -USD symbol directly and steer routing to the crypto path (no equity
+        # fundamentals/DCF exist for a coin).
+        crypto_symbol = normalize_crypto_symbol(query) or detect_crypto_in_query(query)
+        if crypto_symbol:
+            return tool_ok(
+                query=query,
+                asset_class="crypto",
+                candidates=[{"ticker": crypto_symbol, "name": query, "exchange": "Crypto", "type": "CRYPTOCURRENCY"}],
+                best_guess=crypto_symbol,
+                note=("This is a cryptocurrency. Use get_crypto for a market snapshot "
+                      "and get_technicals for chart levels. Do NOT call get_financials/"
+                      "build_model/write_report — coins have no fundamentals or DCF."),
+            )
 
         def _search():
             import yfinance as yf
@@ -121,6 +137,8 @@ class GetPricesTool(Tool):
     async def execute(self, ticker: str, period: str = "1y") -> str:
         import asyncio
         ticker = (ticker or "").strip().upper()
+        # Accept bare crypto symbols/names (BTC, Bitcoin) → Yahoo BTC-USD pair.
+        ticker = normalize_crypto_symbol(ticker) or ticker
         period = (period or "1y").strip().lower()
         if period not in ("1mo", "3mo", "6mo", "1y", "ytd", "5y", "2y", "max"):
             period = "1y"
@@ -170,6 +188,8 @@ class GetTechnicalsTool(Tool):
     async def execute(self, ticker: str) -> str:
         import asyncio
         ticker = (ticker or "").strip().upper()
+        # Accept bare crypto symbols/names (BTC, Bitcoin) → Yahoo BTC-USD pair.
+        ticker = normalize_crypto_symbol(ticker) or ticker
 
         def _calc():
             import yfinance as yf
