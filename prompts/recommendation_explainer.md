@@ -134,7 +134,7 @@ Return STRICT JSON with this structure:
 ## QUALITY STANDARDS
 
 ### Evidence Citation
-- 90%+ of material claims must cite ≥1 evidence ID
+- 95%+ of material claims must cite ≥1 evidence ID
 - Prefer high-relevance evidence (relevance > 0.8)
 - Note dates explicitly when relevant
 - If evidence conflicts, prefer more recent sources
