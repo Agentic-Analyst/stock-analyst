@@ -996,15 +996,22 @@ def generate_professional_report(
     if logger:
         logger.info(f"     ✅ Complete (cost: ${cost:.4f})")
     
-    # Section 6: Recommendation
+    # Section 6: Recommendation — degrade to a placeholder rather than sinking
+    # the whole report (financials/model/valuation sections are already done).
     if logger:
         logger.info("  6/7 Generating Recommendation & Price Target...")
-    section, cost, evidence_pack = generate_section_recommendation(data, llm, logger)
-    sections['recommendation'] = section
-    sections['evidence_pack'] = evidence_pack  # Store for appendix
-    total_cost += cost
-    if logger:
-        logger.info(f"     ✅ Complete (cost: ${cost:.4f})")
+    try:
+        section, cost, evidence_pack = generate_section_recommendation(data, llm, logger)
+        sections['recommendation'] = section
+        sections['evidence_pack'] = evidence_pack  # Store for appendix
+        total_cost += cost
+        if logger:
+            logger.info(f"     ✅ Complete (cost: ${cost:.4f})")
+    except Exception as e:
+        if logger:
+            logger.error(f"     ❌ Recommendation section failed: {e}")
+        sections['recommendation'] = "_Section unavailable (recommendation)._"
+        sections['evidence_pack'] = {'evidence': []}
     
     # Section 7: Executive Summary (generated last, needs other sections)
     if logger:
@@ -1093,6 +1100,9 @@ async def generate_professional_report_async(
             if logger:
                 logger.error(f"     ❌ Section '{key}' failed: {res}")
             sections[key] = f"_Section unavailable ({key})._"
+            if key == "recommendation":
+                # Keep downstream consumers (appendix) uniform.
+                sections["evidence_pack"] = {'evidence': []}
             continue
         if key == "recommendation":
             section, cost, evidence_pack = res

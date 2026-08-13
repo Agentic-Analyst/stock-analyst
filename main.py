@@ -793,6 +793,77 @@ def _print_supervisor_failure_summary(supervisor_runner):
     except Exception:
         pass  # Silently ignore if we can't print summary
 
+
+def _finalize_dead_chat_run(args, agent, exc):
+    """
+    Last-resort contract keeper for the chat pipeline: runs only when the
+    generalist agent died OUTSIDE its own crash guard (constructor / event
+    loop). Guarantees the three things the rest of the stack depends on:
+    an answer.md, a session turn marked failed (never "in_progress"), and the
+    terminal SESSION_ID + completion banner so api-runner finalizes the job.
+    """
+    # If the agent's own finally already emitted the answer, everything below
+    # was handled there — a second pass would overwrite a real answer.
+    if agent is not None and getattr(agent, "_answer_emitted", False):
+        return
+
+    from pathlib import Path as _Path
+
+    apology = ("I hit an internal error while working on that — please try "
+               "again in a moment.")
+    session_name = args.session_id or f"chat_{args.timestamp}"
+
+    # Reuse the agent's logger if it exists — setup_logger truncates ('w+'),
+    # so re-creating it on an existing run dir would wipe the streamed log.
+    logger = None
+    base = None
+    if agent is not None and getattr(agent, "ctx", None) is not None:
+        logger = agent.ctx.logger
+        base = agent.ctx.base_path or agent.ctx.chat_base_path
+    if logger is None:
+        from path_utils import get_analysis_path, ensure_analysis_paths
+        from logger import setup_logger
+        base = get_analysis_path(args.email, "CHAT", args.timestamp)
+        ensure_analysis_paths(base)
+        logger = setup_logger("CHAT", base_path=base, session_name=session_name)
+
+    logger.error(f"[SUPERVISOR] ❌ FATAL (pre-run): {exc}")
+
+    if base is not None:
+        try:
+            answer_path = _Path(base) / "answer.md"
+            if not answer_path.exists() or not answer_path.read_text(encoding="utf-8").strip():
+                answer_path.write_text(apology, encoding="utf-8")
+        except Exception:
+            pass
+
+    # Emit the apology on the structured answer channel so the frontend
+    # renders something instead of an eternal ANALYZING.
+    logger.info("")
+    logger.info("[ANSWER_BEGIN]")
+    for line in apology.split("\n"):
+        logger.info(f"[LLM] {line}")
+    logger.info("[ANSWER_END]")
+    logger.info("")
+
+    try:
+        from src.session_manager import SessionManager
+        sm = SessionManager(email=args.email, ticker="CHAT", session_name=session_name)
+        idx = sm.start_conversation(user_query=args.user_prompt)
+        sm.update_conversation(
+            conversation_index=idx,
+            completion_status="failed",
+            error_message=str(exc),
+        )
+    except Exception as sess_err:
+        logger.error(f"[SUPERVISOR] ⚠️ Failed-session record could not be saved: {sess_err}")
+
+    # Terminal markers LAST (api-runner parses SESSION_ID from the
+    # second-to-last line).
+    if hasattr(logger, "program_end"):
+        logger.program_end()
+
+
 def main():
     """Main entry point for the comprehensive stock analysis pipeline."""
     parser = argparse.ArgumentParser(
@@ -956,18 +1027,28 @@ Examples:
                         conversation_context = _sm.get_conversation_summary(limit=3)
                     except Exception:
                         conversation_context = None
-                agent = GeneralistAgent(
-                    email=args.email,
-                    timestamp=args.timestamp,
-                    user_prompt=args.user_prompt,
-                    session_id=args.session_id,
-                    conversation_context=conversation_context,
-                )
+                agent = None
                 try:
+                    agent = GeneralistAgent(
+                        email=args.email,
+                        timestamp=args.timestamp,
+                        user_prompt=args.user_prompt,
+                        session_id=args.session_id,
+                        conversation_context=conversation_context,
+                    )
                     results = asyncio.run(agent.run())
                 except Exception as e:
+                    # LAST-RESORT contract keeper: agent.run() finalizes itself
+                    # (crash guard), so reaching here means construction or the
+                    # event loop died. Still: answer.md + failed session turn +
+                    # terminal markers, so the frontend finalizes and no session
+                    # is left "in_progress".
                     print(f"❌ Generalist agent failed: {e}")
                     import traceback; traceback.print_exc()
+                    try:
+                        _finalize_dead_chat_run(args, agent, e)
+                    except Exception as fz:
+                        print(f"⚠️ Last-resort finalize also failed: {fz}")
                     time.sleep(3)
                     return 1
                 time.sleep(3)

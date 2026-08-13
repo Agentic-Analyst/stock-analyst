@@ -373,15 +373,21 @@ class ArticleScraper:
             "industry_trends": f"{self.company_name} industry market trends"
         }
     
-    def _serpapi_news_links(self, query: str) -> List[Dict]:
+    def _serpapi_news_links(self, query: str) -> Optional[List[Dict]]:
         """
         Return up to `max_results` news metadata from Google News via SerpAPI.
-        
-        Returns list of dictionaries containing:
+
+        Returns:
+        - list of metadata dicts on success ([] = genuine zero results)
+        - None when the API itself failed (error response, timeout, exception)
+          so the caller can distinguish an outage from "no news" and trip its
+          circuit breaker instead of burning through more queries.
+
+        Each dictionary contains:
         - url: Article URL
         - title: Article title from SerpAPI
         - source_name: Source publication name
-        - authors: List of author names  
+        - authors: List of author names
         - published_date: Publication date
         - snippet: Article snippet/summary
         - thumbnail: Article image URL
@@ -394,18 +400,22 @@ class ArticleScraper:
                 "tbs": "qdr:d",  # Last 24 hours
                 "api_key": self.api_key
             })
+            # The client's default timeout is 60000 (seconds — effectively
+            # none): a hung/erroring SerpAPI held each query ~90s in prod.
+            # SerpApiClient.get_response reads this attribute.
+            search.timeout = 20
             result = search.get_dict()
             
             if not isinstance(result, dict):
                 self._log("warning", f"Unexpected SerpAPI response type: {type(result)}")
-                return []
-            
+                return None
+
             # Check for API errors
             if "error" in result:
                 self._log("error", f"❌ SerpAPI returned error: {result['error']}")
                 if "message" in result:
                     self._log("error", f"   Error details: {result['message']}")
-                return []
+                return None
             
             # Log response for debugging
             self._log("debug", f"SerpAPI response keys: {list(result.keys())}")
@@ -455,19 +465,19 @@ class ArticleScraper:
         except KeyError as e:
             self._log("error", f"❌ SerpAPI response missing expected key: {e}")
             self._log("error", f"   Available keys: {list(result.keys()) if 'result' in locals() else 'N/A'}")
-            return []
+            return None
         except Exception as e:
             self._log("error", f"❌ SerpAPI search failed for query '{query}'")
             self._log("error", f"   Exception type: {type(e).__name__}")
             self._log("error", f"   Exception details: {str(e)}")
-            
+
             # Check if it's an API key issue
             if "api_key" in str(e).lower() or "authentication" in str(e).lower() or "unauthorized" in str(e).lower():
                 self._log("error", f"   ⚠️  Possible API key issue - verify SERPAPI_API_KEY is valid")
             elif "rate" in str(e).lower() or "limit" in str(e).lower() or "quota" in str(e).lower():
                 self._log("error", f"   ⚠️  Possible rate limit or quota issue - check SerpAPI dashboard")
-            
-            return []
+
+            return None
     
     def _scrape_article(self, url: str) -> Optional[Dict]:
         """Download & parse an article. Returns dict or None on failure."""
@@ -578,16 +588,66 @@ og_image: "{article_data.get('top_image', '')}"
             queries["custom_query"] = query_override
             self._log("info", f"➕ Added custom query: '{query_override}'")
 
+        serpapi_down = False
         for i, (category, query) in enumerate(queries.items()):
             self._log("info", f"📰 {category.replace('_', ' ').title()}: '{query}'")
             category_metadata = self._serpapi_news_links(query)
+            if category_metadata is None:
+                # API failure (not "zero results") — one quick retry, then trip
+                # the circuit breaker: don't burn the remaining category
+                # queries against a dead API (this held runs ~6 min in prod).
+                time.sleep(2)
+                category_metadata = self._serpapi_news_links(query)
+                if category_metadata is None:
+                    serpapi_down = True
+                    self._log(
+                        "warning",
+                        "⚡ SerpAPI unavailable — skipping remaining news queries "
+                        "(circuit breaker)"
+                    )
+                    break
             # Store both metadata and category info
             for metadata in category_metadata:
                 all_urls.append((metadata, category))
-            
+
             # Brief pause between different query types
             time.sleep(0.5)
-        
+
+        if not all_urls:
+            # SerpAPI produced nothing (outage or genuinely no coverage) —
+            # fall back to Yahoo Finance headlines so the evidence pack has
+            # something to stand on. These flow through the exact same
+            # scrape -> filter -> Mongo -> screener path as SerpAPI results.
+            try:
+                from yf_news import fetch_ticker_news
+                fallback_items = fetch_ticker_news(self.ticker, count=self.max_articles)
+            except Exception as e:
+                self._log("warning", f"yfinance news fallback failed: {e}")
+                fallback_items = []
+            if fallback_items:
+                self._log(
+                    "info",
+                    f"🔁 {'SerpAPI unavailable' if serpapi_down else 'No SerpAPI results'} — "
+                    f"falling back to Yahoo Finance ticker news "
+                    f"({len(fallback_items)} headlines)"
+                )
+                for item in fallback_items:
+                    if not item.get("link"):
+                        continue
+                    all_urls.append((
+                        {
+                            "url": item["link"],
+                            "title": item.get("title", ""),
+                            "snippet": "",
+                            "thumbnail": "",
+                            "published_date": item.get("published", ""),
+                            "source_name": item.get("publisher", "") or "",
+                            "authors": [],
+                            "source_icon": "",
+                        },
+                        "yfinance_fallback",
+                    ))
+
         if not all_urls:
             self._log("warning", "No URLs found from news search")
             return self._get_scraping_results()

@@ -50,6 +50,7 @@ class AgentContext:
         # session file. A fresh chat leaves this None and derives a name lazily.
         self.session_name: Optional[str] = session_id or None
         self.base_path = None        # run folder (ticker folder, or a CHAT folder)
+        self.chat_base_path = None   # original CHAT folder, kept when base_path repoints
         self._ticker_announced = False
 
     def ensure_base_logger(self):
@@ -65,6 +66,10 @@ class AgentContext:
         base = get_analysis_path(self.email, "CHAT", self.timestamp)
         ensure_analysis_paths(base)
         self.base_path = base
+        # Remember the CHAT folder even if a ticker later repoints base_path:
+        # the answer gets mirrored there so api-runner's CHAT fallback path
+        # never finds an empty run dir.
+        self.chat_base_path = base
         # Keep a pinned session_name (a continuing chat's session_id); only
         # derive a fresh one for a brand-new chat.
         if not self.session_name:
@@ -150,18 +155,34 @@ _TICKER_PARAM = {
 }
 
 
-def _valuation_warning(fair_value, upside):
+def _valuation_warning(fair_value, upside, market_cap=None, method=None):
     """
-    Sanity rail on DCF output. An FCF-projection DCF on a deeply FCF-negative
-    or freshly listed company produces mathematically valid nonsense (negative
-    fair value, -100% "upside") — e.g. SpaceX right after its IPO with -$14B
-    FCF. Flag it so the agent leads with the caveat instead of the number.
+    Sanity rail on valuation output. An FCF-projection DCF on a deeply
+    FCF-negative or freshly listed company produces mathematically valid
+    nonsense (negative fair value, -100% "upside") — e.g. SpaceX right after
+    its IPO with -$14B FCF. And on mega-caps, a large implied mispricing is
+    far more often a broken assumption than a broken market (a GOOGL DCF
+    shipped -55% vs price to a real user). Flag both so the agent leads with
+    the caveat instead of the number.
+
+    `upside` is a FRACTION (e.g. -0.55 for -55%).
     """
+    if method == "justified_pb_roe":
+        return ("METHOD NOTE: fair value comes from a bank-appropriate "
+                "justified P/B x ROE (Gordon) model on book value per share; "
+                "the standard FCF DCF is suppressed as not meaningful for "
+                "financials. Present the fair value WITH this method note.")
     try:
         fv = float(fair_value) if fair_value is not None else None
         up = float(upside) if upside is not None else None
+        mcap = float(market_cap) if market_cap else None
     except (TypeError, ValueError):
         return None
+    # upside is contractually a fraction everywhere it is produced — a plain
+    # conversion keeps the rails armed even for absurd (>500%) upsides. (A
+    # defensive "looks like a percent already" heuristic here disarmed both
+    # rails precisely for the most broken valuations.)
+    up_pct = up * 100 if up is not None else None
     if fv is not None and fv <= 0:
         return ("UNRELIABLE VALUATION: the DCF produced a non-positive fair value, "
                 "which means the company's free cash flow profile (heavy investment / "
@@ -169,7 +190,15 @@ def _valuation_warning(fair_value, upside):
                 "method. Do NOT present this number as the company's worth. Say the DCF "
                 "is not meaningful for this profile and analyze via growth, unit "
                 "economics, and market pricing instead.")
-    if up is not None and up <= -70:
+    if mcap is not None and mcap >= 200e9 and up_pct is not None and abs(up_pct) > 40:
+        return (f"SUSPECT VALUATION: the DCF implies {up_pct:+.0f}% vs the market "
+                f"price for a ~${mcap/1e9:.0f}B mega-cap. Markets rarely misprice "
+                "companies this large by 40%+; the far more likely culprit is the "
+                "DCF's assumptions (WACC, terminal growth, FCF normalization). "
+                "Cross-check against market multiples (trailing/forward P/E, "
+                "EV/EBITDA vs peers) before presenting, and present the DCF as ONE "
+                "method with this caveat leading — never as a headline fair value.")
+    if up_pct is not None and up_pct <= -70:
         return ("SUSPECT VALUATION: the DCF implies more than 70% downside vs the "
                 "market price. That can be real, but with negative or thin FCF history "
                 "it usually means the method fits this company poorly. Present it with "
@@ -251,7 +280,18 @@ class BuildModelTool(_CtxTool):
         fair_value = vm.get("fair_value") if isinstance(vm, dict) else None
         current_price = vm.get("current_price") if isinstance(vm, dict) else None
         upside = vm.get("upside_vs_market") if isinstance(vm, dict) else None
-        warning = _valuation_warning(fair_value, upside)
+        method = vm.get("valuation_method") if isinstance(vm, dict) else None
+        km = state.financial_data.key_metrics if state.financial_data else {}
+        mcap = (km.get("market_data", {}) or {}).get("market_cap") if isinstance(km, dict) else None
+        warning = _valuation_warning(fair_value, upside, market_cap=mcap, method=method)
+
+        if method == "justified_pb_roe":
+            note = ("Financial-sector company: fair value computed via justified "
+                    "P/B x ROE on book value per share; the standard FCF DCF is "
+                    "suppressed (not meaningful for banks). Present the fair value "
+                    "with this method note.")
+        else:
+            note = "DCF model built and saved (downloadable)."
 
         return tool_ok(
             ticker=ticker,
@@ -260,8 +300,11 @@ class BuildModelTool(_CtxTool):
             current_price=current_price,
             upside_vs_market=upside,
             excel_path=state.financial_model.excel_path if state.financial_model else None,
+            **({"valuation_method": method} if method else {}),
+            **({"dcf_fair_value": vm.get("dcf_fair_value")}
+               if isinstance(vm, dict) and vm.get("dcf_fair_value") is not None and method else {}),
             **({"data_quality_warning": warning} if warning else {}),
-            note="DCF model built and saved (downloadable).",
+            note=note,
         )
 
 
@@ -385,7 +428,10 @@ class WriteReportTool(_CtxTool):
         na = state.news_analysis
         fair_value = vm.get("fair_value") if isinstance(vm, dict) else None
         upside = vm.get("upside_vs_market") if isinstance(vm, dict) else None
-        warning = _valuation_warning(fair_value, upside)
+        method = vm.get("valuation_method") if isinstance(vm, dict) else None
+        km = state.financial_data.key_metrics if state.financial_data else {}
+        mcap = (km.get("market_data", {}) or {}).get("market_cap") if isinstance(km, dict) else None
+        warning = _valuation_warning(fair_value, upside, market_cap=mcap, method=method)
         return tool_ok(
             ticker=ticker,
             report_path=state.report.report_path,
@@ -393,6 +439,7 @@ class WriteReportTool(_CtxTool):
             fair_value=fair_value,
             upside_vs_market=upside,
             overall_sentiment=na.overall_sentiment if na else None,
+            **({"valuation_method": method} if method else {}),
             **({"data_quality_warning": warning} if warning else {}),
             note="Full report generated (downloadable). Summarize its findings for the user.",
         )
@@ -469,7 +516,7 @@ class CompareTickersTool(_CtxTool):
                 "items": {"type": "string"},
                 "description": "2-5 ticker symbols to compare, e.g. ['NVDA','AMD','AVGO'].",
                 "minItems": 2,
-                "maxItems": 5,
+                "maxItems": 8,
             }
         },
         "required": ["tickers"],
@@ -480,7 +527,7 @@ class CompareTickersTool(_CtxTool):
         import asyncio
         if isinstance(tickers, str):
             tickers = [t.strip() for t in tickers.replace(",", " ").split() if t.strip()]
-        tickers = [t.strip().upper() for t in (tickers or []) if t and t.strip()][:5]
+        tickers = [t.strip().upper() for t in (tickers or []) if t and t.strip()][:8]
         if len(tickers) < 2:
             return tool_error("compare_tickers needs at least 2 tickers.", tickers=tickers)
 

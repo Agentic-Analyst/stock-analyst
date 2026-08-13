@@ -99,14 +99,14 @@ async def report_generator_agent(
             "report_generator_agent",
             f"✅ Professional report generated successfully"
         )
-        
+
         state.log_action(
             "report_generator_agent",
             f"Report details: "
             f"{len(report_text):,} characters, "
             f"saved to {report_path.name}"
         )
-        
+
         # Update FinancialState with generated report
         state.report = Report(
             ticker=state.ticker,
@@ -116,6 +116,30 @@ async def report_generator_agent(
             generated_at=datetime.now(),
             llm_cost=state.total_llm_cost
         )
+
+        # Non-fatal degradation flags: the recommendation section may ship
+        # annotated (no news evidence / citation coverage below standard).
+        # Record it on the report's WARNING slot — never `error`, which
+        # is_report_generated() treats as report-failed and would turn a
+        # successfully delivered report into a workflow failure.
+        if "News evidence was unavailable" in report_text:
+            state.report.warning = (
+                "recommendation section generated without news evidence "
+                "(citations omitted)"
+            )
+            state.log_action(
+                "report_generator_agent",
+                "⚠️ Recommendation shipped without news evidence (annotated)"
+            )
+        elif "**Validation Warning**" in report_text:
+            state.report.warning = (
+                "recommendation section below citation-coverage standard "
+                "(delivered with validation warning)"
+            )
+            state.log_action(
+                "report_generator_agent",
+                "⚠️ Recommendation delivered degraded (citation coverage below standard)"
+            )
         
         # Update pipeline stage
         state.current_stage = PipelineStage.REPORT_GENERATED

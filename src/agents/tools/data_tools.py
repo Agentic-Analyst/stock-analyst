@@ -229,9 +229,22 @@ class GetTechnicalsTool(Tool):
 
     async def execute(self, ticker: str) -> str:
         import asyncio
-        ticker = (ticker or "").strip().upper()
+        raw = (ticker or "").strip().upper()
         # Accept bare crypto symbols/names (BTC, Bitcoin) → Yahoo BTC-USD pair.
-        ticker = normalize_crypto_symbol(ticker) or ticker
+        normalized = normalize_crypto_symbol(raw)
+        if normalized:
+            ticker = normalized
+        elif raw.endswith("-USD"):
+            # A -USD pair our map doesn't know: the base may need Yahoo's
+            # numeric suffix (TAO-USD is a dead asset; Bittensor is
+            # TAO22974-USD). Resolve live before computing on wrong data.
+            from .crypto_utils import search_crypto_symbol
+            resolved = await asyncio.to_thread(
+                search_crypto_symbol, raw.rsplit("-", 1)[0]
+            )
+            ticker = resolved or raw
+        else:
+            ticker = raw
 
         def _calc():
             from .yf_resilience import fetch_history
@@ -308,45 +321,19 @@ class GetGlobalNewsTool(Tool):
 
     async def execute(self, topic: str = "stock market today", ticker: str = "") -> str:
         import asyncio
+
+        # Shared with the report pipeline's SerpAPI fallback (src/yf_news.py).
+        from yf_news import fetch_ticker_news, fetch_topic_news
+
         topic = (topic or "stock market today").strip()
         ticker = (ticker or "").strip().upper()
         if ticker:
             ticker = normalize_crypto_symbol(ticker) or ticker
 
-        def _extract(n: dict) -> Optional[dict]:
-            # yfinance news items come in two shapes: flat (older) and nested
-            # under "content" (newer). Handle both.
-            c = n.get("content") if isinstance(n.get("content"), dict) else n
-            title = c.get("title")
-            if not title:
-                return None
-            provider = c.get("provider") if isinstance(c.get("provider"), dict) else {}
-            link = c.get("canonicalUrl", {}).get("url") if isinstance(c.get("canonicalUrl"), dict) else c.get("link")
-            return {
-                "title": title,
-                "publisher": c.get("publisher") or provider.get("displayName"),
-                "link": link,
-                "published": c.get("pubDate") or _fmt_ts(c.get("providerPublishTime")),
-            }
-
         def _news():
-            import yfinance as yf
-            items = []
-            try:
-                if ticker:
-                    raw = yf.Ticker(ticker).news or []
-                    # Fallback: search by symbol when .news is empty.
-                    if not raw:
-                        raw = yf.Search(ticker, news_count=10).news or []
-                else:
-                    raw = yf.Search(topic, news_count=10).news or []
-                for n in raw:
-                    item = _extract(n)
-                    if item:
-                        items.append(item)
-            except Exception:
-                pass
-            return items
+            if ticker:
+                return fetch_ticker_news(ticker, count=10)
+            return fetch_topic_news(topic, count=10)
 
         news = await asyncio.to_thread(_news)
         subject = ticker or topic

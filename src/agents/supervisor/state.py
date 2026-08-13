@@ -98,6 +98,10 @@ class Report:
     generated_at: Optional[datetime] = None
     llm_cost: float = 0.0
     error: Optional[str] = None
+    # Non-fatal quality flag (e.g. recommendation shipped without news
+    # evidence). MUST stay separate from `error`: is_report_generated()
+    # treats any error as report-failed.
+    warning: Optional[str] = None
 
 
 @dataclass

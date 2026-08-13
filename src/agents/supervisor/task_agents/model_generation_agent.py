@@ -208,17 +208,66 @@ async def model_generation_agent(
                     f"Current=${valuation_metrics.get('current_price', 'N/A'):.2f}, "
                     f"Upside={valuation_metrics.get('upside_vs_market', 0)*100:.1f}%"
                 )
-                
+
             except Exception as extract_error:
                 state.log_action(
                     "model_generation_agent",
                     f"⚠️  Could not extract valuation metrics from JSON: {extract_error}"
                 )
-        
+
+        # Financial-sector override: an FCF DCF is structurally unfit for
+        # banks/insurers (deposit and loan flows swamp "FCF" — FBP and JPM
+        # both shipped meaningless valuations to real users). Swap in a
+        # Gordon justified P/B x ROE fair value; keep the DCF numbers under
+        # dcf_* keys for transparency.
+        model_type = "comprehensive_dcf"
+        try:
+            from src.agents.fm.bank_valuation import (
+                is_financial_sector, compute_bank_fair_value
+            )
+            basic_info = {}
+            company_data = {}
+            if state.financial_data:
+                basic_info = (state.financial_data.key_metrics or {}).get("basic_info", {}) or {}
+                company_data = (state.financial_data.raw_data or {}).get("company_data", {}) or {}
+            if is_financial_sector(basic_info.get("sector"), basic_info.get("industry")):
+                bank = compute_bank_fair_value(
+                    company_data, assumptions.get("terminal_growth")
+                )
+                if bank:
+                    if valuation_metrics.get("fair_value") is not None:
+                        valuation_metrics["dcf_fair_value"] = valuation_metrics["fair_value"]
+                    ref_price = valuation_metrics.get("current_price") or (
+                        (company_data.get("market_data", {}) or {}).get("current_price")
+                    )
+                    valuation_metrics["fair_value"] = bank["fair_value"]
+                    if ref_price:
+                        valuation_metrics["upside_vs_market"] = (
+                            bank["fair_value"] / float(ref_price) - 1.0
+                        )
+                    elif bank.get("upside_vs_market") is not None:
+                        valuation_metrics["upside_vs_market"] = bank["upside_vs_market"]
+                    valuation_metrics["valuation_method"] = "justified_pb_roe"
+                    for k, v in bank["inputs"].items():
+                        assumptions[f"bank_{k}"] = v
+                    model_type = "bank_justified_pb_roe"
+                    state.log_action(
+                        "model_generation_agent",
+                        f"🏦 Financial-sector valuation: justified P/B x ROE fair value "
+                        f"${bank['fair_value']:.2f} (P/B {bank['inputs']['justified_pb']:.2f}, "
+                        f"ROE {bank['inputs']['roe']*100:.1f}%, r {bank['inputs']['cost_of_equity']*100:.1f}%) "
+                        f"— FCF DCF suppressed as not meaningful for financials"
+                    )
+        except Exception as bank_error:
+            state.log_action(
+                "model_generation_agent",
+                f"⚠️  Bank valuation override skipped: {bank_error}"
+            )
+
         # Update FinancialState with generated model
         state.financial_model = FinancialModel(
             ticker=state.ticker,
-            model_type="comprehensive_dcf",
+            model_type=model_type,
             excel_path=str(output_file),
             json_computed_values_path=computed_values_path,
             valuation_metrics=valuation_metrics,

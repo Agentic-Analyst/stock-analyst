@@ -113,13 +113,42 @@ class RecommendationEngineV3:
         
         # Step 3: Build evidence pack
         evidence_pack = self.evidence_extractor.build_evidence_pack(screening_data)
-        
+
+        # A pack with no items — or whose only item is the generic
+        # "market analysis of 0 articles" summary — carries no citable news.
+        # Treat it as empty everywhere (prompt, validator, appendix) so the
+        # model is never asked to cite evidence that does not exist. Note:
+        # when real articles exist but produced no catalysts/risks, the
+        # summary item IS legitimate evidence and citations stay enabled.
+        evidence_items = evidence_pack.get('evidence', [])
+        articles_analyzed = (screening_data or {}).get(
+            'analysis_summary', {}
+        ).get('articles_analyzed', 0)
+        has_news_evidence = any(
+            ev.get('type') != 'market_analysis' for ev in evidence_items
+        ) or (bool(evidence_items) and articles_analyzed > 0)
+        if not has_news_evidence:
+            if evidence_items:
+                self._log(
+                    "⚠️  Evidence pack contains only a generic 0-article summary — "
+                    "treating as no news evidence (citations disabled)",
+                    "warning"
+                )
+            else:
+                self._log(
+                    "⚠️  Evidence pack is empty (no news for this ticker) — "
+                    "citations disabled, report will be annotated",
+                    "warning"
+                )
+            evidence_pack['evidence'] = []
+
         # Step 4: Build prompt
         prompt = self._build_explainer_prompt(
             fixed_numbers,
             evidence_pack,
             company_data,
-            valuation_data
+            valuation_data,
+            citations_enabled=has_news_evidence
         )
         
         # Debug output
@@ -278,20 +307,36 @@ class RecommendationEngineV3:
         else:
             # Loop completed without breaking (either max attempts or no rewrite needed)
             if self.validator.needs_rewrite(validation_report):
+                # DELIVER, DON'T DIE: the numeric fields are deterministic and
+                # already auto-corrected; failing the whole report here throws
+                # away a successful financials/model/valuation run over
+                # narrative citations. Strip anything invalid and annotate.
                 coverage_pct = validation_report.get('coverage_details', {}).get('coverage_pct', 0)
                 self._log(f"\n⚠️  Maximum rewrite attempts ({max_rewrite_attempts}) reached", "warning")
-                self._log(f"Final coverage: {coverage_pct:.1f}%", "warning")
-                raise RuntimeError(
-                    f"Recommendation validation failed after {max_rewrite_attempts} rewrite attempts; final coverage {coverage_pct:.1f}%"
+                self._log(f"Final coverage: {coverage_pct:.1f}% — delivering degraded (numbers unaffected)", "warning")
+                valid_ids = {ev['id'] for ev in evidence_pack.get('evidence', [])}
+                corrected_json, removed = self.validator.strip_citations(
+                    corrected_json, valid_ids
                 )
+                if removed:
+                    self._log(f"Removed {removed} invalid citation(s) before delivery", "warning")
+                validation_report["degraded"] = True
             else:
                 self._log("\n✅ VALIDATION PASSED - No rewrite needed\n")
 
-        if not validation_report.get("valid"):
-            coverage_pct = validation_report.get('coverage_details', {}).get('coverage_pct', 0)
-            raise RuntimeError(
-                f"Recommendation validation failed; coverage {coverage_pct:.1f}% is below the required threshold"
+        if not validation_report.get("valid") and not (
+            validation_report.get("degraded")
+            or validation_report.get("citation_enforcement_bypassed")
+        ):
+            # Defensive: any remaining invalid state degrades the same way
+            # rather than aborting the report.
+            valid_ids = {ev['id'] for ev in evidence_pack.get('evidence', [])}
+            corrected_json, removed = self.validator.strip_citations(
+                corrected_json, valid_ids
             )
+            if removed:
+                self._log(f"Removed {removed} invalid citation(s) before delivery", "warning")
+            validation_report["degraded"] = True
 
         # Step 8: Format final output
         final_output = self._format_final_output(
@@ -299,12 +344,25 @@ class RecommendationEngineV3:
             fixed_numbers,
             validation_report
         )
-        
+
         self._log("\n" + "="*80)
         self._log("FINAL OUTPUT")
         self._log("="*80)
         self._log(final_output)
         self._log("="*80 + "\n")
+
+        # Machine-readable status for downstream consumers (safe sibling key:
+        # the only reader, integrate_report_sections, uses .get('evidence')).
+        if validation_report.get("citation_enforcement_bypassed"):
+            status = "bypassed_no_news"
+        elif validation_report.get("degraded"):
+            status = "degraded"
+        else:
+            status = "passed"
+        evidence_pack['validation'] = {
+            "status": status,
+            "coverage_pct": validation_report.get('coverage_details', {}).get('coverage_pct'),
+        }
 
         return final_output, total_cost, evidence_pack
     
@@ -317,8 +375,12 @@ class RecommendationEngineV3:
         attempt: int = 1
     ) -> str:
         """Build text-only rewrite prompt with corrected JSON and iteration-specific guidance."""
-        
+
         valid_ids = sorted([ev['id'] for ev in evidence_pack.get('evidence', [])])
+        valid_ids_rendered = (
+            ", ".join(valid_ids) if valid_ids
+            else "NONE — do not cite any evidence IDs"
+        )
         
         # Build issues section
         issues_section = ""
@@ -394,7 +456,7 @@ class RecommendationEngineV3:
         prompt = template.format(
             issues_section=issues_section,
             corrected_json=json.dumps(corrected_json, indent=2),
-            valid_evidence_ids=', '.join(valid_ids),
+            valid_evidence_ids=valid_ids_rendered,
             attempt=attempt,
             iteration_guidance=iteration_guidance
         )
@@ -406,7 +468,8 @@ class RecommendationEngineV3:
         fixed_numbers: Dict[str, Any],
         evidence_pack: Dict[str, Any],
         company_data: Dict[str, Any],
-        valuation_data: Dict[str, Any]
+        valuation_data: Dict[str, Any],
+        citations_enabled: bool = True
     ) -> str:
         """Build explainer prompt for LLM."""
         
@@ -438,7 +501,21 @@ class RecommendationEngineV3:
             evidence_pack_json=json.dumps(evidence_pack, indent=2),
             company_context=json.dumps(context, indent=2)
         )
-        
+
+        if not citations_enabled:
+            # The template unconditionally mandates [E#] citations; when the
+            # evidence pack is empty that demand would force fabrication.
+            # This override supersedes it.
+            prompt += (
+                "\n\n---\n"
+                "## OVERRIDE — NO NEWS EVIDENCE AVAILABLE\n"
+                "The evidence pack for this ticker is EMPTY. Ignore every "
+                "citation requirement above: do NOT write any [E#] citation "
+                "anywhere in your response. Base the narrative solely on "
+                "FIXED_NUMBERS and COMPANY_CONTEXT, and make clear in the "
+                "thesis that news evidence was unavailable at generation time.\n"
+            )
+
         return prompt
     
     def _extract_json(self, response: str) -> Dict[str, Any]:
@@ -562,7 +639,29 @@ class RecommendationEngineV3:
             output.append(f"- 40% × Net Catalysts/Risks ({inputs['net_catalyst_risk_pct']:.1f}%) = {0.4 * inputs['net_catalyst_risk_pct']:.1f}%")
             output.append(f"- 20% × Momentum ({inputs['momentum_score_pct']:.1f}%) = {0.2 * inputs['momentum_score_pct']:.1f}%")
             output.append(f"- **Total**: {fixed_numbers['expected_return_pct_12m']:.1f}%")
-            
+
+            # Conspicuous annotation when the section shipped without full
+            # citation validation — readers must not mistake it for a fully
+            # evidence-backed recommendation.
+            if validation_report.get("citation_enforcement_bypassed"):
+                output.append(
+                    "\n> **Note**: News evidence was unavailable for this ticker at "
+                    "generation time. This recommendation is based on quantitative "
+                    "model outputs (valuation, momentum) only; evidence citations "
+                    "are omitted."
+                )
+            elif validation_report.get("degraded"):
+                coverage_pct = validation_report.get(
+                    'coverage_details', {}
+                ).get('coverage_pct', 0) or 0
+                output.append(
+                    f"\n> **Validation Warning**: This section did not reach the 95% "
+                    f"citation-coverage standard after rewrite attempts (final "
+                    f"coverage {coverage_pct:.1f}%, measured before invalid citations "
+                    f"were removed). Numeric fields are deterministic and unaffected; "
+                    f"treat narrative claims with appropriate caution."
+                )
+
             return '\n'.join(output)
             
         except Exception as e:

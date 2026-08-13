@@ -46,10 +46,17 @@ class GetCryptoTool(Tool):
 
         symbol = normalize_crypto_symbol(asset)
         if not symbol:
+            # Long-tail coin outside the curated map (e.g. a new alt) — try a
+            # live Yahoo symbol search before giving up. Bittensor/TAO went
+            # unanswered in prod for exactly this gap.
+            from .crypto_utils import search_crypto_symbol
+            symbol = await asyncio.to_thread(search_crypto_symbol, asset)
+        if not symbol:
             return tool_error(
-                f"'{asset}' isn't a recognized cryptocurrency. Pass a coin name "
-                "(Bitcoin, Ethereum, Solana) or its symbol (BTC, ETH). For a stock, "
-                "use get_prices/get_financials instead.",
+                f"'{asset}' isn't a recognized cryptocurrency (a live Yahoo "
+                "symbol search found no matching -USD pair with price data). "
+                "Pass a coin name (Bitcoin, Ethereum, Solana) or its symbol "
+                "(BTC, ETH). For a stock, use get_prices/get_financials instead.",
                 asset=asset,
             )
 

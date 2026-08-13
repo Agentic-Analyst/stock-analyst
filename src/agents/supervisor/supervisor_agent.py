@@ -738,17 +738,43 @@ Provide a helpful, informative answer:"""
                         self.logger.info(f"[SUPERVISOR]    \"{self.user_prompt}\"")
                         self.logger.info("")
                         self.logger.info("[SUPERVISOR] 🤖 INTRODUCTION & GUIDANCE:")
+                        if not direct_answer:
+                            # Never log the header and then... nothing.
+                            direct_answer = (
+                                "Hello! I can analyze stocks, build valuation "
+                                "models, screen news, and answer market "
+                                "questions. What would you like to look at?"
+                            )
                         self._emit_answer(direct_answer)
                         self._answer_emitted = True
                         self.stats["completion_status"] = "conversational"
-                        
+
+                        # FINALIZE before returning. This branch used to return
+                        # with no session update and no terminal markers — every
+                        # conversational run from Jul 24-Aug 1 hung the frontend
+                        # on ANALYZING and left its session "in_progress".
+                        try:
+                            if self.session_manager is not None and \
+                               self.current_conversation_index is not None:
+                                self.session_manager.update_conversation(
+                                    conversation_index=self.current_conversation_index,
+                                    completion_status="completed",
+                                    key_findings=(direct_answer or "")[:800],
+                                )
+                        except Exception as sess_err:
+                            self.logger.error(
+                                f"[SUPERVISOR] ⚠️ Conversational session save failed: {sess_err}"
+                            )
+                        if hasattr(self.logger, "program_end"):
+                            self.logger.program_end()
+
                         # Return the conversational response
                         return {
                             "status": "conversational",
                             "message": direct_answer,
                             "ticker": "CHAT",
                             "company_name": "Conversational Mode",
-                            "session_name": None,  # No session for conversational queries
+                            "session_name": self.session_name,
                             "statistics": self.stats
                         }
                     

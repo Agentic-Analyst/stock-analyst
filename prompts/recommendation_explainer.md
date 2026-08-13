@@ -28,6 +28,7 @@ You will receive:
 - ✅ Prefer primary sources (company filings, official sources) and tier-1 outlets
 - ✅ Prefer recent and high-relevance evidence
 - ✅ Be specific about timing and mechanisms
+- ✅ If the EVIDENCE_PACK contains no items, do not fabricate citations — write the narrative without [E#] and state that news evidence is unavailable
 - ✅ Provide comprehensive but concise explanations
 - ✅ Connect narrative to quantitative inputs
 - ✅ **MANDATORY**: Achieve 95%+ citation coverage - COUNT YOUR CITATIONS

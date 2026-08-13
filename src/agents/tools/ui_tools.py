@@ -16,11 +16,33 @@ actual price data itself from the realtime API, so the chart is genuinely live
 from __future__ import annotations
 
 import json
+import time
 
 from .base import Tool, tool_ok, tool_error
-from .crypto_utils import normalize_crypto_symbol
+from .crypto_utils import normalize_crypto_symbol, search_crypto_symbol
 
 _TIMEFRAMES = ("1D", "1W", "1M", "3M", "1Y", "ALL")
+
+# Symbols recently verified to return price data — avoids re-probing on
+# repeat/comparison charts. symbol -> verified_at (epoch seconds).
+_PROBE_CACHE: dict = {}
+_PROBE_TTL = 600.0
+
+
+def _has_price_data(sym: str) -> bool:
+    """Cheap history probe so we never claim a chart for a dead symbol."""
+    hit = _PROBE_CACHE.get(sym)
+    if hit and time.time() - hit < _PROBE_TTL:
+        return True
+    try:
+        from .yf_resilience import fetch_history
+        df = fetch_history(sym, "5d", attempts=2)
+        ok = df is not None and not df.empty
+    except Exception:
+        ok = False
+    if ok:
+        _PROBE_CACHE[sym] = time.time()
+    return ok
 
 
 class ShowChartTool(Tool):
@@ -65,12 +87,46 @@ class ShowChartTool(Tool):
 
     async def execute(self, symbol: str, name: str = "", timeframe: str = "1M",
                       title: str = "") -> str:
+        import asyncio
+
         sym = (symbol or "").strip().upper()
         if not sym:
             return tool_error("symbol is required")
         # Coins normalize to their Yahoo -USD pair so the frontend's data
         # endpoints (which are yfinance-backed) resolve them.
         sym = normalize_crypto_symbol(sym) or sym
+
+        # Validate BEFORE emitting: a directive for a symbol with no data
+        # renders a broken/wrong chart while the model tells the user "I
+        # displayed the chart" (happened in prod with TAO-USD, which is a
+        # different, dead asset — Bittensor is TAO22974-USD).
+        ok = await asyncio.to_thread(_has_price_data, sym)
+        if not ok and sym.endswith("-USD"):
+            # Unknown coin pair — resolve via live search using the display
+            # name the model supplied ('Bittensor') or the base symbol.
+            base = sym.rsplit("-", 1)[0]
+            resolved = await asyncio.to_thread(
+                search_crypto_symbol, (name or "").strip() or base
+            )
+            if resolved and resolved != sym:
+                if await asyncio.to_thread(_has_price_data, resolved):
+                    sym = resolved
+                    ok = True
+        if not ok:
+            if sym.endswith("-USD"):
+                # Crypto pairs get the hard gate: a wrong/dead pair renders a
+                # wrong chart while the model claims success (the TAO bug).
+                return tool_error(
+                    f"No price data exists for '{sym}' — the chart was NOT "
+                    "displayed; do not tell the user a chart was shown. Resolve "
+                    "the correct symbol first (get_crypto for coins, "
+                    "resolve_symbol for stocks), then call show_chart again.",
+                    symbol=sym,
+                )
+            # Equities: a failed probe is far more likely a transient Yahoo
+            # throttle than a bad symbol (the ticker usually came from
+            # resolve_symbol or the user). The frontend fetches its own data,
+            # so emit anyway rather than block a valid chart.
 
         tf = (timeframe or "1M").strip().upper()
         if tf not in _TIMEFRAMES:

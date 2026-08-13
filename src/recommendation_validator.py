@@ -60,43 +60,64 @@ class RecommendationValidator:
             "auto_corrected": False,
             "corrections_made": []
         }
-        
+
         # Get valid evidence IDs
         valid_evidence_ids = {ev['id'] for ev in evidence_pack.get('evidence', [])}
-        
+
+        # Citation enforcement only makes sense when there is evidence to cite.
+        # With an empty pack (no news for the ticker) every [E#] the model was
+        # prompted into writing is unfixable — enforcing would send the rewrite
+        # loop on an impossible task and fail the whole report. Bypass instead:
+        # strip the citations, keep the numbers, deliver the report annotated.
+        citation_enforcement = bool(valid_evidence_ids)
+        validation_report["evidence_available"] = citation_enforcement
+        if not citation_enforcement:
+            validation_report["citation_enforcement_bypassed"] = True
+
         # 1. Validate and correct numeric fields
         numeric_corrections = self._validate_numbers(
-            response_data, 
-            fixed_numbers, 
+            response_data,
+            fixed_numbers,
             validation_report
         )
-        
+
         if numeric_corrections:
             response_data = numeric_corrections
             validation_report["auto_corrected"] = True
-        
+
         # 2. Validate evidence citations
         invalid_citations = self._validate_evidence_citations(
             response_data,
-            valid_evidence_ids,
-            validation_report
+            valid_evidence_ids
         )
-        
+
         if invalid_citations:
-            validation_report["errors"].append(
-                f"Invalid evidence IDs cited: {invalid_citations}"
-            )
-            validation_report["valid"] = False
-        
+            if citation_enforcement:
+                validation_report["errors"].append(
+                    f"Invalid evidence IDs cited: {invalid_citations}"
+                )
+                validation_report["valid"] = False
+            else:
+                response_data, removed = self.strip_citations(
+                    response_data, valid_evidence_ids
+                )
+                validation_report["warnings"].append(
+                    f"No news evidence available; removed {removed} fabricated citation(s)"
+                )
+                validation_report["corrections_made"].append(
+                    f"Removed {removed} invalid citation(s) (no evidence pack)"
+                )
+
         # 3. Check citation coverage
         coverage = self._check_citation_coverage(
             response_data,
             valid_evidence_ids,
             validation_report
         )
-        
-        # PRODUCTION REQUIREMENT: 95% minimum coverage
-        if coverage < 95.0:
+
+        # PRODUCTION REQUIREMENT: 95% minimum coverage (only meaningful when
+        # there is evidence available to cite)
+        if citation_enforcement and coverage < 95.0:
             validation_report["errors"].append(
                 f"Citation coverage {coverage:.1f}% is below required 95% threshold"
             )
@@ -201,12 +222,11 @@ class RecommendationValidator:
     def _validate_evidence_citations(
         self,
         response_data: Dict[str, Any],
-        valid_evidence_ids: Set[str],
-        report: Dict[str, Any]
+        valid_evidence_ids: Set[str]
     ) -> List[str]:
         """
         Check that all cited evidence IDs exist in evidence pack.
-        Returns list of invalid IDs.
+        Returns list of invalid IDs (the caller decides error vs. bypass).
         """
         # Collect all text fields to check
         text_fields = [
@@ -258,13 +278,52 @@ class RecommendationValidator:
         
         # Find invalid IDs
         invalid_ids = cited_ids - valid_evidence_ids
-        
-        if invalid_ids:
-            report["errors"].append(
-                f"Invalid evidence IDs: {sorted(invalid_ids)}"
-            )
-        
+
         return sorted(invalid_ids)
+
+    def strip_citations(
+        self,
+        response_data: Dict[str, Any],
+        valid_evidence_ids: Set[str]
+    ) -> Tuple[Dict[str, Any], int]:
+        """
+        Remove every [E#] token whose ID is not in valid_evidence_ids from all
+        string fields, recursively. Walking the whole tree (rather than the
+        field list in _validate_evidence_citations) guarantees no dangling
+        citation survives in any field the report might print.
+
+        Returns (cleaned_data, removed_count).
+        """
+        removed = 0
+
+        def clean(text: str) -> str:
+            nonlocal removed
+
+            def repl(match):
+                nonlocal removed
+                if f"E{match.group(1)}" in valid_evidence_ids:
+                    return match.group(0)
+                removed += 1
+                return ""
+
+            out = self.EVIDENCE_PATTERN.sub(repl, text)
+            if out != text:
+                # Tidy the whitespace holes the removals leave behind
+                out = re.sub(r' {2,}', ' ', out)
+                out = re.sub(r'\s+([.,;:!?])', r'\1', out)
+                out = out.strip()
+            return out
+
+        def walk(node):
+            if isinstance(node, dict):
+                return {k: walk(v) for k, v in node.items()}
+            if isinstance(node, list):
+                return [walk(v) for v in node]
+            if isinstance(node, str):
+                return clean(node)
+            return node
+
+        return walk(response_data), removed
     
     def _check_citation_coverage(
         self,
@@ -472,7 +531,13 @@ class RecommendationValidator:
         - Auto-corrections applied
         - Any validation errors
         - Coverage below 95%
+
+        When citation enforcement was bypassed (no evidence pack), a rewrite
+        can never improve the situation — numeric fixes are already applied
+        in-code and there are no valid IDs the model could cite.
         """
+        if validation_report.get("citation_enforcement_bypassed"):
+            return False
         return (
             validation_report.get("auto_corrected", False) or
             len(validation_report.get("errors", [])) > 0 or
