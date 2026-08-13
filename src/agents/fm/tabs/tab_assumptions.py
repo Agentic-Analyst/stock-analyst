@@ -515,7 +515,7 @@ def infer_assumptions_with_llm(json_data: Dict[str, Any]) -> Dict[str, Any]:
     # Call LLM using proper provider
     print("\n🤖 Calling LLM to infer assumptions...")
     messages = [{"role": "user", "content": prompt}]
-    response, cost = llm(messages, temperature=0.3)
+    response, cost = llm(messages, temperature=0.0)
     print(f"   💰 LLM cost: ${cost:.4f}")
     
     # Parse JSON response

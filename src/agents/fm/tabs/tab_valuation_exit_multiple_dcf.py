@@ -42,14 +42,19 @@ class ValuationExitMultipleDCFBuilder:
     - Market price comparison
     """
     
-    def __init__(self, projection_years: int = 5):
+    def __init__(self, projection_years: int = 5, exit_multiple: float = 20.0):
         """
         Initialize the Exit Multiple DCF builder.
+
+        exit_multiple: terminal EV/EBITDA — grounded per company by
+        assumption_grounding (0.8x current EV/EBITDA, clamped 8-30x); the
+        old hardcoded 20.0x applied one multiple to every sector.
         
         Args:
             projection_years: Number of projection years (default: 5)
         """
         self.projection_years = projection_years
+        self.exit_multiple = float(exit_multiple)
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -119,7 +124,7 @@ class ValuationExitMultipleDCFBuilder:
         ws.cell(row=3, column=1).font = Font(bold=True)
         # Note: Markdown specifies Assumptions!B12, but we need to add this to Assumptions tab
         # For now, use a default value and add a note
-        ws.cell(row=3, column=2, value=20.0)  # Default 20x multiple
+        ws.cell(row=3, column=2, value=self.exit_multiple)  # Grounded per company
         ws.cell(row=3, column=2).number_format = '0.0"x"'
         ws.cell(row=3, column=2).font = Font(bold=True)
         ws.cell(row=3, column=7, value="User input: exit multiple assumption")

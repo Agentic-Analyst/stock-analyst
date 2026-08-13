@@ -204,6 +204,18 @@ class FinancialModelBuilder:
         self._log("info", "[Step 1/2] Inferring forward assumptions with LLM...")
         self._log("info", "-" * 70)
         self.llm_assumptions = infer_assumptions_with_llm(self.json_data)
+
+        # Step 1b: deterministic grounding — CAPM WACC, terminal-growth clamp,
+        # trailing-anchored margin paths, company-specific exit multiple. The
+        # LLM narrates the trajectory; the parameters a bank computes
+        # mechanically are computed mechanically.
+        from .assumption_grounding import ground_assumptions
+        self.llm_assumptions, grounding_notes = ground_assumptions(
+            self.llm_assumptions, self.json_data
+        )
+        for note in grounding_notes:
+            self._log("info", f"   ⚙️ {note}")
+
         self._log("info", f"✅ Assumptions inferred:")
         self._log("info", f"   • WACC: {self.llm_assumptions.get('wacc', 0)*100:.2f}%")
         self._log("info", f"   • Terminal Growth: {self.llm_assumptions.get('terminal_growth_rate', 0)*100:.2f}%")
@@ -224,7 +236,9 @@ class FinancialModelBuilder:
         self.historical_builder = HistoricalTabBuilder()
         self.projections_builder = ProjectionsTabBuilder()
         self.perpetual_growth_dcf_builder = ValuationPerpetualGrowthDCFBuilder()
-        self.exit_multiple_dcf_builder = ValuationExitMultipleDCFBuilder()
+        self.exit_multiple_dcf_builder = ValuationExitMultipleDCFBuilder(
+            exit_multiple=self.llm_assumptions.get('exit_multiple', 20.0)
+        )
         self.sensitivity_builder = SensitivityTabBuilder()
         self.summary_builder = SummaryTabBuilder()
         

@@ -270,10 +270,29 @@ class ValuationPerpetualGrowthDCFBuilder:
         ws.cell(row=24, column=2, value='=F16*(1+$B$23)')  # FCF_FY5 * (1 + g)
         ws.cell(row=24, column=2).number_format = ExcelFormats.CURRENCY
         
-        # Row 25: Terminal Value (Un-discounted)
-        ws.cell(row=25, column=1, value="Terminal Value (Un-discounted)")
-        ws.cell(row=25, column=2, value='=B24/($B$12-$B$23)')  # Terminal FCF / (WACC - g)
+        # Row 25: Terminal Value — H-model fade.
+        # A Gordon TV that slams FY5 growth to 2.5% overnight structurally
+        # undervalues long-duration growers (the whole reason 5-year DCFs on
+        # GOOG/NVDA read "50% overvalued"). The H-model lets growth fade
+        # linearly from the FY5 rate (proxy: FY5 revenue growth, capped 20%)
+        # to terminal g over ~5 more years:
+        #   TV = FCF5 x [(1+g) + H x (g5 - g)] / (WACC - g),  H = 2.5
+        # Reduces exactly to Gordon when g5 = g (mature names unaffected).
+        # Applied only when FCF5 > 0 — a negative terminal FCF falls back to
+        # plain Gordon and is caught by the valuation warning rails.
+        ws.cell(row=25, column=1, value="Terminal Value (H-model fade)")
+        ws.cell(
+            row=25, column=2,
+            value=(
+                '=IF(F16>0,'
+                'F16*((1+$B$23)+2.5*(MIN(MAX(LLM_Inferred!F4,$B$23),0.2)-$B$23))'
+                '/($B$12-$B$23),'
+                'B24/($B$12-$B$23))'
+            ),
+        )
         ws.cell(row=25, column=2).number_format = ExcelFormats.CURRENCY
+        ws.cell(row=25, column=7, value="H-model: growth fades g5 → g over years 6-10")
+        ws.cell(row=25, column=7).font = Font(italic=True, size=9)
         
         # Row 26: PV of Terminal Value
         ws.cell(row=26, column=1, value="PV of Terminal Value")
