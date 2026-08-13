@@ -181,7 +181,7 @@ class ValuationPerpetualGrowthDCFBuilder:
         ws.cell(row=13, column=1, value="")
         
         # Section header
-        ws.cell(row=14, column=1, value="B. FCF DISCOUNTING (FY1-FY5)")
+        ws.cell(row=14, column=1, value="B. FCF DISCOUNTING (FY1-FY10 — EXPLICIT FY1-5, STAGE-2 FADE FY6-10)")
         ws.cell(row=14, column=1).font = Font(bold=True, size=11, underline="single")
         
         # Row 15: Year headers (B-F columns for FY1-FY5)
@@ -227,10 +227,49 @@ class ValuationPerpetualGrowthDCFBuilder:
             ws.cell(row=18, column=col, value=formula)
             ws.cell(row=18, column=col).number_format = ExcelFormats.CURRENCY
         
-        # Row 19: Sum of PV of FCFs
-        ws.cell(row=19, column=1, value="Sum of PV of FCFs")
+        # Columns G-K: STAGE 2 (FY6-FY10). A 5-year horizon structurally
+        # undervalues long-duration growers, so the explicit window extends
+        # to 10 years: FCF grows at a rate that fades linearly from the FY5
+        # revenue-growth rate (capped 20%) down to terminal g by FY10. Only
+        # applied when FY5 FCF is positive — negative-FCF names contribute 0
+        # here and are handled by the terminal fallback + warning rails.
+        gs_expr = 'MIN(MAX(LLM_Inferred!$F$4,Assumptions!$B$30),0.2)'
+        for j in range(1, 6):  # FY6..FY10 -> columns G..K
+            col = 6 + j
+            col_letter = chr(64 + col)
+            prev_letter = chr(64 + col - 1)
+            period = 5 + j
+            frac = j / 5.0
+
+            # Year header continues the sequence numerically
+            ws.cell(row=15, column=col, value=f'=Projections!$F$2+{j}')
+            ws.cell(row=15, column=col).number_format = '0'
+            ws.cell(row=15, column=col).font = Font(bold=True)
+            ws.cell(row=15, column=col).alignment = Alignment(horizontal="center")
+
+            # Fading-growth FCF
+            fade_g = f'({gs_expr}+{frac:.1f}*(Assumptions!$B$30-{gs_expr}))'
+            ws.cell(
+                row=16, column=col,
+                value=f'=IF($F$16>0,{prev_letter}16*(1+{fade_g}),0)'
+            )
+            ws.cell(row=16, column=col).number_format = ExcelFormats.CURRENCY
+
+            # Discount factor
+            ws.cell(
+                row=17, column=col,
+                value=f'=1/((1+$B$12)^({period}-Sensitivity!$B$4))'
+            )
+            ws.cell(row=17, column=col).number_format = '0.0000'
+
+            # PV
+            ws.cell(row=18, column=col, value=f'={col_letter}16*{col_letter}17')
+            ws.cell(row=18, column=col).number_format = ExcelFormats.CURRENCY
+
+        # Row 19: Sum of PV of FCFs (all ten years)
+        ws.cell(row=19, column=1, value="Sum of PV of FCFs (FY1-FY10)")
         ws.cell(row=19, column=1).font = Font(bold=True)
-        ws.cell(row=19, column=2, value='=SUM(B18:F18)')  # Sum across FY1-FY5
+        ws.cell(row=19, column=2, value='=SUM(B18:K18)')
         ws.cell(row=19, column=2).number_format = ExcelFormats.CURRENCY
         ws.cell(row=19, column=2).font = Font(bold=True)
     
@@ -265,41 +304,29 @@ class ValuationPerpetualGrowthDCFBuilder:
         ws.cell(row=23, column=2, value='=Assumptions!B30')  # Updated: row 30 in Assumptions
         ws.cell(row=23, column=2).number_format = '0.00%'
         
-        # Row 24: Terminal FCF (Year n+1)
-        ws.cell(row=24, column=1, value="Terminal FCF (Year n+1)")
-        ws.cell(row=24, column=2, value='=F16*(1+$B$23)')  # FCF_FY5 * (1 + g)
+        # Row 24: Terminal FCF (year 11 when stage 2 ran, year 6 otherwise).
+        # With the explicit FY6-10 fade, the terminal year is FY10 (cell K16)
+        # growing at terminal g. Negative-FCF names never populate stage 2,
+        # so they fall back to the FY5-based Gordon and hit the warning rails.
+        ws.cell(row=24, column=1, value="Terminal FCF (next year after horizon)")
+        ws.cell(row=24, column=2, value='=IF($F$16>0,K16,F16)*(1+$B$23)')
         ws.cell(row=24, column=2).number_format = ExcelFormats.CURRENCY
-        
-        # Row 25: Terminal Value — H-model fade.
-        # A Gordon TV that slams FY5 growth to 2.5% overnight structurally
-        # undervalues long-duration growers (the whole reason 5-year DCFs on
-        # GOOG/NVDA read "50% overvalued"). The H-model lets growth fade
-        # linearly from the FY5 rate (proxy: FY5 revenue growth, capped 20%)
-        # to terminal g over ~5 more years:
-        #   TV = FCF5 x [(1+g) + H x (g5 - g)] / (WACC - g),  H = 2.5
-        # Reduces exactly to Gordon when g5 = g (mature names unaffected).
-        # Applied only when FCF5 > 0 — a negative terminal FCF falls back to
-        # plain Gordon and is caught by the valuation warning rails.
-        ws.cell(row=25, column=1, value="Terminal Value (H-model fade)")
-        ws.cell(
-            row=25, column=2,
-            value=(
-                '=IF(F16>0,'
-                'F16*((1+$B$23)+2.5*(MIN(MAX(LLM_Inferred!F4,$B$23),0.2)-$B$23))'
-                '/($B$12-$B$23),'
-                'B24/($B$12-$B$23))'
-            ),
-        )
+
+        # Row 25: Terminal Value (Gordon on the post-fade terminal year)
+        ws.cell(row=25, column=1, value="Terminal Value (Un-discounted)")
+        ws.cell(row=25, column=2, value='=B24/($B$12-$B$23)')
         ws.cell(row=25, column=2).number_format = ExcelFormats.CURRENCY
-        ws.cell(row=25, column=7, value="H-model: growth fades g5 → g over years 6-10")
+        ws.cell(row=25, column=7, value="Two-stage: explicit fade FY6-10, Gordon thereafter")
         ws.cell(row=25, column=7).font = Font(italic=True, size=9)
-        
-        # Row 26: PV of Terminal Value
+
+        # Row 26: PV of Terminal Value — discounted over the horizon that was
+        # actually used (10 years with stage 2, 5 without).
         ws.cell(row=26, column=1, value="PV of Terminal Value")
         ws.cell(row=26, column=1).font = Font(bold=True)
-        # Professional formula: Use COLUMNS to dynamically count projection periods
-        # This discounts TV by the exact number of projected periods
-        ws.cell(row=26, column=2, value='=B25/(1+$B$12)^(COLUMNS($B$16:$F$16))')
+        ws.cell(
+            row=26, column=2,
+            value='=B25/(1+$B$12)^(IF($F$16>0,10,5)-Sensitivity!$B$4)'
+        )
         ws.cell(row=26, column=2).number_format = ExcelFormats.CURRENCY
         ws.cell(row=26, column=2).font = Font(bold=True)
         

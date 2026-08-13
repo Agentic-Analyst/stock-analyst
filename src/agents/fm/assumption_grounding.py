@@ -205,4 +205,24 @@ def ground_assumptions(
         )
     a["exit_multiple"] = exit_m
 
+    # 5. Market-comps leg parameters (the third method on the football
+    #    field): the company's own forward-looking multiples, mildly
+    #    de-rated, applied to FY2 projections. P/S covers pre-EBITDA names.
+    ev_eb = vm.get("enterprise_to_ebitda")
+    a["comps_ev_ebitda"] = (
+        _clamp(0.9 * float(ev_eb), 6.0, 25.0) if ev_eb and ev_eb > 0 else 0.0
+    )
+    ps = vm.get("price_to_sales")
+    a["comps_ps"] = _clamp(0.9 * float(ps), 0.5, 40.0) if ps and ps > 0 else 0.0
+    fg = company_data.get("forward_guidance", {}) or {}
+    tgt = fg.get("target_mean_price")
+    a["analyst_target_mean"] = float(tgt) if tgt and tgt > 0 else 0.0
+    if a["comps_ev_ebitda"] or a["comps_ps"]:
+        notes.append(
+            f"Comps leg: EV/EBITDA {a['comps_ev_ebitda']:.1f}x / "
+            f"P/S {a['comps_ps']:.1f}x on FY2 projections"
+            + (f"; analyst mean target ${a['analyst_target_mean']:.2f}"
+               if a["analyst_target_mean"] else "")
+        )
+
     return a, notes

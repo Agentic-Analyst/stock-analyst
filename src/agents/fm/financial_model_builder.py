@@ -240,7 +240,11 @@ class FinancialModelBuilder:
             exit_multiple=self.llm_assumptions.get('exit_multiple', 20.0)
         )
         self.sensitivity_builder = SensitivityTabBuilder()
-        self.summary_builder = SummaryTabBuilder()
+        self.summary_builder = SummaryTabBuilder(
+            comps_ev_ebitda=self.llm_assumptions.get('comps_ev_ebitda', 0.0),
+            comps_ps=self.llm_assumptions.get('comps_ps', 0.0),
+            analyst_target=self.llm_assumptions.get('analyst_target_mean', 0.0),
+        )
         
         # Build tabs in sequence
         self._log("info", "[1/9] Building Raw tab...")

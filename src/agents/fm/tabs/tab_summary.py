@@ -36,9 +36,18 @@ class SummaryTabBuilder:
     with all key metrics, checks, and comparisons in one place.
     """
     
-    def __init__(self):
-        """Initialize the Summary builder."""
-        pass
+    def __init__(self, comps_ev_ebitda: float = 0.0, comps_ps: float = 0.0,
+                 analyst_target: float = 0.0):
+        """
+        Initialize the Summary builder.
+
+        comps_ev_ebitda / comps_ps: grounded market-multiple parameters for
+        the comps leg (0 = unavailable). analyst_target: consensus mean
+        price target, shown as a reference line (0 = unavailable).
+        """
+        self.comps_ev_ebitda = float(comps_ev_ebitda or 0.0)
+        self.comps_ps = float(comps_ps or 0.0)
+        self.analyst_target = float(analyst_target or 0.0)
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -243,7 +252,20 @@ class SummaryTabBuilder:
         # Row 26: Average of Methods
         ws.cell(row=26, column=1, value="Average of Methods (Per-Share)")
         ws.cell(row=26, column=1).font = Font(bold=True, size=12)
-        ws.cell(row=26, column=2, value="=AVERAGE($B$18,$B$22)")
+        # Blended fair value over the VALID legs (10Y DCF, exit multiple,
+        # market comps): a leg only enters the blend when positive, so a
+        # broken/unfit method cannot drag the headline below zero. When no
+        # leg is valid, fall back to the plain DCF average — the negative
+        # number then trips the UNRELIABLE valuation rail downstream.
+        ws.cell(
+            row=26, column=2,
+            value=(
+                '=IF((($B$18>0)+($B$22>0)+($B$30>0))=0,'
+                'AVERAGE($B$18,$B$22),'
+                '(MAX($B$18,0)+MAX($B$22,0)+MAX($B$30,0))'
+                '/(($B$18>0)+($B$22>0)+($B$30>0)))'
+            ),
+        )
         ws.cell(row=26, column=2).number_format = '$0.00'
         ws.cell(row=26, column=2).font = Font(bold=True, size=12)
         ws.cell(row=26, column=2).fill = PatternFill(
@@ -287,9 +309,40 @@ class SummaryTabBuilder:
         38: FCF Yield on EV - Perpetual = IFERROR(B35/B17, "")
         39: FCF Yield on EV - Exit Multiple = IFERROR(B35/B20, "")
         """
-        # Blank rows
-        ws.cell(row=30, column=1, value="")
-        ws.cell(row=31, column=1, value="")
+        # Row 30: Market-comps leg — the company's own (de-rated) forward
+        # multiple applied to FY2 projections. EV/EBITDA when FY2 EBITDA is
+        # positive; P/S fallback for pre-EBITDA names; 0 when unavailable.
+        ws.cell(row=30, column=1, value="Value per Share (Market Comps)")
+        ws.cell(row=30, column=1).font = Font(bold=True, size=11)
+        ps_term = (
+            f'{self.comps_ps:.2f}*Projections!$C$3/$B$8'
+            if self.comps_ps > 0 else '0'
+        )
+        if self.comps_ev_ebitda > 0:
+            comps_formula = (
+                f'=IF(Projections!$C$21>0,'
+                f'({self.comps_ev_ebitda:.2f}*Projections!$C$21'
+                f'+$B$14-$B$15+$B$16)/$B$8,'
+                f'{ps_term})'
+            )
+        elif self.comps_ps > 0:
+            comps_formula = f'={ps_term}'
+        else:
+            comps_formula = None
+        if comps_formula:
+            ws.cell(row=30, column=2, value=comps_formula)
+        else:
+            ws.cell(row=30, column=2, value=0)
+        ws.cell(row=30, column=2).number_format = '$0.00'
+        ws.cell(row=30, column=2).font = Font(bold=True, size=11)
+        ws.cell(row=30, column=7,
+                value=f"EV/EBITDA {self.comps_ev_ebitda:.1f}x / P/S {self.comps_ps:.1f}x on FY2 (0 = n/a)")
+        ws.cell(row=30, column=7).font = Font(italic=True, size=9)
+
+        # Row 31: analyst consensus, reference only (never in the blend)
+        ws.cell(row=31, column=1, value="Analyst Consensus Target (reference)")
+        ws.cell(row=31, column=2, value=self.analyst_target if self.analyst_target > 0 else 0)
+        ws.cell(row=31, column=2).number_format = '$0.00'
         ws.cell(row=32, column=1, value="")
         
         # Row 33: Revenue (FY5)
