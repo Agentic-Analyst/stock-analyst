@@ -212,23 +212,46 @@ class ProjectionsTabBuilder:
           - Scales SG&A by revenue intensity from Historical FY0
         Row 9: Operating Income (EBIT) = Gross Profit - R&D - SG&A
         """
-        # Row 7: R&D
+        # Rows 7-8: R&D and SG&A.
+        #
+        # Total opex is DERIVED from the LLM's operating-margin path
+        # (LLM_Inferred row 7): opex_total = Gross Profit - Revenue x OpMargin,
+        # split between R&D and SG&A in their historical proportion. The old
+        # base-year scaling (Historical FY0 ratio x revenue) froze the most
+        # investment-heavy year in company history into all five projection
+        # years — for a hypergrowth name like CBRS that meant R&D at 48% of
+        # revenue forever, EBIT negative in FY5, a negative terminal value and
+        # a negative "fair value". The margin path already encodes the
+        # convergence story; the projections must actually use it.
+        # MAX(0, ...) guards the degenerate case where the op-margin path
+        # exceeds gross margin; IFERROR falls back to base-year scaling when
+        # the LLM path is unavailable.
         ws.cell(row=7, column=1, value="R&D")
         for i in range(self.projection_years):
             col = 2 + i
             col_letter = chr(64 + col)  # B, C, D, E, F
-            
-            formula = f'=Historical!$F$6*({col_letter}3/Historical!$F$3)'
+            llm_col = chr(66 + i)       # LLM_Inferred FY1..FY5 = B..F
+
+            formula = (
+                f'=IFERROR(MAX(0,{col_letter}5-{col_letter}3*LLM_Inferred!{llm_col}7)'
+                f'*Historical!$F$6/(Historical!$F$6+Historical!$F$7),'
+                f'Historical!$F$6*({col_letter}3/Historical!$F$3))'
+            )
             ws.cell(row=7, column=col, value=formula)
             ws.cell(row=7, column=col).number_format = ExcelFormats.CURRENCY
-        
+
         # Row 8: SG&A
         ws.cell(row=8, column=1, value="SG&A")
         for i in range(self.projection_years):
             col = 2 + i
             col_letter = chr(64 + col)  # B, C, D, E, F
-            
-            formula = f'=Historical!$F$7*({col_letter}3/Historical!$F$3)'
+            llm_col = chr(66 + i)
+
+            formula = (
+                f'=IFERROR(MAX(0,{col_letter}5-{col_letter}3*LLM_Inferred!{llm_col}7)'
+                f'*Historical!$F$7/(Historical!$F$6+Historical!$F$7),'
+                f'Historical!$F$7*({col_letter}3/Historical!$F$3))'
+            )
             ws.cell(row=8, column=col, value=formula)
             ws.cell(row=8, column=col).number_format = ExcelFormats.CURRENCY
         
@@ -291,13 +314,24 @@ class ProjectionsTabBuilder:
             ws.cell(row=12, column=col, value=formula)
             ws.cell(row=12, column=col).number_format = ExcelFormats.CURRENCY
         
-        # Row 13: Capital Expenditure (negative)
-        ws.cell(row=13, column=1, value="Capital Expenditure")
+        # Row 13: Capital Expenditure (negative).
+        #
+        # Capex intensity GLIDES from the base-year ratio to a maturity level
+        # of ~1.1x D&A by FY5 (the standard convergence assumption: a
+        # steady-state business spends roughly its depreciation plus a growth
+        # allowance). Holding the base-year ratio flat — 75% of revenue for a
+        # company mid build-out — compounded capex to ~$2.4B on $3.2B revenue
+        # in FY5 and single-handedly forced FCF (and the DCF) deeply negative.
         for i in range(self.projection_years):
             col = 2 + i
             col_letter = chr(64 + col)  # B, C, D, E, F
-            
-            formula = f'=Historical!$F$24*({col_letter}3/Historical!$F$3)'
+            frac = i / max(1, self.projection_years - 1)  # 0 .. 1 across FY1..FY5
+
+            formula = (
+                f'={col_letter}3*((Historical!$F$24/Historical!$F$3)*{1 - frac:.2f}'
+                f'-1.1*ABS(Historical!$F$18)/Historical!$F$3*{frac:.2f})'
+            )
+            ws.cell(row=13, column=1, value="Capital Expenditure")
             ws.cell(row=13, column=col, value=formula)
             ws.cell(row=13, column=col).number_format = ExcelFormats.CURRENCY
     
@@ -613,8 +647,10 @@ class ProjectionsTabBuilder:
         
         # Beginning Net PP&E
         ws.cell(row=current_row, column=1, value="Beginning Net PP&E")
-        # B column: from Historical F25 (Net PP&E row in Historical tab)
-        ws.cell(row=current_row, column=2, value='=Historical!$F$25')
+        # B column: from Historical F25 (Net PP&E row in Historical tab).
+        # ABS: the source row can carry a cash-flow sign convention; net PP&E
+        # on a balance sheet is positive.
+        ws.cell(row=current_row, column=2, value='=ABS(Historical!$F$25)')
         ws.cell(row=current_row, column=2).number_format = ExcelFormats.CURRENCY
         # C-F columns: prior year's Ending PP&E
         for i in range(1, self.projection_years):
@@ -625,12 +661,14 @@ class ProjectionsTabBuilder:
             ws.cell(row=current_row, column=col).number_format = ExcelFormats.CURRENCY
         current_row += 1
         
-        # + Capex
+        # + Capex (additions are POSITIVE in a PP&E roll-forward; row 13
+        # carries the cash-flow sign, so negate it — adding the raw negative
+        # capex made PP&E spiral to -$8.9B over five years)
         ws.cell(row=current_row, column=1, value="+ Capex")
         for i in range(self.projection_years):
             col = 2 + i
             col_letter = chr(64 + col)
-            formula = f'={col_letter}13'  # Reference Capex from row 13
+            formula = f'=-{col_letter}13'  # Capex additions as positive
             ws.cell(row=current_row, column=col, value=formula)
             ws.cell(row=current_row, column=col).number_format = ExcelFormats.CURRENCY
         current_row += 1

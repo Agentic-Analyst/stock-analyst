@@ -131,7 +131,7 @@ class SummaryTabBuilder:
         # Row 10: Market Capitalization
         ws.cell(row=10, column=1, value="Market Capitalization")
         ws.cell(row=10, column=2, value="=B8*B9")
-        ws.cell(row=10, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=10, column=2).number_format = '[$$-409]#,##0.0,,," B"'
     
     def _setup_perpetual_dcf_outputs(self, ws: Worksheet) -> None:
         """
@@ -153,28 +153,28 @@ class SummaryTabBuilder:
         ws.cell(row=13, column=1, value="Equity Value (Perpetual DCF)")
         ws.cell(row=13, column=1).font = Font(bold=True)
         ws.cell(row=13, column=2, value="='Valuation (DCF)'!$B$33")
-        ws.cell(row=13, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=13, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
         # Row 14: Cash & Equivalents
         ws.cell(row=14, column=1, value="Cash & Equivalents (from DCF)")
         ws.cell(row=14, column=2, value="='Valuation (DCF)'!$B$30")
-        ws.cell(row=14, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=14, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
         # Row 15: Total Debt
         ws.cell(row=15, column=1, value="Total Debt (from DCF)")
         ws.cell(row=15, column=2, value="='Valuation (DCF)'!$B$31")
-        ws.cell(row=15, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=15, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
         # Row 16: Investments
         ws.cell(row=16, column=1, value="Investments / Non-operating")
         ws.cell(row=16, column=2, value="='Valuation (DCF)'!$B$32")
-        ws.cell(row=16, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=16, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
         # Row 17: Enterprise Value (Perpetual DCF)
         ws.cell(row=17, column=1, value="Enterprise Value (Perpetual DCF)")
         ws.cell(row=17, column=1).font = Font(bold=True)
         ws.cell(row=17, column=2, value="=B13-B14+B15-B16")
-        ws.cell(row=17, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=17, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         ws.cell(row=17, column=2).font = Font(bold=True)
         
         # Row 18: Value per Share (Perpetual DCF)
@@ -205,13 +205,13 @@ class SummaryTabBuilder:
         ws.cell(row=20, column=1, value="Enterprise Value (Exit Multiple DCF)")
         ws.cell(row=20, column=1).font = Font(bold=True)
         ws.cell(row=20, column=2, value="='Valuation (Exit Multiple)'!$B$17")
-        ws.cell(row=20, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=20, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         ws.cell(row=20, column=2).font = Font(bold=True)
         
         # Row 21: Equity Value (Exit Multiple DCF)
         ws.cell(row=21, column=1, value="Equity Value (Exit Multiple DCF)")
         ws.cell(row=21, column=2, value="='Valuation (Exit Multiple)'!$B$22")
-        ws.cell(row=21, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=21, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
         # Row 22: Value per Share (Exit Multiple DCF)
         ws.cell(row=22, column=1, value="Value per Share (Exit Multiple DCF)")
@@ -272,7 +272,7 @@ class SummaryTabBuilder:
         # Row 29: Market Enterprise Value
         ws.cell(row=29, column=1, value="Market Enterprise Value")
         ws.cell(row=29, column=2, value="=$B$10-$B$14+$B$15-$B$16")
-        ws.cell(row=29, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=29, column=2).number_format = '[$$-409]#,##0.0,,," B"'
     
     def _setup_sanity_metrics(self, ws: Worksheet) -> None:
         """
@@ -295,17 +295,17 @@ class SummaryTabBuilder:
         # Row 33: Revenue (FY5)
         ws.cell(row=33, column=1, value="Revenue (FY5)")
         ws.cell(row=33, column=2, value="='Projections'!$F$3")
-        ws.cell(row=33, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=33, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
         # Row 34: EBITDA (FY5)
         ws.cell(row=34, column=1, value="EBITDA (FY5)")
         ws.cell(row=34, column=2, value="='Projections'!$F$21")
-        ws.cell(row=34, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=34, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
         # Row 35: FCF (FY5)
         ws.cell(row=35, column=1, value="FCF (FY5)")
         ws.cell(row=35, column=2, value="='Projections'!$F$19")
-        ws.cell(row=35, column=2).number_format = '[$$-409]#,,0.0,," B"'
+        ws.cell(row=35, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
         # Row 36: EV/EBITDA - Perpetual
         ws.cell(row=36, column=1, value="EV/EBITDA — Perpetual")
