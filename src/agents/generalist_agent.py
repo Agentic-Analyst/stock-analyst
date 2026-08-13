@@ -73,6 +73,10 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 - Only run write_report / build_model again if the user explicitly asks for a fresh run, or if no prior analysis for that company exists in the context.
 - The follow-ups you offer at the end of an answer (summarize, break out cases, compare peers) must be ones you can actually deliver cheaply next turn via read_report / compare_tickers — so when the user takes you up on them, DELIVER, don't re-run the pipeline.
 
+## CRITICAL: follow-ups inherit the subject from the conversation context
+- When the current message does NOT name a company but the conversation context DOES ("build a financial model for me", "run the full analysis", "what about the risks", "compare it with AMD"), the subject is the most recent company/ticker in the context — look for the "Subject:", "Company:" or ticker mentions in the [Recent conversation for context] block. PROCEED with that company immediately; open your answer by naming it ("Building the DCF model for Cerebras (CBRS)…") so the user can correct you if you guessed wrong.
+- Asking "which company?" when the context plainly shows one is a serious failure — it makes the product feel like it has no memory. Only ask when the context contains NO company at all, or several and the message is genuinely ambiguous between them.
+
 ## CRITICAL: never analyze without a real company
 - The analysis tools (get_financials, build_model, analyze_news, write_report) need a REAL ticker. NEVER call them with a placeholder like "CHAT", "PENDING", or a guess.
 - If the user asks for analysis but you don't yet know which company (e.g. a vague "give me a detailed analysis" with no company mentioned and nothing in the conversation context), DO NOT run any analysis tool. Instead, ask them which company/ticker they want — briefly and helpfully. A wrong or empty analysis is far worse than a quick clarifying question.
@@ -412,6 +416,12 @@ class GeneralistAgent:
             # stored results instead of re-running the whole pipeline. Without
             # this, the next turn only sees a 500-char snippet and regenerates.
             analysis_results = self._collect_analysis_results()
+            # Record the subject ticker so the NEXT turn's context can inherit
+            # it ("build a financial model for me" after a Cerebras discussion
+            # must resolve to CBRS, not a clarifying question).
+            if self.ctx.ticker:
+                analysis_results = analysis_results or {}
+                analysis_results["ticker"] = self.ctx.ticker
             # Link the turn to its persisted answer file (per-turn answers stop
             # multi-turn sessions overwriting each other).
             if self.ctx.base_path is not None:
@@ -463,8 +473,19 @@ class GeneralistAgent:
         try:
             na = getattr(state, "news_analysis", None)
             if na is not None:
-                catalysts = [getattr(c, "title", str(c)) for c in (getattr(na, "catalysts", None) or [])][:5]
-                risks = [getattr(r, "title", str(r)) for r in (getattr(na, "risks", None) or [])][:5]
+                def _item_brief(item):
+                    # Catalysts/risks arrive as rich dicts; store ONE readable
+                    # line, not str(dict) — the session summary feeds the next
+                    # turn's context and raw dumps drowned the subject signal.
+                    if isinstance(item, dict):
+                        return (item.get("description") or item.get("title")
+                                or item.get("statement") or str(item)[:160])
+                    return (getattr(item, "title", None)
+                            or getattr(item, "description", None)
+                            or str(item)[:160])
+
+                catalysts = [_item_brief(c) for c in (getattr(na, "catalysts", None) or [])][:5]
+                risks = [_item_brief(r) for r in (getattr(na, "risks", None) or [])][:5]
                 results["news_summary"] = {
                     "overall_sentiment": getattr(na, "overall_sentiment", None),
                     "top_catalysts": catalysts,

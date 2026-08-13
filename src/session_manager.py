@@ -255,6 +255,9 @@ class SessionManager:
             
             summary_lines.append(f"**Conversation {i}** ({timestamp}):")
             summary_lines.append(f"- User Query: \"{user_query}\"")
+            turn_ticker = (analysis_results or {}).get("ticker")
+            if turn_ticker:
+                summary_lines.append(f"- Subject: {turn_ticker}")
             summary_lines.append(f"- Status: {status}")
             summary_lines.append(f"- Agents Used: {', '.join(agents) if agents else 'None (direct answer)'}")
             if findings:
@@ -285,19 +288,37 @@ class SessionManager:
                     if "overall_sentiment" in news:
                         summary_lines.append(f"  - Overall Sentiment: {news.get('overall_sentiment', 'N/A')}")
                     
-                    # Catalysts
+                    # Catalysts / risks: render one readable line each.
+                    # (These are rich dicts — dumping them raw buried the
+                    # context signal under ~20KB of quotes and reasoning,
+                    # and follow-ups stopped inheriting the subject.)
+                    def _brief(item):
+                        if isinstance(item, dict):
+                            desc = (item.get("description")
+                                    or item.get("statement")
+                                    or "")
+                            if not desc:
+                                return str(item)[:160]
+                            tags = []
+                            if item.get("severity"):
+                                tags.append(f"severity: {item['severity']}")
+                            if item.get("timeline"):
+                                tags.append(str(item["timeline"]))
+                            return desc + (f" [{', '.join(tags)}]" if tags else "")
+                        return str(item)[:200]
+
                     catalysts = news.get("top_catalysts", [])
                     if catalysts:
                         summary_lines.append(f"  - **Key Catalysts** ({len(catalysts)}):")
                         for catalyst in catalysts[:3]:  # Top 3
-                            summary_lines.append(f"    • {catalyst}")
-                    
+                            summary_lines.append(f"    • {_brief(catalyst)}")
+
                     # Risks
                     risks = news.get("top_risks", [])
                     if risks:
                         summary_lines.append(f"  - **Key Risks** ({len(risks)}):")
                         for risk in risks[:3]:  # Top 3
-                            summary_lines.append(f"    • {risk}")
+                            summary_lines.append(f"    • {_brief(risk)}")
                 
                 # Report info
                 report = analysis_results.get("report", {})
