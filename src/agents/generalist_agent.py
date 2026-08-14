@@ -314,6 +314,17 @@ class GeneralistAgent:
                         _status = _rd.get("status", "ok")
                         _note = _rd.get("note") or _rd.get("error") or ""
                         self._log(f"[SUPERVISOR]    ↳ {call.name}: {_status}{(' — ' + str(_note)[:120]) if _note else ''}")
+                        # Surface the FACTS this tool just established so the
+                        # waiting user sees real numbers arriving instead of a
+                        # spinner. Same marker channel as [CHART_DIRECTIVE]:
+                        # api-runner lifts these out and forwards them as
+                        # `finding` SSE events. Facts only — never verdicts.
+                        from agents.findings import extract_findings
+                        for _f in extract_findings(call.name, _rd):
+                            self._log(
+                                "[FINDING] "
+                                + json.dumps(_f, ensure_ascii=False, separators=(",", ":"))
+                            )
                     except Exception:
                         pass
                     # Flag every tool result as data-not-instructions before it
