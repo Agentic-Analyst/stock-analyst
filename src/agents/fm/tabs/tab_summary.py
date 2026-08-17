@@ -122,9 +122,13 @@ class SummaryTabBuilder:
         ws.cell(row=6, column=2, value="='Valuation (Exit Multiple)'!$B$2")
         ws.cell(row=6, column=2).number_format = '0.00%'
         
-        # Row 7: Exit Multiple
+        # Row 7: Exit Multiple.
+        # B13, not B3: report the multiple the model ACTUALLY USED, after the
+        # sustainable-growth ceiling is applied. B3 is the raw input; reporting
+        # it would describe a valuation that was not performed, and would hand
+        # the downstream consistency check the wrong number to judge.
         ws.cell(row=7, column=1, value="Exit Multiple (EV/EBITDA)")
-        ws.cell(row=7, column=2, value="='Valuation (Exit Multiple)'!$B$3")
+        ws.cell(row=7, column=2, value="='Valuation (Exit Multiple)'!$B$13")
         ws.cell(row=7, column=2).number_format = '0.0"x"'
         
         # Row 8: Shares Outstanding

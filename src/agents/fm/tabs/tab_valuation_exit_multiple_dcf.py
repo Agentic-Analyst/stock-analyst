@@ -209,9 +209,56 @@ class ValuationExitMultipleDCFBuilder:
         ws.cell(row=12, column=2).number_format = ExcelFormats.CURRENCY
         ws.cell(row=12, column=2).font = Font(bold=True)
         
-        # Row 13: Exit Multiple
+        # Row 13: Exit Multiple — SELF-LIMITING.
+        #
+        # The input ($B$3) is 0.8x what the company trades at TODAY. That embeds
+        # today's growth expectations, and applying it to a terminal year where
+        # growth has already decayed to ~2.5% assumes no multiple compression at
+        # all. Across 39 audited production models this is what drove the exit
+        # leg far above the perpetuity leg — median spread 1.99x, up to 54x —
+        # before the two were averaged into a fair value neither supported.
+        #
+        # A terminal multiple is only defensible if some sustainable growth rate
+        # justifies it. Inverting M = r(1+g)/(WACC-g) at g = 4% (long-run nominal
+        # GDP) gives the highest multiple that is not implicitly claiming the
+        # company outgrows the economy forever:
+        #
+        #   r       = terminal FCF / terminal EBITDA  =  $F$7 / $B$12
+        #   ceiling = r * 1.04 / (WACC - 0.04)
+        #
+        # MIN() so this can only ever REDUCE the multiple, never inflate it.
+        #
+        # GATED on r >= 30%, and that gate is deliberately STRICTER than the 15%
+        # the steady-state warning uses. Warning wrongly costs a stray caveat;
+        # clamping wrongly silently rewrites a valuation, so this acts only where
+        # the projection is clearly sound.
+        #
+        # At steady state FCF/EBITDA = (1 - D&A/EBITDA)(1 - tax), so a 30% floor
+        # still admits a business whose D&A is 60% of EBITDA — genuinely
+        # capital-intensive names pass. In the audit the sane models clustered at
+        # 54-92% and the broken ones at 1.3-9.6%; the two marginal cases (CBRS
+        # 17.8%, GOOGL 25.1%) both belonged to already-broken valuations and
+        # would have been clamped to absurd 2.6x and 3.7x multiples under a
+        # looser gate.
+        #
+        # Where conversion is below the gate, capex never normalises to D&A, so
+        # the "terminal" year is not steady state and the ceiling is computed
+        # from garbage — EOG's works out at 0.56x, which would clamp it to $5.10
+        # against a $134.74 market price. The legs would converge on nonsense.
+        # Convergence is not correctness. There the raw input is left untouched
+        # and fm/terminal_value.py reports the projection as unusable instead.
+        #
+        # WACC must also sit comfortably above the 4% cap or the denominator
+        # collapses.
         ws.cell(row=13, column=1, value="Exit Multiple (EV/EBITDA)")
-        ws.cell(row=13, column=2, value='=$B$3')  # Reference exit multiple input
+        ws.cell(
+            row=13, column=2,
+            value=(
+                '=IF(AND($B$12>0,$B$2>0.045,$F$7/$B$12>=0.30),'
+                'MIN($B$3,($F$7/$B$12)*1.04/($B$2-0.04)),'
+                '$B$3)'
+            ),
+        )
         ws.cell(row=13, column=2).number_format = '0.0"x"'
         
         # Row 14: Terminal Value (Un-discounted)
