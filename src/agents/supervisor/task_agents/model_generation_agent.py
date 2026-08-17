@@ -213,33 +213,15 @@ async def model_generation_agent(
                     assumptions["terminal_growth"] = terminal_growth
                 if exit_multiple is not None:
                     assumptions["exit_multiple"] = exit_multiple
-                # The exit multiple the PERPETUITY implicitly assumes, derived
-                # from first principles rather than read off a diagnostic row:
-                #
-                #     TV      = FCF_terminal * (1 + g) / (WACC - g)
-                #     implied = TV / EBITDA_terminal
-                #
-                # Terminal value is assumed TWICE in this model — once by the
-                # perpetuity formula and once as an explicit exit multiple — and
-                # those two imply each other. When they disagree the model
-                # contradicts itself, and that contradiction is the mechanical
-                # reason the two valuation legs diverge.
-                #
-                # NOTE: the workbook's "EV/EBITDA — Perpetual" row is NOT this.
-                # It divides TODAY's enterprise value by terminal EBITDA, which
-                # is a forward multiple on present value, not a terminal
-                # multiple. Reading it as the implied exit multiple understates
-                # it (5.1x vs the true 6.7x for META) and misstates the gap.
-                try:
-                    if (fcf_terminal and ebitda_terminal and wacc is not None
-                            and terminal_growth is not None
-                            and wacc > terminal_growth and ebitda_terminal > 0):
-                        tv = fcf_terminal * (1 + terminal_growth) / (wacc - terminal_growth)
-                        implied = tv / ebitda_terminal
-                        if implied > 0:
-                            assumptions["implied_exit_multiple_perpetual"] = implied
-                except (TypeError, ZeroDivisionError):
-                    pass
+                # Terminal-year cash flows. Terminal value dominates both
+                # valuation legs, and these two figures are what let the
+                # perpetuity assumption and the exit multiple be checked
+                # against each other (see fm/terminal_value.py) instead of
+                # silently contradicting each other inside an average.
+                if fcf_terminal is not None:
+                    assumptions["fcf_terminal"] = fcf_terminal
+                if ebitda_terminal is not None:
+                    assumptions["ebitda_terminal"] = ebitda_terminal
                 if revenue_growth_rates:
                     assumptions["revenue_growth_rates"] = revenue_growth_rates
                 

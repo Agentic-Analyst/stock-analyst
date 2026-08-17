@@ -393,25 +393,20 @@ class BuildModelTool(_CtxTool):
         # exit EV/EBITDA while the exit leg assumed 11.2x, which is the whole
         # 44% gap between the legs.
         asmp = state.financial_model.assumptions if state.financial_model else {}
-        tv_note = None
-        if band in ("wide", "unreliable") and isinstance(asmp, dict):
-            try:
-                implied = float(asmp.get("implied_exit_multiple_perpetual"))
-                assumed = float(asmp.get("exit_multiple"))
-            except (TypeError, ValueError):
-                implied = assumed = None
-            if implied and assumed and implied > 0 and assumed > 0:
-                gap = max(implied, assumed) / min(implied, assumed)
-                if gap >= 1.4:
-                    direction = "below" if implied < assumed else "above"
-                    tv_note = (
-                        f"TERMINAL VALUE ASSUMED TWICE: the perpetual-growth method "
-                        f"implies a {implied:.1f}x exit EV/EBITDA while the exit-multiple "
-                        f"method assumes {assumed:.1f}x — {gap:.1f}x apart, with the "
-                        f"perpetuity {direction} the multiple. This IS the gap between "
-                        f"the two legs. Explain it as an assumption conflict (WACC and "
-                        f"terminal growth versus the exit multiple), not as two "
-                        f"independent opinions that happen to differ.")
+        tv_note, tv_recon = None, None
+        if isinstance(asmp, dict) and method != "justified_pb_roe":
+            from src.agents.fm.terminal_value import reconcile as _reconcile_tv
+            tv_recon = _reconcile_tv(
+                fcf_terminal=asmp.get("fcf_terminal"),
+                ebitda_terminal=asmp.get("ebitda_terminal"),
+                wacc=asmp.get("wacc"),
+                terminal_growth=asmp.get("terminal_growth"),
+                exit_multiple=asmp.get("exit_multiple"),
+            )
+            # Reported regardless of the spread band. An exit multiple implying
+            # growth above nominal GDP is indefensible even when the two legs
+            # happen to land close together — the agreement would be luck.
+            tv_note = tv_recon.get("note")
 
         # Ordered strongest-first. A contradiction between methods explains the
         # suspect headline, not the other way round, so it must lead — followed
