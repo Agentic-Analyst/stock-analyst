@@ -137,6 +137,7 @@ async def model_generation_agent(
                 current_price = None
                 perpetual_price = None
                 exit_multiple_price = None
+                comps_price = None
                 average_price = None
                 upside_vs_market = None
                 wacc = None
@@ -157,6 +158,11 @@ async def model_generation_agent(
                             perpetual_price = cell_value
                         elif "Value per Share (Exit Multiple DCF)" in label and col == 2:
                             exit_multiple_price = cell_value
+                        elif "Value per Share (Market Comps)" in label and col == 2:
+                            # The blend's third leg. Computed in the workbook but
+                            # never surfaced, so nothing downstream could see how
+                            # far the three methods actually disagreed.
+                            comps_price = cell_value
                         elif "Average of Methods (Per-Share)" in label and col == 2:
                             average_price = cell_value
                         elif "Upside vs Market" in label and col == 2:
@@ -187,6 +193,8 @@ async def model_generation_agent(
                     valuation_metrics["perpetual_price"] = perpetual_price
                 if exit_multiple_price is not None:
                     valuation_metrics["exit_multiple_price"] = exit_multiple_price
+                if comps_price is not None:
+                    valuation_metrics["comps_price"] = comps_price
                 if current_price is not None:
                     valuation_metrics["current_price"] = current_price
                 if upside_vs_market is not None:
