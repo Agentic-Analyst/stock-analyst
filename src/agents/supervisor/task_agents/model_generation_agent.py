@@ -143,7 +143,8 @@ async def model_generation_agent(
                 wacc = None
                 terminal_growth = None
                 exit_multiple = None
-                implied_exit_multiple = None
+                ebitda_terminal = None
+                fcf_terminal = None
                 revenue_growth_rates = []
                 
                 for cell_key, cell_value in summary_cells.items():
@@ -174,13 +175,10 @@ async def model_generation_agent(
                             terminal_growth = cell_value
                         elif "Exit Multiple (EV/EBITDA)" in label and col == 2:
                             exit_multiple = cell_value
-                        elif label.strip() == "EV/EBITDA — Perpetual" and col == 2:
-                            # The exit multiple the PERPETUAL method implicitly
-                            # assumes. When this is far from the exit multiple
-                            # the other leg assumes outright, terminal value has
-                            # been assumed twice and inconsistently — which is
-                            # the mechanical reason the two legs disagree.
-                            implied_exit_multiple = cell_value
+                        elif label.strip().startswith("EBITDA (FY") and col == 2:
+                            ebitda_terminal = cell_value
+                        elif label.strip().startswith("FCF (FY") and col == 2:
+                            fcf_terminal = cell_value
                 
                 # Extract revenue growth rates from LLM_Inferred tab
                 llm_inferred_cells = computed_data.get("LLM_Inferred", {}).get("cells", {})
@@ -215,8 +213,33 @@ async def model_generation_agent(
                     assumptions["terminal_growth"] = terminal_growth
                 if exit_multiple is not None:
                     assumptions["exit_multiple"] = exit_multiple
-                if implied_exit_multiple is not None:
-                    assumptions["implied_exit_multiple_perpetual"] = implied_exit_multiple
+                # The exit multiple the PERPETUITY implicitly assumes, derived
+                # from first principles rather than read off a diagnostic row:
+                #
+                #     TV      = FCF_terminal * (1 + g) / (WACC - g)
+                #     implied = TV / EBITDA_terminal
+                #
+                # Terminal value is assumed TWICE in this model — once by the
+                # perpetuity formula and once as an explicit exit multiple — and
+                # those two imply each other. When they disagree the model
+                # contradicts itself, and that contradiction is the mechanical
+                # reason the two valuation legs diverge.
+                #
+                # NOTE: the workbook's "EV/EBITDA — Perpetual" row is NOT this.
+                # It divides TODAY's enterprise value by terminal EBITDA, which
+                # is a forward multiple on present value, not a terminal
+                # multiple. Reading it as the implied exit multiple understates
+                # it (5.1x vs the true 6.7x for META) and misstates the gap.
+                try:
+                    if (fcf_terminal and ebitda_terminal and wacc is not None
+                            and terminal_growth is not None
+                            and wacc > terminal_growth and ebitda_terminal > 0):
+                        tv = fcf_terminal * (1 + terminal_growth) / (wacc - terminal_growth)
+                        implied = tv / ebitda_terminal
+                        if implied > 0:
+                            assumptions["implied_exit_multiple_perpetual"] = implied
+                except (TypeError, ZeroDivisionError):
+                    pass
                 if revenue_growth_rates:
                     assumptions["revenue_growth_rates"] = revenue_growth_rates
                 

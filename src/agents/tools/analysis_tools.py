@@ -418,6 +418,33 @@ class BuildModelTool(_CtxTool):
         # by the mechanical reason, then any generic rail.
         warning = " ".join(p for p in (spread_note, tv_note, warning) if p) or None
 
+        # WITHHOLD the point estimate when the methods contradict each other.
+        #
+        # Instructing the model not to quote a number while still handing it
+        # that number is a weak control: it is the most quotable thing in the
+        # payload, it is what the user asked for, and one summarisation step
+        # later the caveat is gone and "$109.81" is on screen. So when the legs
+        # disagree past the unreliable threshold, fair_value and the upside are
+        # replaced by the RANGE they actually support. Nothing is hidden — the
+        # legs are published individually right below — but there is no longer a
+        # single misleadingly precise figure to lift out of context.
+        legs_pub = {
+            k: v for k, v in {
+                "perpetual_dcf": (vm.get("perpetual_price") if isinstance(vm, dict) else None),
+                "exit_multiple_dcf": (vm.get("exit_multiple_price") if isinstance(vm, dict) else None),
+                "market_comps": (vm.get("comps_price") if isinstance(vm, dict) else None),
+            }.items() if isinstance(v, (int, float))
+        }
+        positive_legs = [v for v in legs_pub.values() if v > 0]
+        withheld = False
+        if band == "unreliable" and len(positive_legs) >= 2:
+            withheld = True
+            fair_value_out, upside_out = None, None
+            low, high = min(positive_legs), max(positive_legs)
+        else:
+            fair_value_out, upside_out = fair_value, upside
+            low = high = None
+
         if method == "justified_pb_roe":
             note = ("Financial-sector company: fair value computed via justified "
                     "P/B x ROE on book value per share; the standard FCF DCF is "
@@ -429,19 +456,22 @@ class BuildModelTool(_CtxTool):
         return tool_ok(
             ticker=ticker,
             model_type=state.financial_model.model_type if state.financial_model else None,
-            fair_value=fair_value,
+            fair_value=fair_value_out,
             current_price=current_price,
-            upside_vs_market=upside,
+            upside_vs_market=upside_out,
             excel_path=state.financial_model.excel_path if state.financial_model else None,
+            # What the methods actually support when they refuse to agree.
+            **({"fair_value_range_low": round(low, 2),
+                "fair_value_range_high": round(high, 2),
+                "fair_value_withheld": True,
+                "fair_value_withheld_reason":
+                    "The valuation methods disagree by more than 2.5x. No single "
+                    "fair value is defensible, so the range is reported instead. "
+                    "Quote the range, never a midpoint."}
+               if withheld else {}),
             # Publish the legs and the confidence band so the answer can show a
             # football field instead of a false point estimate.
-            **({"valuation_legs": {
-                    k: v for k, v in {
-                        "perpetual_dcf": vm.get("perpetual_price"),
-                        "exit_multiple_dcf": vm.get("exit_multiple_price"),
-                        "market_comps": vm.get("comps_price"),
-                    }.items() if isinstance(v, (int, float))
-                }} if isinstance(vm, dict) else {}),
+            **({"valuation_legs": legs_pub} if legs_pub else {}),
             **({"valuation_spread_ratio": round(ratio, 2)} if ratio else {}),
             **({"valuation_confidence": band} if band else {}),
             **({"valuation_method": method} if method else {}),
