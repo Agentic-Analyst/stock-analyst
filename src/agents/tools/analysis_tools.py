@@ -385,10 +385,38 @@ class BuildModelTool(_CtxTool):
                 "exit multiple DCF": vm.get("exit_multiple_price"),
                 "market comps": vm.get("comps_price"),
             })
-        # The spread is the stronger signal when both fire: a contradiction
-        # between methods explains the suspect headline, not the other way round.
-        if spread_note:
-            warning = f"{spread_note} {warning}" if warning else spread_note
+        # WHY the legs disagree, when they do. Terminal value is assumed twice:
+        # once implicitly by the perpetuity formula, once explicitly as an exit
+        # multiple. When those two disagree the model is internally
+        # inconsistent, and naming that is far more useful to an analyst than
+        # "the methods differ" — for META the perpetual method implied a 5.1x
+        # exit EV/EBITDA while the exit leg assumed 11.2x, which is the whole
+        # 44% gap between the legs.
+        asmp = state.financial_model.assumptions if state.financial_model else {}
+        tv_note = None
+        if band in ("wide", "unreliable") and isinstance(asmp, dict):
+            try:
+                implied = float(asmp.get("implied_exit_multiple_perpetual"))
+                assumed = float(asmp.get("exit_multiple"))
+            except (TypeError, ValueError):
+                implied = assumed = None
+            if implied and assumed and implied > 0 and assumed > 0:
+                gap = max(implied, assumed) / min(implied, assumed)
+                if gap >= 1.4:
+                    direction = "below" if implied < assumed else "above"
+                    tv_note = (
+                        f"TERMINAL VALUE ASSUMED TWICE: the perpetual-growth method "
+                        f"implies a {implied:.1f}x exit EV/EBITDA while the exit-multiple "
+                        f"method assumes {assumed:.1f}x — {gap:.1f}x apart, with the "
+                        f"perpetuity {direction} the multiple. This IS the gap between "
+                        f"the two legs. Explain it as an assumption conflict (WACC and "
+                        f"terminal growth versus the exit multiple), not as two "
+                        f"independent opinions that happen to differ.")
+
+        # Ordered strongest-first. A contradiction between methods explains the
+        # suspect headline, not the other way round, so it must lead — followed
+        # by the mechanical reason, then any generic rail.
+        warning = " ".join(p for p in (spread_note, tv_note, warning) if p) or None
 
         if method == "justified_pb_roe":
             note = ("Financial-sector company: fair value computed via justified "

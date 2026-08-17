@@ -143,6 +143,7 @@ async def model_generation_agent(
                 wacc = None
                 terminal_growth = None
                 exit_multiple = None
+                implied_exit_multiple = None
                 revenue_growth_rates = []
                 
                 for cell_key, cell_value in summary_cells.items():
@@ -173,6 +174,13 @@ async def model_generation_agent(
                             terminal_growth = cell_value
                         elif "Exit Multiple (EV/EBITDA)" in label and col == 2:
                             exit_multiple = cell_value
+                        elif label.strip() == "EV/EBITDA — Perpetual" and col == 2:
+                            # The exit multiple the PERPETUAL method implicitly
+                            # assumes. When this is far from the exit multiple
+                            # the other leg assumes outright, terminal value has
+                            # been assumed twice and inconsistently — which is
+                            # the mechanical reason the two legs disagree.
+                            implied_exit_multiple = cell_value
                 
                 # Extract revenue growth rates from LLM_Inferred tab
                 llm_inferred_cells = computed_data.get("LLM_Inferred", {}).get("cells", {})
@@ -207,6 +215,8 @@ async def model_generation_agent(
                     assumptions["terminal_growth"] = terminal_growth
                 if exit_multiple is not None:
                     assumptions["exit_multiple"] = exit_multiple
+                if implied_exit_multiple is not None:
+                    assumptions["implied_exit_multiple_perpetual"] = implied_exit_multiple
                 if revenue_growth_rates:
                     assumptions["revenue_growth_rates"] = revenue_growth_rates
                 
