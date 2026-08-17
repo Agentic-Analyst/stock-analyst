@@ -60,6 +60,33 @@ MAX_SUSTAINABLE_GROWTH = 0.04
 # rather than a contradiction worth reporting.
 CONSISTENCY_TOLERANCE = 1.25
 
+# Minimum plausible terminal FCF / EBITDA conversion.
+#
+# A TERMINAL year is by definition steady state: growth has decayed to
+# perpetuity levels, so capex should have normalised toward D&A and working
+# capital should barely move. A mature business therefore converts a large
+# share of EBITDA into free cash — the healthy runs in the audit sit at
+# 55-82%.
+#
+# Every absurd valuation in the 39-model audit sits far below that:
+#
+#     EOG    3.8%   -> perpetuity $3.97   vs $134.74 market
+#     META   1.3%   -> perpetuity $27.50  vs $604.96 market
+#     HOOD   9.6%   -> perpetuity -$7.23
+#     SPCX -266.8%  -> perpetuity -$32.90
+#
+# That is not a company being cheap. It is a terminal year still carrying
+# growth-phase capex while growing at 2.5% forever — an internally
+# contradictory projection. The perpetuity value is then structurally far too
+# low, which is the mechanical source of the "prices are nowhere near
+# rational" complaint.
+#
+# It also invalidates the exit-multiple ceiling: a ceiling derived from broken
+# terminal cash flow would clamp the exit leg to something equally absurd
+# (EOG's ceiling computes to 0.56x), so the legs would agree on nonsense.
+# Convergence is not correctness.
+MIN_TERMINAL_CONVERSION = 0.15
+
 
 def implied_growth_from_multiple(
     exit_multiple: float, cash_conversion: float, wacc: float
@@ -153,6 +180,33 @@ def reconcile(
         ceiling=round(ceiling, 2),
         multiple_gap=round(max(M, implied_multiple) / min(M, implied_multiple), 2),
     )
+
+    # BEFORE anything else: is the terminal year actually a terminal year?
+    # Every quantity above is derived from terminal cash flow, so if that is
+    # broken the multiple comparison is arithmetic on garbage — and the ceiling
+    # would clamp the exit leg to something equally absurd, making the legs
+    # agree on nonsense. Convergence is not correctness.
+    if r < MIN_TERMINAL_CONVERSION:
+        out["verdict"] = "terminal_year_not_steady_state"
+        out["ceiling"] = None          # withdraw advice built on a broken base
+        out["implied_multiple"] = None
+        out["note"] = (
+            f"TERMINAL YEAR IS NOT STEADY STATE: it converts only "
+            f"{r * 100:.1f}% of EBITDA into free cash flow, against "
+            f"{MIN_TERMINAL_CONVERSION * 100:.0f}%+ for a mature business "
+            f"(healthy models in this codebase run 55-82%). A terminal year is "
+            f"by definition steady state — growth has decayed to "
+            f"{g * 100:.1f}%, so capex should have normalised toward D&A and "
+            f"working capital should barely move. Still carrying growth-phase "
+            f"investment while growing at {g * 100:.1f}% forever is an "
+            f"internally contradictory projection, and it drives the perpetuity "
+            f"value structurally far too low — this is the usual cause of a DCF "
+            f"landing at a small fraction of the market price. Do NOT present "
+            f"the perpetuity fair value. Say the cash-flow projection does not "
+            f"reach a steady state, and value the company on growth, unit "
+            f"economics and market multiples instead."
+        )
+        return out
 
     # The strongest failure first: an exit multiple that cannot be justified at
     # ANY sustainable growth rate is wrong on its own terms, regardless of what

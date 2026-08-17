@@ -138,6 +138,64 @@ class TestVerdicts:
         assert "cheaper" in out["note"].lower()
 
 
+class TestSteadyStateCheck:
+    """
+    Terminal cash conversion is the deepest diagnostic in the audit. Every
+    absurd valuation across the 39 production models had FCF/EBITDA far below
+    a mature business, and every sane one sat at 55-82%:
+
+        EOG    3.8%   -> perpetuity $3.97   vs $134.74 market
+        META   1.3%   -> perpetuity $27.50  vs $604.96 market
+        HOOD   9.6%   -> perpetuity -$7.23
+        NVDA  72-79%  -> perpetuity $118-204 vs ~$207   (sane)
+
+    A terminal year still carrying growth-phase capex while growing at 2.5%
+    forever is internally contradictory, and it drives the perpetuity value
+    structurally far too low.
+    """
+
+    def _case(self, fcf_over_ebitda):
+        ebitda = 100e9
+        return dict(fcf_terminal=ebitda * fcf_over_ebitda, ebitda_terminal=ebitda,
+                    wacc=0.11, terminal_growth=0.025, exit_multiple=12.0)
+
+    @pytest.mark.parametrize("conv,ticker", [(0.038, "EOG"), (0.013, "META"), (0.096, "HOOD")])
+    def test_real_broken_projections_are_caught(self, conv, ticker):
+        out = tv.reconcile(**self._case(conv))
+        assert out["verdict"] == "terminal_year_not_steady_state", ticker
+
+    @pytest.mark.parametrize("conv", [0.556, 0.72, 0.82])
+    def test_healthy_conversion_is_not_flagged_as_broken(self, conv):
+        out = tv.reconcile(**self._case(conv))
+        assert out["verdict"] != "terminal_year_not_steady_state"
+
+    def test_steady_state_failure_outranks_the_multiple_verdicts(self):
+        # Everything else is derived from terminal cash flow, so if that is
+        # broken the multiple comparison is arithmetic on garbage.
+        out = tv.reconcile(**{**self._case(0.03), "exit_multiple": 40.0})
+        assert out["verdict"] == "terminal_year_not_steady_state"
+
+    def test_ceiling_advice_is_withdrawn_when_the_base_is_broken(self):
+        # A ceiling derived from broken terminal cash flow would clamp the exit
+        # leg to something equally absurd — EOG's computes to 0.56x — and the
+        # legs would then agree on nonsense. Convergence is not correctness.
+        out = tv.reconcile(**self._case(0.038))
+        assert out["ceiling"] is None
+        assert out["implied_multiple"] is None
+
+    def test_note_names_capex_normalisation_as_the_cause(self):
+        note = tv.reconcile(**self._case(0.038))["note"]
+        assert "steady state" in note.lower()
+        assert "capex" in note.lower()
+        assert "do not present" in note.lower()
+
+    def test_boundary_is_not_off_by_one(self):
+        assert tv.reconcile(**self._case(tv.MIN_TERMINAL_CONVERSION - 0.001))["verdict"] \
+            == "terminal_year_not_steady_state"
+        assert tv.reconcile(**self._case(tv.MIN_TERMINAL_CONVERSION + 0.001))["verdict"] \
+            != "terminal_year_not_steady_state"
+
+
 class TestRefusesToGuess:
     @pytest.mark.parametrize("bad", [
         dict(fcf_terminal=-5e9),          # cash-burning terminal year
