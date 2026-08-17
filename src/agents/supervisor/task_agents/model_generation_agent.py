@@ -137,11 +137,14 @@ async def model_generation_agent(
                 current_price = None
                 perpetual_price = None
                 exit_multiple_price = None
+                comps_price = None
                 average_price = None
                 upside_vs_market = None
                 wacc = None
                 terminal_growth = None
                 exit_multiple = None
+                ebitda_terminal = None
+                fcf_terminal = None
                 revenue_growth_rates = []
                 
                 for cell_key, cell_value in summary_cells.items():
@@ -157,6 +160,11 @@ async def model_generation_agent(
                             perpetual_price = cell_value
                         elif "Value per Share (Exit Multiple DCF)" in label and col == 2:
                             exit_multiple_price = cell_value
+                        elif "Value per Share (Market Comps)" in label and col == 2:
+                            # The blend's third leg. Computed in the workbook but
+                            # never surfaced, so nothing downstream could see how
+                            # far the three methods actually disagreed.
+                            comps_price = cell_value
                         elif "Average of Methods (Per-Share)" in label and col == 2:
                             average_price = cell_value
                         elif "Upside vs Market" in label and col == 2:
@@ -167,6 +175,10 @@ async def model_generation_agent(
                             terminal_growth = cell_value
                         elif "Exit Multiple (EV/EBITDA)" in label and col == 2:
                             exit_multiple = cell_value
+                        elif label.strip().startswith("EBITDA (FY") and col == 2:
+                            ebitda_terminal = cell_value
+                        elif label.strip().startswith("FCF (FY") and col == 2:
+                            fcf_terminal = cell_value
                 
                 # Extract revenue growth rates from LLM_Inferred tab
                 llm_inferred_cells = computed_data.get("LLM_Inferred", {}).get("cells", {})
@@ -187,6 +199,8 @@ async def model_generation_agent(
                     valuation_metrics["perpetual_price"] = perpetual_price
                 if exit_multiple_price is not None:
                     valuation_metrics["exit_multiple_price"] = exit_multiple_price
+                if comps_price is not None:
+                    valuation_metrics["comps_price"] = comps_price
                 if current_price is not None:
                     valuation_metrics["current_price"] = current_price
                 if upside_vs_market is not None:
@@ -199,6 +213,15 @@ async def model_generation_agent(
                     assumptions["terminal_growth"] = terminal_growth
                 if exit_multiple is not None:
                     assumptions["exit_multiple"] = exit_multiple
+                # Terminal-year cash flows. Terminal value dominates both
+                # valuation legs, and these two figures are what let the
+                # perpetuity assumption and the exit multiple be checked
+                # against each other (see fm/terminal_value.py) instead of
+                # silently contradicting each other inside an average.
+                if fcf_terminal is not None:
+                    assumptions["fcf_terminal"] = fcf_terminal
+                if ebitda_terminal is not None:
+                    assumptions["ebitda_terminal"] = ebitda_terminal
                 if revenue_growth_rates:
                     assumptions["revenue_growth_rates"] = revenue_growth_rates
                 

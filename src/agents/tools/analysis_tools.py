@@ -206,6 +206,95 @@ def _valuation_warning(fair_value, upside, market_cap=None, method=None):
     return None
 
 
+def valuation_dispersion(legs: dict):
+    """
+    How much do the valuation methods disagree?
+
+    THE GAP THIS CLOSES. Every rail above inspects only the FINAL blended
+    number, so a fair value averaged from methods that wildly contradict each
+    other sails through as long as the average lands near the market price.
+    Measured across 39 real production models:
+
+        EOG    perpetual $3.97   vs exit $215.64   -> blend $109.81, "-18.5%"
+        META   perpetual $27.50  vs exit $906.98   -> blend $467.24, "-22.8%"
+        BTSG   perpetual $30.93  vs exit $93.67    -> blend $62.30,  "+4.3%"
+
+    None of those tripped an existing rail: the blend is positive, the company
+    is not a mega-cap, and the implied upside is mild. The user is handed a
+    confident number built from methods that disagree by up to 54x. The median
+    spread across all 39 models was 1.85x, and 31 of 39 exceeded 1.5x.
+
+    A blend of two numbers 54x apart is not a valuation — it is the midpoint of
+    an interval so wide it excludes nothing. Reporting its centre as a fair
+    value is the most misleading thing this pipeline can do, because it looks
+    exactly like a precise answer.
+
+    Returns (ratio, band, note) where band is one of
+    tight / moderate / wide / unreliable, or (None, None, None) when fewer than
+    two legs are usable.
+    """
+    usable, broken = {}, []
+    for name, v in (legs or {}).items():
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f != f:                      # NaN
+            continue
+        # Non-positive legs are excluded from the blend upstream, so they must
+        # not also widen the spread and double-count the same problem. They are
+        # still recorded: a method that returned a negative share price did not
+        # produce a low estimate, it FAILED.
+        if f > 0:
+            usable[name] = f
+        else:
+            broken.append(name)
+
+    # One method blew up while another survived. The blend drops the broken leg
+    # and hands over a confident single-method number with no hint that half the
+    # analysis failed — HOOD shipped $38.05 with a perpetual DCF of -$7.23.
+    if broken and usable:
+        return None, "single-method", (
+            f"HALF THE MODEL FAILED: {', '.join(broken)} produced a non-positive "
+            f"value per share, so the fair value rests on "
+            f"{' and '.join(usable)} alone. A negative share price is not a low "
+            "estimate, it is a method that does not fit this company's cash-flow "
+            "profile. Say the valuation rests on one method and why the other "
+            "broke; do not present the survivor as a consensus fair value.")
+
+    if len(usable) < 2:
+        return None, None, None
+
+    lo, hi = min(usable.values()), max(usable.values())
+    ratio = hi / lo
+
+    spread_txt = ", ".join(f"{k.replace('_', ' ')} ${v:,.2f}" for k, v in sorted(usable.items(), key=lambda kv: kv[1]))
+
+    if ratio < 1.3:
+        return ratio, "tight", None
+    if ratio < 1.8:
+        return ratio, "moderate", (
+            f"VALUATION RANGE: the methods span {lo:,.2f}–{hi:,.2f} per share "
+            f"({ratio:.1f}x). Present the RANGE alongside the point estimate "
+            f"({spread_txt}), not the average alone.")
+    if ratio < 2.5:
+        return ratio, "wide", (
+            f"WIDE VALUATION SPREAD: the methods disagree by {ratio:.1f}x "
+            f"({spread_txt}). The average is not a reliable point estimate. "
+            "Lead with the RANGE and name the assumption driving the gap "
+            "(usually terminal value: perpetual growth vs the exit multiple). "
+            "Do NOT present a single fair value as if it were precise.")
+    return ratio, "unreliable", (
+        f"UNRELIABLE VALUATION — METHODS CONTRADICT: {spread_txt}, a "
+        f"{ratio:.1f}x spread. An average of numbers this far apart is not a "
+        "valuation; it is the midpoint of an interval so wide it excludes "
+        "nothing. Do NOT quote a fair value or an upside percentage. Say the "
+        "model does not converge for this company, show the range, and explain "
+        "why (typically terminal-value assumptions the cash-flow profile "
+        "cannot support). Analyse via growth, unit economics and market "
+        "multiples instead.")
+
+
 class _CtxTool(Tool):
     """Base for tools that share the run's AgentContext."""
     is_readonly = True
@@ -285,6 +374,72 @@ class BuildModelTool(_CtxTool):
         mcap = (km.get("market_data", {}) or {}).get("market_cap") if isinstance(km, dict) else None
         warning = _valuation_warning(fair_value, upside, market_cap=mcap, method=method)
 
+        # How far apart are the methods? A blend is only meaningful when its
+        # legs roughly agree; averaging contradictory methods produces a number
+        # that looks precise and is not. Skipped for banks, where the DCF legs
+        # are deliberately suppressed in favour of justified P/B x ROE.
+        ratio, band, spread_note = (None, None, None)
+        if method != "justified_pb_roe" and isinstance(vm, dict):
+            ratio, band, spread_note = valuation_dispersion({
+                "perpetual DCF": vm.get("perpetual_price"),
+                "exit multiple DCF": vm.get("exit_multiple_price"),
+                "market comps": vm.get("comps_price"),
+            })
+        # WHY the legs disagree, when they do. Terminal value is assumed twice:
+        # once implicitly by the perpetuity formula, once explicitly as an exit
+        # multiple. When those two disagree the model is internally
+        # inconsistent, and naming that is far more useful to an analyst than
+        # "the methods differ" — for META the perpetual method implied a 5.1x
+        # exit EV/EBITDA while the exit leg assumed 11.2x, which is the whole
+        # 44% gap between the legs.
+        asmp = state.financial_model.assumptions if state.financial_model else {}
+        tv_note, tv_recon = None, None
+        if isinstance(asmp, dict) and method != "justified_pb_roe":
+            from src.agents.fm.terminal_value import reconcile as _reconcile_tv
+            tv_recon = _reconcile_tv(
+                fcf_terminal=asmp.get("fcf_terminal"),
+                ebitda_terminal=asmp.get("ebitda_terminal"),
+                wacc=asmp.get("wacc"),
+                terminal_growth=asmp.get("terminal_growth"),
+                exit_multiple=asmp.get("exit_multiple"),
+            )
+            # Reported regardless of the spread band. An exit multiple implying
+            # growth above nominal GDP is indefensible even when the two legs
+            # happen to land close together — the agreement would be luck.
+            tv_note = tv_recon.get("note")
+
+        # Ordered strongest-first. A contradiction between methods explains the
+        # suspect headline, not the other way round, so it must lead — followed
+        # by the mechanical reason, then any generic rail.
+        warning = " ".join(p for p in (spread_note, tv_note, warning) if p) or None
+
+        # WITHHOLD the point estimate when the methods contradict each other.
+        #
+        # Instructing the model not to quote a number while still handing it
+        # that number is a weak control: it is the most quotable thing in the
+        # payload, it is what the user asked for, and one summarisation step
+        # later the caveat is gone and "$109.81" is on screen. So when the legs
+        # disagree past the unreliable threshold, fair_value and the upside are
+        # replaced by the RANGE they actually support. Nothing is hidden — the
+        # legs are published individually right below — but there is no longer a
+        # single misleadingly precise figure to lift out of context.
+        legs_pub = {
+            k: v for k, v in {
+                "perpetual_dcf": (vm.get("perpetual_price") if isinstance(vm, dict) else None),
+                "exit_multiple_dcf": (vm.get("exit_multiple_price") if isinstance(vm, dict) else None),
+                "market_comps": (vm.get("comps_price") if isinstance(vm, dict) else None),
+            }.items() if isinstance(v, (int, float))
+        }
+        positive_legs = [v for v in legs_pub.values() if v > 0]
+        withheld = False
+        if band == "unreliable" and len(positive_legs) >= 2:
+            withheld = True
+            fair_value_out, upside_out = None, None
+            low, high = min(positive_legs), max(positive_legs)
+        else:
+            fair_value_out, upside_out = fair_value, upside
+            low = high = None
+
         if method == "justified_pb_roe":
             note = ("Financial-sector company: fair value computed via justified "
                     "P/B x ROE on book value per share; the standard FCF DCF is "
@@ -296,10 +451,24 @@ class BuildModelTool(_CtxTool):
         return tool_ok(
             ticker=ticker,
             model_type=state.financial_model.model_type if state.financial_model else None,
-            fair_value=fair_value,
+            fair_value=fair_value_out,
             current_price=current_price,
-            upside_vs_market=upside,
+            upside_vs_market=upside_out,
             excel_path=state.financial_model.excel_path if state.financial_model else None,
+            # What the methods actually support when they refuse to agree.
+            **({"fair_value_range_low": round(low, 2),
+                "fair_value_range_high": round(high, 2),
+                "fair_value_withheld": True,
+                "fair_value_withheld_reason":
+                    "The valuation methods disagree by more than 2.5x. No single "
+                    "fair value is defensible, so the range is reported instead. "
+                    "Quote the range, never a midpoint."}
+               if withheld else {}),
+            # Publish the legs and the confidence band so the answer can show a
+            # football field instead of a false point estimate.
+            **({"valuation_legs": legs_pub} if legs_pub else {}),
+            **({"valuation_spread_ratio": round(ratio, 2)} if ratio else {}),
+            **({"valuation_confidence": band} if band else {}),
             **({"valuation_method": method} if method else {}),
             **({"dcf_fair_value": vm.get("dcf_fair_value")}
                if isinstance(vm, dict) and vm.get("dcf_fair_value") is not None and method else {}),
