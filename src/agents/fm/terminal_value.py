@@ -211,7 +211,13 @@ def reconcile(
     # The strongest failure first: an exit multiple that cannot be justified at
     # ANY sustainable growth rate is wrong on its own terms, regardless of what
     # the perpetuity happens to assume.
-    if implied_growth > MAX_SUSTAINABLE_GROWTH:
+    # Tolerance, not strictness. The grounding step now CAPS the exit multiple
+    # at exactly defensible_multiple(r, wacc, MAX_SUSTAINABLE_GROWTH), so a
+    # correctly capped model lands on the boundary and inverts back to
+    # MAX_SUSTAINABLE_GROWTH plus floating-point dust. A strict `>` then
+    # condemns the very models the cap just made consistent. 1bp is far below
+    # any economically meaningful difference in a perpetual growth rate.
+    if implied_growth > MAX_SUSTAINABLE_GROWTH + 1e-4:
         out["verdict"] = "growth_not_sustainable"
         out["note"] = (
             f"EXIT MULTIPLE IS NOT A TERMINAL MULTIPLE: {M:.1f}x EV/EBITDA implies "

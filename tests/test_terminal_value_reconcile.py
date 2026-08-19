@@ -221,3 +221,58 @@ class TestRefusesToGuess:
         out = tv.reconcile(fcf_terminal=None, ebitda_terminal=None, wacc=None,
                            terminal_growth=None, exit_multiple=None)
         assert set(("ok", "verdict", "note")).issubset(out.keys())
+
+
+class TestCapMakesModelsConsistent:
+    """
+    The cap in assumption_grounding and the verdict here must agree.
+
+    Grounding now clamps the exit multiple to
+    defensible_multiple(r, wacc, MAX_SUSTAINABLE_GROWTH). A model capped that
+    way lands exactly on the boundary, so the verdict must call it consistent —
+    a strict `>` condemned the very models the cap had just fixed, which is how
+    replaying 36 production models produced 24 false "growth_not_sustainable"
+    verdicts after capping.
+    """
+
+    def test_a_capped_multiple_is_consistent(self):
+        from src.agents.fm.terminal_value import (
+            defensible_multiple, reconcile, MAX_SUSTAINABLE_GROWTH,
+        )
+        for r in (0.30, 0.45, 0.60, 0.75, 0.82):
+            for wacc in (0.08, 0.095, 0.11, 0.13):
+                ceiling = defensible_multiple(r, wacc, MAX_SUSTAINABLE_GROWTH)
+                assert ceiling and ceiling > 0
+                res = reconcile(
+                    fcf_terminal=r * 100, ebitda_terminal=100,
+                    wacc=wacc, terminal_growth=0.03, exit_multiple=ceiling,
+                )
+                assert res["ok"], (r, wacc)
+                assert res["verdict"] != "growth_not_sustainable", (
+                    f"capping at the ceiling must not be judged unsustainable "
+                    f"(r={r}, wacc={wacc}, ceiling={ceiling}, "
+                    f"implied_growth={res.get('implied_growth')})"
+                )
+
+    def test_just_above_the_ceiling_is_still_caught(self):
+        # The tolerance must not become a loophole.
+        from src.agents.fm.terminal_value import defensible_multiple, reconcile, MAX_SUSTAINABLE_GROWTH
+        r, wacc = 0.60, 0.10
+        ceiling = defensible_multiple(r, wacc, MAX_SUSTAINABLE_GROWTH)
+        res = reconcile(
+            fcf_terminal=r * 100, ebitda_terminal=100,
+            wacc=wacc, terminal_growth=0.03, exit_multiple=ceiling * 1.25,
+        )
+        assert res["verdict"] == "growth_not_sustainable"
+
+    def test_cash_conversion_extraction_rejects_nonsense(self):
+        from src.agents.fm.assumption_grounding import _terminal_cash_conversion
+        mk = lambda fcf, ebitda: {"financial_statements": {
+            "cash_flow": {"2025-12-31": {"Free Cash Flow": fcf}},
+            "income_statement": {"2025-12-31": {"EBITDA": ebitda}}}}
+        assert _terminal_cash_conversion(mk(60, 100)) == 0.6
+        assert _terminal_cash_conversion(mk(-10, 100)) is None   # negative FCF
+        assert _terminal_cash_conversion(mk(60, -100)) is None   # negative EBITDA
+        assert _terminal_cash_conversion(mk(300, 100)) is None   # r=3.0, mislabelled
+        assert _terminal_cash_conversion(mk(1, 100)) is None     # r=0.01, mislabelled
+        assert _terminal_cash_conversion({}) is None
