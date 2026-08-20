@@ -601,6 +601,19 @@ class WriteReportTool(_CtxTool):
         km = state.financial_data.key_metrics if state.financial_data else {}
         mcap = (km.get("market_data", {}) or {}).get("market_cap") if isinstance(km, dict) else None
         warning = _valuation_warning(fair_value, upside, market_cap=mcap, method=method)
+
+        # The dispersion check runs in model_generation_agent and lands here as
+        # `valuation_warning`. Surfacing it matters most on THIS path: the
+        # report route is what a user gets when they ask for a full analysis,
+        # and it previously reported a blended fair value with no indication of
+        # how far the methods diverged. A real ASTS request came back as "DCF
+        # fair value from the model: $31.78" when both DCF legs had returned
+        # negative per-share values and $31.78 was the market-comps leg alone.
+        spread_note = vm.get("valuation_warning") if isinstance(vm, dict) else None
+        band = vm.get("dispersion_band") if isinstance(vm, dict) else None
+        # Dispersion leads: it explains the headline rather than the reverse.
+        warning = " ".join(p for p in (spread_note, warning) if p) or None
+
         return tool_ok(
             ticker=ticker,
             report_path=state.report.report_path,
@@ -609,6 +622,7 @@ class WriteReportTool(_CtxTool):
             upside_vs_market=upside,
             overall_sentiment=na.overall_sentiment if na else None,
             **({"valuation_method": method} if method else {}),
+            **({"valuation_confidence": band} if band else {}),
             **({"data_quality_warning": warning} if warning else {}),
             note="Full report generated (downloadable). Summarize its findings for the user.",
         )

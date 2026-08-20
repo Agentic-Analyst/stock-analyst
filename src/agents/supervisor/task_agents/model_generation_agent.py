@@ -225,6 +225,40 @@ async def model_generation_agent(
                 if revenue_growth_rates:
                     assumptions["revenue_growth_rates"] = revenue_growth_rates
                 
+                # Do the legs actually agree?
+                #
+                # This check existed only in the generalist agent's build_model
+                # tool, so the SUPERVISOR path — the one that writes full
+                # analyst reports — shipped blended fair values with no idea how
+                # far its methods diverged. A real user asked for an ASTS DCF
+                # and got "DCF fair value from the model: $31.78" when BOTH DCF
+                # legs had returned negative per-share values (-$17.64 and
+                # -$6.98) and $31.78 was the market-comps leg alone. The number
+                # presented as a DCF was not one.
+                try:
+                    from src.agents.tools.analysis_tools import valuation_dispersion
+                    ratio, band, spread_note = valuation_dispersion({
+                        "perpetual DCF": perpetual_price,
+                        "exit multiple DCF": exit_multiple_price,
+                        "market comps": comps_price,
+                    })
+                    if band:
+                        valuation_metrics["dispersion_band"] = band
+                    if ratio:
+                        valuation_metrics["dispersion_ratio"] = ratio
+                    if spread_note:
+                        # Carried on the state so the report generator and the
+                        # answer writer both see it; logged so it is auditable
+                        # in the run's info.log afterwards.
+                        valuation_metrics["valuation_warning"] = spread_note
+                        state.log_action("model_generation_agent", f"⚠️ {spread_note}")
+                except Exception as _disp_err:
+                    # Never let a diagnostic break model generation.
+                    state.log_action(
+                        "model_generation_agent",
+                        f"dispersion check skipped: {_disp_err}"
+                    )
+
                 state.log_action(
                     "model_generation_agent",
                     f"📊 Extracted valuation: Fair Value=${valuation_metrics.get('fair_value', 'N/A'):.2f}, "
