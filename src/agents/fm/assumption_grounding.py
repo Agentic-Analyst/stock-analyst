@@ -119,6 +119,41 @@ def _anchor_path(path: List[float], trailing: float,
     return new, True
 
 
+def _terminal_cash_conversion(json_data: Dict[str, Any]) -> Optional[float]:
+    """
+    FCF / EBITDA from the most recent reported year.
+
+    This is the `r` the terminal-value identity needs. It is a proxy — the true
+    figure is the TERMINAL year's conversion, which does not exist until the
+    projection is built — but a mature company's conversion is stable enough
+    that using the latest actual is far better than leaving the exit multiple
+    unchecked entirely.
+
+    Returns None when either line is missing or non-positive; the caller must
+    then leave the multiple alone rather than cap it on a guess.
+    """
+    try:
+        fs = (json_data or {}).get("financial_statements", {}) or {}
+        cf = fs.get("cash_flow", {}) or {}
+        inc = fs.get("income_statement", {}) or {}
+        if not cf or not inc:
+            return None
+        year = sorted(cf.keys(), reverse=True)[0]
+        fcf = (cf.get(year) or {}).get("Free Cash Flow")
+        ebitda = (inc.get(year) or {}).get("EBITDA") or (inc.get(year) or {}).get("Normalized EBITDA")
+        if ebitda is None:
+            ebitda = (cf.get(year) or {}).get("EBITDA")
+        fcf, ebitda = float(fcf), float(ebitda)
+        if ebitda <= 0 or fcf <= 0:
+            return None
+        r = fcf / ebitda
+        # Outside this band the inputs are almost certainly mislabelled rather
+        # than describing a real business.
+        return r if 0.05 <= r <= 1.5 else None
+    except (TypeError, ValueError, IndexError, KeyError):
+        return None
+
+
 def ground_assumptions(
     assumptions: Dict[str, Any],
     json_data: Dict[str, Any],
@@ -203,6 +238,42 @@ def ground_assumptions(
             f"Exit multiple {exit_m:.1f}x fallback (current EV/EBITDA "
             f"unavailable/negative)"
         )
+    # CAP THE MULTIPLE AT WHAT SUSTAINABLE GROWTH CAN JUSTIFY.
+    #
+    # Everything above sources the exit multiple from what the company trades
+    # at TODAY, which embeds today's growth expectations. It is then applied to
+    # a terminal year in which growth has already decayed to perpetuity levels
+    # — assuming no multiple compression despite growth collapsing.
+    #
+    # Replaying 34 production models showed how systematic that is: 28 assumed
+    # an exit multiple implying perpetual growth ABOVE nominal GDP (one implied
+    # 7.29% forever against a perpetuity assuming 2.5%), and only 2 were
+    # internally consistent. That single unstated assumption is the bulk of the
+    # gap between the two DCF legs — the thing the dispersion rail could only
+    # report after the fact.
+    #
+    # Inverting the terminal-value identity gives the highest multiple a
+    # defensible perpetual growth rate supports; anything above it is a claim
+    # that the company outgrows the economy forever. Capping here makes the
+    # model internally consistent BY CONSTRUCTION instead of contradicting
+    # itself and being flagged afterwards.
+    r_conv = _terminal_cash_conversion(json_data)
+    if r_conv is not None:
+        try:
+            from src.agents.fm.terminal_value import defensible_multiple, MAX_SUSTAINABLE_GROWTH
+            ceiling = defensible_multiple(r_conv, a["wacc"], MAX_SUSTAINABLE_GROWTH)
+            if ceiling and ceiling > 0 and exit_m > ceiling:
+                notes.append(
+                    f"Exit multiple {exit_m:.1f}x -> {ceiling:.1f}x (capped: above "
+                    f"{ceiling:.1f}x the multiple implies perpetual growth over "
+                    f"{MAX_SUSTAINABLE_GROWTH*100:.1f}%, i.e. faster than the economy "
+                    f"forever; cash conversion {r_conv:.2f}, WACC {a['wacc']*100:.2f}%)"
+                )
+                exit_m = ceiling
+        except Exception as _cap_err:
+            # A grounding refinement must never break model generation.
+            notes.append(f"Exit-multiple cap skipped ({_cap_err})")
+
     a["exit_multiple"] = exit_m
 
     # 5. Market-comps leg parameters (the third method on the football
