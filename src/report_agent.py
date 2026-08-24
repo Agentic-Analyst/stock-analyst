@@ -62,6 +62,40 @@ def _language_directive() -> str:
     )
 
 
+# Listing currency for the current report run. Same contextvar pattern as the
+# output language directly above, and for the same reason: threading a param
+# through ~10 nested report functions is worse than one run-scoped value that
+# load_prompt() appends to every section prompt.
+#
+# Without this the writer had no idea what currency it was reporting in and
+# defaulted to dollars for everything. A real LVMH request — a EUR listing,
+# with a brief that said "use EUR" — produced a report containing 500 "$" and
+# not a single "€". Every figure in it was mislabelled.
+_REPORT_CURRENCY: contextvars.ContextVar[str] = contextvars.ContextVar("report_currency", default="")
+
+
+def set_report_currency(code: Optional[str]) -> None:
+    """Set the listing currency for the current report run (best-effort)."""
+    _REPORT_CURRENCY.set((code or "").strip())
+
+
+def _currency_directive() -> str:
+    """Instruction appended to each section prompt so every figure the LLM
+    writes carries the listing's own currency rather than a default dollar."""
+    code = _REPORT_CURRENCY.get()
+    if not code or code.upper() == "USD":
+        # USD needs no directive: it is what the prompts already assume.
+        return ""
+    sym = currency_symbol(code)
+    return (
+        f"\n\n---\nCURRENCY: this company reports and trades in {code}. Every "
+        f"monetary figure you write MUST use {code} (symbol \"{sym.strip()}\"). Do NOT "
+        f"write \"$\" and do NOT convert values into dollars — the figures you have "
+        f"been given are already in {code}. Prices, market cap, revenue, targets and "
+        f"table cells all follow this."
+    )
+
+
 def load_prompt(prompt_name: str) -> str:
     """Load a prompt template from the prompts folder.
 
@@ -75,7 +109,7 @@ def load_prompt(prompt_name: str) -> str:
     prompt_path = Path(__file__).parent.parent / "prompts" / f"{prompt_name}.md"
     with open(prompt_path, 'r') as f:
         template = f.read()
-    return template + _language_directive()
+    return template + _currency_directive() + _language_directive()
 
 
 def load_financial_json(json_path: Path) -> Dict[str, Any]:
@@ -116,6 +150,11 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
         'employees': basic_info.get('employees', 0),
         'country': basic_info.get('country', 'N/A'),
         'exchange': basic_info.get('exchange', 'N/A'),
+        # The listing currency. Captured by the scraper all along and never
+        # read here, so every report denominated a foreign listing in dollars:
+        # an LVMH report came back with 500 "$" and not one "€", against a
+        # brief that explicitly said EUR.
+        'currency': basic_info.get('currency') or 'USD',
         'current_price': market_data.get('current_price', 0),
         'market_cap': market_data.get('market_cap', 0),
         'enterprise_value': market_data.get('enterprise_value', 0),
@@ -316,6 +355,23 @@ def extract_news_analysis(screening_data: Dict[str, Any]) -> Dict[str, Any]:
         'mitigations': screening_data.get('mitigations', []),
         'screening_method': screening_data.get('analysis_method', 'LLM-based screening'),
     }
+
+
+# Symbols for the venues this product actually covers. Anything unlisted
+# falls back to the ISO code, which is unambiguous even when unlovely
+# ("SEK 1.2bn" beats a wrong "$1.2bn").
+_CURRENCY_SYMBOLS = {
+    "USD": "$", "EUR": "\u20ac", "GBP": "\u00a3", "GBp": "p", "JPY": "\u00a5",
+    "CHF": "CHF ", "CNY": "\u00a5", "HKD": "HK$", "SGD": "S$", "AUD": "A$",
+    "CAD": "C$", "KRW": "\u20a9", "INR": "\u20b9", "TWD": "NT$", "SEK": "SEK ",
+    "NOK": "NOK ", "DKK": "DKK ", "BRL": "R$", "MXN": "MX$", "ZAR": "R",
+}
+
+
+def currency_symbol(code):
+    """Symbol for an ISO currency code, falling back to the code itself."""
+    code = (code or "USD").strip()
+    return _CURRENCY_SYMBOLS.get(code, f"{code} ")
 
 
 def format_number(num, decimals=2):
@@ -1137,6 +1193,19 @@ async def generate_and_save_professional_report_async(
     """Async entry point: generate (parallel sections) + save the report."""
     set_report_language(output_language)
     financials_path = analysis_path / "financials" / "financials_annual_modeling_latest.json"
+
+    # Pin the listing currency for this run before any section prompt loads.
+    # Read from the financials the scraper already captured, so a foreign
+    # listing is reported in its own currency instead of defaulting to dollars.
+    try:
+        import json as _json
+        with open(financials_path) as _f:
+            _basic = (_json.load(_f).get("company_data", {}) or {}).get("basic_info", {}) or {}
+        set_report_currency(_basic.get("currency"))
+    except Exception:
+        # Never block a report on this; USD stays the prompts' default.
+        set_report_currency(None)
+
     computed_values_path = analysis_path / "models" / f"{ticker}_financial_model_computed_values.json"
     screening_path = analysis_path / "screened" / "screening_data.json"
     report_output_dir = analysis_path / "reports"
