@@ -17,6 +17,7 @@ print the ``Identified ticker:`` line api-runner scrapes.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -207,6 +208,35 @@ def _listing_currency(state) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def _report_headline(content: Optional[str]) -> dict:
+    """
+    The rating and price target the report actually published.
+
+    write_report returned a fair value and an upside but never the RATING, so the
+    chat answer inferred its own call from the numbers. A user got a report
+    headed "Investment Rating: SELL" and an answer that said "HOLD / Neutral"
+    about the same company in the same turn.
+
+    These lines are emitted by the recommendation engine in code, not written by
+    the model, so reading them back is reliable.
+    """
+    out: dict = {}
+    if not content:
+        return out
+    # Tolerates both depths: reports written before the heading was nested
+    # under "Recommendation & Price Target" used a second H2.
+    rating = re.search(r"^#{2,3}\s*Investment Rating:\s*(.+?)\s*$", content, re.M)
+    if rating:
+        out["rating"] = rating.group(1).strip()
+    target = re.search(r"\*\*12-Month Price Target\*\*:\s*(\S+)", content)
+    if target:
+        out["price_target_12m"] = target.group(1).strip()
+    expected = re.search(r"\*\*Expected Return\*\*:\s*([+-]?[\d.]+)%", content)
+    if expected:
+        out["price_target_expected_return_pct"] = float(expected.group(1))
+    return out
 
 
 def _valuation_warning(fair_value, upside, market_cap=None, method=None):
@@ -699,10 +729,19 @@ class WriteReportTool(_CtxTool):
             fair_value=fair_value,
             upside_vs_market=upside,
             overall_sentiment=na.overall_sentiment if na else None,
+            # The rating the report published, so the answer cannot contradict
+            # the document the user downloads.
+            **_report_headline(state.report.content),
             **({"valuation_method": method} if method else {}),
             **({"valuation_confidence": band} if band else {}),
             **({"data_quality_warning": warning} if warning else {}),
-            note="Full report generated (downloadable). Summarize its findings for the user.",
+            note=("Full report generated (downloadable). Summarize its findings for "
+                  "the user. If `rating` is present, state THAT rating — it is the "
+                  "one printed in the report the user can open, and it is computed "
+                  "from the model rather than judged. Do not substitute your own "
+                  "call. Note that `upside_vs_market` is measured against the DCF "
+                  "fair value while `price_target_expected_return_pct` belongs to "
+                  "the 12-month target; never quote one with the other's figure."),
         )
 
 

@@ -12,6 +12,7 @@ Design: Numbers = Code, Narrative = LLM, Validation = Code + Critic
 """
 
 import json
+import traceback
 import os
 import re
 from typing import Dict, Any, Tuple, Optional
@@ -500,17 +501,30 @@ class RecommendationEngineV3:
         
         # Prepare additional context
         # company_data comes from extract_company_overview() which has proper structure
+        #
+        # Ratios are rounded BEFORE the model sees them. The explainer is told not
+        # to alter any number it is given, so a raw float arrives in the report
+        # verbatim — a shipped LVMH note read "20.927107x earnings ... 3.3263094x
+        # book value", which is seven decimal places of spurious precision in a
+        # document meant to read as sell-side research.
+        def _ratio(value):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return value if value is not None else "N/A"
+            if value != value:                 # NaN
+                return "N/A"
+            return round(value, 2)
+
         context = {
             "company_name": company_data.get('company_name', 'N/A'),
             "sector": company_data.get('sector', self.sector),
             "market_cap": company_data.get('market_cap', 'N/A'),
-            "pe_ratio": company_data.get('pe_trailing', company_data.get('pe_forward', 'N/A')),
-            "ev_ebitda": company_data.get('ev_to_ebitda', 'N/A'),
-            "pb_ratio": company_data.get('price_to_book', 'N/A'),
-            "revenue_growth": company_data.get('revenue_growth', 'N/A'),
-            "net_margin": company_data.get('net_margin', 'N/A'),
-            "roe": company_data.get('roe', 'N/A'),
-            "debt_equity": company_data.get('debt_to_equity', 'N/A'),
+            "pe_ratio": _ratio(company_data.get('pe_trailing', company_data.get('pe_forward', 'N/A'))),
+            "ev_ebitda": _ratio(company_data.get('ev_to_ebitda', 'N/A')),
+            "pb_ratio": _ratio(company_data.get('price_to_book', 'N/A')),
+            "revenue_growth": _ratio(company_data.get('revenue_growth', 'N/A')),
+            "net_margin": _ratio(company_data.get('net_margin', 'N/A')),
+            "roe": _ratio(company_data.get('roe', 'N/A')),
+            "debt_equity": _ratio(company_data.get('debt_to_equity', 'N/A')),
             "week_52_low": company_data.get('week_52_low', 0),
             "week_52_high": company_data.get('week_52_high', 0)
         }
@@ -581,7 +595,7 @@ class RecommendationEngineV3:
             # Header
             ccy = getattr(self, "_ccy", "$")
             priced = fixed_numbers.get("price_available", True)
-            output.append(f"## Investment Rating: {fixed_numbers['rating']}")
+            output.append(f"### Investment Rating: {fixed_numbers['rating']}")
             if priced:
                 output.append(f"\n**12-Month Price Target**: {ccy}{fixed_numbers['targets']['m12']['price']:.2f}")
                 output.append(f"**Expected Return**: {fixed_numbers['expected_return_pct_12m']:+.1f}%")
@@ -677,15 +691,15 @@ class RecommendationEngineV3:
             # Conspicuous annotation when the section shipped without full
             # citation validation — readers must not mistake it for a fully
             # evidence-backed recommendation.
-            if validation_report.get("citation_enforcement_bypassed"):
+            if validation_result.get("citation_enforcement_bypassed"):
                 output.append(
                     "\n> **Note**: News evidence was unavailable for this ticker at "
                     "generation time. This recommendation is based on quantitative "
                     "model outputs (valuation, momentum) only; evidence citations "
                     "are omitted."
                 )
-            elif validation_report.get("degraded"):
-                coverage_pct = validation_report.get(
+            elif validation_result.get("degraded"):
+                coverage_pct = validation_result.get(
                     'coverage_details', {}
                 ).get('coverage_pct', 0) or 0
                 output.append(
@@ -698,6 +712,49 @@ class RecommendationEngineV3:
 
             return '\n'.join(output)
             
-        except Exception as e:
-            # Fallback to simple format
-            return f"## Investment Rating: {fixed_numbers['rating']}\n\n{llm_response}"
+        except Exception:
+            # This used to `return ... {llm_response}`, which pasted the model's
+            # raw JSON payload — 7,000 characters of {"rating": "SELL", ...} with
+            # \u2019 escapes — into the middle of a professional report, and said
+            # nothing about it. A NameError introduced in c81d3e3 meant the branch
+            # was taken on EVERY report for eleven days: 12 of 33 stored reports
+            # carry the blob, including real users'.
+            #
+            # A fallback must degrade to something a reader can use, and it must
+            # be loud enough that the next failure is found by a log rather than
+            # by a customer.
+            self._log(
+                "Recommendation formatting failed; emitting the deterministic "
+                "summary without the narrative.\n" + traceback.format_exc(),
+                "error",
+            )
+            return self._minimal_recommendation(fixed_numbers)
+
+    def _minimal_recommendation(self, fixed_numbers: Dict[str, Any]) -> str:
+        """
+        The recommendation reduced to the numbers the calculator already proved.
+
+        Used when narrative formatting fails. Everything here is computed in
+        Python, so it is safe to publish even when the LLM payload is unusable.
+        """
+        ccy = getattr(self, "_ccy", "$")
+        lines = [f"### Investment Rating: {fixed_numbers.get('rating', 'NOT RATED')}"]
+        if fixed_numbers.get("price_available", True):
+            target = (fixed_numbers.get("targets") or {}).get("m12") or {}
+            if target.get("price") is not None:
+                lines.append(f"\n**12-Month Price Target**: {ccy}{target['price']:.2f}")
+            expected = fixed_numbers.get("expected_return_pct_12m")
+            if expected is not None:
+                lines.append(f"**Expected Return**: {expected:+.1f}%")
+        else:
+            lines.append(
+                "\n**No market price was available for this listing**, so no price "
+                "target, upside or rating can be derived."
+            )
+        lines.append(
+            "\n> **Note**: the narrative for this section could not be rendered, so "
+            "only the model's computed figures are shown. The valuation, price "
+            "target and rating above are unaffected — they are calculated in code, "
+            "not written by the model."
+        )
+        return "\n".join(lines)
