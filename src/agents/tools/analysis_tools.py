@@ -52,6 +52,9 @@ class AgentContext:
         self.base_path = None        # run folder (ticker folder, or a CHAT folder)
         self.chat_base_path = None   # original CHAT folder, kept when base_path repoints
         self._ticker_announced = False
+        # Requested ticker -> the listing we actually analyze, so a repeated
+        # request for a bad line doesn't re-run the search over the network.
+        self._listing_cache = {}
 
     def ensure_base_logger(self):
         """
@@ -85,6 +88,7 @@ class AgentContext:
         Reuses the state if the same ticker is requested again.
         """
         from src.agents.supervisor.state import FinancialState
+        from src.listing_resolver import better_listing, is_analyzable
         from path_utils import get_analysis_path, ensure_analysis_paths
         from logger import setup_logger
 
@@ -102,17 +106,51 @@ class AgentContext:
                 f"(resolve_symbol) or ask the user which company they mean before analyzing."
             )
 
+        # Map through any substitution decided on an earlier call BEFORE the reuse
+        # check, so a second request for the original symbol lands on the state we
+        # already built for its home listing instead of rebuilding it.
+        ticker = self._listing_cache.get(ticker, ticker)
+
         # If we already have state for this ticker, reuse it (chain continuity).
         if self.state is not None and self.ticker == ticker:
             return self.state
 
+        # A ticker the agent picked may be a regional or OTC line rather than the
+        # company's home listing. Those quote a price but report no market cap and
+        # no share count, so every downstream valuation divides into a hole and the
+        # report ships NOT RATED. Verify the listing here, at the single point where
+        # a ticker becomes the analysis target, instead of asking the prompt to get
+        # it right. See src/listing_resolver.py for why the search needs two queries
+        # and why ranking is not "biggest market cap".
+        info = {}
+        try:
+            import yfinance as yf
+            info = yf.Ticker(ticker).info or {}
+        except Exception:
+            info = {}
+
+        if info and not is_analyzable(info):
+            try:
+                upgrade = better_listing(ticker, info)
+            except Exception:
+                upgrade = None
+            if upgrade:
+                better_symbol, better_name = upgrade
+                print(
+                    f"[SUPERVISOR] ↪ {ticker} has no market cap or share count "
+                    f"(secondary listing); analyzing {better_symbol} instead."
+                )
+                self._listing_cache[ticker] = better_symbol
+                ticker = better_symbol
+                company_name = company_name or better_name
+                try:
+                    info = yf.Ticker(ticker).info or {}
+                except Exception:
+                    pass
+
         # Resolve company name (best-effort).
         if not company_name:
-            try:
-                import yfinance as yf
-                company_name = yf.Ticker(ticker).info.get("longName") or ticker
-            except Exception:
-                company_name = ticker
+            company_name = info.get("longName") or ticker
 
         analysis_path = get_analysis_path(self.email, ticker, self.timestamp)
         ensure_analysis_paths(analysis_path)

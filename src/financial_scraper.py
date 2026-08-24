@@ -422,7 +422,19 @@ class FinancialScraper:
                     "shares_outstanding_basic": info.get("sharesOutstanding"),
                     "shares_outstanding_diluted": info.get("sharesOutstandingDiluted"),
                     "float_shares": info.get("floatShares"),
-                    "current_price": info.get("currentPrice"),
+                    # Yahoo populates "currentPrice" for US primary listings but
+                    # leaves it null on many foreign and secondary venues, where the
+                    # live quote arrives as "regularMarketPrice" instead. Reading only
+                    # the first field returned None for those tickers, which flowed
+                    # through the whole valuation chain as a zero price and surfaced
+                    # as a NOT RATED report (LVMH on Stuttgart quoted 458.70 the whole
+                    # time). The realtime price fetcher already fell back this way;
+                    # the scraper did not.
+                    "current_price": (
+                        info.get("currentPrice")
+                        or info.get("regularMarketPrice")
+                        or info.get("previousClose")
+                    ),
                     "previous_close": info.get("previousClose"),
                     "market_cap": info.get("marketCap"),
                     "enterprise_value": info.get("enterpriseValue"),

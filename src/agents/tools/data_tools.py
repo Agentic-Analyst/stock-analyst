@@ -117,6 +117,26 @@ class ResolveSymbolTool(Tool):
 # ---------------------------------------------------------------------------
 # get_prices — OHLCV history / recent performance
 # ---------------------------------------------------------------------------
+def company_label(ticker: str) -> Optional[str]:
+    """
+    The company a ticker actually belongs to.
+
+    Price payloads used to carry the symbol alone. When an agent guessed "MC"
+    for LVMH it got back $68.90 with nothing to contradict it — that is Moelis &
+    Company on the NYSE — and the figure flowed into a luxury-sector report as
+    though it were LVMH's. Naming the issuer lets the model catch its own bad
+    guess instead of quoting another company's price at the user.
+
+    Best-effort and never raises; an unnamed quote is still a usable quote.
+    """
+    try:
+        import yfinance as yf
+        info = yf.Ticker(ticker).info or {}
+        return info.get("longName") or info.get("shortName") or None
+    except Exception:
+        return None
+
+
 class GetPricesTool(Tool):
     name = "get_prices"
     description = (
@@ -196,12 +216,19 @@ class GetPricesTool(Tool):
                 "end": str(df.index[-1]),
             }
 
-        quote, stats = await asyncio.gather(
-            asyncio.to_thread(_quote), asyncio.to_thread(_period_stats)
+        # The name resolves concurrently with the price lookups, so identifying
+        # the issuer costs no wall-clock time.
+        quote, stats, name = await asyncio.gather(
+            asyncio.to_thread(_quote),
+            asyncio.to_thread(_period_stats),
+            asyncio.to_thread(company_label, ticker),
         )
         if quote.get("latest_price") is None and not stats:
             return tool_error(f"No price data for {ticker} right now.", ticker=ticker)
         payload = {"ticker": ticker, "period": period, **quote}
+        if name:
+            # Named explicitly so a wrong-ticker guess is visible in the result.
+            payload["company"] = name
         if stats:
             payload["period_stats"] = stats
         else:
