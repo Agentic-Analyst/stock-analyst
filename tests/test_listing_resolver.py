@@ -307,4 +307,5 @@ class TestCompanyLabel:
         from src.agents.tools.data_tools import GetPricesTool
         source = inspect.getsource(GetPricesTool.execute)
         assert 'payload["company"] = name' in source
-        assert "company_label" in source
+        # Name and currency resolve together in one lookup.
+        assert "listing_identity" in source

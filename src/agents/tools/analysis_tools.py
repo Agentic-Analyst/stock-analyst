@@ -193,6 +193,22 @@ _TICKER_PARAM = {
 }
 
 
+def _listing_currency(state) -> Optional[str]:
+    """
+    The currency the scraped listing reports in.
+
+    findings.py formats every monetary chip with this; without it a EUR
+    valuation is published to the chat surface as "$388.27".
+    """
+    try:
+        km = state.financial_data.key_metrics if state.financial_data else {}
+        if isinstance(km, dict):
+            return (km.get("basic_info", {}) or {}).get("currency") or None
+    except Exception:
+        pass
+    return None
+
+
 def _valuation_warning(fair_value, upside, market_cap=None, method=None):
     """
     Sanity rail on valuation output. An FCF-projection DCF on a deeply
@@ -368,6 +384,7 @@ class GetFinancialsTool(_CtxTool):
         return tool_ok(
             ticker=ticker,
             company_name=state.company_name,
+            currency=basic.get("currency"),
             sector=basic.get("sector"),
             industry=basic.get("industry"),
             current_price=market.get("current_price"),
@@ -489,6 +506,7 @@ class BuildModelTool(_CtxTool):
         return tool_ok(
             ticker=ticker,
             model_type=state.financial_model.model_type if state.financial_model else None,
+            currency=_listing_currency(state),
             fair_value=fair_value_out,
             current_price=current_price,
             upside_vs_market=upside_out,
@@ -677,6 +695,7 @@ class WriteReportTool(_CtxTool):
             ticker=ticker,
             report_path=state.report.report_path,
             content_length=len(state.report.content) if state.report.content else 0,
+            currency=_listing_currency(state),
             fair_value=fair_value,
             upside_vs_market=upside,
             overall_sentiment=na.overall_sentiment if na else None,

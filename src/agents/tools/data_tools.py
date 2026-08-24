@@ -129,12 +129,24 @@ def company_label(ticker: str) -> Optional[str]:
 
     Best-effort and never raises; an unnamed quote is still a usable quote.
     """
+    return listing_identity(ticker)[0]
+
+
+def listing_identity(ticker: str) -> tuple:
+    """
+    ``(company_name, currency)`` for a ticker, in one lookup.
+
+    The currency matters as much as the name: a EUR listing whose findings are
+    published with a "$" is telling the user something false about the number,
+    and both facts come from the same call.
+    """
     try:
         import yfinance as yf
         info = yf.Ticker(ticker).info or {}
-        return info.get("longName") or info.get("shortName") or None
+        name = info.get("longName") or info.get("shortName") or None
+        return name, info.get("currency") or None
     except Exception:
-        return None
+        return None, None
 
 
 class GetPricesTool(Tool):
@@ -218,17 +230,21 @@ class GetPricesTool(Tool):
 
         # The name resolves concurrently with the price lookups, so identifying
         # the issuer costs no wall-clock time.
-        quote, stats, name = await asyncio.gather(
+        quote, stats, identity = await asyncio.gather(
             asyncio.to_thread(_quote),
             asyncio.to_thread(_period_stats),
-            asyncio.to_thread(company_label, ticker),
+            asyncio.to_thread(listing_identity, ticker),
         )
+        name, currency = identity
         if quote.get("latest_price") is None and not stats:
             return tool_error(f"No price data for {ticker} right now.", ticker=ticker)
         payload = {"ticker": ticker, "period": period, **quote}
         if name:
             # Named explicitly so a wrong-ticker guess is visible in the result.
             payload["company"] = name
+        if currency:
+            # Read by findings.py so the chat chip is denominated correctly.
+            payload["currency"] = currency
         if stats:
             payload["period_stats"] = stats
         else:

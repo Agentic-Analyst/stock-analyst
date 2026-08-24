@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from src.currency import currency_symbol
+
 
 def _num(v) -> Optional[float]:
     try:
@@ -35,17 +37,35 @@ def _num(v) -> Optional[float]:
         return None
 
 
-def _money(v) -> Optional[str]:
+def _symbol(ccy: Optional[str]) -> str:
+    """
+    The listing's own currency symbol, defaulting to "$".
+    """
+    if not ccy:
+        return "$"
+    return currency_symbol(ccy)
+
+
+def _money(v, ccy: Optional[str] = None) -> Optional[str]:
+    """
+    Format a monetary finding in the currency it was actually measured in.
+
+    The symbol used to be a hardcoded "$". A verified LVMH run produced a
+    correct EUR report and then published the finding chip "$388.27" beside it —
+    the same mislabelling that was fixed inside reports, still live on the chat
+    surface the user watches while waiting.
+    """
     n = _num(v)
     if n is None:
         return None
+    sym = _symbol(ccy)
     if abs(n) >= 1_000_000_000_000:
-        return f"${n/1_000_000_000_000:.2f}T"
+        return f"{sym}{n/1_000_000_000_000:.2f}T"
     if abs(n) >= 1_000_000_000:
-        return f"${n/1_000_000_000:.1f}B"
+        return f"{sym}{n/1_000_000_000:.1f}B"
     if abs(n) >= 1_000_000:
-        return f"${n/1_000_000:.1f}M"
-    return f"${n:,.2f}"
+        return f"{sym}{n/1_000_000:.1f}M"
+    return f"{sym}{n:,.2f}"
 
 
 def _pct(v, already_pct: bool = False) -> Optional[str]:
@@ -69,6 +89,8 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
         return []
 
     out: List[Dict[str, str]] = []
+    # The listing's currency, when the tool reported one. Absent it, "$".
+    ccy = result.get("currency")
 
     def add(kind: str, label: str, value: Optional[str], sub: Optional[str] = None):
         if value:
@@ -83,26 +105,26 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
         add("identity", "Resolved", sym, name)
 
     elif tool == "get_prices":
-        px = _money(result.get("latest_price"))
+        px = _money(result.get("latest_price"), ccy)
         chg = _pct(result.get("day_change_pct"), already_pct=True)
         if px:
             add("price", result.get("ticker") or "Price", px, chg)
 
     elif tool == "get_crypto":
-        px = _money(result.get("price"))
+        px = _money(result.get("price"), ccy)
         chg = _pct(result.get("change_24h_pct"), already_pct=True)
         if px:
             add("price", result.get("symbol") or result.get("asset") or "Price", px, chg)
 
     elif tool == "get_financials":
         add("company", result.get("company_name") or "Company",
-            _money(result.get("market_cap")), "market cap")
+            _money(result.get("market_cap"), ccy), "market cap")
         pe = _num(result.get("trailing_pe"))
         if pe:
             add("metric", "Trailing P/E", f"{pe:.1f}x")
 
     elif tool == "build_model":
-        fv = _money(result.get("fair_value"))
+        fv = _money(result.get("fair_value"), ccy)
         up = _pct(result.get("upside_vs_market"))
         method = result.get("valuation_method")
         add("valuation", "Fair value", fv,
@@ -130,7 +152,7 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
             add("news", "Latest headline", (title or "")[:90] or None)
 
     elif tool == "write_report":
-        fv = _money(result.get("fair_value"))
+        fv = _money(result.get("fair_value"), ccy)
         add("report", "Report ready", fv, "full analyst report generated")
         if not fv:
             out.clear()

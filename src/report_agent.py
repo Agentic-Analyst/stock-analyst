@@ -413,18 +413,10 @@ def extract_news_analysis(screening_data: Dict[str, Any]) -> Dict[str, Any]:
 # Symbols for the venues this product actually covers. Anything unlisted
 # falls back to the ISO code, which is unambiguous even when unlovely
 # ("SEK 1.2bn" beats a wrong "$1.2bn").
-_CURRENCY_SYMBOLS = {
-    "USD": "$", "EUR": "\u20ac", "GBP": "\u00a3", "GBp": "p", "JPY": "\u00a5",
-    "CHF": "CHF ", "CNY": "\u00a5", "HKD": "HK$", "SGD": "S$", "AUD": "A$",
-    "CAD": "C$", "KRW": "\u20a9", "INR": "\u20b9", "TWD": "NT$", "SEK": "SEK ",
-    "NOK": "NOK ", "DKK": "DKK ", "BRL": "R$", "MXN": "MX$", "ZAR": "R",
-}
-
-
-def currency_symbol(code):
-    """Symbol for an ISO currency code, falling back to the code itself."""
-    code = (code or "USD").strip()
-    return _CURRENCY_SYMBOLS.get(code, f"{code} ")
+# Re-exported so existing callers keep working; the table itself lives in
+# src/currency.py, which has no dependencies and can be imported from the hot
+# log path without dragging in the LLM clients.
+from src.currency import _CURRENCY_SYMBOLS, currency_symbol  # noqa: E402,F401
 
 
 def _requested_title() -> str:
