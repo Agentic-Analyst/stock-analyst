@@ -73,9 +73,21 @@ class RecommendationCalculator:
         Returns a complete FixedNumbers payload that LLM cannot modify.
         """
         
-        # Handle None values for ETFs or missing data
-        if current_price is None or current_price == 0:
-            current_price = 0.01  # Avoid division by zero
+        # A MISSING PRICE INVALIDATES THE RATING. It does not become a penny.
+        #
+        # This used to read `current_price = 0.01  # Avoid division by zero`,
+        # which turned "we have no price" into "the stock costs one cent". Every
+        # downstream figure then followed from that: a real LVMH run on the
+        # Stuttgart line, where yfinance returns no price, computed the
+        # valuation gap as 290.73/0.01 and shipped a confident BUY with a price
+        # target — while the chat answer, which had the live price, said HOLD.
+        #
+        # Upside, a rating and a price target are all measured AGAINST the
+        # market price. Without one there is nothing to measure against, so the
+        # honest output is to say so rather than to invent the denominator.
+        price_available = current_price is not None and current_price > 0
+        if not price_available:
+            current_price = 0.0
         if dcf_perpetual is None:
             dcf_perpetual = 0
         if dcf_exit is None:
@@ -117,6 +129,8 @@ class RecommendationCalculator:
         
         # 6. Calculate price targets
         # Progressive targets: 3M gets 33% of ER, 6M gets 67%, 12M gets 100%
+        # With no market price these are meaningless (every one would be 0), so
+        # they are left at zero and flagged rather than presented as targets.
         target_3m = current_price * (1 + 0.33 * expected_return_pct / 100)
         target_6m = current_price * (1 + 0.67 * expected_return_pct / 100)
         target_12m = current_price * (1 + expected_return_pct / 100)
@@ -161,7 +175,12 @@ class RecommendationCalculator:
         }
         
         # 9. Determine rating
-        rating = self._determine_rating(expected_return_pct)
+        #
+        # A rating is a statement about price versus value. With no market
+        # price there is no such statement to make, so this returns NOT RATED
+        # instead of letting the band table hand back a default that reads as
+        # a considered call.
+        rating = self._determine_rating(expected_return_pct) if price_available else "NOT RATED"
         
         # 10. Build complete fixed numbers payload
         return {
@@ -171,6 +190,10 @@ class RecommendationCalculator:
             "expected_return_pct_12m": round(expected_return_pct, 2),
             "targets": targets_with_ranges,
             "rating": rating,
+            # Downstream must be able to distinguish "no view" from "neutral
+            # view": the report narrative, the price-target table and the
+            # answer all read this.
+            "price_available": price_available,
             "inputs": {
                 "raw_val_gap_pct": round(raw_val_gap_pct, 2),
                 "sector_premium_adjustment": self.sector_adjustment,

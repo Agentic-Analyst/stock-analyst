@@ -23,6 +23,20 @@ from recommendation_validator import RecommendationValidator
 from logger import StockAnalystLogger
 
 
+# Local copy rather than an import from report_agent, which imports this module.
+_CCY = {
+    "USD": "$", "EUR": "\u20ac", "GBP": "\u00a3", "JPY": "\u00a5", "CHF": "CHF ",
+    "HKD": "HK$", "SGD": "S$", "AUD": "A$", "CAD": "C$", "CNY": "\u00a5",
+    "KRW": "\u20a9", "INR": "\u20b9", "TWD": "NT$", "SEK": "SEK ", "NOK": "NOK ",
+    "DKK": "DKK ", "BRL": "R$", "MXN": "MX$", "ZAR": "R",
+}
+
+
+def _symbol_for(code):
+    code = (code or "USD").strip()
+    return _CCY.get(code, f"{code} ")
+
+
 class RecommendationEngineV3:
     """
     Evidence-based recommendation engine with deterministic calculations
@@ -99,6 +113,12 @@ class RecommendationEngineV3:
         )
         
         # Step 2: Calculate fixed numbers (deterministic)
+        # The listing currency, so code-generated lines (price targets, the
+        # rating header) are denominated correctly. The prompt-level directive
+        # added in report_agent only steers what the LLM writes; these lines are
+        # built in Python and would otherwise stay hardcoded to "$".
+        self._ccy = _symbol_for(company_data.get("currency"))
+
         fixed_numbers = self.calculator.calculate_fixed_numbers(
             ticker=ticker,
             current_price=current_price,
@@ -559,9 +579,22 @@ class RecommendationEngineV3:
             output = []
             
             # Header
+            ccy = getattr(self, "_ccy", "$")
+            priced = fixed_numbers.get("price_available", True)
             output.append(f"## Investment Rating: {fixed_numbers['rating']}")
-            output.append(f"\n**12-Month Price Target**: ${fixed_numbers['targets']['m12']['price']:.2f}")
-            output.append(f"**Expected Return**: {fixed_numbers['expected_return_pct_12m']:+.1f}%")
+            if priced:
+                output.append(f"\n**12-Month Price Target**: {ccy}{fixed_numbers['targets']['m12']['price']:.2f}")
+                output.append(f"**Expected Return**: {fixed_numbers['expected_return_pct_12m']:+.1f}%")
+            else:
+                # Without a market price a target is not a low estimate, it is
+                # arithmetic on a denominator we never had. Say that instead of
+                # printing a confident "0.00".
+                output.append(
+                    "\n**No market price was available for this listing**, so no price "
+                    "target, upside or rating can be derived. The intrinsic value below "
+                    "still stands on its own; compare it against the price on the "
+                    "company's primary listing."
+                )
             
             # Thesis
             output.append(f"\n### Investment Thesis\n")
@@ -571,12 +604,13 @@ class RecommendationEngineV3:
             output.append(f"\n### Valuation Perspective\n")
             output.append(response_data.get('valuation_perspective', ''))
             
-            # Price Targets
-            output.append(f"\n### Price Targets\n")
-            for period, label in [('m3', '3-Month'), ('m6', '6-Month'), ('m12', '12-Month')]:
+            # Price Targets — omitted entirely when there is no price to target.
+            if priced:
+                output.append(f"\n### Price Targets\n")
+            for period, label in ([] if not priced else [('m3', '3-Month'), ('m6', '6-Month'), ('m12', '12-Month')]):
                 target = fixed_numbers['targets'][period]
                 driver = response_data.get('price_targets', {}).get(period, {}).get('driver', 'N/A')
-                output.append(f"**{label}**: ${target['price']:.2f} (Range: ${target['range_low']:.2f} - ${target['range_high']:.2f})")
+                output.append(f"**{label}**: {ccy}{target['price']:.2f} (Range: {ccy}{target['range_low']:.2f} - {ccy}{target['range_high']:.2f})")
                 output.append(f"- Key Driver: {driver}\n")
             
             # Catalysts

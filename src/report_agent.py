@@ -96,6 +96,53 @@ def _currency_directive() -> str:
     )
 
 
+# The user's own framing for this report — persona, title, the sections they
+# asked for, what to emphasise. Same contextvar mechanism as language and
+# currency above.
+#
+# Without it, write_report took only {ticker, output_language} and the brief
+# never reached the writer at all. A user asked for a ~10-page sell-side
+# initiation on LVMH with a specific title and ten named sections, and received
+# the stock template: no title, none of the requested structure. The brief
+# steered the chat answer and nothing else, so the downloadable artifact — the
+# part a professional would actually keep — ignored the request entirely.
+#
+# HARD BOUNDARY: the brief may shape STRUCTURE, EMPHASIS and TONE. It may not
+# change a number. Every figure still comes from the model and the calculator,
+# and the validator still rejects any the engine did not compute. A brief that
+# says "target 800" must not produce one.
+_REPORT_BRIEF: contextvars.ContextVar[str] = contextvars.ContextVar("report_brief", default="")
+
+# Long enough for a detailed brief, short enough that it cannot dominate a
+# section prompt or blow up token cost across ~8 parallel sections.
+_BRIEF_MAX_CHARS = 2000
+
+
+def set_report_brief(brief: Optional[str]) -> None:
+    """Set the user's framing for the current report run (best-effort)."""
+    _REPORT_BRIEF.set((brief or "").strip()[:_BRIEF_MAX_CHARS])
+
+
+def _brief_directive() -> str:
+    """Instruction appended to each section prompt carrying the user's brief."""
+    brief = _REPORT_BRIEF.get()
+    if not brief:
+        return ""
+    return (
+        "\n\n---\nUSER BRIEF for this report. Follow it for STRUCTURE, EMPHASIS and "
+        "TONE — the section's framing, what to foreground, the register to write in, "
+        "and any title or headings requested:\n\n"
+        f"{brief}\n\n"
+        "STRICT LIMITS. Do NOT invent, alter or round any figure to satisfy the "
+        "brief; every number is supplied to you and is computed elsewhere. If the "
+        "brief asks for data you were not given, say it is unavailable rather than "
+        "estimating it. If the brief asks for a specific rating or price target, "
+        "IGNORE that instruction — the recommendation is derived from the model, not "
+        "requested. Cover only what belongs in THIS section; other sections handle "
+        "the rest of the brief."
+    )
+
+
 def load_prompt(prompt_name: str) -> str:
     """Load a prompt template from the prompts folder.
 
@@ -109,7 +156,7 @@ def load_prompt(prompt_name: str) -> str:
     prompt_path = Path(__file__).parent.parent / "prompts" / f"{prompt_name}.md"
     with open(prompt_path, 'r') as f:
         template = f.read()
-    return template + _currency_directive() + _language_directive()
+    return template + _currency_directive() + _brief_directive() + _language_directive()
 
 
 def load_financial_json(json_path: Path) -> Dict[str, Any]:
@@ -372,6 +419,39 @@ def currency_symbol(code):
     """Symbol for an ISO currency code, falling back to the code itself."""
     code = (code or "USD").strip()
     return _CURRENCY_SYMBOLS.get(code, f"{code} ")
+
+
+def _strip_echoed_heading(body: str, title: str) -> str:
+    """
+    Drop a section's own heading when the model repeated it.
+
+    The section prompts never ask for a heading, but models add one anyway, and
+    the assembler below always writes its own — so a real report shipped with
+    "## Executive Summary" twice, back to back, and the same for Company
+    Overview and Financial Performance Analysis.
+
+    Only a heading that MATCHES the section title is removed. A section that
+    legitimately opens with a different heading keeps it: silently eating the
+    first line of every section would trade a cosmetic defect for a content
+    one.
+    """
+    if not body:
+        return body
+    stripped = body.lstrip()
+    lines = stripped.split("\n")
+    # \s* not \s+: models sometimes write "##Heading" with no space.
+    # Safe because a heading is only removed when it MATCHES the title.
+    m = re.match(r"^#{1,6}\s*(.+?)\s*$", lines[0]) if lines else None
+    if not m:
+        return body
+
+    def norm(x: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", x.lower()).strip()
+
+    heading, want = norm(m.group(1)), norm(title)
+    if heading and want and (heading == want or heading in want or want in heading):
+        return "\n".join(lines[1:]).lstrip()
+    return body
 
 
 def format_number(num, decimals=2):
@@ -730,7 +810,7 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     # Executive Summary
     report_parts.append(f"""## Executive Summary
 
-{sections['executive_summary']}
+{_strip_echoed_heading(sections['executive_summary'], "Executive Summary")}
 
 ---
 """)
@@ -738,7 +818,7 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     # Company Overview
     report_parts.append(f"""## Company Overview
 
-{sections['company_overview']}
+{_strip_echoed_heading(sections['company_overview'], "Company Overview")}
 
 ---
 """)
@@ -746,7 +826,7 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     # Financial Performance
     report_parts.append(f"""## Financial Performance Analysis
 
-{sections['financial_performance']}
+{_strip_echoed_heading(sections['financial_performance'], "Financial Performance Analysis")}
 
 ---
 """)
@@ -754,7 +834,7 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     # Valuation
     report_parts.append(f"""## Financial Model & Valuation
 
-{sections['valuation']}
+{_strip_echoed_heading(sections['valuation'], "Financial Model & Valuation")}
 
 ---
 """)
@@ -762,7 +842,7 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     # News Analysis
     report_parts.append(f"""## News & Market Analysis
 
-{sections['news_analysis']}
+{_strip_echoed_heading(sections['news_analysis'], "News & Market Analysis")}
 
 ---
 """)
@@ -770,7 +850,7 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     # Investment Thesis
     report_parts.append(f"""## Investment Thesis
 
-{sections['investment_thesis']}
+{_strip_echoed_heading(sections['investment_thesis'], "Investment Thesis")}
 
 ---
 """)
@@ -778,7 +858,7 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     # Recommendation
     report_parts.append(f"""## Recommendation & Price Target
 
-{sections['recommendation']}
+{_strip_echoed_heading(sections['recommendation'], "Recommendation & Price Target")}
 
 ---
 """)
@@ -1189,9 +1269,11 @@ async def generate_and_save_professional_report_async(
     ticker: str,
     logger: Optional[StockAnalystLogger] = None,
     output_language: Optional[str] = None,
+    brief: Optional[str] = None,
 ) -> Tuple[str, Path]:
     """Async entry point: generate (parallel sections) + save the report."""
     set_report_language(output_language)
+    set_report_brief(brief)
     financials_path = analysis_path / "financials" / "financials_annual_modeling_latest.json"
 
     # Pin the listing currency for this run before any section prompt loads.

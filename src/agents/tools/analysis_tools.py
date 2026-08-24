@@ -530,12 +530,25 @@ class WriteReportTool(_CtxTool):
                     "if the user asked for a non-English report. Omit for English."
                 ),
             },
+            "brief": {
+                "type": "string",
+                "description": (
+                    "Optional. The user's own framing for the report, passed through "
+                    "close to verbatim: the persona they asked you to adopt, a title "
+                    "they specified, the sections or areas they want covered, and what "
+                    "to emphasise. Set this whenever the user described the report they "
+                    "want rather than just naming a company — e.g. 'act as a sell-side "
+                    "analyst', 'cover these 10 areas', 'title it X'. It steers structure "
+                    "and tone ONLY; never put a requested rating or price target here, "
+                    "as those are derived from the model and cannot be requested."
+                ),
+            },
         },
         "required": ["ticker"],
     }
     is_readonly = False
 
-    async def execute(self, ticker: str, output_language: str = "") -> str:
+    async def execute(self, ticker: str, output_language: str = "", brief: str = "") -> str:
         from src.agents.supervisor.task_agents.financial_data_agent import financial_data_agent
         from src.agents.supervisor.task_agents.model_generation_agent import model_generation_agent
         from src.agents.supervisor.task_agents.news_analysis_agent import news_analysis_agent
@@ -546,6 +559,14 @@ class WriteReportTool(_CtxTool):
         state = self.ctx.ensure_state_for_ticker(ticker)
         if output_language and output_language.strip():
             state.output_language = output_language.strip()
+        # The user's framing for the report. Falls back to their original
+        # message when the agent did not pass one explicitly: a detailed brief
+        # is far more often stated once up front than restated as a tool
+        # argument, and losing it is what produced a stock-template report for
+        # a request that specified a title and ten sections.
+        _brief = (brief or "").strip() or (self.ctx.user_prompt or "").strip()
+        if _brief:
+            state.report_brief = _brief
         if not state.is_financial_data_collected():
             state = await financial_data_agent(state)
             self.ctx.state = state
