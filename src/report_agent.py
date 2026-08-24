@@ -18,6 +18,10 @@ Output: Professional analyst report in markdown format
 from __future__ import annotations
 import asyncio
 import contextvars
+# Used by _strip_echoed_heading. Its absence broke EVERY report for one
+# deploy: the helper referenced `re` at call time and the module never
+# imported it.
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -139,7 +143,9 @@ def _brief_directive() -> str:
         "estimating it. If the brief asks for a specific rating or price target, "
         "IGNORE that instruction — the recommendation is derived from the model, not "
         "requested. Cover only what belongs in THIS section; other sections handle "
-        "the rest of the brief."
+        "the rest of the brief. Do NOT restate the report title and do NOT open with a "
+        "top-level '#' heading — you are writing ONE SECTION of a document that "
+        "already has its title and its section heading."
     )
 
 
@@ -421,37 +427,94 @@ def currency_symbol(code):
     return _CURRENCY_SYMBOLS.get(code, f"{code} ")
 
 
+def _requested_title() -> str:
+    """
+    The title the user asked for, if their brief named one.
+
+    Sections are told not to restate the title, so unless the document header
+    uses it the requested title vanishes entirely — which is what happened on
+    the first pass of this fix: a brief saying 'titled "X"' produced a report
+    where X appeared zero times.
+
+    Deliberately conservative. Only well-formed, explicitly-quoted or
+    explicitly-labelled titles are picked up; anything ambiguous falls through
+    to the default company header rather than guessing a title from prose.
+    """
+    brief = _REPORT_BRIEF.get()
+    if not brief:
+        return ""
+    patterns = [
+        r'titled\s*[:\-]?\s*[\u201c"\u2018\']([^\u201d"\u2019\']{4,120})',
+        r'title\s*it\s*[:\-]?\s*[\u201c"\u2018\']?([^\u201d"\u2019\'\n]{4,120})',
+        r'\btitle\s*[:\-]\s*[\u201c"\u2018\']?([^\u201d"\u2019\'\n]{4,120})',
+    ]
+    for pat in patterns:
+        m = re.search(pat, brief, re.I)
+        if m:
+            t = m.group(1).strip().strip('*').strip(' .;,')
+            # Reject a fragment that is obviously the rest of a sentence.
+            if 4 <= len(t) <= 120:
+                return t
+    return ""
+
+
 def _strip_echoed_heading(body: str, title: str) -> str:
     """
-    Drop a section's own heading when the model repeated it.
+    Drop the report title and the section's own heading when a model repeats
+    them at the top of a section.
 
-    The section prompts never ask for a heading, but models add one anyway, and
-    the assembler below always writes its own — so a real report shipped with
-    "## Executive Summary" twice, back to back, and the same for Company
-    Overview and Financial Performance Analysis.
+    Two things get echoed, and both were visible in a shipped report:
 
-    Only a heading that MATCHES the section title is removed. A section that
-    legitimately opens with a different heading keeps it: silently eating the
-    first line of every section would trade a cosmetic defect for a content
-    one.
+      * The SECTION HEADING. The prompts never ask for one, but models add it
+        and the assembler adds its own -> "## Company Overview" twice.
+      * The REPORT TITLE. Once the user's brief reaches the section prompts, a
+        brief saying "title it X" makes every section restate X as an H1. Eight
+        sections, eight copies of the title mid-document.
+
+    So this walks past a leading H1 and any blank lines before looking for an
+    echoed section heading — an earlier version only inspected line 1, found
+    the title there, and gave up, leaving the duplicate heading in place.
+
+    Only a heading MATCHING the section title is removed. A section that opens
+    with a genuinely different heading keeps it: silently eating the first line
+    of every section would trade a cosmetic defect for a content one.
     """
     if not body:
         return body
-    stripped = body.lstrip()
-    lines = stripped.split("\n")
-    # \s* not \s+: models sometimes write "##Heading" with no space.
-    # Safe because a heading is only removed when it MATCHES the title.
-    m = re.match(r"^#{1,6}\s*(.+?)\s*$", lines[0]) if lines else None
-    if not m:
-        return body
+
+    lines = body.lstrip().split("\n")
 
     def norm(x: str) -> str:
         return re.sub(r"[^a-z0-9]+", " ", x.lower()).strip()
 
-    heading, want = norm(m.group(1)), norm(title)
-    if heading and want and (heading == want or heading in want or want in heading):
-        return "\n".join(lines[1:]).lstrip()
-    return body
+    want = norm(title)
+    i = 0
+    changed = True
+    while changed and i < len(lines):
+        changed = False
+        # Skip blanks between echoed elements.
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+            changed = True
+        if i >= len(lines):
+            break
+        m = re.match(r"^(#{1,6})\s*(.+?)\s*$", lines[i])
+        if not m:
+            break
+        level, text = len(m.group(1)), norm(m.group(2))
+        # A section never owns the document title, so any leading H1 goes.
+        if level == 1:
+            i += 1
+            changed = True
+            continue
+        # Otherwise only remove it when it restates this section's own title.
+        if text and want and (text == want or text in want or want in text):
+            i += 1
+            changed = True
+            continue
+        break
+
+    return "\n".join(lines[i:]).lstrip()
 
 
 def format_number(num, decimals=2):
@@ -782,8 +845,17 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     report_parts = []
     
     # Header
-    report_parts.append(f"""# {company['company_name']} ({company['ticker']})
-## Investment Analysis Report
+    # Use the title the user asked for when they gave one; otherwise the
+    # company header. Either way the company and ticker stay on the line below,
+    # so the document is still identifiable at a glance.
+    _title = _requested_title()
+    _heading = _title or f"{company['company_name']} ({company['ticker']})"
+    _subheading = (
+        f"## {company['company_name']} ({company['ticker']}) — Investment Analysis Report"
+        if _title else "## Investment Analysis Report"
+    )
+    report_parts.append(f"""# {_heading}
+{_subheading}
 
 **Report Date**: {report_date}  
 **Sector**: {company['sector']} | **Industry**: {company['industry']}  

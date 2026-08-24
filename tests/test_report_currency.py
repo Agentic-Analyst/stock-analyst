@@ -23,15 +23,16 @@ import sys
 
 import pytest
 
-_SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "report_agent.py")
-_text = open(_SRC, encoding="utf-8").read()
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+sys.path.insert(0, os.path.join(_ROOT, "src"))
 
-# Import the two pure pieces without dragging in the LLM client stack.
-_ns: dict = {}
-_start = _text.index("_CURRENCY_SYMBOLS")
-_end = _text.index("def format_number")
-exec(compile(_text[_start:_end], _SRC, "exec"), _ns)
-currency_symbol = _ns["currency_symbol"]
+# Import the REAL module rather than exec'ing an extracted slice of it. An
+# earlier version of these tests extracted the source and supplied its own
+# namespace, which masked a missing `import re` in report_agent and let a
+# NameError reach production on every report.
+from src.report_agent import currency_symbol, _CURRENCY_SYMBOLS, set_report_currency, _currency_directive
+_ns = {"_CURRENCY_SYMBOLS": _CURRENCY_SYMBOLS}
 
 
 class TestCurrencySymbol:
@@ -63,13 +64,8 @@ class TestCurrencyDirective:
     """The directive is what actually reaches the writer."""
 
     def _directive(self, code):
-        ns = {}
-        src = _text[_text.index("_REPORT_CURRENCY:"):_text.index("def load_prompt")]
-        src = "import contextvars\nfrom typing import Optional\n" + src
-        ns["currency_symbol"] = currency_symbol
-        exec(compile(src, _SRC, "exec"), ns)
-        ns["set_report_currency"](code)
-        return ns["_currency_directive"]()
+        set_report_currency(code)
+        return _currency_directive()
 
     def test_eur_directive_names_the_currency_and_forbids_dollars(self):
         d = self._directive("EUR")

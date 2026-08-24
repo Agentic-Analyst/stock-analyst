@@ -32,15 +32,49 @@ sys.path.insert(0, os.path.join(_ROOT, "src"))
 
 
 def _load(path, start, end):
+    """
+    Extract a pure helper for testing.
+
+    NOTE the empty namespace. An earlier version of this seeded it with
+    {"re": re}, which supplied the exact import the module was MISSING —
+    report_agent used `re` in _strip_echoed_heading and never imported it. The
+    test passed, and every report in production failed with NameError. A test
+    harness must never provide a dependency the module is supposed to bring
+    itself.
+
+    The import guard below closes the general case: it imports the real module
+    so any missing top-level import fails here rather than in a user's run.
+    """
     text = open(os.path.join(_ROOT, path), encoding="utf-8").read()
-    ns = {"re": re}
+    ns: dict = {}
     exec(compile(text[text.index(start):text.index(end)], path, "exec"), ns)
     return ns
 
 
+def test_report_agent_imports_cleanly():
+    """
+    The regression guard for the bug above: importing the module for real
+    exercises every top-level import. A helper that references a name the
+    module never imported cannot survive this.
+    """
+    import importlib
+    m = importlib.import_module("src.report_agent")
+    # And the helper must actually run, not merely be importable.
+    assert m._strip_echoed_heading("## Executive Summary\n\nbody", "Executive Summary").strip() == "body"
+
+
+def test_recommendation_engine_imports_cleanly():
+    import importlib
+    m = importlib.import_module("src.recommendation_engine")
+    assert m._symbol_for("EUR") == "\u20ac"
+
+
 class TestEchoedHeadings:
     def setup_method(self):
-        self.f = _load("src/report_agent.py", "def _strip_echoed_heading", "def format_number")["_strip_echoed_heading"]
+        # Import the REAL module. Extracting the function's source and exec'ing
+        # it in a synthetic namespace is what hid the missing `import re`.
+        from src.report_agent import _strip_echoed_heading
+        self.f = _strip_echoed_heading
 
     @pytest.mark.parametrize("first", [
         "## Executive Summary",
@@ -65,6 +99,26 @@ class TestEchoedHeadings:
 
     def test_empty_body_is_safe(self):
         assert self.f("", "Executive Summary") == ""
+
+    def test_strips_the_report_title_then_the_section_heading(self):
+        # The exact shape a shipped report had once the brief reached the
+        # section prompts: title echoed as H1, then the section heading.
+        body = (
+            "# LVMH: Temporary Luxury Slowdown or Structural De-rating?\n\n"
+            "## Company Overview\n\n"
+            "LVMH is a luxury conglomerate."
+        )
+        assert self.f(body, "Company Overview") == "LVMH is a luxury conglomerate."
+
+    def test_strips_a_lone_echoed_title(self):
+        body = "# LVMH: Slowdown or De-rating?\n\nBody text."
+        assert self.f(body, "Company Overview") == "Body text."
+
+    def test_stops_at_real_content(self):
+        # Must not keep eating once past the echoed chrome.
+        body = "# Title\n\n## Company Overview\n\n## Segment Detail\n\ntext"
+        out = self.f(body, "Company Overview")
+        assert out.startswith("## Segment Detail")
 
 
 class TestMissingPriceInvalidatesTheRating:
@@ -112,14 +166,12 @@ class TestMissingPriceInvalidatesTheRating:
 
 class TestBriefDirective:
     def setup_method(self):
-        text = open(os.path.join(_ROOT, "src/report_agent.py"), encoding="utf-8").read()
-        src = "import contextvars\nfrom typing import Optional\n" + text[text.index("_REPORT_BRIEF:"):text.index("def load_prompt")]
-        self.ns = {}
-        exec(compile(src, "report_agent", "exec"), self.ns)
+        from src.report_agent import set_report_brief, _brief_directive
+        self._set, self._dir = set_report_brief, _brief_directive
 
     def d(self, brief):
-        self.ns["set_report_brief"](brief)
-        return self.ns["_brief_directive"]()
+        self._set(brief)
+        return self._dir()
 
     def test_the_brief_reaches_the_prompt(self):
         d = self.d("Act as a sell-side analyst. Title it 'Slowdown or De-rating?'")
