@@ -76,41 +76,168 @@ class ResolveSymbolTool(Tool):
                       "build_model/write_report — coins have no fundamentals or DCF."),
             )
 
-        def _search():
+        from src.listing_resolver import (
+            _enrichment_order, _search_queries, is_depositary, is_home_listing,
+            is_otc, names_might_match, rank_key, venue_suffix,
+        )
+
+        def _search(q: str) -> List[dict]:
             import yfinance as yf
             out: List[dict] = []
             try:
-                res = yf.Search(query, max_results=8)
-                for q in (res.quotes or []):
-                    sym = q.get("symbol")
+                res = yf.Search(q, max_results=8)
+                for quote in (res.quotes or []):
+                    sym = quote.get("symbol")
                     if not sym:
                         continue
                     out.append({
                         "ticker": sym,
-                        "name": q.get("shortname") or q.get("longname") or "",
-                        "exchange": q.get("exchDisp") or q.get("exchange") or "",
-                        "type": q.get("quoteType") or q.get("typeDisp") or "",
+                        "name": quote.get("shortname") or quote.get("longname") or "",
+                        "exchange": quote.get("exchDisp") or quote.get("exchange") or "",
+                        "type": quote.get("quoteType") or quote.get("typeDisp") or "",
                     })
             except Exception:
                 pass
             return out
 
-        candidates = await asyncio.to_thread(_search)
-        # Prefer equities, then keep order.
-        equities = [c for c in candidates if str(c.get("type", "")).upper() in ("EQUITY", "EQUITIES", "S")]
-        ranked = equities + [c for c in candidates if c not in equities]
+        def _info(sym: str) -> dict:
+            import yfinance as yf
+            try:
+                return yf.Ticker(sym).info or {}
+            except Exception:
+                return {}
+
+        async def _enrich(cands: List[dict]) -> List[dict]:
+            """
+            Attach real listing data to each candidate.
+
+            Search results alone cannot tell a home listing from a regional line:
+            the exchange field is not even stable across calls (the same symbol
+            came back as TKS and JPX, NYQ and NYS). Concurrency matters — six
+            sequential .info calls measured 2.3-3.0s cold against 0.55-0.64s
+            through a thread pool. Each call is bounded so one slow foreign
+            listing cannot stall the tool; an unenriched candidate is still
+            returned, just unranked.
+            """
+            async def one(c):
+                try:
+                    return await asyncio.wait_for(asyncio.to_thread(_info, c["ticker"]), timeout=4.0)
+                except Exception:
+                    return {}
+
+            infos = await asyncio.gather(*[one(c) for c in cands])
+            for cand, info in zip(cands, infos):
+                cand["_info"] = info
+            return cands
+
+        def _annotate(cand: dict) -> dict:
+            """Publish the venue facts the model needs to choose for itself."""
+            info, sym = cand.pop("_info", {}) or {}, cand["ticker"]
+            if not info:
+                return cand
+            if info.get("longName"):
+                cand["name"] = info["longName"]
+            cand["currency"] = info.get("currency")
+            cand["country"] = info.get("country")
+            if info.get("marketCap"):
+                cand["market_cap"] = info["marketCap"]
+            if info.get("averageVolume"):
+                cand["avg_volume"] = info["averageVolume"]
+            # One plain-language reason, so the model does not have to infer the
+            # venue's status from an exchange code it may not recognise.
+            if is_otc(info):
+                cand["venue"] = "OTC / unsponsored ADR — not the company's home listing"
+            elif is_depositary(info, sym):
+                cand["venue"] = "depositary receipt venue — no market cap or share count"
+            elif is_home_listing(info, sym):
+                cand["venue"] = "primary listing in the company's home market"
+            else:
+                cand["venue"] = "cross-listing outside the company's home market"
+            return cand
+
+        # The model's own query first: it is usually already the brand name, and
+        # that path stays a single search.
+        seen, candidates = set(), []
+        for c in await asyncio.to_thread(_search, query):
+            if c["ticker"] not in seen:
+                seen.add(c["ticker"])
+                candidates.append(c)
+
+        # Keep only equities. The responses also carry ETFs, indices, mutual
+        # funds and tokenised-stock crypto lines for these same queries.
+        def _is_equity(c):
+            return str(c.get("type", "")).upper() in ("EQUITY", "EQUITIES", "S")
+
+        equities = [c for c in candidates if _is_equity(c)]
+        others = [c for c in candidates if not _is_equity(c)]
+
+        # An EXACT symbol match always wins. Yahoo answers a short query with
+        # fuzzy matches — "MC" returns Freeport-McMoRan and McDonald's alongside
+        # Moelis, and both outweigh it on volume — so ranking on venue quality
+        # alone hands back a company the user did not ask for.
+        wanted = query.upper()
+
+        def _sort_key(c):
+            return (c["ticker"].upper() == wanted,) + rank_key(c.get("_info") or {}, c["ticker"])
+
+        # Spend the enrichment budget on the most promising symbols rather than
+        # on Yahoo's first six, which for a legal-name query are all regional
+        # floors. Only the symbol is known at this point, so this is a cheap
+        # pre-sort; the real ranking runs on the fetched data.
+        by_symbol = {c["ticker"]: c for c in equities}
+        preferred = [by_symbol[t] for t in _enrichment_order(by_symbol)]
+        enriched = await _enrich(preferred[:6])
+        ranked = sorted(enriched, key=_sort_key, reverse=True)
+
+        # Retry unless we already have the company's HOME listing. Merely finding
+        # something tradeable is not enough: the de-accented "Nestle S.A." returns
+        # a Milan cross-listing and never NESN.SW, and stopping there would ship
+        # the wrong venue without ever trying the brand token.
+        def _good(c):
+            info = c.get("_info") or {}
+            if not info:
+                return False
+            if c["ticker"].upper() == wanted:
+                return True          # the user named this symbol outright
+            return is_home_listing(info, c["ticker"]) and not is_otc(info)
+
+        if not any(_good(c) for c in ranked):
+            for alt in _search_queries(query)[1:]:
+                extra = [c for c in await asyncio.to_thread(_search, alt)
+                         if c["ticker"] not in seen and _is_equity(c)
+                         and names_might_match(query, c["name"])]
+                if not extra:
+                    continue
+                for c in extra:
+                    seen.add(c["ticker"])
+                # Only the new arrivals need a lookup; `ranked` already carries
+                # its own.
+                ranked = sorted(ranked + await _enrich(extra[:6]),
+                                key=_sort_key, reverse=True)
+                if any(_good(c) for c in ranked):
+                    break
+
+        ranked = [_annotate(c) for c in ranked] + others
 
         if not ranked:
             return tool_ok(
                 query=query, candidates=[],
                 note=("No ticker found via search. If you know the ticker from your own "
-                      "knowledge, use it directly; otherwise ask the user to clarify."),
+                      "knowledge, use it directly — but include the exchange suffix for "
+                      "any non-US listing; otherwise ask the user to clarify."),
             )
+
         return tool_ok(
             query=query,
             candidates=ranked[:6],
             best_guess=ranked[0]["ticker"],
-            note="Pick the candidate that best matches the user's intent, then proceed.",
+            note=("Candidates are ordered by venue quality: a company's home listing "
+                  "first, then cross-listings, then depositary receipts and OTC lines. "
+                  "best_guess is the top of that order. Read the `venue` field before "
+                  "overriding it, and prefer a listing with a market_cap — one without "
+                  "cannot be valued. Always pass the FULL symbol including its exchange "
+                  "suffix (MC.PA, not MC): a bare ticker resolves to whichever company "
+                  "owns it in the US."),
         )
 
 
