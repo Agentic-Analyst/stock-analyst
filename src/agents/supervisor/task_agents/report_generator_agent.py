@@ -93,6 +93,7 @@ async def report_generator_agent(
             state.ticker,
             logger=effective_logger,
             output_language=getattr(state, "output_language", "") or "",
+            brief=getattr(state, "report_brief", "") or "",
         )
         
         state.log_action(

@@ -141,6 +141,10 @@ class FinancialState:
     # "日本語"). Empty means English (the template default). Set by the agent
     # when the user asks for a specific language; no enum, any language works.
     output_language: str = ""
+    # The user's own framing for the report — persona, title, requested
+    # sections, emphasis. Steers structure and tone only; every figure still
+    # comes from the model and the calculator.
+    report_brief: str = ""
 
     # Analysis base path (where all outputs are saved)
     analysis_path: Optional[str] = None
