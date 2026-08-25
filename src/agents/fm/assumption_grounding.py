@@ -32,9 +32,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-_ERP = 0.05                 # equity risk premium
+_ERP = 0.055                # mature-market equity risk premium; in the range
+                            # Damodaran publishes for developed markets, and the
+                            # figure a sell-side DCF on a euro large-cap would use
 _DEBT_SPREAD = 0.015        # cost of debt = rf + spread
-_TAX = 0.21                 # statutory-ish rate for after-tax Kd
+_TAX_DEFAULT = 0.25         # mature-market average; overridden by the
+                            # company's own effective rate when available
 _RF_FALLBACK = 0.043
 _BETA_MIN, _BETA_MAX = 0.6, 1.6
 _WACC_MIN, _WACC_MAX = 0.07, 0.13
@@ -46,11 +49,28 @@ _EXIT_FALLBACK = 15.0
 _ESTABLISHED_OM = 0.05      # margin anchoring applies above this trailing OM
 
 
-def _live_risk_free() -> Tuple[float, str]:
+# 10-year sovereign yields for currencies yfinance does not carry. Verified:
+# ^TNX (US 10Y) is the ONLY sovereign yield symbol that returns data — ^GDBR10,
+# DE10Y-DE, GB10YT=RR, JP10Y-JP and every other variant 404. There is no live
+# feed to use, and no FRED key configured, so non-USD rates come from this table
+# with an explicit as-of date that is printed alongside the number. A stale rate
+# a reader can see is worth more than a live US rate silently applied to a euro
+# company, which is what the model did before: LVMH was discounted on a US
+# Treasury yield, contributing to a EUR 269 fair value against a EUR 452 price.
+#
+# Override any entry without a deploy by setting RISK_FREE_<CCY>, e.g.
+# RISK_FREE_EUR=0.0324.
+_RF_AS_OF = "2026-08-21"
+_RF_STATIC = {
+    # currency: (rate, instrument)
+    "EUR": (0.0324, "10Y German Bund"),
+}
+
+
+def _live_us_10y() -> Optional[Tuple[float, str]]:
     """
-    10Y treasury yield via ^TNX. The index is usually quoted as yield x10
-    (42.5 = 4.25%) but some feeds return the plain percent — accept whichever
-    scaling lands in a sane band. Clamped, with fallback.
+    US 10Y via ^TNX. Usually quoted as yield x10 (47.0 = 4.70%) but some feeds
+    return plain percent — accept whichever scaling lands in a sane band.
     """
     try:
         import yfinance as yf
@@ -60,32 +80,101 @@ def _live_risk_free() -> Tuple[float, str]:
             for scale in (1000.0, 100.0):
                 rf = close / scale
                 if 0.02 <= rf <= 0.07:
-                    return rf, f"live 10Y {rf*100:.2f}%"
+                    return rf, f"live US 10Y {rf*100:.2f}%"
     except Exception:
         pass
-    return _RF_FALLBACK, f"fallback {_RF_FALLBACK*100:.1f}%"
+    return None
+
+
+def risk_free_rate(currency: Optional[str] = "USD") -> Tuple[float, str]:
+    """
+    The risk-free rate for cash flows denominated in ``currency``.
+
+    Discounting a euro cash-flow stream at a US Treasury yield is a currency
+    mismatch in the cost of capital — the same class of error as quoting a EUR
+    company in dollars. Returns ``(rate, source_label)``; the label is printed in
+    the report so the reader can see whether the rate was live, dated or a proxy.
+    """
+    import os
+
+    ccy = (currency or "USD").upper()
+
+    override = os.getenv(f"RISK_FREE_{ccy}")
+    if override:
+        try:
+            rate = float(override)
+            if 0.0 <= rate <= 0.25:
+                return rate, f"{ccy} {rate*100:.2f}% (RISK_FREE_{ccy} override)"
+        except ValueError:
+            pass
+
+    if ccy == "USD":
+        live = _live_us_10y()
+        if live:
+            return live
+        return _RF_FALLBACK, f"US 10Y fallback {_RF_FALLBACK*100:.2f}%"
+
+    if ccy in _RF_STATIC:
+        rate, instrument = _RF_STATIC[ccy]
+        return rate, f"{instrument} {rate*100:.2f}% (as of {_RF_AS_OF})"
+
+    # No feed and no table entry. Say so rather than pretending the US rate is
+    # this currency's risk-free.
+    live = _live_us_10y()
+    if live:
+        rate, _ = live
+        return rate, (f"US 10Y {rate*100:.2f}% used as a proxy — no {ccy} "
+                      f"sovereign yield source available")
+    return _RF_FALLBACK, (f"fallback {_RF_FALLBACK*100:.2f}% — no {ccy} "
+                          f"sovereign yield source available")
+
+
+def _live_risk_free() -> Tuple[float, str]:
+    """Backwards-compatible USD entry point."""
+    return risk_free_rate("USD")
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
-def compute_capm_wacc(company_data: Dict[str, Any]) -> Tuple[float, str]:
-    """Deterministic CAPM WACC from scraped beta, live rates, actual D/E."""
+def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    The full CAPM build, not just the answer.
+
+    This function used to return only ``(wacc, note)`` and discard rf, beta, Ke,
+    Kd and the capital-structure weights. That mattered more than it looked:
+    the Excel model rebuilt its own cost of capital from hardcoded constants
+    (Rf 4.5%, ERP 6.5%, beta 1.2) because the derived inputs were not available
+    to write into the cells, so the workbook discounted every company on earth
+    at ~11% while the report printed this function's number instead. LVMH was
+    valued at EUR 269/share against a market price of EUR 452.
+
+    Returning the components lets the workbook, the report and the recommendation
+    all quote one derivation.
+    """
     cs = company_data.get("capital_structure", {}) or {}
     md = company_data.get("market_data", {}) or {}
+    bi = company_data.get("basic_info", {}) or {}
 
-    rf, rf_src = _live_risk_free()
+    currency = (bi.get("currency") or "USD").upper()
+    rf, rf_source = risk_free_rate(currency)
+
     raw_beta = cs.get("beta")
     if raw_beta:
         # Blume adjustment: raw betas mean-revert toward 1.0, so every bank
         # shrinks them (2/3 raw + 1/3 market) before CAPM — a raw 1.8+ beta
         # would price the largest companies on earth at a 13%+ WACC.
         beta = _clamp(0.67 * float(raw_beta) + 0.33, _BETA_MIN, _BETA_MAX)
+        beta_source = f"Blume-adjusted from observed {float(raw_beta):.2f}"
     else:
         beta = 1.0
+        beta_source = "market beta 1.00 (no observed beta available)"
+
+    tax = _effective_tax_rate(company_data)
     ke = rf + beta * _ERP
-    kd_after_tax = (rf + _DEBT_SPREAD) * (1 - _TAX)
+    kd_pre_tax = rf + _DEBT_SPREAD
+    kd_after_tax = kd_pre_tax * (1 - tax)
 
     equity = float(md.get("market_cap") or 0)
     debt = float(cs.get("total_debt") or 0)
@@ -93,12 +182,60 @@ def compute_capm_wacc(company_data: Dict[str, Any]) -> Tuple[float, str]:
     w_e = equity / total if total > 0 else 1.0
     w_d = 1.0 - w_e
 
-    wacc = _clamp(w_e * ke + w_d * kd_after_tax, _WACC_MIN, _WACC_MAX)
+    raw_wacc = w_e * ke + w_d * kd_after_tax
+    wacc = _clamp(raw_wacc, _WACC_MIN, _WACC_MAX)
+
+    return {
+        "currency": currency,
+        "risk_free_rate": rf,
+        "risk_free_source": rf_source,
+        "equity_risk_premium": _ERP,
+        "beta": beta,
+        "beta_source": beta_source,
+        "cost_of_equity": ke,
+        "pre_tax_cost_of_debt": kd_pre_tax,
+        "tax_rate": tax,
+        "after_tax_cost_of_debt": kd_after_tax,
+        "equity_value": equity,
+        "debt_value": debt,
+        "equity_weight": w_e,
+        "debt_weight": w_d,
+        "wacc": wacc,
+        "wacc_unclamped": raw_wacc,
+        "wacc_clamped": abs(raw_wacc - wacc) > 1e-9,
+    }
+
+
+def compute_capm_wacc(company_data: Dict[str, Any]) -> Tuple[float, str]:
+    """Deterministic CAPM WACC from scraped beta, live rates, actual D/E."""
+    c = capm_components(company_data)
     note = (
-        f"CAPM WACC {wacc*100:.2f}% (rf {rf_src}, beta {beta:.2f}, "
-        f"Ke {ke*100:.2f}%, D/(D+E) {w_d*100:.0f}%)"
+        f"CAPM WACC {c['wacc']*100:.2f}% (rf {c['risk_free_source']}, "
+        f"beta {c['beta']:.2f}, Ke {c['cost_of_equity']*100:.2f}%, "
+        f"D/(D+E) {c['debt_weight']*100:.0f}%)"
     )
-    return wacc, note
+    if c["wacc_clamped"]:
+        note += f" [clamped from {c['wacc_unclamped']*100:.2f}%]"
+    return c["wacc"], note
+
+
+def _effective_tax_rate(company_data: Dict[str, Any]) -> float:
+    """
+    The rate that shields interest. Falls back to a mature-market average
+    rather than the US statutory 21%, which is wrong for most of the world and
+    was previously applied to every company regardless of domicile.
+    """
+    gp = company_data.get("growth_profitability", {}) or {}
+    for key in ("effective_tax_rate", "tax_rate"):
+        value = gp.get(key)
+        if value is not None:
+            try:
+                rate = float(value)
+            except (TypeError, ValueError):
+                continue
+            if 0.0 < rate < 0.6:
+                return rate
+    return _TAX_DEFAULT
 
 
 def _anchor_path(path: List[float], trailing: float,
@@ -170,8 +307,13 @@ def ground_assumptions(
 
     # 1. WACC — always deterministic (the LLM's guess is discarded).
     llm_wacc = a.get("wacc")
+    capm = capm_components(company_data)
     wacc, wacc_note = compute_capm_wacc(company_data)
     a["wacc"] = wacc
+    # Publish the derivation, not just the answer. The workbook writes these into
+    # the Assumptions tab so its CAPM cells stop being hardcoded constants, and
+    # the report prints them so the discount rate can be argued with.
+    a["capm"] = capm
     if llm_wacc is not None and abs(llm_wacc - wacc) > 0.005:
         notes.append(f"WACC {llm_wacc*100:.2f}% (LLM) -> {wacc_note}")
     else:

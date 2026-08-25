@@ -329,6 +329,86 @@ def extract_model_assumptions(computed_values: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
+def extract_cost_of_capital(computed_values: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    The WACC build the DCF actually used, from the Valuation (DCF) tab.
+
+    The report used to print `LLM_Inferred!(2,2)` — a rate the workbook did not
+    discount with. The DCF tab computed its own from the Assumptions cells, so a
+    reader was shown one number and sold a valuation built on another. These are
+    the cells the DCF formulas reference, so what is printed is what was used.
+    """
+    cells = computed_values.get('Valuation (DCF)', {}).get('cells', {}) or {}
+
+    def cell(row: int):
+        value = cells.get(f'({row}, 2)')
+        return value if isinstance(value, (int, float)) else None
+
+    return {
+        'risk_free_rate': cell(3),
+        'equity_risk_premium': cell(4),
+        'beta': cell(5),
+        'cost_of_equity': cell(6),
+        'pre_tax_cost_of_debt': cell(7),
+        'tax_rate': cell(8),
+        'after_tax_cost_of_debt': cell(9),
+        'equity_weight': cell(10),
+        'debt_weight': cell(11),
+        'wacc': cell(12),
+    }
+
+
+def build_sensitivity_grid(projections: Dict[str, Any], terminal_growth: float,
+                           valuation: Dict[str, Any], wacc: float) -> str:
+    """
+    Value per share across WACC and terminal growth, as markdown.
+
+    The workbook has a Sensitivity tab, but its interior cells carry formatting
+    and no values, so there is nothing to read back — the grid is recomputed here
+    from the same FCF path, net debt and share count the DCF used.
+
+    This is the table that makes a DCF arguable. Our own numbers show the value
+    moving far more per 50bp of discount rate than per point of growth, which a
+    reader cannot know from a single fair-value figure.
+    """
+    try:
+        fcf = [float(x) for x in (projections.get('fcf') or [])][:5]
+        dcf = valuation.get('dcf_perpetual', {}) or {}
+        ev = float(dcf.get('enterprise_value') or 0)
+        equity = float(dcf.get('equity_value') or 0)
+        per_share = float(dcf.get('intrinsic_value_per_share') or 0)
+        if len(fcf) < 5 or not per_share or not equity or not wacc:
+            return ""
+        net_debt = ev - equity
+        shares = equity / per_share
+        if shares <= 0:
+            return ""
+    except (TypeError, ValueError, ZeroDivisionError):
+        return ""
+
+    waccs = [wacc + d for d in (-0.010, -0.005, 0.0, 0.005, 0.010)]
+    growths = [terminal_growth + d for d in (-0.010, -0.005, 0.0, 0.005, 0.010)]
+
+    header = "| WACC \\ terminal g | " + " | ".join(f"{g*100:.1f}%" for g in growths) + " |\n"
+    header += "|---" * (len(growths) + 1) + "|\n"
+
+    rows = ""
+    for w in waccs:
+        cells = []
+        for g in growths:
+            if w <= g + 0.001:
+                cells.append("n/m")      # terminal value diverges
+                continue
+            pv = sum(f / (1 + w) ** (i + 1) for i, f in enumerate(fcf))
+            tv = fcf[-1] * (1 + g) / (w - g)
+            value = (pv + tv / (1 + w) ** len(fcf) - net_debt) / shares
+            cells.append(f"{value:,.0f}")
+        label = f"**{w*100:.2f}%**" if abs(w - wacc) < 1e-9 else f"{w*100:.2f}%"
+        rows += f"| {label} | " + " | ".join(cells) + " |\n"
+
+    return header + rows
+
+
 def extract_projections(computed_values: Dict[str, Any]) -> Dict[str, Any]:
     """Extract 5-year projections from Projections tab."""
     projections = computed_values.get('Projections', {}).get('cells', {})
@@ -624,7 +704,10 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     # Model assumptions table
     assumptions_table = "| Assumption | Value |\n"
     assumptions_table += "|------------|-------|\n"
-    assumptions_table += f"| WACC | {format_percent(assumptions['wacc'])} |\n"
+    # WACC is deliberately NOT repeated here — it is shown with its full
+    # derivation in the Cost of Capital table below, sourced from the cells the
+    # DCF actually discounted with. Printing it in both places invites the two
+    # to drift apart, which is the failure this section is recovering from.
     assumptions_table += f"| Terminal Growth Rate | {format_percent(assumptions['terminal_growth'])} |\n"
     assumptions_table += f"| Revenue Growth (FY1) | {format_percent(assumptions['revenue_growth_rates'][0])} |\n"
     assumptions_table += f"| Revenue Growth (FY2) | {format_percent(assumptions['revenue_growth_rates'][1])} |\n"
@@ -672,11 +755,44 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     summary_table += f"| Current Market Price | {format_number(company['current_price'], 2)} |\n"
     summary_table += f"| **Implied Upside** | **{format_percent(valuation['summary']['upside'])}** |\n"
     
+    # Cost of capital — the derivation, not just the rate. A DCF is mostly an
+    # argument about the discount rate: on these projections the value moves far
+    # more per 50bp of WACC than per point of growth, so a reader given only a
+    # fair value has been given the least informative number in the model.
+    coc = data.get('cost_of_capital') or {}
+    coc_table = ""
+    if coc.get('wacc'):
+        coc_table = "| Input | Value |\n|-------|-------|\n"
+        for label, key, fmt in (
+            ("Risk-free rate", 'risk_free_rate', 'pct'),
+            ("Equity risk premium", 'equity_risk_premium', 'pct'),
+            ("Levered beta", 'beta', 'num'),
+            ("Cost of equity", 'cost_of_equity', 'pct'),
+            ("Pre-tax cost of debt", 'pre_tax_cost_of_debt', 'pct'),
+            ("Tax rate", 'tax_rate', 'pct'),
+            ("After-tax cost of debt", 'after_tax_cost_of_debt', 'pct'),
+            ("Equity weight (E/V)", 'equity_weight', 'pct'),
+            ("Debt weight (D/V)", 'debt_weight', 'pct'),
+            ("**WACC**", 'wacc', 'pct'),
+        ):
+            value = coc.get(key)
+            if value is None:
+                continue
+            rendered = format_percent(value) if fmt == 'pct' else f"{value:.2f}"
+            coc_table += f"| {label} | {rendered} |\n"
+
+    sensitivity_table = build_sensitivity_grid(
+        projections, assumptions.get('terminal_growth') or 0.025,
+        valuation, coc.get('wacc') or assumptions.get('wacc') or 0,
+    )
+
     # Load prompt template and fill in variables
     prompt_template = load_prompt("report_valuation")
     prompt = prompt_template.format(
         company_name=company['company_name'],
         assumptions_table=assumptions_table,
+        cost_of_capital_table=coc_table or "_Cost-of-capital build unavailable for this model._",
+        sensitivity_table=sensitivity_table or "_Sensitivity grid unavailable for this model._",
         projections_table=projections_table,
         dcf_perp_table=dcf_perp_table,
         dcf_exit_table=dcf_exit_table,
@@ -1134,6 +1250,9 @@ def generate_professional_report(
         'company_overview': extract_company_overview(financial_data),
         'historical': extract_historical_financials(financial_data),
         'assumptions': extract_model_assumptions(computed_values),
+        # The WACC build the DCF actually discounted with, so the report can
+        # show its derivation instead of asserting a rate.
+        'cost_of_capital': extract_cost_of_capital(computed_values),
         'projections': extract_projections(computed_values),
         'valuation': extract_valuation(computed_values),
         'news': extract_news_analysis(screening_data),
@@ -1265,6 +1384,9 @@ async def generate_professional_report_async(
         'company_overview': extract_company_overview(financial_data),
         'historical': extract_historical_financials(financial_data),
         'assumptions': extract_model_assumptions(computed_values),
+        # The WACC build the DCF actually discounted with, so the report can
+        # show its derivation instead of asserting a rate.
+        'cost_of_capital': extract_cost_of_capital(computed_values),
         'projections': extract_projections(computed_values),
         'valuation': extract_valuation(computed_values),
         'news': extract_news_analysis(screening_data),

@@ -363,36 +363,43 @@ class AssumptionsTabBuilder:
         ws.cell(row=22, column=1, value="Cost of Equity Inputs:")
         ws.cell(row=22, column=1).font = Font(bold=True, italic=True, size=10)
         
-        # Risk-Free Rate (row 30 in markdown, but we'll use row 23 here)
-        ws.cell(row=23, column=1, value="Risk-Free Rate (Rf)").font = Font(bold=True)
-        ws.cell(row=23, column=2, value=0.045).number_format = '0.00%'  # Default 4.5%
-        ws.cell(row=23, column=3, value="[10Y Treasury]").font = Font(italic=True, size=9)
-        
-        # Equity Risk Premium (row 31 in markdown, row 24 here)
-        ws.cell(row=24, column=1, value="Equity Risk Premium (ERP)").font = Font(bold=True)
-        ws.cell(row=24, column=2, value=0.065).number_format = '0.00%'  # Default 6.5%
-        ws.cell(row=24, column=3, value="[Historical ERP]").font = Font(italic=True, size=9)
-        
-        # Levered Beta (row 32 in markdown, row 25 here)
-        ws.cell(row=25, column=1, value="Levered Beta (β)").font = Font(bold=True)
-        ws.cell(row=25, column=2, value=1.2).number_format = '0.00'  # Default 1.2
-        ws.cell(row=25, column=3, value="[From Bloomberg/Yahoo]").font = Font(italic=True, size=9)
-        
+        # Every cell below used to be a literal — Rf 4.5%, ERP 6.5%, beta 1.2,
+        # Kd 5.5%, equity weight 85% — for every company on earth, whatever its
+        # actual beta, domicile or currency. The DCF tab reads these cells, so
+        # the workbook discounted LVMH (observed beta 0.84, euro issuer) at
+        # 11.01% and returned EUR 269/share against a EUR 452 market price,
+        # while the report printed a different, CAPM-derived rate that nothing
+        # used. They are now seeded from that same CAPM derivation.
+        #
+        # They remain plain values, not formulas: the point of shipping a
+        # workbook is that a reader can change the discount rate and watch the
+        # valuation move.
+        capm = self.llm_assumptions.get("capm") or {}
+
+        def _seed(row: int, label: str, key: str, default, fmt: str, note: str):
+            value = capm.get(key, default)
+            ws.cell(row=row, column=1, value=label).font = Font(bold=True)
+            ws.cell(row=row, column=2, value=value).number_format = fmt
+            ws.cell(row=row, column=3, value=note).font = Font(italic=True, size=9)
+
+        _seed(23, "Risk-Free Rate (Rf)", "risk_free_rate", 0.045, '0.00%',
+              f"[{capm.get('risk_free_source', '10Y government bond')}]")
+        _seed(24, "Equity Risk Premium (ERP)", "equity_risk_premium", 0.055, '0.00%',
+              "[Mature-market ERP]")
+        _seed(25, "Levered Beta (β)", "beta", 1.0, '0.00',
+              f"[{capm.get('beta_source', 'observed beta')}]")
+
         # Subsection: Cost of Debt Inputs
         ws.cell(row=26, column=1, value="Cost of Debt Inputs:").font = Font(bold=True, italic=True, size=10)
-        
-        # Pre-Tax Cost of Debt (row 33 in markdown, row 27 here)
-        ws.cell(row=27, column=1, value="Pre-Tax Cost of Debt (Kd)").font = Font(bold=True)
-        ws.cell(row=27, column=2, value=0.055).number_format = '0.00%'  # Default 5.5%
-        ws.cell(row=27, column=3, value="[Corporate bonds yield]").font = Font(italic=True, size=9)
-        
+
+        _seed(27, "Pre-Tax Cost of Debt (Kd)", "pre_tax_cost_of_debt", 0.055, '0.00%',
+              "[Risk-free + credit spread]")
+
         # Subsection: Capital Structure
         ws.cell(row=28, column=1, value="Capital Structure Weights:").font = Font(bold=True, italic=True, size=10)
-        
-        # Equity Weight (row 34 in markdown, row 29 here)
-        ws.cell(row=29, column=1, value="Equity Weight (E/V)").font = Font(bold=True)
-        ws.cell(row=29, column=2, value=0.85).number_format = '0.00%'  # Default 85%
-        ws.cell(row=29, column=3, value="[Target capital structure]").font = Font(italic=True, size=9)
+
+        _seed(29, "Equity Weight (E/V)", "equity_weight", 0.85, '0.00%',
+              "[Market cap / (market cap + total debt)]")
         
         # Terminal Growth Rate (row 35 in markdown, row 30 here)
         ws.cell(row=30, column=1, value="Terminal Growth Rate (g)").font = Font(bold=True)
@@ -403,6 +410,7 @@ class AssumptionsTabBuilder:
         ws.cell(row=31, column=1, value="Shares Outstanding (for valuation)").font = Font(bold=True)
         ws.cell(row=31, column=2, value='=B18').number_format = '#,##0'  # Reference row 18
         ws.cell(row=31, column=3, value="[From row 18]").font = Font(italic=True, size=9)
+
     
     def _format_sheet(self, ws: Worksheet) -> None:
         """Apply formatting."""

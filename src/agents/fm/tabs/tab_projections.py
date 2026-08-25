@@ -10,7 +10,7 @@ Professional-grade financial model following investment banking standards:
 - Gross Margin driven by Assumptions!C9:G9
 - R&D/SG&A scaled by revenue intensity
 - Working capital modeled using DSO/DIO/DPO explicit drivers
-- Unlevered FCF = NOPAT + D&A + Capex - ΔNWC
+- Unlevered FCF = NOPAT + D&A + Capex - ΔNWC (leases treated as debt)
 """
 
 from typing import List
@@ -421,7 +421,6 @@ class ProjectionsTabBuilder:
         
         Row 19: Free Cash Flow = NOPAT + D&A + Capex - ΔNWC
           - B19: =B11 + B12 + B13 - B18
-          - C19: =C11 + C12 + C13 - C18
           - etc.
         
         This is unlevered FCF ready for DCF valuation.
@@ -435,6 +434,16 @@ class ProjectionsTabBuilder:
             col_letter = chr(64 + col)  # B, C, D, E, F
             
             # FCF = NOPAT + D&A + Capex - ΔNWC
+            #
+            # NOT after lease principal repayments, deliberately. This model
+            # treats leases as debt: row 12 adds back total D&A (including
+            # right-of-use depreciation) and the equity bridge in the DCF tab
+            # deducts balance-sheet Total Debt, which INCLUDES capital lease
+            # obligations (EUR 16.4bn of LVMH's EUR 36.7bn). Deducting lease
+            # repayments here as well would charge the same obligation twice.
+            # The alternative convention — lease payments in the cash flow,
+            # leases out of net debt — is equally valid but must not be mixed
+            # with this one.
             formula = f'={col_letter}11+{col_letter}12+{col_letter}13-{col_letter}18'
             cell = ws.cell(row=19, column=col, value=formula)
             cell.number_format = ExcelFormats.CURRENCY
