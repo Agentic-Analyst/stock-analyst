@@ -340,21 +340,41 @@ def extract_cost_of_capital(computed_values: Dict[str, Any]) -> Dict[str, Any]:
     """
     cells = computed_values.get('Valuation (DCF)', {}).get('cells', {}) or {}
 
-    def cell(row: int):
-        value = cells.get(f'({row}, 2)')
-        return value if isinstance(value, (int, float)) else None
+    # Index by the tab's own row LABELS, not by row number. The builder writes
+    # the label in column 1 and the value in column 2; keying on position means
+    # inserting a row in the tab silently reads the wrong number here, which is
+    # the failure mode this whole section exists to stop. Row numbers remain a
+    # fallback so models built before the labels existed still parse.
+    by_label = {}
+    for key, value in cells.items():
+        try:
+            row, col = eval(key)
+        except Exception:
+            continue
+        if col != 1 or not isinstance(value, str):
+            continue
+        pair = cells.get(f'({row}, 2)')
+        if isinstance(pair, (int, float)):
+            by_label[value.strip().lower()] = pair
+
+    def read(label: str, row: int):
+        value = by_label.get(label.lower())
+        if value is not None:
+            return value
+        fallback = cells.get(f'({row}, 2)')
+        return fallback if isinstance(fallback, (int, float)) else None
 
     return {
-        'risk_free_rate': cell(3),
-        'equity_risk_premium': cell(4),
-        'beta': cell(5),
-        'cost_of_equity': cell(6),
-        'pre_tax_cost_of_debt': cell(7),
-        'tax_rate': cell(8),
-        'after_tax_cost_of_debt': cell(9),
-        'equity_weight': cell(10),
-        'debt_weight': cell(11),
-        'wacc': cell(12),
+        'risk_free_rate': read('Risk-Free Rate (Rf)', 3),
+        'equity_risk_premium': read('Equity Risk Premium (ERP)', 4),
+        'beta': read('Levered Beta (β)', 5),
+        'cost_of_equity': read('Cost of Equity (Ke)', 6),
+        'pre_tax_cost_of_debt': read('Pre-Tax Cost of Debt (Kd)', 7),
+        'tax_rate': read('Tax Rate (T)', 8),
+        'after_tax_cost_of_debt': read('After-Tax Cost of Debt', 9),
+        'equity_weight': read('Equity Weight (E/V)', 10),
+        'debt_weight': read('Debt Weight (D/V)', 11),
+        'wacc': read('WACC', 12),
     }
 
 

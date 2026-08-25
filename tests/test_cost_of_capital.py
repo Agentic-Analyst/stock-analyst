@@ -216,15 +216,39 @@ class TestReportShowsTheDerivation:
     Assumptions cells — one number shown, another used.
     """
 
-    def _computed(self):
-        return {
-            'Valuation (DCF)': {'cells': {
-                '(3, 2)': 0.0324, '(4, 2)': 0.055, '(5, 2)': 0.894,
-                '(6, 2)': 0.0816, '(7, 2)': 0.0474, '(8, 2)': 0.3279,
-                '(9, 2)': 0.0319, '(10, 2)': 0.8604, '(11, 2)': 0.1396,
-                '(12, 2)': 0.0746,
-            }}
+    def _computed(self, labelled=True):
+        cells = {
+            '(3, 2)': 0.0324, '(4, 2)': 0.055, '(5, 2)': 0.894,
+            '(6, 2)': 0.0816, '(7, 2)': 0.0474, '(8, 2)': 0.3279,
+            '(9, 2)': 0.0319, '(10, 2)': 0.8604, '(11, 2)': 0.1396,
+            '(12, 2)': 0.0746,
         }
+        if labelled:
+            cells.update({
+                '(3, 1)': 'Risk-Free Rate (Rf)', '(4, 1)': 'Equity Risk Premium (ERP)',
+                '(5, 1)': 'Levered Beta (β)', '(6, 1)': 'Cost of Equity (Ke)',
+                '(7, 1)': 'Pre-Tax Cost of Debt (Kd)', '(8, 1)': 'Tax Rate (T)',
+                '(9, 1)': 'After-Tax Cost of Debt', '(10, 1)': 'Equity Weight (E/V)',
+                '(11, 1)': 'Debt Weight (D/V)', '(12, 1)': 'WACC',
+            })
+        return {'Valuation (DCF)': {'cells': cells}}
+
+    def test_a_shifted_row_does_not_silently_read_the_wrong_number(self):
+        """Labels win over positions; a moved row must not become a wrong rate."""
+        from src.report_agent import extract_cost_of_capital
+        cells = self._computed()['Valuation (DCF)']['cells']
+        shifted = {}
+        for key, value in cells.items():
+            row, col = eval(key)
+            shifted[f'({row + 5}, {col})'] = value
+        coc = extract_cost_of_capital({'Valuation (DCF)': {'cells': shifted}})
+        assert coc['wacc'] == pytest.approx(0.0746)
+        assert coc['beta'] == pytest.approx(0.894)
+
+    def test_unlabelled_models_still_parse_by_row(self):
+        from src.report_agent import extract_cost_of_capital
+        coc = extract_cost_of_capital(self._computed(labelled=False))
+        assert coc['wacc'] == pytest.approx(0.0746)
 
     def test_reads_the_rate_the_dcf_actually_used(self):
         from src.report_agent import extract_cost_of_capital
