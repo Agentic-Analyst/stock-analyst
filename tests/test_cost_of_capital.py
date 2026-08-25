@@ -297,3 +297,92 @@ class TestSensitivityGrid:
         assert "{cost_of_capital_table}" in prompt
         assert "{sensitivity_table}" in prompt
         assert "most sensitive" in prompt
+
+
+class TestReportAssemblyRuns:
+    """
+    Two NameErrors shipped from this area in one day: `validation_report` in the
+    recommendation formatter (eleven days live, hidden by a bare except), and a
+    reference to `assumptions` in integrate_report_sections placed a hundred
+    lines above where that local is bound.
+
+    Source inspection catches neither reliably. Assembling a report does.
+    """
+
+    def _data(self):
+        five = [0.03, 0.028, 0.026, 0.024, 0.022]
+        return {
+            'company_overview': {
+                'company_name': 'LVMH', 'ticker': 'MC.PA', 'sector': 'Consumer Cyclical',
+                'industry': 'Luxury Goods', 'current_price': 459.35,
+                'market_cap': 226_443_575_296, 'currency': 'EUR',
+                'exchange': 'PAR', 'country': 'France', 'website': 'https://lvmh.com',
+                'employees': 211_000, 'business_summary': 'Luxury goods group.',
+            },
+            'historical': {'years': ['2023', '2024', '2025'], 'revenue': [86.2e9, 84.7e9, 80.8e9],
+                           'gross_profit': [0, 0, 0], 'operating_income': [0, 0, 0],
+                           'net_income': [0, 0, 0], 'ebitda': [0, 0, 0],
+                           'free_cash_flow': [0, 0, 0]},
+            'assumptions': {
+                'wacc': 0.0857, 'terminal_growth': 0.025,
+                'revenue_growth_rates': five, 'gross_margins': five,
+                'ebitda_margins': five, 'operating_margins': five,
+            },
+            'cost_of_capital': {
+                'risk_free_rate': 0.0324, 'equity_risk_premium': 0.055, 'beta': 0.894,
+                'cost_of_equity': 0.0816, 'pre_tax_cost_of_debt': 0.0474,
+                'tax_rate': 0.3279, 'after_tax_cost_of_debt': 0.0319,
+                'equity_weight': 0.8591, 'debt_weight': 0.1409, 'wacc': 0.0746,
+            },
+            'projections': {
+                'revenue': [83.2e9] * 5, 'ebitda': [26.6e9] * 5,
+                'fcf': [15.34e9, 14.93e9, 14.35e9, 13.71e9, 12.96e9],
+                'ebit': [18.4e9] * 5, 'nopat': [12.4e9] * 5,
+            },
+            'valuation': {
+                'dcf_perpetual': {'pv_fcfs': 83.6e9, 'terminal_value': 176.6e9,
+                                  'enterprise_value': 247.3e9, 'equity_value': 232.8e9,
+                                  'intrinsic_value_per_share': 467.58},
+                'dcf_exit': {'terminal_ev': 200e9, 'enterprise_value': 240e9,
+                             'equity_value': 225e9, 'intrinsic_value_per_share': 452.0,
+                             'exit_multiple': 12.0},
+                'summary': {'dcf_intrinsic': 467.58, 'exit_intrinsic': 452.0,
+                            'average_intrinsic': 459.79, 'upside': 0.018,
+                            'shares_outstanding': 497_976_118, 'cash': 8.79e9,
+                            'debt': 36.73e9, 'net_debt': 27.94e9},
+            },
+            'news': {
+                'summary': {'articles_analyzed': 6, 'overall_sentiment': 'neutral',
+                            'confidence_score': 0.6},
+                'articles': [], 'catalysts': [], 'risks': [], 'evidence': [],
+                'mitigations': [], 'themes': [],
+            },
+        }
+
+    def _sections(self):
+        keys = ('executive_summary', 'company_overview', 'financial_performance',
+                'valuation', 'news_analysis', 'investment_thesis', 'recommendation')
+        return {k: f"_{k} body_" for k in keys}
+
+    def test_it_assembles_without_raising(self):
+        from src.report_agent import integrate_report_sections
+        report = integrate_report_sections(self._sections(), self._data())
+        assert isinstance(report, str) and len(report) > 500
+
+    def test_the_appendix_quotes_the_rate_the_dcf_used(self):
+        """
+        It printed assumptions['wacc'] — a different tab's number. On a shipped
+        AAPL report that was 8.5% against a model discounting at 11.15%.
+        """
+        from src.report_agent import integrate_report_sections
+        report = integrate_report_sections(self._sections(), self._data())
+        assert "| WACC | 7.5%" in report or "| WACC | 7.46%" in report
+        assert "8.6%" not in report.split("### C. Key Model Assumptions")[-1]
+
+    def test_it_survives_a_model_with_no_cost_of_capital(self):
+        """Older runs and degraded models have no such key."""
+        from src.report_agent import integrate_report_sections
+        data = self._data()
+        data.pop('cost_of_capital')
+        report = integrate_report_sections(self._sections(), data)
+        assert "| WACC |" in report

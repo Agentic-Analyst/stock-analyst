@@ -947,6 +947,13 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     are already comprehensive and well-formatted.
     """
     company = data['company_overview']
+    # The rate the DCF actually discounted with. The appendix used to print
+    # assumptions['wacc'], which is read from a different tab: on one shipped
+    # AAPL report that was 8.5% while the model discounted at 11.15%.
+    _coc = data.get('cost_of_capital') or {}
+    # Read from `data`, not the local `assumptions`, which is not bound until
+    # later in this function.
+    _wacc_used = _coc.get('wacc') or (data.get('assumptions') or {}).get('wacc')
     report_date = datetime.now().strftime('%B %d, %Y')
     
     # Build complete report
@@ -1178,7 +1185,7 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
 
 | Assumption | Value |
 |-----------|-------|
-| WACC | {format_percent(assumptions['wacc'])} |
+| WACC | {format_percent(_wacc_used)} |
 | Terminal Growth Rate | {format_percent(assumptions['terminal_growth'])} |
 | Revenue Growth (FY1) | {format_percent(assumptions['revenue_growth_rates'][0])} |
 | Revenue Growth (FY2) | {format_percent(assumptions['revenue_growth_rates'][1])} |
