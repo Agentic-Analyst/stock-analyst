@@ -39,8 +39,8 @@ _DEBT_SPREAD = 0.015        # cost of debt = rf + spread
 _TAX_DEFAULT = 0.25         # mature-market average; overridden by the
                             # company's own effective rate when available
 _RF_FALLBACK = 0.043
-_BETA_MIN, _BETA_MAX = 0.6, 1.6
-_WACC_MIN, _WACC_MAX = 0.07, 0.13
+_BETA_MIN, _BETA_MAX = 0.5, 2.0
+_WACC_MIN, _WACC_MAX = 0.06, 0.20   # disclosure band, not a clamp
 _TG_MIN, _TG_MAX = 0.02, 0.03
 _EXIT_HAIRCUT = 0.8
 # Terminal-year multiples above ~22x are rarely defensible in any sector.
@@ -160,38 +160,87 @@ def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
     currency = (bi.get("currency") or "USD").upper()
     rf, rf_source = risk_free_rate(currency)
 
-    raw_beta = cs.get("beta")
-    if raw_beta:
-        # Blume adjustment: raw betas mean-revert toward 1.0, so every bank
-        # shrinks them (2/3 raw + 1/3 market) before CAPM — a raw 1.8+ beta
-        # would price the largest companies on earth at a 13%+ WACC.
-        beta = _clamp(0.67 * float(raw_beta) + 0.33, _BETA_MIN, _BETA_MAX)
-        beta_source = f"Blume-adjusted from observed {float(raw_beta):.2f}"
-    else:
+    # Beta against the listing's HOME index, computed from price history.
+    # Yahoo's `beta` is measured against the S&P 500 for every listing on
+    # earth, so every NSE name read 0.1-0.3 and was floored; see market_beta.
+    from .market_beta import compute_beta, country_risk_premium
+    symbol = bi.get("symbol") or (company_data.get("ticker") if isinstance(company_data, dict) else None)
+    fit = compute_beta(symbol)
+    beta_r2 = None
+    beta_index = None
+    if fit and fit["weak_fit"]:
+        # R² below 0.10: the slope is mostly noise. Alnylam regressed at 0.36
+        # with R² 0.01, which would hand a biotech an 8% cost of equity. When
+        # the market explains nothing of the stock's movement the defensible
+        # beta is the market's own, and the reader is told why.
         beta = 1.0
-        beta_source = "market beta 1.00 (no observed beta available)"
+        beta_r2 = fit["r_squared"]
+        beta_index = fit["index"]
+        beta_source = (f"regression vs {fit['index']} is not informative "
+                       f"(R²={fit['r_squared']:.2f}, slope {fit['raw']:.2f}); market beta 1.00 used")
+    elif fit:
+        # Blume adjustment: raw betas mean-revert toward 1.0, so every bank
+        # shrinks them (2/3 raw + 1/3 market) before CAPM.
+        beta = _clamp(fit["blume"], _BETA_MIN, _BETA_MAX)
+        beta_r2 = fit["r_squared"]
+        beta_index = fit["index"]
+        beta_source = (f"{fit['raw']:.2f} vs {fit['index']} ({fit['window']}, "
+                       f"n={fit['observations']}, R²={fit['r_squared']:.2f}), Blume-adjusted")
+        if abs(beta - fit["blume"]) > 1e-9:
+            beta_source += f", clamped to {beta:.2f}"
+    else:
+        raw_beta = cs.get("beta")
+        if raw_beta:
+            beta = _clamp(0.67 * float(raw_beta) + 0.33, _BETA_MIN, _BETA_MAX)
+            beta_source = (f"Blume-adjusted from Yahoo's {float(raw_beta):.2f} — measured "
+                           f"against the S&P 500, not the home index; price history was unavailable")
+        else:
+            beta = 1.0
+            beta_source = "market beta 1.00 (no price history and no observed beta)"
+
+    # Country risk premium on top of the mature-market ERP, Damodaran style:
+    # Ke = Rf + beta x (ERP + CRP). Zero for developed markets.
+    crp, crp_source = country_risk_premium(bi.get("country"))
+    erp_total = _ERP + crp
 
     tax = _effective_tax_rate(company_data)
-    ke = rf + beta * _ERP
+    ke = rf + beta * erp_total
     kd_pre_tax = rf + _DEBT_SPREAD
     kd_after_tax = kd_pre_tax * (1 - tax)
 
     equity = float(md.get("market_cap") or 0)
     debt = float(cs.get("total_debt") or 0)
-    total = equity + debt
-    w_e = equity / total if total > 0 else 1.0
+    weights_note = "market cap / (market cap + total debt)"
+    if equity > 0:
+        w_e = equity / (equity + debt)
+    else:
+        # No market cap on record (Yahoo returned none for Reliance on one
+        # day). Treating that as zero equity priced the whole firm at the cost
+        # of debt — a 3.8% WACC for India's largest company. Missing equity
+        # means we cannot weight; use all-equity and say so.
+        w_e = 1.0
+        weights_note = "market cap unavailable — all-equity weights used"
     w_d = 1.0 - w_e
 
+    # The WACC is what the components produce. It is NOT clamped: the workbook
+    # recomputes it from the same seeded cells, so altering the number here
+    # would put two different rates in one model (13% in the summary, 20% in
+    # the DCF tab for PC Jeweller). Out-of-band values are flagged instead.
     raw_wacc = w_e * ke + w_d * kd_after_tax
-    wacc = _clamp(raw_wacc, _WACC_MIN, _WACC_MAX)
+    wacc = raw_wacc
 
     return {
         "currency": currency,
         "risk_free_rate": rf,
         "risk_free_source": rf_source,
         "equity_risk_premium": _ERP,
+        "country_risk_premium": crp,
+        "crp_source": crp_source,
+        "equity_risk_premium_total": erp_total,
         "beta": beta,
         "beta_source": beta_source,
+        "beta_r_squared": beta_r2,
+        "beta_index": beta_index,
         "cost_of_equity": ke,
         "pre_tax_cost_of_debt": kd_pre_tax,
         "tax_rate": tax,
@@ -200,9 +249,13 @@ def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
         "debt_value": debt,
         "equity_weight": w_e,
         "debt_weight": w_d,
+        "weights_note": weights_note,
         "wacc": wacc,
         "wacc_unclamped": raw_wacc,
-        "wacc_clamped": abs(raw_wacc - wacc) > 1e-9,
+        # Kept as a flag, not an alteration: a WACC outside [6%, 20%] usually
+        # means an input is broken, and the reader should see the number that
+        # was actually used alongside the warning.
+        "wacc_clamped": not (_WACC_MIN <= wacc <= _WACC_MAX),
     }
 
 
@@ -211,11 +264,12 @@ def compute_capm_wacc(company_data: Dict[str, Any]) -> Tuple[float, str]:
     c = capm_components(company_data)
     note = (
         f"CAPM WACC {c['wacc']*100:.2f}% (rf {c['risk_free_source']}, "
-        f"beta {c['beta']:.2f}, Ke {c['cost_of_equity']*100:.2f}%, "
-        f"D/(D+E) {c['debt_weight']*100:.0f}%)"
+        f"beta {c['beta']:.2f} [{c['beta_source']}], "
+        f"ERP {c['equity_risk_premium']*100:.1f}% + CRP {c['country_risk_premium']*100:.1f}%, "
+        f"Ke {c['cost_of_equity']*100:.2f}%, D/(D+E) {c['debt_weight']*100:.0f}%)"
     )
     if c["wacc_clamped"]:
-        note += f" [clamped from {c['wacc_unclamped']*100:.2f}%]"
+        note += " [OUTSIDE the 6-20% band — check the inputs]"
     return c["wacc"], note
 
 

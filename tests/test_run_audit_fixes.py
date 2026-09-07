@@ -407,3 +407,46 @@ class TestEvaluatorNestedCallsInAggregates:
         f = (f'=IFERROR(IF({ns["calcs"]}>0,IF({ns["calcs"]}>0.5,0.5,{ns["calcs"]}),'
              f'IF({ns["ratio"]}<0,0,IF({ns["ratio"]}>0.5,0.5,{ns["ratio"]}))),"")')
         assert self._evaluate(f) == pytest.approx(0.4)
+
+
+class TestRatingIgnoresBrokenLegs:
+    """
+    PC Jeweller, with a real beta and India's premium: perpetual DCF -2.03,
+    exit 6.82, price 12.87. The summary averages positive legs to 12.14 (a 6%
+    discount). The calculator averaged BOTH — (-2.03 + 6.82) / 2 = 2.40 — and
+    rated it STRONG SELL on an 81% "discount" the report never shows. A
+    negative per-share value is a method that does not fit the company, not a
+    low estimate.
+    """
+
+    def _calc(self, perp, exit_, price=12.87):
+        from src.recommendation_calculator import RecommendationCalculator
+        try:
+            calc = RecommendationCalculator()
+        except TypeError:
+            calc = RecommendationCalculator(sector="default")
+        return calc.calculate_fixed_numbers(
+            ticker="PCJEWELLER.NS", current_price=price, dcf_perpetual=perp, dcf_exit=exit_,
+            catalyst_score_pct=0.0, risk_score_pct=0.0, momentum_score_pct=0.0,
+            hist_vol_annual_pct=30.0,
+        )
+
+    def test_a_negative_leg_is_excluded_from_the_gap(self):
+        fn = self._calc(-2.03, 6.82)
+        gap = fn["inputs"]["raw_val_gap_pct"]
+        assert gap == pytest.approx((6.82 / 12.87 - 1) * 100, abs=0.01)
+        assert fn["inputs"]["dcf_legs_used"] == 1
+
+    def test_two_positive_legs_are_averaged(self):
+        fn = self._calc(10.0, 14.0)
+        assert fn["inputs"]["raw_val_gap_pct"] == pytest.approx((12.0 / 12.87 - 1) * 100, abs=0.01)
+        assert fn["inputs"]["dcf_legs_used"] == 2
+
+    def test_no_positive_leg_is_a_zero_gap_not_a_crash(self):
+        fn = self._calc(-2.0, -5.0)
+        assert fn["inputs"]["raw_val_gap_pct"] == 0
+        assert fn["inputs"]["dcf_legs_used"] == 0
+
+    def test_a_zero_leg_is_still_treated_as_missing(self):
+        fn = self._calc(0.0, 14.0)
+        assert fn["inputs"]["dcf_legs_used"] == 1

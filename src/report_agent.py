@@ -376,6 +376,7 @@ def extract_cost_of_capital(computed_values: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         'risk_free_source': note(23),
+        'erp_source': note(24),
         'beta_source': note(25),
         'risk_free_rate': read('Risk-Free Rate (Rf)', 3),
         'equity_risk_premium': read('Equity Risk Premium (ERP)', 4),
@@ -803,9 +804,21 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     comps = valuation['summary'].get('comps_intrinsic')
     if isinstance(comps, (int, float)) and comps > 0:
         summary_table += f"| Market Comps Intrinsic Value | {format_number(comps, 2)} |\n"
-        summary_table += f"| **Average Intrinsic Value (3 methods)** | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
+    # The workbook averages only the legs that came out POSITIVE — a negative
+    # per-share value is a method that does not fit the company, not a low
+    # estimate. Say how many actually entered, so "3 methods" is never printed
+    # over an average of two (PC Jeweller: perpetual -2.03, dropped).
+    legs = [valuation['dcf_perpetual']['intrinsic_value_per_share'],
+            valuation['dcf_exit']['intrinsic_value_per_share'], comps]
+    n_in = sum(1 for v in legs if isinstance(v, (int, float)) and v > 0)
+    n_all = sum(1 for v in legs if isinstance(v, (int, float)))
+    if n_in < n_all:
+        label = f"**Average Intrinsic Value ({n_in} of {n_all} methods — negative results excluded)**"
+    elif n_in > 2:
+        label = f"**Average Intrinsic Value ({n_in} methods)**"
     else:
-        summary_table += f"| **Average Intrinsic Value** | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
+        label = "**Average Intrinsic Value**"
+    summary_table += f"| {label} | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
     summary_table += f"| Current Market Price | {format_number(company['current_price'], 2)} |\n"
     summary_table += f"| **Implied Upside** | **{format_percent(valuation['summary']['upside'])}** |\n"
     
@@ -819,7 +832,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         coc_table = "| Input | Value |\n|-------|-------|\n"
         for label, key, fmt in (
             ("Risk-free rate", 'risk_free_rate', 'pct'),
-            ("Equity risk premium", 'equity_risk_premium', 'pct'),
+            ("Equity risk premium (incl. country premium)", 'equity_risk_premium', 'pct'),
             ("Levered beta", 'beta', 'num'),
             ("Cost of equity", 'cost_of_equity', 'pct'),
             ("Pre-tax cost of debt", 'pre_tax_cost_of_debt', 'pct'),
@@ -841,6 +854,8 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
             coc_table += f"| Risk-free source | {coc['risk_free_source']} |\n"
         if coc.get('beta_source'):
             coc_table += f"| Beta source | {coc['beta_source']} |\n"
+        if coc.get('erp_source'):
+            coc_table += f"| Premium build | {coc['erp_source']} |\n"
 
     sensitivity_table = build_sensitivity_grid(
         projections, assumptions.get('terminal_growth') or 0.025,

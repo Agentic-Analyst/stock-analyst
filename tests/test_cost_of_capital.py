@@ -179,7 +179,7 @@ class TestWorkbookUsesTheDerivation:
         disagree again.
         """
         c = capm_components(LVMH)
-        ke = c["risk_free_rate"] + c["beta"] * c["equity_risk_premium"]
+        ke = c["risk_free_rate"] + c["beta"] * c["equity_risk_premium_total"]
         rebuilt = (c["equity_weight"] * ke
                    + c["debt_weight"] * c["after_tax_cost_of_debt"])
         assert rebuilt == pytest.approx(c["wacc"], abs=1e-6)

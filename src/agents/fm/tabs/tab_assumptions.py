@@ -415,8 +415,14 @@ class AssumptionsTabBuilder:
 
         _seed(23, "Risk-Free Rate (Rf)", "risk_free_rate", 0.045, '0.00%',
               f"[{capm.get('risk_free_source', '10Y government bond')}]")
-        _seed(24, "Equity Risk Premium (ERP)", "equity_risk_premium", 0.055, '0.00%',
-              "[Mature-market ERP]")
+        # The cell carries the mature-market ERP PLUS the country premium so
+        # the tab's Ke = Rf + beta x B24 reproduces the CAPM's own cost of
+        # equity. The note says what was added.
+        _crp = capm.get("country_risk_premium") or 0.0
+        _seed(24, "Equity Risk Premium (ERP + country premium)", "equity_risk_premium_total", 0.055, '0.00%',
+              (f"[Mature-market ERP {capm.get('equity_risk_premium', 0.055)*100:.1f}% + "
+               f"country premium {_crp*100:.1f}%: {capm.get('crp_source', 'none')}]")
+              if capm else "[Mature-market ERP]")
         _seed(25, "Levered Beta (β)", "beta", 1.0, '0.00',
               f"[{capm.get('beta_source', 'observed beta')}]")
 
@@ -430,7 +436,7 @@ class AssumptionsTabBuilder:
         ws.cell(row=28, column=1, value="Capital Structure Weights:").font = Font(bold=True, italic=True, size=10)
 
         _seed(29, "Equity Weight (E/V)", "equity_weight", 0.85, '0.00%',
-              "[Market cap / (market cap + total debt)]")
+              f"[{capm.get('weights_note', 'Market cap / (market cap + total debt)')}]")
         
         # Terminal Growth Rate (row 35 in markdown, row 30 here)
         ws.cell(row=30, column=1, value="Terminal Growth Rate (g)").font = Font(bold=True)
