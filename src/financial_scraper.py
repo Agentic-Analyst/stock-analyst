@@ -20,6 +20,76 @@ import numpy as np
 
 import yfinance as yf
 
+
+def _fx_rate(from_ccy, to_ccy):
+    """Spot rate FROM->TO via yfinance ("USDJPY=X"). None when unavailable."""
+    if not from_ccy or not to_ccy or from_ccy == to_ccy:
+        return 1.0
+    try:
+        import yfinance as yf
+        h = yf.Ticker(f"{from_ccy}{to_ccy}=X").history(period="5d")
+        if h is not None and not h.empty:
+            return float(h["Close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def _listing_ccy(info):
+    c = info.get("currency")
+    return "GBP" if c == "GBp" else c
+
+
+def _reporting_currency(info):
+    """The currency the valuation comes out in: the statements', when known."""
+    return info.get("financialCurrency") or _listing_ccy(info)
+
+
+def _fx_listing_to_financial(info):
+    """Rate that converts the listing price into the financial currency, or None."""
+    lc, fc = _listing_ccy(info), info.get("financialCurrency")
+    if not lc or not fc or lc == fc:
+        return None
+    return _fx_rate(lc, fc)
+
+
+def _price_in_financial_currency(price, info):
+    """
+    The listing price expressed in the currency of the financial statements.
+
+    A value per share is computed from the statements, so it is in their
+    currency; comparing it to a price in another currency produced Toyota's
+    "+21,000%". Converted here, once, so every downstream upside is like for
+    like. If no rate is available the price is left as is and the mismatch is
+    visible in `listing_currency` vs `currency`.
+    """
+    if price is None:
+        return None
+    rate = _fx_listing_to_financial(info)
+    if rate is None:
+        return price
+    try:
+        return float(price) * rate
+    except (TypeError, ValueError):
+        return price
+
+
+def _price_in_major_units(price, currency):
+    """
+    London quotes in pence. yfinance reports the price, previous close and
+    52-week range in GBp while the market cap and every statement are in GBP —
+    so a valuation of £25 per share was compared against a "price" of 3,437 and
+    every LSE listing showed a ~99% downside. Divide by 100 once, here, and let
+    everything downstream see pounds.
+    """
+    if price is None or currency != "GBp":
+        return price
+    try:
+        return float(price) / 100.0
+    except (TypeError, ValueError):
+        return price
+
+
 class FinancialScraper:
     """Financial statements scraper for collecting precise financial data."""
     
@@ -282,6 +352,18 @@ class FinancialScraper:
             
             if current_assets and current_liabilities:
                 key_metrics["ratios"]["current_ratio"] = current_assets / current_liabilities
+
+            # Interest income over revenue — the signal that tells a lender from
+            # a payments company Yahoo files in the same industry. Capital One
+            # 1.22, Synchrony 2.28, the banks >= 1.0; PayPal 0.02, Visa -0.01.
+            _interest = self._find_metric_with_fallbacks(
+                latest_income, ["Interest Income", "Total Interest Income", "InterestIncome",
+                                "Net Interest Income", "NetInterestIncome"])
+            if total_revenue and _interest is not None:
+                try:
+                    key_metrics["ratios"]["interest_income_to_revenue"] = float(_interest) / float(total_revenue)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
             
         except Exception as e:
             self._log("warning", f"Error extracting key metrics: {e}")
@@ -414,13 +496,26 @@ class FinancialScraper:
                     "employees": info.get("fullTimeEmployees"),
                     "country": info.get("country"),
                     "exchange": info.get("exchange"),
-                    "currency": info.get("currency")
+                    # Pence-quoted listings are reported in pounds, to match the
+                    # market cap and the financial statements (see _price_in_major_units).
+                    # A listing that trades in one currency and reports in another
+                    # (an ADR, or Alibaba in HKD over CNY books) is reported in the
+                    # FINANCIAL currency: the valuation is built from the statements,
+                    # so that is the currency a value per share comes out in, and
+                    # the price is converted to match (see market_data).
+                    "currency": _reporting_currency(info),
+                    "listing_currency": _listing_ccy(info),
                 },
                 
                 # 2. Share/Market Data (Critical for modeling)
                 "market_data": {
                     "shares_outstanding_basic": info.get("sharesOutstanding"),
                     "shares_outstanding_diluted": info.get("sharesOutstandingDiluted"),
+                    # market cap / price. Unlike sharesOutstanding this counts every
+                    # class: Alphabet's sharesOutstanding is Class A only (5.9B),
+                    # while the market cap covers 12.2B shares. Dividing equity
+                    # value by the Class A count doubles the value per share.
+                    "shares_outstanding_implied": info.get("impliedSharesOutstanding"),
                     "float_shares": info.get("floatShares"),
                     # Yahoo populates "currentPrice" for US primary listings but
                     # leaves it null on many foreign and secondary venues, where the
@@ -430,16 +525,27 @@ class FinancialScraper:
                     # as a NOT RATED report (LVMH on Stuttgart quoted 458.70 the whole
                     # time). The realtime price fetcher already fell back this way;
                     # the scraper did not.
-                    "current_price": (
+                    "current_price": _price_in_financial_currency(
+                        _price_in_major_units(
+                            info.get("currentPrice")
+                            or info.get("regularMarketPrice")
+                            or info.get("previousClose"),
+                            info.get("currency"),
+                        ),
+                        info,
+                    ),
+                    "current_price_listing": _price_in_major_units(
                         info.get("currentPrice")
                         or info.get("regularMarketPrice")
-                        or info.get("previousClose")
+                        or info.get("previousClose"),
+                        info.get("currency"),
                     ),
-                    "previous_close": info.get("previousClose"),
+                    "fx_listing_to_financial": _fx_listing_to_financial(info),
+                    "previous_close": _price_in_major_units(info.get("previousClose"), info.get("currency")),
                     "market_cap": info.get("marketCap"),
                     "enterprise_value": info.get("enterpriseValue"),
-                    "52_week_high": info.get("fiftyTwoWeekHigh"),
-                    "52_week_low": info.get("fiftyTwoWeekLow"),
+                    "52_week_high": _price_in_major_units(info.get("fiftyTwoWeekHigh"), info.get("currency")),
+                    "52_week_low": _price_in_major_units(info.get("fiftyTwoWeekLow"), info.get("currency")),
                     "dividend_yield": info.get("dividendYield"),
                     "ex_dividend_date": info.get("exDividendDate"),
                     "dividend_rate": info.get("dividendRate"),
@@ -936,6 +1042,22 @@ class FinancialScraper:
             
             latest_income = income_data.get(latest_year, {})
             latest_balance = balance_data.get(latest_year, {})
+
+            # Interest income as a share of revenue: the signal that separates a
+            # balance-sheet lender (Capital One 1.22, Synchrony 2.28, the banks
+            # >= 1.0) from a payments company Yahoo files in the same industry
+            # (PayPal 0.02, Visa -0.01). Used to decide whether a P/B x ROE
+            # valuation applies.
+            _rev = self._find_metric_with_fallbacks(
+                latest_income, ["Total Revenue", "TotalRevenues", "totalRevenue", "Revenue"])
+            _int = self._find_metric_with_fallbacks(
+                latest_income, ["Interest Income", "Total Interest Income", "InterestIncome",
+                                "Net Interest Income", "NetInterestIncome"])
+            if _rev and _int is not None:
+                try:
+                    ratios.setdefault("financial_profile", {})["interest_income_to_revenue"] = float(_int) / float(_rev)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
             latest_cashflow = cashflow_data.get(latest_year, {})
             
             # Profitability ratios

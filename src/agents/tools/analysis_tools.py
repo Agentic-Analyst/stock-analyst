@@ -130,6 +130,40 @@ class AgentContext:
         except Exception:
             info = {}
 
+        # A depositary receipt trades in one currency and reports in another.
+        # Toyota's ADR (TM) quotes in dollars over yen financials, and the model
+        # divided yen equity by 1.3B ADRs against a $197 price — value per share
+        # ¥77,233, "+21,000%", STRONG BUY. When the home line reports and trades
+        # in the same currency, analyze that instead; when nothing does (Alibaba
+        # reports CNY and trades HKD or USD), keep the listing and let the
+        # scraper convert the price (see _price_in_financial_currency).
+        mismatch = (info.get("currency") and info.get("financialCurrency")
+                    and info.get("currency") != info.get("financialCurrency")
+                    and "." not in ticker)
+        if info and mismatch and is_analyzable(info):
+            try:
+                upgrade = better_listing(ticker, info)
+                if upgrade:
+                    import yfinance as yf
+                    cand = yf.Ticker(upgrade[0]).info or {}
+                    if cand.get("currency") != cand.get("financialCurrency"):
+                        upgrade = None      # would not resolve the mismatch
+            except Exception:
+                upgrade = None
+            if upgrade:
+                better_symbol, better_name = upgrade
+                print(
+                    f"[SUPERVISOR] ↪ {ticker} trades in {info.get('currency')} but reports in "
+                    f"{info.get('financialCurrency')}; analyzing the home listing {better_symbol} instead."
+                )
+                self._listing_cache[ticker] = better_symbol
+                ticker = better_symbol
+                company_name = company_name or better_name
+                try:
+                    info = yf.Ticker(ticker).info or {}
+                except Exception:
+                    pass
+
         if info and not is_analyzable(info):
             try:
                 upgrade = better_listing(ticker, info)
@@ -192,6 +226,30 @@ _TICKER_PARAM = {
                        "For non-US names resolve to a ticker first with resolve_symbol.",
     }
 }
+
+
+def _listing_price_note(state) -> dict:
+    """
+    When the listing trades in a different currency from its statements, the
+    figures are in the statements' currency and the price was converted. Give
+    the chat the original quote and the rate so it can say "£34.37 (≈$46.43)"
+    rather than a dollar price a London investor has never seen.
+    """
+    try:
+        km = state.financial_data.key_metrics if state.financial_data else {}
+        bi = (km.get("basic_info") or {}) if isinstance(km, dict) else {}
+        md = (km.get("market_data") or {}) if isinstance(km, dict) else {}
+        lc, rc = bi.get("listing_currency"), bi.get("currency")
+        px, fx = md.get("current_price_listing"), md.get("fx_listing_to_financial")
+        if lc and rc and lc != rc and isinstance(px, (int, float)):
+            return {"listing_currency": lc, "price_in_listing_currency": px,
+                    "fx_rate_listing_to_reporting": fx,
+                    "currency_note": (f"Figures are in {rc}, the currency of the financial statements. "
+                                      f"The listing trades in {lc} at {px:,.2f}; the price was converted"
+                                      + (f" at {fx:.4f} {rc}/{lc}." if fx else "."))}
+    except Exception:
+        pass
+    return {}
 
 
 def _listing_currency(state) -> Optional[str]:
@@ -538,6 +596,7 @@ class BuildModelTool(_CtxTool):
             ticker=ticker,
             model_type=state.financial_model.model_type if state.financial_model else None,
             currency=_listing_currency(state),
+            **_listing_price_note(state),
             fair_value=fair_value_out,
             current_price=current_price,
             upside_vs_market=upside_out,
@@ -710,12 +769,16 @@ class WriteReportTool(_CtxTool):
         # REPORT was still built from the workbook's DCF. The chat then quoted a
         # fair value the document did not contain (PayPal: $61.01 vs $87.11).
         # Quote what the report shows; carry the other number alongside it.
-        bank_fair_value = None
-        if isinstance(vm, dict) and vm.get("dcf_fair_value") is not None and method == "justified_pb_roe":
-            bank_fair_value = fair_value
-            fair_value = vm.get("dcf_fair_value")
-            price = vm.get("current_price")
-            upside = (float(fair_value) / float(price) - 1.0) if price and fair_value else upside
+        # The report now carries the balance-sheet valuation itself (see
+        # apply_valuation_override), so for a bank the chat quotes that same
+        # number. The suppressed DCF is offered as a cross-check only when it
+        # actually produced a value — for banks it is 0.00, and an earlier
+        # version of this block would have told the user "fair value $0.00".
+        dcf_cross_check = None
+        if isinstance(vm, dict) and method == "justified_pb_roe":
+            _dcf = vm.get("dcf_fair_value")
+            if isinstance(_dcf, (int, float)) and _dcf > 0:
+                dcf_cross_check = _dcf
         km = state.financial_data.key_metrics if state.financial_data else {}
         mcap = (km.get("market_data", {}) or {}).get("market_cap") if isinstance(km, dict) else None
         warning = _valuation_warning(fair_value, upside, market_cap=mcap, method=method)
@@ -737,13 +800,14 @@ class WriteReportTool(_CtxTool):
             report_path=state.report.report_path,
             content_length=len(state.report.content) if state.report.content else 0,
             currency=_listing_currency(state),
+            **_listing_price_note(state),
             fair_value=fair_value,
             upside_vs_market=upside,
             overall_sentiment=na.overall_sentiment if na else None,
             # The rating the report published, so the answer cannot contradict
             # the document the user downloads.
             **_report_headline(state.report.content),
-            **({"bank_fair_value_cross_check": bank_fair_value} if bank_fair_value is not None else {}),
+            **({"dcf_fair_value_cross_check": dcf_cross_check} if dcf_cross_check is not None else {}),
             **({"valuation_method": method} if method else {}),
             **({"valuation_confidence": band} if band else {}),
             **({"data_quality_warning": warning} if warning else {}),

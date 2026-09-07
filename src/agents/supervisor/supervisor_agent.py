@@ -1279,10 +1279,17 @@ Provide a helpful, informative answer:"""
                         upside_pct = valuation_metrics.get("upside_vs_market", 0) * 100
                         
                         parts.append(f"Generated {self.state.financial_model.model_type} valuation model")
-                        parts.append(f"Fair Value: ${fair_value:.2f}")
+                        # The listing's own currency, not a hardcoded dollar.
+                        try:
+                            from src.report_agent import currency_symbol
+                            _bi = (self.state.financial_data.key_metrics or {}).get("basic_info", {}) if self.state.financial_data else {}
+                            _sym = currency_symbol(_bi.get("currency") or "USD")
+                        except Exception:
+                            _sym = "$"
+                        parts.append(f"Fair Value: {_sym}{fair_value:.2f}")
                         
                         if current_price:
-                            parts.append(f"Current Price: ${current_price:.2f}")
+                            parts.append(f"Current Price: {_sym}{current_price:.2f}")
                             if abs(upside_pct) > 0.1:  # Only mention if significant
                                 direction = "upside" if upside_pct > 0 else "downside"
                                 parts.append(f"{abs(upside_pct):.1f}% {direction}")

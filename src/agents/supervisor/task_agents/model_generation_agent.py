@@ -287,7 +287,9 @@ async def model_generation_agent(
             if state.financial_data:
                 basic_info = (state.financial_data.key_metrics or {}).get("basic_info", {}) or {}
                 company_data = (state.financial_data.raw_data or {}).get("company_data", {}) or {}
-            if is_financial_sector(basic_info.get("sector"), basic_info.get("industry")):
+            _ratios = (state.financial_data.key_metrics or {}).get("ratios", {}) if state.financial_data else {}
+            if is_financial_sector(basic_info.get("sector"), basic_info.get("industry"),
+                                   (_ratios or {}).get("interest_income_to_revenue")):
                 bank = compute_bank_fair_value(
                     company_data, assumptions.get("terminal_growth")
                 )

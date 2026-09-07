@@ -42,18 +42,37 @@ _PB_MAX = 3.0
 # into a justified P/B x ROE valuation ($61.01) while its report ran a DCF
 # ($87.11), and the chat told the user a DCF "was not used".
 _FINANCIAL_INDUSTRY_HINTS = (
-    "bank", "insurance", "reinsurance", "thrift", "savings",
+    "bank", "insurance", "capital markets", "credit services", "financial",
 )
+# Interest income at or above this share of revenue marks a balance-sheet
+# lender. Measured: Capital One 1.22, Synchrony 2.28, Ally 1.71, Bajaj Finance
+# 1.56, banks >= 1.0, Amex 0.36, Schwab 0.60 — against PayPal 0.02, Visa -0.01,
+# Mastercard -0.02, Coinbase -0.01.
+_LENDER_INTEREST_SHARE = 0.30
 
 
-def is_financial_sector(sector: Optional[str], industry: Optional[str] = None) -> bool:
+def is_financial_sector(sector: Optional[str], industry: Optional[str] = None,
+                        interest_income_to_revenue: Optional[float] = None) -> bool:
     """
-    True for a balance-sheet financial — a bank or insurer — where a justified
-    P/B x ROE valuation is meaningful. Sector alone is not enough: Yahoo files
-    PayPal, Visa, Coinbase and Robinhood under "Financial Services" too.
+    True for a balance-sheet financial, where a justified P/B x ROE valuation
+    is meaningful.
+
+    Yahoo files lenders and payment processors in the same "Credit Services"
+    industry, so the taxonomy alone cannot decide: PayPal ($61.01 on P/B x ROE
+    against an $87.11 DCF) was the cost of trusting it. When the income
+    statement is available the interest-income share decides. When it is not,
+    the industry hints decide, exactly as before — narrowing them was itself a
+    regression that would have sent Capital One, Synchrony, Ally and Bajaj
+    Finance through an FCF DCF.
     """
+    financial = (sector or "").strip().lower() == "financial services"
     ind = (industry or "").strip().lower()
-    return any(h in ind for h in _FINANCIAL_INDUSTRY_HINTS)
+    hinted = financial or any(h in ind for h in _FINANCIAL_INDUSTRY_HINTS)
+    if not hinted:
+        return False
+    if isinstance(interest_income_to_revenue, (int, float)):
+        return interest_income_to_revenue >= _LENDER_INTEREST_SHARE
+    return True
 
 
 def compute_bank_fair_value(

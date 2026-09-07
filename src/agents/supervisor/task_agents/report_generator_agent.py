@@ -94,6 +94,12 @@ async def report_generator_agent(
             logger=effective_logger,
             output_language=getattr(state, "output_language", "") or "",
             brief=getattr(state, "report_brief", "") or "",
+            # The model's own valuation metrics. For a balance-sheet financial
+            # these carry the justified P/B x ROE fair value that replaced the
+            # DCF; without them the report printed "DCF $0.00 / Upside -100%"
+            # for every bank while the chat quoted the real number.
+            valuation_override=(state.financial_model.valuation_metrics
+                                if state.financial_model else None),
         )
         
         state.log_action(

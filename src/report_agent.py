@@ -208,6 +208,13 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
         # an LVMH report came back with 500 "$" and not one "€", against a
         # brief that explicitly said EUR.
         'currency': basic_info.get('currency') or 'USD',
+        # The listing's own quote, when it differs from the reporting currency:
+        # Shell trades at 3,437p in London and reports in dollars, so the
+        # valuation is in USD and the price was converted to match. A reader
+        # is told both numbers and the rate, or the "$46.43" looks invented.
+        'listing_currency': basic_info.get('listing_currency') or basic_info.get('currency') or 'USD',
+        'current_price_listing': market_data.get('current_price_listing'),
+        'fx_listing_to_financial': market_data.get('fx_listing_to_financial'),
         'current_price': market_data.get('current_price', 0),
         'market_cap': market_data.get('market_cap', 0),
         'enterprise_value': market_data.get('enterprise_value', 0),
@@ -443,6 +450,45 @@ def build_sensitivity_grid(projections: Dict[str, Any], terminal_growth: float,
     return header + rows
 
 
+def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Carry the model's balance-sheet valuation into the report.
+
+    For a bank or lender the model replaces the FCF DCF with a justified
+    P/B x ROE fair value in state — and left the workbook's DCF at zero. The
+    report was built from the workbook alone, so it printed "DCF $0.00 /
+    Average $0.00 / Implied Upside -100%" and rated Capital One and JPMorgan
+    STRONG SELL, while the chat quoted $159.34 and $304.65 from the real
+    method. Here the report's headline, its summary rows and the numbers the
+    recommendation engine rates on are all set to the method actually used.
+    """
+    if not override or override.get("valuation_method") != "justified_pb_roe":
+        return data
+    fair_value = override.get("fair_value")
+    if not isinstance(fair_value, (int, float)) or fair_value <= 0:
+        return data
+    v = data.get("valuation") or {}
+    price = (data.get("company_overview") or {}).get("current_price") or override.get("current_price")
+    upside = (fair_value / float(price) - 1.0) if price else override.get("upside_vs_market")
+    v["bank"] = {
+        "fair_value": fair_value,
+        "method": "Justified P/B x ROE",
+        "inputs": override.get("bank_inputs") or {},
+    }
+    # The engine and the summary must rate and print the same number.
+    v.setdefault("dcf_perpetual", {})["intrinsic_value_per_share"] = fair_value
+    v.setdefault("dcf_exit", {})["intrinsic_value_per_share"] = fair_value
+    summary = v.setdefault("summary", {})
+    summary["dcf_intrinsic"] = fair_value
+    summary["exit_intrinsic"] = fair_value
+    summary["comps_intrinsic"] = None
+    summary["average_intrinsic"] = fair_value
+    if upside is not None:
+        summary["upside"] = upside
+    data["valuation"] = v
+    return data
+
+
 def extract_projections(computed_values: Dict[str, Any]) -> Dict[str, Any]:
     """Extract 5-year projections from Projections tab."""
     projections = computed_values.get('Projections', {}).get('cells', {})
@@ -637,20 +683,35 @@ def _strip_echoed_heading(body: str, title: str) -> str:
     return "\n".join(lines[i:]).lstrip()
 
 
+def _money_symbol() -> str:
+    """The current report's currency symbol; a dollar when no run is pinned."""
+    code = _REPORT_CURRENCY.get()
+    return currency_symbol(code) if code else "$"
+
+
 def format_number(num, decimals=2):
-    """Format number with commas and decimals."""
+    """
+    Format a monetary figure in the REPORT'S currency.
+
+    This hardcoded "$" for years without anyone noticing, because the tables it
+    built travelled inside the LLM prompt and the model rewrote the symbol to
+    match the currency directive while echoing them. Once the tables were
+    emitted by code verbatim, LVMH's projections read "$83.23B" and PC
+    Jeweller's "$44.26B" — 29 and 20 dollar amounts in euro and rupee reports.
+    """
     if num is None:
         return "N/A"
+    sym = _money_symbol()
     try:
         num = float(num)
         if abs(num) >= 1e9:
-            return f"${num/1e9:.{decimals}f}B"
+            return f"{sym}{num/1e9:.{decimals}f}B"
         elif abs(num) >= 1e6:
-            return f"${num/1e6:.{decimals}f}M"
+            return f"{sym}{num/1e6:.{decimals}f}M"
         elif abs(num) >= 1e3:
-            return f"${num/1e3:.{decimals}f}K"
+            return f"{sym}{num/1e3:.{decimals}f}K"
         else:
-            return f"${num:.{decimals}f}"
+            return f"{sym}{num:.{decimals}f}"
     except:
         return str(num)
 
@@ -801,8 +862,16 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     summary_table += f"| DCF Exit Multiple Intrinsic Value | {format_number(valuation['dcf_exit']['intrinsic_value_per_share'], 2)} |\n"
     # The workbook's average blends a third, market-comps leg. It was omitted
     # here, so the two rows above visibly failed to average to the row below.
+    bank = valuation.get('bank')
+    if bank:
+        # A balance-sheet financial: the FCF DCF is not meaningful for a bank,
+        # and the model valued it on justified P/B x ROE instead. Say so, and
+        # print that number where the DCF rows would otherwise read 0.00.
+        summary_table = "| Metric | Value |\n|--------|-------|\n"
+        summary_table += f"| Justified P/B x ROE Intrinsic Value | {format_number(bank['fair_value'], 2)} |\n"
+        summary_table += "| FCF DCF | _not applied — balance-sheet financial_ |\n"
     comps = valuation['summary'].get('comps_intrinsic')
-    if isinstance(comps, (int, float)) and comps > 0:
+    if isinstance(comps, (int, float)) and comps > 0 and not bank:
         summary_table += f"| Market Comps Intrinsic Value | {format_number(comps, 2)} |\n"
     # The workbook averages only the legs that came out POSITIVE — a negative
     # per-share value is a method that does not fit the company, not a low
@@ -812,7 +881,9 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
             valuation['dcf_exit']['intrinsic_value_per_share'], comps]
     n_in = sum(1 for v in legs if isinstance(v, (int, float)) and v > 0)
     n_all = sum(1 for v in legs if isinstance(v, (int, float)))
-    if n_in < n_all:
+    if bank:
+        label = "**Intrinsic Value (justified P/B x ROE)**"
+    elif n_in < n_all:
         label = f"**Average Intrinsic Value ({n_in} of {n_all} methods — negative results excluded)**"
     elif n_in > 2:
         label = f"**Average Intrinsic Value ({n_in} methods)**"
@@ -820,6 +891,14 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         label = "**Average Intrinsic Value**"
     summary_table += f"| {label} | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
     summary_table += f"| Current Market Price | {format_number(company['current_price'], 2)} |\n"
+    # A listing that trades in another currency: show the quote a holder sees
+    # and the rate behind the converted figure above (Shell: 3,437p / £34.37
+    # in London, $46.43 against USD statements).
+    _lc, _rc = company.get('listing_currency'), company.get('currency')
+    _pl, _fx = company.get('current_price_listing'), company.get('fx_listing_to_financial')
+    if _lc and _rc and _lc != _rc and isinstance(_pl, (int, float)):
+        _rate = f", converted at {_fx:.4f} {_rc}/{_lc}" if isinstance(_fx, (int, float)) else ""
+        summary_table += f"| Price on the listing exchange | {currency_symbol(_lc)}{_pl:,.2f} ({_lc}{_rate}) |\n"
     summary_table += f"| **Implied Upside** | **{format_percent(valuation['summary']['upside'])}** |\n"
     
     # Cost of capital — the derivation, not just the rate. A DCF is mostly an
@@ -857,10 +936,16 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         if coc.get('erp_source'):
             coc_table += f"| Premium build | {coc['erp_source']} |\n"
 
-    sensitivity_table = build_sensitivity_grid(
-        projections, assumptions.get('terminal_growth') or 0.025,
-        valuation, coc.get('wacc') or assumptions.get('wacc') or 0,
-    )
+    # A WACC x growth grid describes an FCF DCF. For a bank the DCF was not
+    # applied, and recomputing it prints a grid of zeros under a P/B x ROE
+    # headline (Capital One, JPMorgan). Say so instead.
+    if valuation.get('bank'):
+        sensitivity_table = "_Not applicable — valued on justified P/B x ROE, not a cash-flow DCF._"
+    else:
+        sensitivity_table = build_sensitivity_grid(
+            projections, assumptions.get('terminal_growth') or 0.025,
+            valuation, coc.get('wacc') or assumptions.get('wacc') or 0,
+        )
 
     # The tables are assembled HERE and returned verbatim. They used to travel
     # inside the prompt with an instruction to reproduce them exactly, which
@@ -1317,7 +1402,8 @@ def generate_professional_report(
     financial_json_path: Path,
     computed_values_json_path: Path,
     screening_json_path: Path,
-    logger: Optional[StockAnalystLogger] = None
+    logger: Optional[StockAnalystLogger] = None,
+    valuation_override: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Generate comprehensive professional report using LLM.
     
@@ -1361,6 +1447,7 @@ def generate_professional_report(
         'valuation': extract_valuation(computed_values),
         'news': extract_news_analysis(screening_data),
     }
+    data = apply_valuation_override(data, valuation_override)
     
     if logger:
         logger.info("✅ Extracted structured data")
@@ -1461,7 +1548,8 @@ async def generate_professional_report_async(
     financial_json_path: Path,
     computed_values_json_path: Path,
     screening_json_path: Path,
-    logger: Optional[StockAnalystLogger] = None
+    logger: Optional[StockAnalystLogger] = None,
+    valuation_override: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Parallel counterpart to generate_professional_report.
@@ -1495,6 +1583,7 @@ async def generate_professional_report_async(
         'valuation': extract_valuation(computed_values),
         'news': extract_news_analysis(screening_data),
     }
+    data = apply_valuation_override(data, valuation_override)
 
     llm = get_llm()
     sections: Dict[str, Any] = {}
@@ -1560,6 +1649,7 @@ async def generate_and_save_professional_report_async(
     logger: Optional[StockAnalystLogger] = None,
     output_language: Optional[str] = None,
     brief: Optional[str] = None,
+    valuation_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Path]:
     """Async entry point: generate (parallel sections) + save the report."""
     set_report_language(output_language)
@@ -1594,6 +1684,7 @@ async def generate_and_save_professional_report_async(
         computed_values_json_path=computed_values_path,
         screening_json_path=screening_path,
         logger=logger,
+        valuation_override=valuation_override,
     )
     report_path = save_professional_report(
         report=report, output_dir=report_output_dir, ticker=ticker, logger=logger

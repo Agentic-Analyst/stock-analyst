@@ -10,6 +10,7 @@ Run:  python -m pytest tests/test_run_audit_fixes.py -q
 """
 
 import inspect
+import re
 import os
 import sys
 import types
@@ -79,27 +80,98 @@ class TestBankValuationScope:
     """
     PayPal (eplatty) was valued on justified P/B x ROE ($61.01) because Yahoo
     files it under "Financial Services / Credit Services". The report ran a DCF
-    ($87.11). The chat told a user who asked for a DCF that one was not used.
+    ($87.11). Narrowing the industry hints to fix that would have been its own
+    regression: Capital One, Synchrony, Ally and Bajaj Finance are "Credit
+    Services" too, and they ARE lenders. The interest-income share decides.
     """
 
-    def test_payments_and_fintech_are_not_banks(self):
+    def test_payments_and_exchanges_are_not_lenders(self):
         from src.agents.fm.bank_valuation import is_financial_sector
-        assert is_financial_sector("Financial Services", "Credit Services") is False   # PayPal
-        assert is_financial_sector("Financial Services", "Capital Markets") is False   # Coinbase, exchanges
-        assert is_financial_sector("Financial Services", "Asset Management") is False
-        assert is_financial_sector("Financial Services", "Financial Data & Stock Exchanges") is False
+        assert is_financial_sector("Financial Services", "Credit Services", 0.02) is False    # PayPal
+        assert is_financial_sector("Financial Services", "Credit Services", -0.01) is False   # Visa
+        assert is_financial_sector("Financial Services", "Financial Data & Stock Exchanges", -0.01) is False  # Coinbase
 
-    def test_banks_and_insurers_still_qualify(self):
+    def test_lenders_in_the_same_industry_still_qualify(self):
         from src.agents.fm.bank_valuation import is_financial_sector
-        assert is_financial_sector("Financial Services", "Banks—Regional") is True
-        assert is_financial_sector("Financial Services", "Banks—Diversified") is True
+        assert is_financial_sector("Financial Services", "Credit Services", 1.22) is True    # Capital One
+        assert is_financial_sector("Financial Services", "Credit Services", 2.28) is True    # Synchrony
+        assert is_financial_sector("Financial Services", "Credit Services", 1.56) is True    # Bajaj Finance
+        assert is_financial_sector("Financial Services", "Credit Services", 0.36) is True    # Amex
+
+    def test_banks_and_insurers_qualify(self):
+        from src.agents.fm.bank_valuation import is_financial_sector
+        assert is_financial_sector("Financial Services", "Banks—Regional", 1.14) is True
         assert is_financial_sector("Financial Services", "Insurance—Life") is True
-        assert is_financial_sector("Financial Services", "Insurance—Reinsurance") is True
 
-    def test_sector_alone_is_not_enough(self):
+    def test_without_an_income_statement_the_deployed_behaviour_holds(self):
+        """No ratio available: fall back to the hints exactly as production does."""
         from src.agents.fm.bank_valuation import is_financial_sector
-        assert is_financial_sector("Financial Services", None) is False
-        assert is_financial_sector("Financial Services", "") is False
+        assert is_financial_sector("Financial Services", "Credit Services") is True
+        assert is_financial_sector("Financial Services", None) is True
+        assert is_financial_sector("Technology", "Software") is False
+
+    def test_a_non_financial_is_never_a_bank_whatever_the_ratio(self):
+        from src.agents.fm.bank_valuation import is_financial_sector
+        assert is_financial_sector("Technology", "Software", 5.0) is False
+
+
+class TestShareCountSeed:
+    """
+    sharesOutstanding is Class A only for Alphabet (5.9B against 12.2B implied)
+    and misses Samsung's preferreds. Seeding the bridge from it doubled
+    Alphabet's value per share. impliedSharesOutstanding is market cap / price.
+    """
+
+    def test_implied_is_preferred(self):
+        from src.agents.fm.assumption_grounding import _current_shares
+        assert _current_shares({"shares_outstanding_implied": 12.23e9, "shares_outstanding_basic": 5.87e9,
+                                "market_cap": 4.1e12, "current_price": 338.46}) == 12.23e9
+
+    def test_basic_is_accepted_only_when_it_reconciles(self):
+        from src.agents.fm.assumption_grounding import _current_shares
+        ok = _current_shares({"shares_outstanding_basic": 855e6, "market_cap": 855e6 * 54.96, "current_price": 54.96})
+        assert ok == 855e6
+        bad = _current_shares({"shares_outstanding_basic": 5.87e9, "market_cap": 4.1e12, "current_price": 338.46})
+        assert bad is None
+
+    def test_basic_is_taken_when_nothing_to_reconcile_against(self):
+        from src.agents.fm.assumption_grounding import _current_shares
+        assert _current_shares({"shares_outstanding_basic": 9.75e9}) == 9.75e9
+
+    def test_nothing_usable_returns_none(self):
+        from src.agents.fm.assumption_grounding import _current_shares
+        assert _current_shares({}) is None
+
+
+class TestPenceQuotedListings:
+    """
+    London quotes in pence. The price, previous close and 52-week range arrived
+    in GBp while the market cap and every statement were in GBP, so a £25
+    valuation was compared to a "price" of 3,437 and every LSE listing showed a
+    99% downside. Pre-existing; found while reconciling share counts.
+    """
+
+    def test_pence_are_converted_to_pounds(self):
+        from src.financial_scraper import _price_in_major_units
+        assert _price_in_major_units(3437.0, "GBp") == pytest.approx(34.37)
+
+    def test_other_currencies_are_untouched(self):
+        from src.financial_scraper import _price_in_major_units
+        assert _price_in_major_units(459.35, "EUR") == 459.35
+        assert _price_in_major_units(54.96, "USD") == 54.96
+
+    def test_missing_price_stays_missing(self):
+        from src.financial_scraper import _price_in_major_units
+        assert _price_in_major_units(None, "GBp") is None
+
+    def test_currency_is_reported_in_the_statements_currency(self):
+        """GBp becomes GBP; and a listing that reports in another currency is
+        labelled in that currency, since that is what a value per share is in."""
+        import src.financial_scraper as fs
+        assert fs._reporting_currency({"currency": "GBp"}) == "GBP"
+        assert fs._reporting_currency({"currency": "GBp", "financialCurrency": "USD"}) == "USD"
+        assert fs._reporting_currency({"currency": "USD", "financialCurrency": "JPY"}) == "JPY"
+        assert fs._reporting_currency({"currency": "EUR", "financialCurrency": "EUR"}) == "EUR"
 
 
 class TestChatQuotesTheReportsFairValue:
@@ -108,25 +180,28 @@ class TestChatQuotesTheReportsFairValue:
     from the workbook DCF. The chat must quote the number the document shows.
     """
 
-    def test_write_report_prefers_the_dcf_number_when_overridden(self):
+    def test_write_report_quotes_the_number_the_report_shows(self):
+        """
+        The report now carries the balance-sheet valuation (apply_valuation_
+        override), so the chat quotes THAT for a bank. An earlier version of
+        this fix preferred the DCF number — which for a bank is 0.00.
+        """
         from src.agents.tools.analysis_tools import WriteReportTool
         source = inspect.getsource(WriteReportTool.execute)
-        assert 'fair_value = vm.get("dcf_fair_value")' in source
-        assert "bank_fair_value_cross_check" in source
+        assert 'fair_value = vm.get("dcf_fair_value")' not in source
+        assert "dcf_fair_value_cross_check" in source
 
-    def test_the_override_logic(self):
-        vm = {"fair_value": 61.01, "dcf_fair_value": 87.11, "current_price": 54.93,
-              "valuation_method": "justified_pb_roe", "upside_vs_market": 0.111}
-        fair_value, upside, method = vm["fair_value"], vm["upside_vs_market"], vm["valuation_method"]
-        bank_fair_value = None
-        if vm.get("dcf_fair_value") is not None and method == "justified_pb_roe":
-            bank_fair_value = fair_value
-            fair_value = vm.get("dcf_fair_value")
-            price = vm.get("current_price")
-            upside = (float(fair_value) / float(price) - 1.0) if price and fair_value else upside
-        assert fair_value == 87.11
-        assert bank_fair_value == 61.01
-        assert upside == pytest.approx(0.586, abs=0.001)
+    def test_the_cross_check_logic(self):
+        def cross_check(vm, method):
+            dcf = None
+            if method == "justified_pb_roe":
+                _dcf = vm.get("dcf_fair_value")
+                if isinstance(_dcf, (int, float)) and _dcf > 0:
+                    dcf = _dcf
+            return dcf
+        assert cross_check({"dcf_fair_value": 0.0}, "justified_pb_roe") is None      # a bank's zeroed DCF
+        assert cross_check({"dcf_fair_value": 87.11}, "justified_pb_roe") == 87.11
+        assert cross_check({"dcf_fair_value": 87.11}, "dcf") is None
 
 
 class TestTaxRateInTheWorkbook:
@@ -450,3 +525,201 @@ class TestRatingIgnoresBrokenLegs:
     def test_a_zero_leg_is_still_treated_as_missing(self):
         fn = self._calc(0.0, 14.0)
         assert fn["inputs"]["dcf_legs_used"] == 1
+
+
+class TestBankValuationReachesTheReport:
+    """
+    Deployed today: Capital One and JPMorgan reports print "DCF $0.00 /
+    Average $0.00 / Implied Upside -100%" and rate STRONG SELL, while the chat
+    quotes $159.34 and $304.65 from justified P/B x ROE. The override lived in
+    state; the report was built from the workbook, whose DCF was zeroed.
+    """
+
+    def _data(self):
+        return {'company_overview': {'current_price': 219.60},
+                'valuation': {'dcf_perpetual': {'intrinsic_value_per_share': 0.0},
+                              'dcf_exit': {'intrinsic_value_per_share': 0.0},
+                              'summary': {'average_intrinsic': 0.0, 'upside': -1.0, 'comps_intrinsic': 180.0}}}
+
+    def test_the_report_adopts_the_bank_number(self):
+        from src.report_agent import apply_valuation_override
+        d = apply_valuation_override(self._data(), {'valuation_method': 'justified_pb_roe', 'fair_value': 159.34})
+        assert d['valuation']['bank']['fair_value'] == 159.34
+        assert d['valuation']['summary']['average_intrinsic'] == 159.34
+        assert d['valuation']['summary']['upside'] == pytest.approx(159.34 / 219.60 - 1)
+        # the engine rates on the same number
+        assert d['valuation']['dcf_perpetual']['intrinsic_value_per_share'] == 159.34
+        assert d['valuation']['dcf_exit']['intrinsic_value_per_share'] == 159.34
+
+    def test_non_bank_data_is_untouched(self):
+        from src.report_agent import apply_valuation_override
+        d = self._data()
+        assert apply_valuation_override(d, {'valuation_method': 'dcf', 'fair_value': 87.11}) is d
+        assert d['valuation']['summary']['average_intrinsic'] == 0.0
+        assert apply_valuation_override(d, None) is d
+
+    def test_a_zero_bank_value_is_not_adopted(self):
+        from src.report_agent import apply_valuation_override
+        d = apply_valuation_override(self._data(), {'valuation_method': 'justified_pb_roe', 'fair_value': 0.0})
+        assert 'bank' not in d['valuation']
+
+    def test_the_summary_table_names_the_method(self):
+        from src.report_agent import generate_section_valuation
+        data = _valuation_data(comps=None)
+        data['valuation']['bank'] = {'fair_value': 159.34, 'method': 'Justified P/B x ROE', 'inputs': {}}
+        text, _ = generate_section_valuation(data, lambda m, temperature=0.5: ("c", 0.0))
+        assert "| Justified P/B x ROE Intrinsic Value | $159.34 |" in text
+        assert "not applied — balance-sheet financial" in text
+        assert "**Intrinsic Value (justified P/B x ROE)**" in text
+
+    def test_write_report_never_quotes_a_zero_dcf_for_a_bank(self):
+        from src.agents.tools.analysis_tools import WriteReportTool
+        source = inspect.getsource(WriteReportTool.execute)
+        assert 'fair_value = vm.get("dcf_fair_value")' not in source
+        assert "dcf_fair_value_cross_check" in source
+        assert "_dcf > 0" in source
+
+
+class TestDepositaryReceiptGuard:
+    """
+    Toyota's ADR: yen financials, a dollar price, 1.3B ADRs — value per share
+    ¥77,233 against $197, "+21,000%", STRONG BUY, live in production.
+    """
+
+    def test_guard_substitutes_only_when_it_resolves_the_mismatch(self):
+        from src.agents.tools.analysis_tools import AgentContext
+        source = inspect.getsource(AgentContext.ensure_state_for_ticker)
+        assert 'info.get("currency") != info.get("financialCurrency")' in source
+        assert 'cand.get("currency") != cand.get("financialCurrency")' in source
+        assert '"." not in ticker' in source          # never fires on a home listing
+
+    def test_price_is_converted_into_the_financial_currency(self, monkeypatch):
+        import src.financial_scraper as fs
+        monkeypatch.setattr(fs, "_fx_rate", lambda a, b: 156.15 if (a, b) == ("USD", "JPY") else None)
+        info = {"currency": "USD", "financialCurrency": "JPY"}
+        assert fs._price_in_financial_currency(197.11, info) == pytest.approx(197.11 * 156.15)
+        assert fs._reporting_currency(info) == "JPY"
+        assert fs._listing_ccy(info) == "USD"
+
+    def test_no_rate_leaves_the_price_alone(self, monkeypatch):
+        import src.financial_scraper as fs
+        monkeypatch.setattr(fs, "_fx_rate", lambda a, b: None)
+        info = {"currency": "USD", "financialCurrency": "CNY"}
+        assert fs._price_in_financial_currency(120.25, info) == 120.25
+
+    def test_same_currency_is_a_no_op(self):
+        import src.financial_scraper as fs
+        info = {"currency": "USD", "financialCurrency": "USD"}
+        assert fs._price_in_financial_currency(319.97, info) == 319.97
+        assert fs._fx_listing_to_financial(info) is None
+
+    def test_pence_then_financial_currency(self, monkeypatch):
+        """Shell: GBp quote, USD books. Pence -> pounds -> dollars."""
+        import src.financial_scraper as fs
+        monkeypatch.setattr(fs, "_fx_rate", lambda a, b: 1.351 if (a, b) == ("GBP", "USD") else None)
+        info = {"currency": "GBp", "financialCurrency": "USD"}
+        pounds = fs._price_in_major_units(3437.0, "GBp")
+        assert fs._price_in_financial_currency(pounds, info) == pytest.approx(34.37 * 1.351)
+        assert fs._reporting_currency(info) == "USD"
+
+
+class TestMoneyFormattingFollowsTheReportCurrency:
+    """
+    format_number hardcoded "$". It went unnoticed because the LLM rewrote the
+    symbol while echoing the tables; emitted verbatim, LVMH's projections read
+    "$83.23B" and PC Jeweller's "$44.26B".
+    """
+
+    def test_euro_report(self):
+        from src.report_agent import format_number, set_report_currency
+        set_report_currency("EUR")
+        try:
+            assert format_number(83.23e9) == "€83.23B"
+            assert format_number(459.35) == "€459.35"
+        finally:
+            set_report_currency(None)
+
+    def test_rupee_report(self):
+        from src.report_agent import format_number, set_report_currency
+        set_report_currency("INR")
+        try:
+            assert format_number(44.26e9).startswith("₹")
+        finally:
+            set_report_currency(None)
+
+    def test_dollar_when_unpinned(self):
+        from src.report_agent import format_number, set_report_currency
+        set_report_currency(None)
+        assert format_number(1.5e6) == "$1.50M"
+
+
+class TestWorkbookGridIsPresent:
+    """
+    The Aug 25 grid commit (b3f0f0d) reached the production image but never
+    reached git main — `git push origin main` was run from the feature branch.
+    Every branch cut from main since then lacked it, and merging one would have
+    shipped a workbook with an empty grid. This pins the code's presence.
+    """
+
+    def test_grid_formulas_are_written(self):
+        source = open(os.path.join(_ROOT, "src", "agents", "fm", "tabs", "tab_sensitivity.py"),
+                      encoding="utf-8").read()
+        assert "_value_per_share_formula" in source
+        assert "_exit_value_per_share_formula" in source
+        written = re.findall(r'value="([^"]*)"', source)
+        assert not any(v.startswith("NOTE: Select") for v in written)
+
+
+class TestNoGridForABank:
+    def test_bank_valuation_has_no_dcf_grid(self):
+        from src.report_agent import generate_section_valuation
+        data = _valuation_data(comps=None)
+        data['valuation']['bank'] = {'fair_value': 159.34, 'method': 'Justified P/B x ROE', 'inputs': {}}
+        text, _ = generate_section_valuation(data, lambda m, temperature=0.5: ("c", 0.0))
+        assert "Not applicable — valued on justified P/B x ROE" in text
+        assert "terminal g" not in text
+
+
+class TestConvertedPriceIsDisclosed:
+    """
+    Shell's report now prices in dollars against dollar statements. Without
+    a note, "$46.43" is a number no London holder has seen; the quote is
+    3,437p. The summary and the chat must both carry the original and the rate.
+    """
+
+    def test_summary_shows_the_listing_quote_and_rate(self):
+        from src.report_agent import generate_section_valuation
+        data = _valuation_data(comps=None)
+        data['company_overview'].update({'currency': 'USD', 'listing_currency': 'GBP',
+                                         'current_price_listing': 34.37, 'fx_listing_to_financial': 1.351})
+        text, _ = generate_section_valuation(data, lambda m, temperature=0.5: ("c", 0.0))
+        assert "| Price on the listing exchange | £34.37 (GBP, converted at 1.3510 USD/GBP) |" in text
+
+    def test_no_row_when_currencies_match(self):
+        from src.report_agent import generate_section_valuation
+        data = _valuation_data(comps=None)
+        data['company_overview'].update({'currency': 'USD', 'listing_currency': 'USD',
+                                         'current_price_listing': 54.96, 'fx_listing_to_financial': None})
+        text, _ = generate_section_valuation(data, lambda m, temperature=0.5: ("c", 0.0))
+        assert "Price on the listing exchange" not in text
+
+    def test_chat_note(self):
+        from src.agents.tools.analysis_tools import _listing_price_note
+        class _FD:
+            key_metrics = {"basic_info": {"listing_currency": "GBP", "currency": "USD"},
+                           "market_data": {"current_price_listing": 34.37, "fx_listing_to_financial": 1.351}}
+        class _S:
+            financial_data = _FD()
+        note = _listing_price_note(_S())
+        assert note["listing_currency"] == "GBP"
+        assert note["price_in_listing_currency"] == 34.37
+        assert "converted at 1.3510 USD/GBP" in note["currency_note"]
+
+    def test_chat_note_absent_when_matching(self):
+        from src.agents.tools.analysis_tools import _listing_price_note
+        class _FD:
+            key_metrics = {"basic_info": {"listing_currency": "USD", "currency": "USD"},
+                           "market_data": {"current_price_listing": 54.96}}
+        class _S:
+            financial_data = _FD()
+        assert _listing_price_note(_S()) == {}

@@ -273,6 +273,33 @@ def compute_capm_wacc(company_data: Dict[str, Any]) -> Tuple[float, str]:
     return c["wacc"], note
 
 
+def _current_shares(md: Dict[str, Any]) -> Optional[float]:
+    """
+    The share count the per-share bridge should divide by.
+
+    Order of trust:
+      1. Yahoo's impliedSharesOutstanding — market cap / price, so it counts
+         every share class. sharesOutstanding is Class A only for Alphabet
+         (5.9B against 12.2B implied) and misses Samsung's preferreds; dividing
+         by it doubled Alphabet's value per share.
+      2. sharesOutstanding, but only when it reconciles to the market cap
+         within 10% — the same check that exposed the cases above.
+      3. None: the workbook falls back to the year-end balance-sheet count.
+    """
+    implied = md.get("shares_outstanding_implied")
+    if isinstance(implied, (int, float)) and implied > 0:
+        return float(implied)
+    basic = md.get("shares_outstanding_basic")
+    mcap, px = md.get("market_cap"), md.get("current_price")
+    if isinstance(basic, (int, float)) and basic > 0:
+        if isinstance(mcap, (int, float)) and isinstance(px, (int, float)) and mcap > 0 and px > 0:
+            if abs(basic * px / mcap - 1.0) <= 0.10:
+                return float(basic)
+            return None          # does not reconcile — do not seed a wrong count
+        return float(basic)      # nothing to reconcile against; take it
+    return None
+
+
 def _effective_tax_rate(company_data: Dict[str, Any]) -> float:
     """
     The rate that shields interest. Falls back to a mature-market average
@@ -371,9 +398,7 @@ def ground_assumptions(
     # Current share count for the per-share bridge. The workbook otherwise
     # divides by last year's diluted AVERAGE, which lags issuance and buybacks.
     md = company_data.get("market_data", {}) or {}
-    shares = md.get("shares_outstanding_basic") or md.get("shares_outstanding_diluted")
-    if isinstance(shares, (int, float)) and shares > 0:
-        a["shares_outstanding_current"] = float(shares)
+    a["shares_outstanding_current"] = _current_shares(md)
     if llm_wacc is not None and abs(llm_wacc - wacc) > 0.005:
         notes.append(f"WACC {llm_wacc*100:.2f}% (LLM) -> {wacc_note}")
     else:
