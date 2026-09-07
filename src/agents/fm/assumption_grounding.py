@@ -57,9 +57,10 @@ _ESTABLISHED_OM = 0.05      # margin anchoring applies above this trailing OM
 #     Rf(currency) = 10-year government yield in that currency
 #                    - the sovereign's rating-based default spread
 #
-# The yield comes from an official feed per currency (sovereign_rates: FRED,
-# the ECB, Japan's MOF, Yahoo for ^TNX), with a dated snapshot as the offline
-# fallback and a labelled US proxy only for currencies none of those cover.
+# The yield comes from a published feed per currency (sovereign_rates: the
+# ECB, Japan's MOF and Yahoo's ^TNX daily, then TradingView's screen, then
+# FRED's monthly series), with a dated snapshot as the offline fallback and a
+# labelled US proxy only for currencies none of those cover.
 # The subtraction is Damodaran's: a government bond rated below Aaa is not
 # default-free, and the default risk it carries is what the country risk
 # premium prices into the cost of equity — leaving it in the risk-free rate

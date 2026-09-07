@@ -44,6 +44,7 @@ def _offline_reference_data(monkeypatch, tmp_path):
         raise ConnectionError(f"network disabled in tests: {url}")
 
     monkeypatch.setattr(netcache, "http_get", _no_network)
+    monkeypatch.setattr(netcache, "http_post", lambda url, body, timeout=None: _no_network(url))
 
     # yfinance is replaced by a module whose every call fails, so the real
     # ^TNX code path runs (and returns None) rather than being stubbed away.
