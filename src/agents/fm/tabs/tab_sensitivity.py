@@ -175,7 +175,7 @@ class SensitivityTabBuilder:
         )
         
         # C12-E12: g scenarios (−0.5%, Base, +0.5%)
-        ws.cell(row=12, column=3, value="=$B$7-0.005")  # g - 0.5%
+        ws.cell(row=12, column=3, value="=$B$7-IF($B$7<0.01,$B$7/2,0.005)")  # g - one step (0.5%, or half of a sub-1% base)
         ws.cell(row=12, column=3).number_format = '0.00%'
         ws.cell(row=12, column=3).font = Font(bold=True, size=10)
         ws.cell(row=12, column=3).fill = PatternFill(
@@ -193,7 +193,7 @@ class SensitivityTabBuilder:
             fill_type="solid"
         )
         
-        ws.cell(row=12, column=5, value="=$B$7+0.005")  # g + 0.5%
+        ws.cell(row=12, column=5, value="=$B$7+IF($B$7<0.01,$B$7/2,0.005)")  # g + one step
         ws.cell(row=12, column=5).number_format = '0.00%'
         ws.cell(row=12, column=5).font = Font(bold=True, size=10)
         ws.cell(row=12, column=5).fill = PatternFill(

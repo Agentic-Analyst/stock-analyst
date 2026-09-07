@@ -121,6 +121,9 @@ async def model_generation_agent(
             state.current_stage = PipelineStage.FAILED
             return state
         
+        # The grounded cost-of-capital build, so the bank valuation and the
+        # terminal-value reconciliation use the same numbers the workbook did.
+        _capm = (getattr(builder, "llm_assumptions", None) or {}).get("capm") or {}
         # Extract valuation metrics from computed values JSON
         valuation_metrics = {}
         assumptions = {}
@@ -211,6 +214,9 @@ async def model_generation_agent(
                     assumptions["wacc"] = wacc
                 if terminal_growth is not None:
                     assumptions["terminal_growth"] = terminal_growth
+                if isinstance(_capm.get("risk_free_rate"), (int, float)):
+                    assumptions["risk_free_rate"] = _capm["risk_free_rate"]
+                    assumptions["currency"] = _capm.get("currency")
                 if exit_multiple is not None:
                     assumptions["exit_multiple"] = exit_multiple
                 # Terminal-year cash flows. Terminal value dominates both
@@ -291,7 +297,7 @@ async def model_generation_agent(
             if is_financial_sector(basic_info.get("sector"), basic_info.get("industry"),
                                    (_ratios or {}).get("interest_income_to_revenue")):
                 bank = compute_bank_fair_value(
-                    company_data, assumptions.get("terminal_growth")
+                    company_data, assumptions.get("terminal_growth"), capm=_capm
                 )
                 if bank:
                     if valuation_metrics.get("fair_value") is not None:

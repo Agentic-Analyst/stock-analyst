@@ -19,18 +19,15 @@ discounted at 7.9% and rated BUY at +48.6%.
 
 This module regresses five years of monthly returns on the home index (two
 years of weekly returns when history is short), applies the Blume adjustment,
-and reports the fit so a weak relationship is visible rather than silent. It
-also supplies a country risk premium, added to the equity risk premium for
-markets where sovereign and equity risk sit above the mature-market baseline.
-Those premiums are methodology constants in the Damodaran style, not market
-observations: they are approximate, dated, printed in the report, and can be
-overridden per country without a deploy.
+and reports the fit so a weak relationship is visible rather than silent. The
+country risk premium that used to live here as a hand-typed table now comes
+from Damodaran's published one (country_risk); the name is re-exported so
+existing callers and tests keep working.
 """
 
 from __future__ import annotations
 
-import os
-from typing import Optional, Tuple
+from typing import Optional
 
 # Exchange suffix -> home index. Verified against live history for the first
 # group; the rest are Yahoo's standard symbols for those markets.
@@ -47,30 +44,6 @@ _HOME_INDEX = {
 }
 _FALLBACK_INDEX = "^GSPC"
 
-# Country risk premium over the mature-market ERP, in the Damodaran style.
-# APPROXIMATE and DATED — seeded from published mid-2025 estimates, not fetched.
-# Printed in the report beside the ERP so a reader sees exactly what was added.
-# Override any entry with CRP_<COUNTRY>=0.025 (uppercase, spaces as underscores).
-_CRP_AS_OF = "2025-07"
-_COUNTRY_RISK_PREMIUM = {
-    # developed: no premium
-    "United States": 0.0, "United Kingdom": 0.0, "Germany": 0.0, "France": 0.0,
-    "Netherlands": 0.0, "Switzerland": 0.0, "Japan": 0.0, "Canada": 0.0,
-    "Australia": 0.0, "Sweden": 0.0, "Denmark": 0.0, "Norway": 0.0,
-    "Finland": 0.0, "Austria": 0.0, "Belgium": 0.0, "Ireland": 0.0,
-    "Singapore": 0.0, "New Zealand": 0.0, "Luxembourg": 0.0,
-    # developed with a spread
-    "Italy": 0.022, "Spain": 0.019, "Portugal": 0.022, "Hong Kong": 0.006,
-    "South Korea": 0.006, "Taiwan": 0.008, "Israel": 0.013, "Poland": 0.013,
-    "Czechia": 0.010, "Saudi Arabia": 0.013, "United Arab Emirates": 0.008,
-    # emerging
-    "China": 0.010, "India": 0.029, "Indonesia": 0.027, "Malaysia": 0.016,
-    "Thailand": 0.022, "Philippines": 0.027, "Vietnam": 0.040, "Brazil": 0.036,
-    "Mexico": 0.024, "Chile": 0.013, "Colombia": 0.036, "Peru": 0.022,
-    "South Africa": 0.040, "Turkey": 0.070, "Greece": 0.036, "Egypt": 0.090,
-    "Nigeria": 0.090, "Pakistan": 0.120, "Argentina": 0.120,
-}
-
 _MIN_MONTHLY_OBS = 36     # below this, fall back to weekly
 _MIN_WEEKLY_OBS = 52
 _WEAK_FIT_R2 = 0.10       # below this the slope is mostly noise; say so
@@ -84,34 +57,7 @@ def home_index(symbol: Optional[str]) -> str:
     return _HOME_INDEX.get(suffix, _FALLBACK_INDEX)
 
 
-def country_risk_premium(country: Optional[str]) -> Tuple[float, str]:
-    """
-    Premium over the mature-market ERP for ``country``, with its provenance.
-
-    Returns ``(premium, label)``. Unknown countries get no premium and a label
-    that says so — the alternative, guessing, is how numbers stop being
-    arguable.
-    """
-    name = (country or "").strip()
-    if not name:
-        return 0.0, "no country on record — no country premium applied"
-
-    key = "CRP_" + name.upper().replace(" ", "_")
-    override = os.getenv(key)
-    if override:
-        try:
-            value = float(override)
-            if 0.0 <= value <= 0.30:
-                return value, f"{name} {value*100:.1f}% ({key} override)"
-        except ValueError:
-            pass
-
-    if name in _COUNTRY_RISK_PREMIUM:
-        value = _COUNTRY_RISK_PREMIUM[name]
-        if value == 0.0:
-            return 0.0, f"{name}: mature market, no country premium"
-        return value, f"{name} {value*100:.1f}% (approx., as of {_CRP_AS_OF})"
-    return 0.0, f"{name}: no country premium on record — none applied"
+from .country_risk import country_risk_premium  # noqa: E402,F401  (re-export)
 
 
 def _returns(symbol: str, period: str, interval: str):

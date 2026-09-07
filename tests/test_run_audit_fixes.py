@@ -358,6 +358,34 @@ class TestRiskFreeProvenanceIsPrinted:
         assert "| Risk-free source | US 10Y 4.78% used as a proxy" in text
         assert "| Beta source | Blume-adjusted from observed 0.33 |" in text
 
+    def test_the_cost_of_debt_build_is_printed(self):
+        """Kd is priced off the government bond, not the default-free rate; the row says so."""
+        from src.report_agent import extract_cost_of_capital, generate_section_valuation
+        coc = extract_cost_of_capital({
+            'Valuation (DCF)': {'cells': {'(12, 1)': 'WACC', '(12, 2)': 0.0792}},
+            'Assumptions': {'cells': {'(27, 3)': '[10Y government yield 6.89% + 1.5% credit spread]'}},
+        })
+        assert coc['kd_source'] == '10Y government yield 6.89% + 1.5% credit spread'
+        data = _valuation_data(comps=None)
+        data['cost_of_capital']['kd_source'] = coc['kd_source']
+        text, _ = generate_section_valuation(data, lambda m, temperature=0.5: ("commentary", 0.0))
+        assert "| Cost of debt build | 10Y government yield 6.89% + 1.5% credit spread |" in text
+
+    def test_the_terminal_growth_basis_is_printed_when_it_was_capped(self):
+        from src.report_agent import extract_cost_of_capital, generate_section_valuation
+        coc = extract_cost_of_capital({
+            'Valuation (DCF)': {'cells': {'(12, 1)': 'WACC', '(12, 2)': 0.0509}},
+            'Assumptions': {'cells': {'(30, 3)': '[capped at the JPY risk-free rate 2.31% — a perpetuity cannot outgrow its currency\'s economy]'}},
+        })
+        data = _valuation_data(comps=None)
+        data['cost_of_capital']['terminal_growth_source'] = coc['terminal_growth_source']
+        text, _ = generate_section_valuation(data, lambda m, temperature=0.5: ("commentary", 0.0))
+        assert "| Terminal growth basis | capped at the JPY risk-free rate 2.31%" in text
+        # The default "[LLM]" note is not a basis worth a row.
+        data['cost_of_capital']['terminal_growth_source'] = 'LLM'
+        text, _ = generate_section_valuation(data, lambda m, temperature=0.5: ("commentary", 0.0))
+        assert "Terminal growth basis" not in text
+
 
 class TestTablesAreEmittedByCode:
     """

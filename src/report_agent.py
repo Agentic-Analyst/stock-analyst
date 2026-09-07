@@ -385,6 +385,8 @@ def extract_cost_of_capital(computed_values: Dict[str, Any]) -> Dict[str, Any]:
         'risk_free_source': note(23),
         'erp_source': note(24),
         'beta_source': note(25),
+        'kd_source': note(27),
+        'terminal_growth_source': note(30),
         'risk_free_rate': read('Risk-Free Rate (Rf)', 3),
         'equity_risk_premium': read('Equity Risk Premium (ERP)', 4),
         'beta': read('Levered Beta (β)', 5),
@@ -425,7 +427,12 @@ def build_sensitivity_grid(projections: Dict[str, Any], terminal_growth: float,
 
     n = len(fcf)
     waccs = [wacc + d for d in (-0.010, -0.005, 0.0, 0.005, 0.010)]
-    growths = [terminal_growth + d for d in (-0.010, -0.005, 0.0, 0.005, 0.010)]
+    # Two steps either side of the base case. The step shrinks when the base
+    # growth is under 1% (a franc or yuan perpetuity capped at its risk-free
+    # rate) so the axis never goes negative.
+    step = 0.005 if terminal_growth >= 0.01 else max(terminal_growth / 2.0, 0.0)
+    growths = ([terminal_growth + k * step for k in (-2, -1, 0, 1, 2)] if step > 0
+               else [0.0, 0.005, 0.010, 0.015, 0.020])
 
     header = "| WACC \\ terminal g | " + " | ".join(f"{g*100:.1f}%" for g in growths) + " |\n"
     header += "|---" * (len(growths) + 1) + "|\n"
@@ -818,6 +825,9 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     # DCF actually discounted with. Printing it in both places invites the two
     # to drift apart, which is the failure this section is recovering from.
     assumptions_table += f"| Terminal Growth Rate | {format_percent(assumptions['terminal_growth'])} |\n"
+    _tg_src = (data.get('cost_of_capital') or {}).get('terminal_growth_source')
+    if _tg_src and _tg_src.strip().upper() != "LLM":
+        assumptions_table += f"| Terminal growth basis | {_tg_src} |\n"
     assumptions_table += f"| Revenue Growth (FY1) | {format_percent(assumptions['revenue_growth_rates'][0])} |\n"
     assumptions_table += f"| Revenue Growth (FY2) | {format_percent(assumptions['revenue_growth_rates'][1])} |\n"
     assumptions_table += f"| Revenue Growth (FY3) | {format_percent(assumptions['revenue_growth_rates'][2])} |\n"
@@ -935,6 +945,12 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
             coc_table += f"| Beta source | {coc['beta_source']} |\n"
         if coc.get('erp_source'):
             coc_table += f"| Premium build | {coc['erp_source']} |\n"
+        if coc.get('kd_source'):
+            coc_table += f"| Cost of debt build | {coc['kd_source']} |\n"
+        if valuation.get('bank'):
+            coc_table += ("\n_The justified P/B x ROE valuation uses the cost of equity from this build "
+                          "(risk-free rate + beta x equity risk premium, held within 8-14%); the WACC "
+                          "and cost of debt describe the cash-flow DCF that was not applied._\n")
 
     # A WACC x growth grid describes an FCF DCF. For a bank the DCF was not
     # applied, and recomputing it prints a grid of zeros under a P/B x ROE

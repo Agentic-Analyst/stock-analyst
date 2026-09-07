@@ -546,6 +546,9 @@ class BuildModelTool(_CtxTool):
                 wacc=asmp.get("wacc"),
                 terminal_growth=asmp.get("terminal_growth"),
                 exit_multiple=asmp.get("exit_multiple"),
+                # The perpetuity leg is capped at the currency's risk-free
+                # rate; the exit leg is judged against the same ceiling.
+                growth_cap=asmp.get("risk_free_rate"),
             )
             # Reported regardless of the spread band. An exit multiple implying
             # growth above nominal GDP is indefensible even when the two legs

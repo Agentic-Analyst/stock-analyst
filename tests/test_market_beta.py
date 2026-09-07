@@ -52,16 +52,32 @@ class TestHomeIndex:
 
 
 class TestCountryRiskPremium:
-    def test_developed_markets_carry_none(self):
-        for c in ("United States", "France", "Japan", "Switzerland", "Netherlands"):
+    """The premiums are Damodaran's published ones (see test_country_risk)."""
+
+    def test_aaa_sovereigns_carry_none(self):
+        for c in ("Germany", "Switzerland", "Netherlands", "Singapore", "Australia"):
             value, label = country_risk_premium(c)
             assert value == 0.0
-            assert "no country premium" in label
+            assert "Aaa" in label and "no country premium" in label
 
-    def test_india_carries_a_premium_and_says_it_is_approximate(self):
+    def test_rated_developed_markets_carry_the_published_premium(self):
+        # The old table put every developed market at zero. Damodaran does not:
+        # the US has been Aa1 since May 2025, France and the UK are Aa3, Japan A1.
+        for c, lo, hi in (("United States", 0.001, 0.005), ("France", 0.005, 0.012),
+                          ("Japan", 0.005, 0.015), ("United Kingdom", 0.005, 0.012)):
+            value, label = country_risk_premium(c)
+            assert lo <= value <= hi, (c, value)
+            assert "Damodaran" in label
+
+    def test_india_carries_a_premium_and_names_its_source(self):
         value, label = country_risk_premium("India")
         assert 0.02 <= value <= 0.04
-        assert "approx" in label and "as of" in label
+        assert "Damodaran" in label and "2026" in label and "Baa3" in label
+
+    def test_yahoo_s_country_names_are_understood(self):
+        assert country_risk_premium("South Korea") == country_risk_premium("Korea")
+        assert country_risk_premium("South Korea")[0] > 0
+        assert country_risk_premium("Czechia")[0] > 0
 
     def test_unknown_country_is_not_guessed(self):
         value, label = country_risk_premium("Atlantis")
@@ -216,11 +232,13 @@ class TestCapmIntegration:
         import src.agents.fm.market_beta as mb
         monkeypatch.setattr(mb, "compute_beta", lambda s: None)
         c = ag.capm_components(self._pcj())
-        assert c["country_risk_premium"] == pytest.approx(0.029)
-        assert c["equity_risk_premium_total"] == pytest.approx(0.055 + 0.029)
+        published = country_risk_premium("India")[0]         # Damodaran: Baa3, 2.85% in Jan 2026
+        assert 0.02 <= published <= 0.04
+        assert c["country_risk_premium"] == pytest.approx(published)
+        assert c["equity_risk_premium_total"] == pytest.approx(0.055 + published)
         assert c["cost_of_equity"] == pytest.approx(
             c["risk_free_rate"] + c["beta"] * c["equity_risk_premium_total"])
-        assert "India" in c["crp_source"]
+        assert "India" in c["crp_source"] and "Damodaran" in c["crp_source"]
 
     def test_falls_back_to_yahoo_and_says_so(self, monkeypatch):
         from src.agents.fm import assumption_grounding as ag
@@ -243,12 +261,32 @@ class TestCapmIntegration:
         c = ag.capm_components(self._pcj())
         assert c["cost_of_equity"] > 0.15
 
-    def test_developed_market_is_unchanged_by_the_premium(self, monkeypatch):
+    def test_a_us_issuer_carries_the_published_us_premium_and_nothing_hidden(self, monkeypatch):
+        """
+        The US has been Aa1 since May 2025, so Damodaran gives it a 0.23%
+        premium — and takes the same 0.23% default spread out of the Treasury
+        yield. The two cancel at beta 1; a US stock is not quietly repriced.
+        """
         from src.agents.fm import assumption_grounding as ag
         import src.agents.fm.market_beta as mb
         monkeypatch.setattr(mb, "compute_beta", lambda s: None)
         c = ag.capm_components({"basic_info": {"symbol": "AAPL", "currency": "USD", "country": "United States"},
                                 "capital_structure": {"beta": 1.085, "total_debt": 1e9},
                                 "market_data": {"market_cap": 4e12}, "growth_profitability": {}})
+        assert 0.001 < c["country_risk_premium"] < 0.005
+        assert c["country_risk_premium"] == pytest.approx(c["sovereign_default_spread"])
+        assert c["equity_risk_premium_total"] == pytest.approx(0.055 + c["country_risk_premium"])
+        naive = c["sovereign_yield"] + c["beta"] * 0.055
+        assert abs(c["cost_of_equity"] - naive) < 0.0005
+
+    def test_an_aaa_market_is_unchanged_by_the_premium(self, monkeypatch):
+        from src.agents.fm import assumption_grounding as ag
+        import src.agents.fm.market_beta as mb
+        monkeypatch.setattr(mb, "compute_beta", lambda s: None)
+        c = ag.capm_components({"basic_info": {"symbol": "SAP.DE", "currency": "EUR", "country": "Germany"},
+                                "capital_structure": {"beta": 1.0, "total_debt": 1e9},
+                                "market_data": {"market_cap": 3e11}, "growth_profitability": {}})
         assert c["country_risk_premium"] == 0.0
+        assert c["sovereign_default_spread"] == 0.0
         assert c["equity_risk_premium_total"] == pytest.approx(0.055)
+        assert c["risk_free_rate"] == c["sovereign_yield"]

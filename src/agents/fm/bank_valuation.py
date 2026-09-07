@@ -78,6 +78,7 @@ def is_financial_sector(sector: Optional[str], industry: Optional[str] = None,
 def compute_bank_fair_value(
     company_data: dict,
     terminal_growth: Optional[float] = None,
+    capm: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     Justified P/B x ROE fair value from the scraped company_data block.
@@ -102,7 +103,19 @@ def compute_bank_fair_value(
 
         beta = float(beta) if beta else 1.0
         g = min(terminal_growth if terminal_growth is not None else 0.025, 0.03)
-        r = _RISK_FREE + beta * _EQUITY_RISK_PREMIUM
+        # One cost of capital per run: when the CAPM build is available the
+        # bank's cost of equity is its risk-free rate, its home-index beta and
+        # its premium — the same numbers the report's Cost of Capital table
+        # prints — rather than a 4.3% + beta x 5% shortcut nothing else uses.
+        rf, erp = _RISK_FREE, _EQUITY_RISK_PREMIUM
+        source = "4.3% + beta x 5% (no CAPM build available)"
+        if isinstance(capm, dict) and isinstance(capm.get("risk_free_rate"), (int, float)) \
+                and isinstance(capm.get("equity_risk_premium_total"), (int, float)):
+            rf, erp = float(capm["risk_free_rate"]), float(capm["equity_risk_premium_total"])
+            if isinstance(capm.get("beta"), (int, float)) and capm["beta"] > 0:
+                beta = float(capm["beta"])
+            source = f"Rf {rf*100:.2f}% + beta {beta:.2f} x ERP {erp*100:.2f}% (CAPM build)"
+        r = rf + beta * erp
         r = max(_COST_OF_EQUITY_MIN, min(_COST_OF_EQUITY_MAX, r))
 
         justified_pb = (float(roe) - g) / (r - g)
@@ -120,6 +133,7 @@ def compute_bank_fair_value(
                 "roe": float(roe),
                 "beta": beta,
                 "cost_of_equity": r,
+                "cost_of_equity_source": source,
                 "terminal_growth": g,
                 "justified_pb": justified_pb,
             },

@@ -11,10 +11,14 @@ into fair values 30-50% off.
 
 This module grounds those parameters from observable data AFTER inference:
 
-  * WACC        — CAPM: live 10Y treasury (^TNX, cached fallback 4.3%),
-                  scraped beta (clamped), 5% equity risk premium, blended
-                  with after-tax cost of debt at actual D/E weights.
-  * Terminal g  — clamped to [2.0%, 3.0%].
+  * WACC        — CAPM: the 10Y government yield in the cash flows' own
+                  currency less the sovereign's default spread (sovereign_rates,
+                  country_risk), beta regressed on the home index and
+                  Blume-adjusted (market_beta), a 5.5% mature-market ERP plus
+                  Damodaran's country premium, blended with after-tax cost of
+                  debt (government yield + spread) at actual D/E weights.
+  * Terminal g  — clamped to [2.0%, 3.0%], then capped at the currency's
+                  risk-free rate.
   * Margin paths— for companies with ESTABLISHED profitability (trailing
                   operating margin >= 5%), the path is anchored to trailing
                   actuals: FY1 within +/-3pts, FY5 within [-5, +8]pts, linear
@@ -35,10 +39,9 @@ from typing import Any, Dict, List, Optional, Tuple
 _ERP = 0.055                # mature-market equity risk premium; in the range
                             # Damodaran publishes for developed markets, and the
                             # figure a sell-side DCF on a euro large-cap would use
-_DEBT_SPREAD = 0.015        # cost of debt = rf + spread
+_DEBT_SPREAD = 0.015        # cost of debt = government yield + spread
 _TAX_DEFAULT = 0.25         # mature-market average; overridden by the
                             # company's own effective rate when available
-_RF_FALLBACK = 0.043
 _BETA_MIN, _BETA_MAX = 0.5, 2.0
 _WACC_MIN, _WACC_MAX = 0.06, 0.20   # disclosure band, not a clamp
 _TG_MIN, _TG_MAX = 0.02, 0.03
@@ -49,84 +52,99 @@ _EXIT_FALLBACK = 15.0
 _ESTABLISHED_OM = 0.05      # margin anchoring applies above this trailing OM
 
 
-# 10-year sovereign yields for currencies yfinance does not carry. Verified:
-# ^TNX (US 10Y) is the ONLY sovereign yield symbol that returns data — ^GDBR10,
-# DE10Y-DE, GB10YT=RR, JP10Y-JP and every other variant 404. There is no live
-# feed to use, and no FRED key configured, so non-USD rates come from this table
-# with an explicit as-of date that is printed alongside the number. A stale rate
-# a reader can see is worth more than a live US rate silently applied to a euro
-# company, which is what the model did before: LVMH was discounted on a US
-# Treasury yield, contributing to a EUR 269 fair value against a EUR 452 price.
+# The risk-free rate is built from two published inputs, both printed:
 #
-# Override any entry without a deploy by setting RISK_FREE_<CCY>, e.g.
-# RISK_FREE_EUR=0.0324.
-_RF_AS_OF = "2026-08-21"
-_RF_STATIC = {
-    # currency: (rate, instrument)
-    "EUR": (0.0324, "10Y German Bund"),
-}
+#     Rf(currency) = 10-year government yield in that currency
+#                    - the sovereign's rating-based default spread
+#
+# The yield comes from an official feed per currency (sovereign_rates: FRED,
+# the ECB, Japan's MOF, Yahoo for ^TNX), with a dated snapshot as the offline
+# fallback and a labelled US proxy only for currencies none of those cover.
+# The subtraction is Damodaran's: a government bond rated below Aaa is not
+# default-free, and the default risk it carries is what the country risk
+# premium prices into the cost of equity — leaving it in the risk-free rate
+# as well would charge it twice. For an Aaa sovereign (Germany, Switzerland,
+# Singapore) the spread is zero and the yield is used as is.
+#
+# RISK_FREE_<CCY> (e.g. RISK_FREE_EUR=0.0324) overrides the final rate without
+# a deploy; EQUITY_RISK_PREMIUM overrides the mature-market ERP.
 
 
-def _live_us_10y() -> Optional[Tuple[float, str]]:
+def _mature_erp() -> float:
+    import os
+    raw = os.getenv("EQUITY_RISK_PREMIUM")
+    if raw:
+        try:
+            value = float(raw)
+            if 0.03 <= value <= 0.09:
+                return value
+        except ValueError:
+            pass
+    return _ERP
+
+
+def risk_free_details(currency: Optional[str] = "USD") -> Dict[str, Any]:
     """
-    US 10Y via ^TNX. Usually quoted as yield x10 (47.0 = 4.70%) but some feeds
-    return plain percent — accept whichever scaling lands in a sane band.
-    """
-    try:
-        import yfinance as yf
-        h = yf.Ticker("^TNX").history(period="5d")
-        if h is not None and not h.empty:
-            close = float(h["Close"].iloc[-1])
-            for scale in (1000.0, 100.0):
-                rf = close / scale
-                if 0.02 <= rf <= 0.07:
-                    return rf, f"live US 10Y {rf*100:.2f}%"
-    except Exception:
-        pass
-    return None
+    The risk-free rate for cash flows denominated in ``currency``, and its build.
 
-
-def risk_free_rate(currency: Optional[str] = "USD") -> Tuple[float, str]:
-    """
-    The risk-free rate for cash flows denominated in ``currency``.
-
-    Discounting a euro cash-flow stream at a US Treasury yield is a currency
-    mismatch in the cost of capital — the same class of error as quoting a EUR
-    company in dollars. Returns ``(rate, source_label)``; the label is printed in
-    the report so the reader can see whether the rate was live, dated or a proxy.
+    Returns ``rate`` (default-free), ``sovereign_yield`` (the government bond
+    yield the rate was built from — what corporate debt is priced off),
+    ``default_spread``, ``as_of``, ``source``, ``proxy`` and ``label``, the
+    sentence the report prints so a reader can see whether the rate was live,
+    dated or a proxy.
     """
     import os
+    from .sovereign_rates import normalise_currency, sovereign_yield
+    from .country_risk import sovereign_default_spread
 
-    ccy = (currency or "USD").upper()
+    ccy = normalise_currency(currency)
+    sy = sovereign_yield(ccy)
+    bond = float(sy["rate"])
+    proxy = bool(sy.get("proxy"))
+    have_bond = not proxy and sy.get("source") != "fallback"
+    instrument = str(sy.get("instrument") or "US 10Y Treasury")
 
     override = os.getenv(f"RISK_FREE_{ccy}")
     if override:
         try:
             rate = float(override)
-            if 0.0 <= rate <= 0.25:
-                return rate, f"{ccy} {rate*100:.2f}% (RISK_FREE_{ccy} override)"
         except ValueError:
-            pass
+            rate = None
+        if rate is not None and 0.0 <= rate <= 0.25:
+            # The operator sets the default-free rate. Corporate debt is still
+            # priced off the government bond when there is one to price it off.
+            label = f"{ccy} {rate*100:.2f}% (RISK_FREE_{ccy} override)"
+            return {"currency": ccy, "rate": rate, "sovereign_yield": bond if have_bond else rate,
+                    "instrument": instrument if have_bond else f"RISK_FREE_{ccy} override",
+                    "default_spread": 0.0, "default_spread_label": "", "as_of": None,
+                    "source": "override", "proxy": False,
+                    "sovereign_label": str(sy["label"]) if have_bond else label, "label": label}
 
-    if ccy == "USD":
-        live = _live_us_10y()
-        if live:
-            return live
-        return _RF_FALLBACK, f"US 10Y fallback {_RF_FALLBACK*100:.2f}%"
+    if sy.get("source") == "proxy":
+        # A US bond standing in for a currency we cannot source. It is still a
+        # US bond, so the US default spread comes out — the currency's own
+        # spread does not belong on it.
+        spread, spread_label = sovereign_default_spread("USD")
+        spread_label = f"US {spread_label}" if spread_label else ""
+    elif proxy:
+        spread, spread_label = 0.0, ""
+    else:
+        spread, spread_label = sovereign_default_spread(ccy)
+    rate = max(0.0, bond - spread)
+    label = str(sy["label"])
+    if spread > 0.0:
+        label += (f"; less {spread*100:.2f}% sovereign default spread "
+                  f"({spread_label}) = {rate*100:.2f}%")
+    return {"currency": ccy, "rate": rate, "sovereign_yield": bond, "instrument": instrument,
+            "default_spread": spread, "default_spread_label": spread_label,
+            "as_of": sy.get("as_of"), "source": sy.get("source"), "proxy": proxy,
+            "sovereign_label": str(sy["label"]), "label": label}
 
-    if ccy in _RF_STATIC:
-        rate, instrument = _RF_STATIC[ccy]
-        return rate, f"{instrument} {rate*100:.2f}% (as of {_RF_AS_OF})"
 
-    # No feed and no table entry. Say so rather than pretending the US rate is
-    # this currency's risk-free.
-    live = _live_us_10y()
-    if live:
-        rate, _ = live
-        return rate, (f"US 10Y {rate*100:.2f}% used as a proxy — no {ccy} "
-                      f"sovereign yield source available")
-    return _RF_FALLBACK, (f"fallback {_RF_FALLBACK*100:.2f}% — no {ccy} "
-                          f"sovereign yield source available")
+def risk_free_rate(currency: Optional[str] = "USD") -> Tuple[float, str]:
+    """``(rate, label)`` — see risk_free_details."""
+    d = risk_free_details(currency)
+    return d["rate"], d["label"]
 
 
 def _live_risk_free() -> Tuple[float, str]:
@@ -157,13 +175,16 @@ def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
     md = company_data.get("market_data", {}) or {}
     bi = company_data.get("basic_info", {}) or {}
 
-    currency = (bi.get("currency") or "USD").upper()
-    rf, rf_source = risk_free_rate(currency)
+    from .sovereign_rates import normalise_currency
+    currency = normalise_currency(bi.get("currency"))
+    rfd = risk_free_details(currency)
+    rf, rf_source = rfd["rate"], rfd["label"]
 
     # Beta against the listing's HOME index, computed from price history.
     # Yahoo's `beta` is measured against the S&P 500 for every listing on
     # earth, so every NSE name read 0.1-0.3 and was floored; see market_beta.
-    from .market_beta import compute_beta, country_risk_premium
+    from .market_beta import compute_beta
+    from .country_risk import country_risk_premium, sovereign_for_currency, load_table, country_entry
     symbol = bi.get("symbol") or (company_data.get("ticker") if isinstance(company_data, dict) else None)
     fit = compute_beta(symbol)
     beta_r2 = None
@@ -199,13 +220,52 @@ def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
             beta_source = "market beta 1.00 (no price history and no observed beta)"
 
     # Country risk premium on top of the mature-market ERP, Damodaran style:
-    # Ke = Rf + beta x (ERP + CRP). Zero for developed markets.
-    crp, crp_source = country_risk_premium(bi.get("country"))
-    erp_total = _ERP + crp
+    # Ke = Rf + beta x (ERP + CRP). Zero only for Aaa sovereigns.
+    country = (bi.get("country") or "").strip()
+    crp, crp_source = country_risk_premium(country) if country else (0.0, "")
+    unmatched = bool(country) and crp == 0.0 and "no country premium on record" in crp_source
+    domicile = country_entry(country) if country and not unmatched else None
+    if not country or unmatched:
+        # No domicile on record, or a name the table does not carry ("Jersey"
+        # before it was aliased). The risk-free build above has already taken
+        # the currency's sovereign default spread out of Rf; pricing no
+        # premium back in would leave that company cheaper than a neighbour
+        # whose country string matched. Assume the currency's sovereign, and
+        # say so.
+        assumed = sovereign_for_currency(currency)
+        if assumed:
+            crp, inner = country_risk_premium(assumed)
+            why = f"{country} is not in Damodaran's table" if country else "no country on record"
+            crp_source = f"{why} — {assumed} assumed from {currency}: {inner}"
+            domicile = country_entry(assumed)
+        elif not country:
+            crp_source = (f"no country on record and no sovereign known for {currency} "
+                          f"— no country premium applied")
+    erp = _mature_erp()
+    erp_total = erp + crp
+    erp_published = (load_table() or {}).get("mature_erp")
 
     tax = _effective_tax_rate(company_data)
     ke = rf + beta * erp_total
-    kd_pre_tax = rf + _DEBT_SPREAD
+    # Corporate debt is priced off the government bond in the same currency,
+    # not off the default-free rate: an Indian issuer borrows above the G-Sec,
+    # not above the G-Sec less India's default spread.
+    # Kd = default-free rate + the ISSUER's sovereign default spread + a credit
+    # spread. A company borrows above its own government, not above the
+    # currency's benchmark: an Italian euro issuer sits over the BTP, not the
+    # Bund. When domicile and currency sovereign coincide (a US company in
+    # dollars, an Indian one in rupees) this is exactly "government yield +
+    # spread"; the general form is what keeps Italy, or a UK major reporting
+    # in dollars, from being lent to at the AAA rate.
+    dom_spread = float(domicile.get("default_spread") or 0.0) if domicile else 0.0
+    kd_pre_tax = rf + dom_spread + _DEBT_SPREAD
+    rf_word = (f"RISK_FREE_{currency} override" if rfd.get("source") == "override"
+               else "US 10Y proxy, default-free" if rfd["proxy"] else "default-free")
+    kd_parts = [f"risk-free {rf*100:.2f}% ({rf_word})"]
+    if domicile and dom_spread > 0:
+        kd_parts.append(f"{domicile['name']} sovereign spread {dom_spread*100:.2f}% (Moody's {domicile['rating']})")
+    kd_parts.append(f"{_DEBT_SPREAD*100:.1f}% credit spread")
+    kd_source = " + ".join(kd_parts)
     kd_after_tax = kd_pre_tax * (1 - tax)
 
     equity = float(md.get("market_cap") or 0)
@@ -228,12 +288,21 @@ def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
     # the DCF tab for PC Jeweller). Out-of-band values are flagged instead.
     raw_wacc = w_e * ke + w_d * kd_after_tax
     wacc = raw_wacc
+    # The 6% floor of the disclosure band is a dollar number. A yen or Swiss
+    # franc WACC of 4-5% is what those rates produce, not a broken input, so
+    # the floor follows the risk-free rate.
+    wacc_min = min(_WACC_MIN, rf + 0.02)
 
     return {
         "currency": currency,
         "risk_free_rate": rf,
         "risk_free_source": rf_source,
-        "equity_risk_premium": _ERP,
+        "risk_free_as_of": rfd.get("as_of"),
+        "risk_free_kind": rfd.get("source"),
+        "sovereign_yield": rfd["sovereign_yield"],
+        "sovereign_default_spread": rfd["default_spread"],
+        "equity_risk_premium": erp,
+        "mature_erp_published": erp_published,
         "country_risk_premium": crp,
         "crp_source": crp_source,
         "equity_risk_premium_total": erp_total,
@@ -243,6 +312,9 @@ def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
         "beta_index": beta_index,
         "cost_of_equity": ke,
         "pre_tax_cost_of_debt": kd_pre_tax,
+        "kd_source": kd_source,
+        "domicile_default_spread": dom_spread,
+        "domicile": domicile["name"] if domicile else None,
         "tax_rate": tax,
         "after_tax_cost_of_debt": kd_after_tax,
         "equity_value": equity,
@@ -255,21 +327,24 @@ def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
         # Kept as a flag, not an alteration: a WACC outside [6%, 20%] usually
         # means an input is broken, and the reader should see the number that
         # was actually used alongside the warning.
-        "wacc_clamped": not (_WACC_MIN <= wacc <= _WACC_MAX),
+        "wacc_clamped": not (wacc_min <= wacc <= _WACC_MAX),
+        "wacc_band": (wacc_min, _WACC_MAX),
     }
 
 
-def compute_capm_wacc(company_data: Dict[str, Any]) -> Tuple[float, str]:
+def compute_capm_wacc(company_data: Dict[str, Any],
+                      components: Optional[Dict[str, Any]] = None) -> Tuple[float, str]:
     """Deterministic CAPM WACC from scraped beta, live rates, actual D/E."""
-    c = capm_components(company_data)
+    c = components or capm_components(company_data)
     note = (
         f"CAPM WACC {c['wacc']*100:.2f}% (rf {c['risk_free_source']}, "
         f"beta {c['beta']:.2f} [{c['beta_source']}], "
-        f"ERP {c['equity_risk_premium']*100:.1f}% + CRP {c['country_risk_premium']*100:.1f}%, "
+        f"ERP {c['equity_risk_premium']*100:.1f}% + CRP {c['country_risk_premium']*100:.2f}%, "
         f"Ke {c['cost_of_equity']*100:.2f}%, D/(D+E) {c['debt_weight']*100:.0f}%)"
     )
     if c["wacc_clamped"]:
-        note += " [OUTSIDE the 6-20% band — check the inputs]"
+        lo, hi = c.get("wacc_band", (_WACC_MIN, _WACC_MAX))
+        note += f" [OUTSIDE the {lo*100:.1f}-{hi*100:.0f}% band — check the inputs]"
     return c["wacc"], note
 
 
@@ -389,7 +464,7 @@ def ground_assumptions(
     # 1. WACC — always deterministic (the LLM's guess is discarded).
     llm_wacc = a.get("wacc")
     capm = capm_components(company_data)
-    wacc, wacc_note = compute_capm_wacc(company_data)
+    wacc, wacc_note = compute_capm_wacc(company_data, components=capm)
     a["wacc"] = wacc
     # Publish the derivation, not just the answer. The workbook writes these into
     # the Assumptions tab so its CAPM cells stop being hardcoded constants, and
@@ -404,12 +479,28 @@ def ground_assumptions(
     else:
         notes.append(wacc_note)
 
-    # 2. Terminal growth — clamp.
+    # 2. Terminal growth — clamp, then cap at the currency's risk-free rate.
     tg = a.get("terminal_growth_rate")
     if tg is not None:
         tg_c = _clamp(float(tg), _TG_MIN, _TG_MAX)
         if abs(tg_c - tg) > 1e-9:
             notes.append(f"Terminal growth {tg*100:.2f}% -> {tg_c*100:.2f}% (clamped)")
+        # A company cannot outgrow its currency's economy forever, and the
+        # risk-free rate is the market's estimate of that economy's long-run
+        # nominal growth (Damodaran's cap). The 2-3% band is a dollar band:
+        # once yen and yuan cash flows were discounted at their own rates, a
+        # 2.5% perpetuity against a 2.3% JPY or 1.1% CNY risk-free rate put
+        # Toyota at 2.5x its price and Alibaba at 1.5x — the terminal value,
+        # not the business, was doing the valuing.
+        rf_cap = capm.get("risk_free_rate")
+        if isinstance(rf_cap, (int, float)) and tg_c > rf_cap:
+            tg_c = max(0.0, float(rf_cap))
+            cap_note = (f"capped at the {capm.get('currency')} risk-free rate "
+                        f"{tg_c*100:.2f}% — a perpetuity cannot outgrow its currency's economy")
+            notes.append(f"Terminal growth {cap_note}")
+            a["terminal_growth_note"] = cap_note
+        elif abs(tg_c - tg) > 1e-9:
+            a["terminal_growth_note"] = f"LLM {tg*100:.2f}% clamped to {tg_c*100:.2f}%"
         a["terminal_growth_rate"] = tg_c
 
     # 3. Margin anchoring — established-profitability companies only. For a
@@ -487,16 +578,24 @@ def ground_assumptions(
     r_conv = _terminal_cash_conversion(json_data)
     if r_conv is not None:
         try:
-            from src.agents.fm.terminal_value import defensible_multiple, MAX_SUSTAINABLE_GROWTH
-            ceiling = defensible_multiple(r_conv, a["wacc"], MAX_SUSTAINABLE_GROWTH)
+            from src.agents.fm.terminal_value import defensible_multiple, sustainable_growth_cap
+            # The same cap the perpetuity leg lives under: nominal GDP, or the
+            # currency's risk-free rate when that is lower (yen, franc, yuan).
+            # Capping one leg and not the other is how they diverge.
+            g_cap = sustainable_growth_cap(capm.get("risk_free_rate"))
+            ceiling = defensible_multiple(r_conv, a["wacc"], g_cap)
             if ceiling and ceiling > 0 and exit_m > ceiling:
                 notes.append(
                     f"Exit multiple {exit_m:.1f}x -> {ceiling:.1f}x (capped: above "
                     f"{ceiling:.1f}x the multiple implies perpetual growth over "
-                    f"{MAX_SUSTAINABLE_GROWTH*100:.1f}%, i.e. faster than the economy "
+                    f"{g_cap*100:.1f}%, i.e. faster than the economy "
                     f"forever; cash conversion {r_conv:.2f}, WACC {a['wacc']*100:.2f}%)"
                 )
                 exit_m = ceiling
+            elif ceiling is None:
+                notes.append(f"Exit-multiple cap not applicable: WACC {a['wacc']*100:.2f}% is at or "
+                             f"below the {g_cap*100:.2f}% growth cap")
+            a["sustainable_growth_cap"] = g_cap
         except Exception as _cap_err:
             # A grounding refinement must never break model generation.
             notes.append(f"Exit-multiple cap skipped ({_cap_err})")

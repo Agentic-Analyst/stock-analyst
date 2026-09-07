@@ -32,9 +32,10 @@ sys.path.insert(0, os.path.join(_ROOT, "src"))
 from src.agents.fm.assumption_grounding import (
     capm_components,
     compute_capm_wacc,
+    risk_free_details,
     risk_free_rate,
-    _RF_STATIC,
 )
+from src.agents.fm.sovereign_rates import _SNAPSHOT
 
 # LVMH as scraped, the run that exposed this.
 LVMH = {
@@ -52,6 +53,9 @@ US_MEGACAP = {
 
 
 class TestRiskFreeByCurrency:
+    # The suite runs with the feeds switched off (conftest), so every rate here
+    # is the dated snapshot — the path a run takes when FRED or the ECB is down.
+
     def test_euro_issuer_does_not_get_a_us_treasury(self):
         """
         Discounting euro cash flows at a US Treasury yield is a currency
@@ -59,24 +63,24 @@ class TestRiskFreeByCurrency:
         EUR company in dollars.
         """
         rate, source = risk_free_rate("EUR")
-        assert rate == _RF_STATIC["EUR"][0]
-        assert "Bund" in source
+        assert rate == pytest.approx(_SNAPSHOT["EUR"][0])     # Germany is Aaa: nothing subtracted
+        assert "euro-area" in source or "Bund" in source
+        assert "US 10Y" not in source
 
     def test_dated_rates_disclose_their_date(self):
-        """
-        yfinance carries no non-US sovereign yield (^GDBR10, DE10Y-DE,
-        GB10YT=RR and every variant 404) and no FRED key is configured, so
-        non-USD rates are dated figures. A stale rate a reader can see beats a
-        live US rate silently applied to a euro company.
-        """
         _, source = risk_free_rate("EUR")
         assert "as of" in source
 
+    def test_a_yen_issuer_gets_the_jgb_not_a_treasury(self):
+        d = risk_free_details("JPY")
+        assert d["sovereign_yield"] == pytest.approx(_SNAPSHOT["JPY"][0])
+        assert "JGB" in d["label"]
+
     def test_unknown_currency_is_labelled_a_proxy_not_passed_off_as_local(self):
-        rate, source = risk_free_rate("SEK")
+        rate, source = risk_free_rate("XXX")
         assert rate > 0
         assert "proxy" in source.lower()
-        assert "SEK" in source
+        assert "XXX" in source
 
     def test_operator_can_override_without_a_deploy(self, monkeypatch):
         monkeypatch.setenv("RISK_FREE_EUR", "0.0290")
@@ -87,11 +91,92 @@ class TestRiskFreeByCurrency:
     def test_a_nonsense_override_is_ignored(self, monkeypatch):
         monkeypatch.setenv("RISK_FREE_EUR", "not-a-number")
         rate, _ = risk_free_rate("EUR")
-        assert rate == _RF_STATIC["EUR"][0]
+        assert rate == pytest.approx(_SNAPSHOT["EUR"][0])
 
     def test_missing_currency_defaults_to_usd(self):
         _, source = risk_free_rate(None)
         assert "US 10Y" in source
+
+
+INDIAN_MIDCAP = {
+    "basic_info": {"currency": "INR", "country": "India"},
+    "capital_structure": {"beta": 1.0, "total_debt": 1_000_000_000},
+    "market_data": {"market_cap": 5_000_000_000},
+    "growth_profitability": {},
+}
+
+
+class TestRiskFreeBuild:
+    """
+    Rf = government bond yield in the currency − the sovereign's default spread.
+
+    A Baa3 bond is not default-free; its default risk is what the country
+    premium prices into Ke. Keeping it in Rf as well charged India twice.
+    """
+
+    def test_a_rated_sovereign_s_default_spread_is_taken_out(self):
+        d = risk_free_details("INR")
+        assert d["sovereign_yield"] == pytest.approx(_SNAPSHOT["INR"][0])
+        assert 0.015 < d["default_spread"] < 0.025          # India, Baa3
+        assert d["rate"] == pytest.approx(d["sovereign_yield"] - d["default_spread"])
+        assert "default spread" in d["label"] and "Baa3" in d["label"]
+        assert f"= {d['rate']*100:.2f}%" in d["label"]
+
+    def test_an_aaa_sovereign_is_used_as_is(self):
+        d = risk_free_details("EUR")
+        assert d["default_spread"] == 0.0
+        assert d["rate"] == d["sovereign_yield"]
+        assert "default spread" not in d["label"]
+
+    def test_the_us_has_been_aa1_since_may_2025(self):
+        d = risk_free_details("USD")
+        assert 0.001 < d["default_spread"] < 0.005
+        assert "Aa1" in d["label"]
+
+    def test_a_proxy_is_still_a_us_bond(self):
+        """It carries the US spread, not the target currency's; see TestReviewFindings."""
+        d = risk_free_details("XXX")
+        assert d["proxy"] is True
+        assert d["default_spread"] == pytest.approx(risk_free_details("USD")["default_spread"])
+
+    def test_cost_of_debt_is_priced_off_the_issuer_s_own_government(self):
+        """An Indian issuer borrows above the G-Sec, not above the G-Sec less India's spread."""
+        c = capm_components(INDIAN_MIDCAP)
+        assert c["pre_tax_cost_of_debt"] == pytest.approx(c["sovereign_yield"] + 0.015)   # = G-Sec + spread
+        assert c["pre_tax_cost_of_debt"] == pytest.approx(c["risk_free_rate"] + c["domicile_default_spread"] + 0.015)
+        assert c["domicile"] == "India"
+        assert c["kd_source"].startswith("risk-free 5.02% (default-free) + India sovereign spread 1.87%")
+        assert c["kd_source"].endswith("+ 1.5% credit spread")
+
+    def test_the_country_premium_is_the_published_one(self):
+        c = capm_components(INDIAN_MIDCAP)
+        assert 0.02 <= c["country_risk_premium"] <= 0.04
+        assert "Damodaran" in c["crp_source"]
+        assert c["equity_risk_premium_total"] == pytest.approx(c["equity_risk_premium"] + c["country_risk_premium"])
+        assert c["cost_of_equity"] == pytest.approx(c["risk_free_rate"] + c["beta"] * c["equity_risk_premium_total"])
+
+    def test_a_us_issuer_s_cost_of_equity_barely_moves_at_beta_one(self):
+        """
+        Subtracting the US default spread from Rf and adding the same spread's
+        premium to the ERP cancel at beta 1: the methodology is consistent,
+        not a hidden repricing of every US stock.
+        """
+        c = capm_components(US_MEGACAP)
+        naive = c["sovereign_yield"] + c["beta"] * c["equity_risk_premium"]
+        assert abs(c["cost_of_equity"] - naive) < 0.001
+
+    def test_mature_erp_can_be_overridden(self, monkeypatch):
+        monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.05")
+        assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(0.05)
+        monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.5")
+        assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(0.055)
+
+    def test_the_build_is_published_for_the_workbook_and_report(self):
+        c = capm_components(INDIAN_MIDCAP)
+        for key in ("sovereign_yield", "sovereign_default_spread", "risk_free_as_of",
+                    "risk_free_kind", "kd_source", "crp_source"):
+            assert key in c, key
+        assert c["risk_free_kind"] == "snapshot"
 
 
 class TestCapmBuild:
@@ -417,3 +502,201 @@ class TestReportAssemblyRuns:
         data.pop('cost_of_capital')
         report = integrate_report_sections(self._sections(), data)
         assert "| WACC |" in report
+
+
+class TestTerminalGrowthCannotOutgrowTheCurrency:
+    """
+    The 2-3% terminal growth band is a dollar band. Once yen and yuan cash
+    flows were discounted at their own rates, a 2.5% perpetuity against a 2.3%
+    JPY or 1.1% CNY risk-free rate put Toyota at 2.5x its price and Alibaba at
+    1.5x: the terminal value, not the business, was doing the valuing. The
+    risk-free rate caps the growth rate (Damodaran).
+    """
+
+    def _ground(self, currency, country, tg):
+        from src.agents.fm.assumption_grounding import ground_assumptions
+        return ground_assumptions(
+            {"wacc": 0.09, "terminal_growth_rate": tg},
+            {"company_data": {"basic_info": {"currency": currency, "country": country},
+                              "capital_structure": {"beta": 1.0, "total_debt": 0},
+                              "market_data": {"market_cap": 1e12}}},
+        )
+
+    def test_yen_growth_is_capped_at_the_yen_risk_free_rate(self):
+        a, notes = self._ground("JPY", "Japan", 0.025)
+        assert a["terminal_growth_rate"] == pytest.approx(a["capm"]["risk_free_rate"])
+        assert a["terminal_growth_rate"] < 0.025
+        assert any("capped at the JPY risk-free rate" in n for n in notes)
+
+    def test_yuan_growth_likewise(self):
+        a, _ = self._ground("CNY", "China", 0.03)
+        assert a["terminal_growth_rate"] == pytest.approx(a["capm"]["risk_free_rate"])
+        assert a["terminal_growth_rate"] < 0.02
+
+    def test_a_dollar_perpetuity_is_untouched(self):
+        a, notes = self._ground("USD", "United States", 0.025)
+        assert a["terminal_growth_rate"] == pytest.approx(0.025)
+        assert not any("capped" in n for n in notes)
+
+    def test_a_zero_rate_currency_gets_zero_growth_not_negative(self, monkeypatch):
+        monkeypatch.setenv("RISK_FREE_CHF", "0.0")
+        a, _ = self._ground("CHF", "Switzerland", 0.02)
+        assert a["terminal_growth_rate"] == 0.0
+
+    def test_the_workbook_still_discounts_above_growth(self):
+        a, _ = self._ground("JPY", "Japan", 0.025)
+        assert a["wacc"] > a["terminal_growth_rate"]
+
+
+class TestReviewFindings:
+    """Each test here is a defect an independent reviewer found in the first cut."""
+
+    def test_an_override_sets_the_risk_free_rate_and_debt_follows_it(self, monkeypatch):
+        monkeypatch.setenv("RISK_FREE_INR", "0.05")
+        d = risk_free_details("INR")
+        assert d["rate"] == pytest.approx(0.05)
+        c = capm_components(INDIAN_MIDCAP)
+        assert c["pre_tax_cost_of_debt"] == pytest.approx(0.05 + c["domicile_default_spread"] + 0.015)
+        assert c["kd_source"].startswith("risk-free 5.00% (RISK_FREE_INR override) + India sovereign spread")
+
+    def test_an_override_with_no_bond_behind_it_is_named_as_such(self, monkeypatch):
+        monkeypatch.setenv("RISK_FREE_XXX", "0.05")
+        c = capm_components({"basic_info": {"currency": "XXX", "country": "Atlantis"},
+                             "capital_structure": {"beta": 1.0, "total_debt": 0},
+                             "market_data": {"market_cap": 1e9}, "growth_profitability": {}})
+        assert c["kd_source"] == "risk-free 5.00% (RISK_FREE_XXX override) + 1.5% credit spread"
+        assert c["pre_tax_cost_of_debt"] == pytest.approx(0.065)
+
+    def test_the_us_proxy_has_the_us_spread_taken_out_like_any_other_us_bond(self):
+        d = risk_free_details("XXX")
+        us = risk_free_details("USD")
+        assert d["proxy"] is True
+        assert d["default_spread"] == pytest.approx(us["default_spread"])
+        assert d["rate"] == pytest.approx(us["rate"])
+        assert "US" in d["default_spread_label"] and "proxy" in d["label"]
+
+    def test_an_aaa_domicile_borrows_over_the_default_free_rate(self):
+        c = capm_components(LVMH)                        # no country -> Germany assumed, Aaa
+        assert c["kd_source"] == "risk-free 3.36% (default-free) + 1.5% credit spread"
+        assert c["pre_tax_cost_of_debt"] == pytest.approx(_SNAPSHOT["EUR"][0] + 0.015)
+
+    def test_an_italian_euro_issuer_borrows_over_the_btp_not_the_bund(self):
+        it = capm_components({"basic_info": {"currency": "EUR", "country": "Italy"},
+                              "capital_structure": {"beta": 1.0, "total_debt": 1e9},
+                              "market_data": {"market_cap": 5e9}, "growth_profitability": {}})
+        de = capm_components({"basic_info": {"currency": "EUR", "country": "Germany"},
+                              "capital_structure": {"beta": 1.0, "total_debt": 1e9},
+                              "market_data": {"market_cap": 5e9}, "growth_profitability": {}})
+        assert it["risk_free_rate"] == de["risk_free_rate"]               # same currency, same Rf
+        assert it["pre_tax_cost_of_debt"] - de["pre_tax_cost_of_debt"] == pytest.approx(it["domicile_default_spread"])
+        assert 0.01 < it["domicile_default_spread"] < 0.03               # Baa2
+        assert "Italy sovereign spread" in it["kd_source"]
+
+    def test_a_uk_major_reporting_in_dollars_borrows_over_the_uk_not_the_us(self):
+        c = capm_components({"basic_info": {"currency": "USD", "country": "United Kingdom"},
+                             "capital_structure": {"beta": 0.7, "total_debt": 8e10},
+                             "market_data": {"market_cap": 2e11}, "growth_profitability": {}})
+        assert c["domicile"] == "United Kingdom"
+        assert c["pre_tax_cost_of_debt"] == pytest.approx(c["risk_free_rate"] + c["domicile_default_spread"] + 0.015)
+
+    def test_no_country_assumes_the_currency_s_sovereign_and_says_so(self):
+        eur = capm_components(LVMH)                       # LVMH fixture carries no country
+        assert eur["country_risk_premium"] == 0.0
+        assert eur["crp_source"].startswith("no country on record — Germany assumed from EUR")
+        usd = capm_components(US_MEGACAP)
+        assert 0.001 < usd["country_risk_premium"] < 0.005
+        assert "United States assumed from USD" in usd["crp_source"]
+
+    def test_a_country_the_table_does_not_carry_also_assumes_the_sovereign(self):
+        c = capm_components({"basic_info": {"currency": "GBP", "country": "Atlantis"},
+                             "capital_structure": {"beta": 1.0, "total_debt": 0},
+                             "market_data": {"market_cap": 1e9}, "growth_profitability": {}})
+        assert c["country_risk_premium"] > 0
+        assert c["crp_source"].startswith("Atlantis is not in Damodaran's table — United Kingdom assumed from GBP")
+
+    def test_no_country_and_no_known_sovereign_is_one_sentence(self):
+        c = capm_components({"basic_info": {"currency": "XXX"},
+                             "capital_structure": {"beta": 1.0, "total_debt": 0},
+                             "market_data": {"market_cap": 1e9}, "growth_profitability": {}})
+        assert c["country_risk_premium"] == 0.0
+        assert c["crp_source"] == "no country on record and no sovereign known for XXX — no country premium applied"
+
+    def test_the_wacc_band_follows_the_currency(self):
+        yen = capm_components({"basic_info": {"currency": "JPY", "country": "Japan"},
+                               "capital_structure": {"beta": 0.7, "total_debt": 3e13},
+                               "market_data": {"market_cap": 4e13}, "growth_profitability": {}})
+        assert yen["wacc"] < 0.06
+        assert yen["wacc_clamped"] is False              # a 5% yen WACC is not a broken input
+        assert yen["wacc_band"][0] == pytest.approx(yen["risk_free_rate"] + 0.02)
+        _, note = compute_capm_wacc({"basic_info": {"currency": "JPY", "country": "Japan"},
+                                     "capital_structure": {"beta": 0.7, "total_debt": 3e13},
+                                     "market_data": {"market_cap": 4e13}, "growth_profitability": {}})
+        assert "OUTSIDE" not in note
+
+    def test_the_premium_note_matches_its_source_to_the_basis_point(self):
+        """0.2% in one half of the cell and 0.23% in the other is a contradiction."""
+        import openpyxl
+        from src.agents.fm.tabs.tab_assumptions import AssumptionsTabBuilder
+        c = capm_components(US_MEGACAP)
+        ws = AssumptionsTabBuilder({"capm": c, "terminal_growth_note": "capped at the USD risk-free rate 4.55%"}).create_tab(openpyxl.Workbook())
+        note = ws["C24"].value
+        assert "country premium 0.23%" in note and "Damodaran's implied base 4.23%" in note and "house assumption" in note
+        assert ws["C27"].value == f"[{c['kd_source']}]"
+        assert ws["C30"].value == "[capped at the USD risk-free rate 4.55%]"
+        assert ws.column_dimensions["C"].width >= 60
+        _, chat = compute_capm_wacc(US_MEGACAP)
+        assert "CRP 0.23%" in chat
+
+    def test_the_exit_leg_is_capped_at_the_same_growth_as_the_perpetuity(self):
+        from src.agents.fm.terminal_value import sustainable_growth_cap, reconcile
+        assert sustainable_growth_cap(0.0231) == pytest.approx(0.0231)
+        assert sustainable_growth_cap(0.0455) == pytest.approx(0.04)
+        assert sustainable_growth_cap(None) == pytest.approx(0.04)
+        assert sustainable_growth_cap(-0.01) == pytest.approx(0.04)
+        # 6x on 30% conversion at 8.7% implies ~3.5% growth: fine against 4%, not against a 2.31% yen cap.
+        loose = reconcile(fcf_terminal=300, ebitda_terminal=1000, wacc=0.0872, terminal_growth=0.0231, exit_multiple=6)
+        tight = reconcile(fcf_terminal=300, ebitda_terminal=1000, wacc=0.0872, terminal_growth=0.0231, exit_multiple=6,
+                          growth_cap=0.0231)
+        assert loose["verdict"] != "growth_not_sustainable"
+        assert tight["verdict"] == "growth_not_sustainable" and "2.3%" in tight["note"]
+
+    def test_grounding_caps_the_exit_multiple_with_the_currency_cap(self):
+        from src.agents.fm.assumption_grounding import ground_assumptions
+        a, notes = ground_assumptions(
+            {"wacc": 0.09, "terminal_growth_rate": 0.025, "exit_multiple": 20.0},
+            {"company_data": {"basic_info": {"currency": "JPY", "country": "Japan"},
+                              "capital_structure": {"beta": 1.0, "total_debt": 0},
+                              "market_data": {"market_cap": 1e12},
+                              "valuation_metrics": {"enterprise_to_ebitda": 30.0}},
+             "financial_statements": {"cash_flow": {"2025": {"Free Cash Flow": 300.0}},
+                                      "income_statement": {"2025": {"EBITDA": 1000.0}}}},
+        )
+        assert a["sustainable_growth_cap"] == pytest.approx(a["capm"]["risk_free_rate"])
+        assert a["exit_multiple"] < 8.0
+        assert any("perpetual growth over 2.3%" in n for n in notes)
+
+    def test_the_report_grid_never_shows_negative_growth(self):
+        from src.report_agent import build_sensitivity_grid
+        grid = build_sensitivity_grid({}, 0.0031, {"dcf_inputs": {"fcf": [100] * 10, "cash": 0, "debt": 0,
+                                                                  "investments": 0, "shares": 10}}, 0.0406)
+        header = grid.splitlines()[0]
+        assert "-" not in header.replace("| WACC \\ terminal g |", "")
+        assert header.count("%") == 5 and "0.3%" in header
+
+    def test_the_workbook_grid_step_shrinks_with_the_base(self):
+        from src.agents.fm.tabs.tab_sensitivity import SensitivityTabBuilder
+        import inspect
+        src = inspect.getsource(SensitivityTabBuilder)
+        assert '"=$B$7-IF($B$7<0.01,$B$7/2,0.005)"' in src and '"=$B$7+IF($B$7<0.01,$B$7/2,0.005)"' in src
+
+    def test_a_bank_s_cost_of_equity_is_the_same_build_the_report_prints(self):
+        from src.agents.fm.bank_valuation import compute_bank_fair_value
+        data = {"valuation_metrics": {"book_value": 100.0}, "growth_profitability": {"return_on_equity": 0.12},
+                "market_data": {"current_price": 150.0}, "capital_structure": {"beta": 1.3}}
+        old = compute_bank_fair_value(data, 0.025)
+        assert old["inputs"]["cost_of_equity"] == pytest.approx(min(0.14, max(0.08, 0.043 + 1.3 * 0.05)))
+        capm = {"risk_free_rate": 0.0455, "equity_risk_premium_total": 0.0573, "beta": 1.1}
+        new = compute_bank_fair_value(data, 0.025, capm=capm)
+        assert new["inputs"]["cost_of_equity"] == pytest.approx(0.0455 + 1.1 * 0.0573)
+        assert new["inputs"]["beta"] == pytest.approx(1.1)
+        assert "CAPM build" in new["inputs"]["cost_of_equity_source"]

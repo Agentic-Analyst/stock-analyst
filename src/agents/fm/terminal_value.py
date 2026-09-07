@@ -112,6 +112,21 @@ def implied_growth_from_multiple(
     return g
 
 
+def sustainable_growth_cap(risk_free_rate: Optional[float]) -> float:
+    """
+    The highest perpetual growth rate a model may assume: long-run nominal GDP,
+    or the currency's risk-free rate when that is lower. A 4% ceiling is a
+    dollar number; a yen perpetuity cannot outgrow a 2.3% JGB forever.
+    """
+    try:
+        rf = float(risk_free_rate)
+    except (TypeError, ValueError):
+        return MAX_SUSTAINABLE_GROWTH
+    if rf != rf or rf <= 0:
+        return MAX_SUSTAINABLE_GROWTH
+    return min(MAX_SUSTAINABLE_GROWTH, rf)
+
+
 def defensible_multiple(
     cash_conversion: float, wacc: float, growth: float = MAX_SUSTAINABLE_GROWTH
 ) -> Optional[float]:
@@ -133,6 +148,7 @@ def reconcile(
     wacc: Optional[float],
     terminal_growth: Optional[float],
     exit_multiple: Optional[float],
+    growth_cap: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Compare the two terminal-value assumptions and name which one fails.
@@ -163,9 +179,10 @@ def reconcile(
         return out
 
     r = fcf / ebitda
+    cap = sustainable_growth_cap(growth_cap) if growth_cap is not None else MAX_SUSTAINABLE_GROWTH
     implied_multiple = defensible_multiple(r, w, g)      # what perpetuity implies
     implied_growth = implied_growth_from_multiple(M, r, w)  # what the multiple implies
-    ceiling = defensible_multiple(r, w, MAX_SUSTAINABLE_GROWTH)
+    ceiling = defensible_multiple(r, w, cap)
 
     if implied_multiple is None or implied_growth is None or ceiling is None:
         return out
@@ -217,12 +234,13 @@ def reconcile(
     # MAX_SUSTAINABLE_GROWTH plus floating-point dust. A strict `>` then
     # condemns the very models the cap just made consistent. 1bp is far below
     # any economically meaningful difference in a perpetual growth rate.
-    if implied_growth > MAX_SUSTAINABLE_GROWTH + 1e-4:
+    if implied_growth > cap + 1e-4:
         out["verdict"] = "growth_not_sustainable"
         out["note"] = (
             f"EXIT MULTIPLE IS NOT A TERMINAL MULTIPLE: {M:.1f}x EV/EBITDA implies "
-            f"{implied_growth * 100:.1f}% growth in perpetuity, above long-run nominal "
-            f"GDP (~{MAX_SUSTAINABLE_GROWTH * 100:.0f}%). Nothing compounds faster than "
+            f"{implied_growth * 100:.1f}% growth in perpetuity, above the sustainable "
+            f"ceiling (~{cap * 100:.1f}%: long-run nominal GDP, or the currency's "
+            f"risk-free rate when lower). Nothing compounds faster than "
             f"the economy forever. The multiple is almost certainly taken from what "
             f"peers trade at TODAY, which embeds today's growth, and then applied to a "
             f"terminal year where growth has already decayed to "
@@ -247,7 +265,7 @@ def reconcile(
             f"TERMINAL VALUE ASSUMED TWICE: the exit multiple ({M:.1f}x) is {gap:.1f}x "
             f"richer than the {implied_multiple:.1f}x the perpetuity implies at "
             f"{g * 100:.1f}% growth. It corresponds to {implied_growth * 100:.1f}% "
-            f"perpetual growth, still under the ~{MAX_SUSTAINABLE_GROWTH * 100:.0f}% "
+            f"perpetual growth, still under the ~{cap * 100:.1f}% "
             f"ceiling but well above what the perpetuity assumes. The two legs differ "
             f"because of THIS, not because two methods reached different conclusions. "
             f"Reconcile the assumptions or present the exit leg as the optimistic case."
