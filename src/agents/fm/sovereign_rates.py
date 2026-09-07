@@ -1,5 +1,5 @@
 """
-Sovereign 10-year yields by currency, from official feeds, with provenance.
+Sovereign 10-year yields by currency, from published feeds, with provenance.
 
 Before this module the risk-free rate was live for USD (^TNX), a dated table
 entry for EUR, and a US proxy for everything else: Toyota's yen cash flows were
@@ -9,20 +9,27 @@ the yen 10Y is 2.9%, not 4.8%, and the Swiss one is 0.3%.
 
 Sources, in the order tried for each currency:
 
-  USD   Yahoo ^TNX (intraday)            then FRED DGS10 (daily)
-  EUR   ECB euro-area AAA 10Y (daily)     then FRED Germany (monthly)
-  JPY   Japan MOF JGB 10Y (daily)         then FRED Japan (monthly)
+  USD   Yahoo ^TNX (intraday)            then FRED DGS10 (daily)     then TradingView
+  EUR   ECB euro-area AAA 10Y (daily)     then TradingView DE10Y     then FRED Germany (monthly)
+  JPY   Japan MOF JGB 10Y (daily)         then TradingView JP10Y     then FRED Japan (monthly)
   GBP CHF INR KRW AUD CAD MXN ZAR SEK NOK DKK NZD PLN ILS HUF CZK CLP
-        FRED "long-term government bond yields" (OECD, monthly, ~2-month lag)
+        TradingView <CC>10Y (daily)       then FRED (OECD, monthly, ~2-month lag)
+  CNY HKD TWD SGD BRL IDR THB MYR PHP VND TRY COP PEN RON PKR NGN KES EGP MAD
+        TradingView <CC>10Y (daily) — the only free feed reachable for these
 
-FRED's fredgraph.csv endpoint is public and needs no key. Each resolved rate is
-cached for a few hours (see netcache) so a basket of runs does not hit the
-sources once per company.
+FRED's fredgraph.csv endpoint is public and needs no key. TradingView's
+scanner is the same class of source as Yahoo Finance, which the rest of the
+product already depends on: unofficial, unauthenticated, live; it sits behind
+the official daily feeds and ahead of the monthly one because a discount rate
+two months stale is a worse number than a fresh one from a screen. Each
+resolved rate is cached for a few hours (see netcache) so a basket of runs
+does not hit the sources once per company.
 
-When every feed fails, the module falls back to a dated snapshot of the same
-series (below), then — only for currencies with neither feed nor snapshot — to
-the US yield, and labels each case. The label is printed in the report beside
-the number, and RISK_FREE_<CCY> still overrides the final rate without a deploy.
+When every feed fails, the module falls back to a copy an earlier run left on
+disk, then to a dated snapshot of the same series (below), then — only for
+currencies with none of those — to the US yield, and labels each case. The
+label is printed in the report beside the number, and RISK_FREE_<CCY> still
+overrides the final rate without a deploy.
 """
 
 from __future__ import annotations
@@ -45,6 +52,33 @@ _FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={id}"
 _ECB = ("https://data-api.ecb.europa.eu/service/data/YC/"
         "B.U2.EUR.4F.G_N_A.SV_C_YM.SR_10Y?lastNObservations=5&format=csvdata")
 _MOF = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv"
+_TRADINGVIEW = "https://scanner.tradingview.com/global/scan"
+
+# currency -> TradingView symbol for the 10-year government bond yield
+_TV_SYMBOLS = {
+    "USD": "TVC:US10Y", "EUR": "TVC:DE10Y", "GBP": "TVC:GB10Y", "JPY": "TVC:JP10Y",
+    "CHF": "TVC:CH10Y", "INR": "TVC:IN10Y", "KRW": "TVC:KR10Y", "AUD": "TVC:AU10Y",
+    "CAD": "TVC:CA10Y", "MXN": "TVC:MX10Y", "ZAR": "TVC:ZA10Y", "SEK": "TVC:SE10Y",
+    "NOK": "TVC:NO10Y", "DKK": "TVC:DK10Y", "NZD": "TVC:NZ10Y", "PLN": "TVC:PL10Y",
+    "ILS": "TVC:IL10Y", "HUF": "TVC:HU10Y", "CZK": "TVC:CZ10Y", "CLP": "TVC:CL10Y",
+    "CNY": "TVC:CN10Y", "HKD": "TVC:HK10Y", "TWD": "TVC:TW10Y", "SGD": "TVC:SG10Y",
+    "BRL": "TVC:BR10Y", "IDR": "TVC:ID10Y", "THB": "TVC:TH10Y", "MYR": "TVC:MY10Y",
+    "PHP": "TVC:PH10Y", "VND": "TVC:VN10Y", "TRY": "TVC:TR10Y", "COP": "TVC:CO10Y",
+    "PEN": "TVC:PE10Y", "RON": "TVC:RO10Y", "PKR": "TVC:PK10Y", "NGN": "TVC:NG10Y",
+    "KES": "TVC:KE10Y", "EGP": "TVC:EG10Y", "MAD": "TVC:MA10Y",
+}
+_TV_INSTRUMENT = {
+    "CNY": "10Y China government bond", "HKD": "10Y Hong Kong government bond",
+    "TWD": "10Y Taiwan government bond", "SGD": "10Y Singapore government bond",
+    "BRL": "10Y Brazilian government bond", "IDR": "10Y Indonesian government bond",
+    "THB": "10Y Thai government bond", "MYR": "10Y Malaysian government bond",
+    "PHP": "10Y Philippine government bond", "VND": "10Y Vietnamese government bond",
+    "TRY": "10Y Turkish government bond", "COP": "10Y Colombian government bond",
+    "PEN": "10Y Peruvian government bond", "RON": "10Y Romanian government bond",
+    "PKR": "10Y Pakistani government bond", "NGN": "10Y Nigerian government bond",
+    "KES": "10Y Kenyan government bond", "EGP": "10Y Egyptian government bond",
+    "MAD": "10Y Moroccan government bond",
+}
 
 # currency -> FRED series, instrument label
 _FRED_SERIES = {
@@ -71,9 +105,7 @@ _FRED_SERIES = {
 }
 
 # Offline fallback: the same series, as last observed. Dated, labelled as a
-# snapshot when used, and never preferred to a live read. Markets with no free
-# feed at all (CNY, HKD, TWD, SGD, BRL, IDR, THB, MYR) are only ever served
-# from here, which the label says.
+# snapshot when used, and never preferred to a live read.
 #   currency: (rate, instrument, as_of)
 _SNAPSHOT: Dict[str, Tuple[float, str, str]] = {
     "USD": (0.0477, "US 10Y Treasury", "2026-09-03"),
@@ -96,16 +128,21 @@ _SNAPSHOT: Dict[str, Tuple[float, str, str]] = {
     "HUF": (0.0526, "10Y Hungarian government bond", "2026-06"),
     "CZK": (0.0470, "10Y Czech government bond", "2026-06"),
     "CLP": (0.0552, "10Y Chilean government bond", "2026-06"),
-    "CNY": (0.0168, "10Y China government bond", "2026-09-04"),
-    "HKD": (0.0332, "10Y Hong Kong government bond", "2026-06-12"),
-    "TWD": (0.0170, "10Y Taiwan government bond", "2026-07-14"),
-    "SGD": (0.0239, "10Y Singapore government bond", "2026-09-04"),
-    "BRL": (0.1435, "10Y Brazilian government bond", "2026-09-04"),
-    "IDR": (0.0723, "10Y Indonesian government bond", "2026-09-02"),
-    "THB": (0.0236, "10Y Thai government bond", "2026-09"),
-    "MYR": (0.0374, "10Y Malaysian government bond", "2026-08-07"),
+    "CNY": (0.0168, "10Y China government bond", "2026-09-07"),
+    "HKD": (0.0368, "10Y Hong Kong government bond", "2026-09-07"),
+    "TWD": (0.0191, "10Y Taiwan government bond", "2026-09-07"),
+    "SGD": (0.0237, "10Y Singapore government bond", "2026-09-07"),
+    "BRL": (0.1434, "10Y Brazilian government bond", "2026-09-07"),
+    "IDR": (0.0709, "10Y Indonesian government bond", "2026-09-07"),
+    "THB": (0.0221, "10Y Thai government bond", "2026-09-07"),
+    "MYR": (0.0404, "10Y Malaysian government bond", "2026-09-07"),
 }
 _FALLBACK = 0.043   # last resort for a currency with nothing at all
+
+# Hard dollar pegs with no sovereign yield feed of their own: the dollar
+# curve IS their curve, and the label says so instead of "no source".
+_PEGGED = {"SAR": "Saudi riyal", "AED": "UAE dirham", "QAR": "Qatari riyal", "BHD": "Bahraini dinar",
+           "OMR": "Omani rial", "JOD": "Jordanian dinar", "PAB": "Panamanian balboa"}
 
 
 # Yahoo quotes some listings in minor units: pence (GBp/GBX), South African
@@ -130,7 +167,10 @@ def normalise_currency(currency: Optional[str]) -> str:
 # ---------------------------------------------------------------- feeds ----
 
 def _sane(rate: float) -> bool:
-    return -0.01 <= rate <= 0.30
+    # A 10-year yield anywhere on earth: Switzerland has printed below zero,
+    # Turkey above 30%. The band exists to catch a feed that answered in
+    # basis points or x10, which lands at 100%+ either way.
+    return -0.01 <= rate <= 0.60
 
 
 def _days_between(as_of: str, today: str) -> Optional[int]:
@@ -234,18 +274,60 @@ def _mof() -> Optional[Tuple[float, str]]:
     return got if got and _sane(got[0]) and _fresh_enough(got[1]) else None
 
 
+def parse_tradingview(payload: bytes, symbol: str) -> Optional[Tuple[float, str]]:
+    """
+    The scanner's reply: {"data":[{"s":"TVC:CN10Y","d":[close, epoch]}]}.
+
+    A garbage filter: anything not shaped like that is None, never an
+    exception. A row without a usable bar time is None too — dating it
+    "today" would let a symbol the screen stopped updating pass the
+    freshness check and outrank the monthly series behind it.
+    """
+    import datetime as dt
+    import json
+    try:
+        doc = json.loads(payload.decode("utf-8", "replace"))
+        for row in doc.get("data") or []:
+            if row.get("s") != symbol:
+                continue
+            d = row.get("d") or []
+            close, when = d[0], d[1]
+            if isinstance(close, bool) or not isinstance(close, (int, float)):
+                return None
+            if isinstance(when, bool) or not isinstance(when, (int, float)) or when <= 0:
+                return None
+            as_of = dt.datetime.fromtimestamp(float(when), dt.timezone.utc).date().isoformat()
+            return float(close) / 100.0, as_of
+    except Exception:
+        return None
+    return None
+
+
+def _tradingview(symbol: str) -> Optional[Tuple[float, str]]:
+    import json
+    body = json.dumps({"symbols": {"tickers": [symbol], "query": {"types": []}},
+                       "columns": ["close", "time"]}).encode("utf-8")
+    got = parse_tradingview(netcache.http_post(_TRADINGVIEW, body, _TIMEOUT), symbol)
+    return got if got and _sane(got[0]) and _fresh_enough(got[1]) else None
+
+
 def _feeds(ccy: str) -> List[Tuple[str, str, Callable[[], Optional[Tuple[float, str]]]]]:
     """(source name, instrument, fetcher) in the order to try."""
     out = []
+    fred = _FRED_SERIES.get(ccy)
+    instrument = (fred[1] if fred else None) or _TV_INSTRUMENT.get(ccy) or f"10Y {ccy} government bond"
     if ccy == "USD":
         out.append(("Yahoo", "US 10Y Treasury", _yahoo_tnx))
+        out.append(("FRED", "US 10Y Treasury", lambda: _fred("DGS10")))
     elif ccy == "EUR":
         out.append(("ECB", "euro-area AAA 10Y", _ecb))
     elif ccy == "JPY":
         out.append(("Japan MOF", "10Y JGB", _mof))
-    if ccy in _FRED_SERIES:
-        sid, instrument = _FRED_SERIES[ccy]
-        out.append(("FRED", instrument, lambda sid=sid: _fred(sid)))
+    if ccy in _TV_SYMBOLS:
+        sym = _TV_SYMBOLS[ccy]
+        out.append((f"TradingView {sym.split(':')[1]}", instrument, lambda sym=sym: _tradingview(sym)))
+    if fred and ccy != "USD":
+        out.append(("FRED", fred[1], lambda sid=fred[0]: _fred(sid)))
     return out
 
 
@@ -321,7 +403,7 @@ def _resolve(ccy: str) -> Dict[str, object]:
 
     if ccy in _SNAPSHOT:
         rate, instrument, as_of = _SNAPSHOT[ccy]
-        why = " — live feed unavailable" if ccy in _FRED_SERIES else " — no live feed for this market"
+        why = " — live feed unavailable"
         is_stale = not _fresh_enough(as_of)
         if is_stale:
             _log.warning("sovereign yield for %s is a STALE snapshot as of %s; set SOVEREIGN "
@@ -336,9 +418,14 @@ def _resolve(ccy: str) -> Dict[str, object]:
     us = sovereign_yield("USD")
     if us.get("source") != "fallback":
         rate = float(us["rate"])
+        if ccy in _PEGGED:
+            why = f"the {_PEGGED[ccy]} is pegged to the US dollar"
+        else:
+            why = f"no {ccy} sovereign yield source available"
         return {"currency": ccy, "rate": rate, "instrument": "US 10Y Treasury", "source": "proxy",
                 "proxy_source": us.get("source"), "as_of": us.get("as_of"), "proxy": True,
-                "label": f"{us['label']} used as a proxy — no {ccy} sovereign yield source available"}
+                "pegged": ccy in _PEGGED,
+                "label": f"{us['label']} used as a proxy — {why}"}
     return {"currency": ccy, "rate": _FALLBACK, "instrument": None, "source": "fallback",
             "as_of": None, "proxy": True,
             "label": f"fallback {_FALLBACK*100:.2f}% — no {ccy} sovereign yield source available"}

@@ -299,8 +299,13 @@ async def _call_openai_tools(model_id, messages, tools, temperature, tool_choice
         except Exception:
             args = {}
         calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
-    # Raw assistant message for transcript round-tripping.
-    raw_assistant = {"role": "assistant", "content": msg.content or "", "tool_calls": msg.tool_calls}
+    # Raw assistant message for transcript round-tripping. The tool_calls key
+    # is present only when there were calls: Chat Completions rejects a null
+    # where it expects an array, and a text-only turn is re-sent by the
+    # report guard.
+    raw_assistant = {"role": "assistant", "content": msg.content or ""}
+    if msg.tool_calls:
+        raw_assistant["tool_calls"] = msg.tool_calls
     return LLMToolResponse(msg.content or "", calls, cost, raw_assistant)
 
 

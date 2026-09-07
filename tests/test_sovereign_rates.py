@@ -40,7 +40,7 @@ MOF_CSV = (
 )
 
 
-def _serve(monkeypatch, routes):
+def _serve(monkeypatch, routes, post_routes=None):
     """Route substrings of the URL to fixture text; anything else is a network error."""
     def fake(url, timeout=None):
         for needle, body in routes.items():
@@ -49,7 +49,19 @@ def _serve(monkeypatch, routes):
                     raise body
                 return body.encode("utf-8")
         raise ConnectionError(url)
+
+    def fake_post(url, body, timeout=None):
+        for needle, reply in (post_routes or {}).items():
+            if needle in url or needle in body.decode("utf-8", "replace"):
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply.encode("utf-8")
+        raise ConnectionError(url)
     monkeypatch.setattr(netcache, "http_get", fake)
+    monkeypatch.setattr(netcache, "http_post", fake_post)
+
+
+TV_REPLY = ('{"totalCount":1,"data":[{"s":"TVC:CN10Y","d":[1.682,1788741000]}]}')
 
 
 class TestParsers:
@@ -125,6 +137,70 @@ class TestFeedOrder:
         assert got["source"] == "snapshot"
 
 
+class TestTradingView:
+    """The only reachable feed for the yuan, the Hong Kong dollar and six other markets."""
+
+    def test_parses_the_scanner_reply(self):
+        rate, as_of = sr.parse_tradingview(TV_REPLY.encode(), "TVC:CN10Y")
+        assert rate == pytest.approx(0.01682)
+        assert as_of == "2026-09-07"                     # epoch 1788741000 = 2026-09-07 00:30 UTC
+
+    def test_the_wrong_symbol_or_garbage_is_none(self):
+        assert sr.parse_tradingview(TV_REPLY.encode(), "TVC:HK10Y") is None
+        assert sr.parse_tradingview(b"<html>", "TVC:CN10Y") is None
+        assert sr.parse_tradingview(b'{"data":[{"s":"TVC:CN10Y","d":[null,1]}]}', "TVC:CN10Y") is None
+        assert sr.parse_tradingview(b'{"data":[{"s":"TVC:CN10Y","d":{"close":1.6}}]}', "TVC:CN10Y") is None
+        assert sr.parse_tradingview(b'{"data":[{"s":"TVC:CN10Y","d":[1.6,1e20]}]}', "TVC:CN10Y") is None
+
+    def test_a_row_without_a_bar_time_is_not_dated_today(self):
+        """A symbol the screen stopped updating must not outrank the monthly series behind it."""
+        assert sr.parse_tradingview(b'{"data":[{"s":"TVC:CN10Y","d":[1.682,null]}]}', "TVC:CN10Y") is None
+        assert sr.parse_tradingview(b'{"data":[{"s":"TVC:CN10Y","d":[1.682,0]}]}', "TVC:CN10Y") is None
+
+    def test_a_turkish_yield_above_thirty_percent_is_a_real_number(self, monkeypatch):
+        _serve(monkeypatch, {}, {"TVC:TR10Y": TV_REPLY.replace("TVC:CN10Y", "TVC:TR10Y").replace("1.682", "31.5")})
+        got = sr.sovereign_yield("TRY")
+        assert got["source"] == "TradingView TR10Y" and got["rate"] == pytest.approx(0.315)
+
+    def test_a_dollar_peg_says_so_instead_of_no_source(self):
+        got = sr.sovereign_yield("SAR")
+        assert got["proxy"] is True and got["pegged"] is True
+        assert "Saudi riyal is pegged to the US dollar" in got["label"]
+
+    def test_the_yuan_comes_from_tradingview(self, monkeypatch):
+        _serve(monkeypatch, {}, {"TVC:CN10Y": TV_REPLY})
+        got = sr.sovereign_yield("CNY")
+        assert got["source"] == "TradingView CN10Y"
+        assert got["rate"] == pytest.approx(0.01682)
+        assert got["label"] == "10Y China government bond 1.68% (TradingView CN10Y, as of 2026-09-07)"
+
+    def test_a_daily_screen_beats_a_two_month_old_monthly_series(self, monkeypatch):
+        _serve(monkeypatch, {"INDIRLTLT01STM": "observation_date,INDIRLTLT01STM\n2026-06-01,6.89\n"},
+               {"TVC:IN10Y": TV_REPLY.replace("TVC:CN10Y", "TVC:IN10Y").replace("1.682", "6.957")})
+        got = sr.sovereign_yield("INR")
+        assert got["source"] == "TradingView IN10Y" and got["rate"] == pytest.approx(0.06957)
+
+    def test_but_sits_behind_the_official_daily_feeds(self, monkeypatch):
+        _serve(monkeypatch, {"ecb.europa.eu": ECB_CSV},
+               {"TVC:DE10Y": TV_REPLY.replace("TVC:CN10Y", "TVC:DE10Y").replace("1.682", "3.5")})
+        assert sr.sovereign_yield("EUR")["source"] == "ECB"
+        sr._reset_memo()
+        monkeypatch.setattr(netcache, "cache_dir", lambda: None)
+        _serve(monkeypatch, {"ecb.europa.eu": ConnectionError("down"), "IRLTLT01DEM156N": "observation_date,x\n2026-06-01,2.97\n"},
+               {"TVC:DE10Y": TV_REPLY.replace("TVC:CN10Y", "TVC:DE10Y").replace("1.682", "3.5")})
+        got = sr.sovereign_yield("EUR")
+        assert got["source"] == "TradingView DE10Y" and got["rate"] == pytest.approx(0.035)
+
+    def test_and_falls_to_fred_when_the_screen_is_down(self, monkeypatch):
+        _serve(monkeypatch, {"IRLTLT01GBM156N": "observation_date,x\n2026-06-01,4.80\n"})
+        got = sr.sovereign_yield("GBP")
+        assert got["source"] == "FRED"
+
+    def test_an_absurd_screen_value_is_rejected(self, monkeypatch):
+        _serve(monkeypatch, {}, {"TVC:CN10Y": TV_REPLY.replace("1.682", "168.2")})
+        assert sr.sovereign_yield("CNY")["source"] == "snapshot"
+
+
 class TestFallbacks:
     def test_offline_gives_the_dated_snapshot_and_says_so(self):
         got = sr.sovereign_yield("GBP")
@@ -132,9 +208,11 @@ class TestFallbacks:
         assert got["rate"] == sr._SNAPSHOT["GBP"][0]
         assert "snapshot as of 2026-06" in got["label"] and "live feed unavailable" in got["label"]
 
-    def test_markets_with_no_feed_say_so(self):
+    def test_every_snapshot_market_now_has_a_feed_behind_it(self):
         got = sr.sovereign_yield("CNY")
-        assert got["source"] == "snapshot" and "no live feed for this market" in got["label"]
+        assert got["source"] == "snapshot" and "live feed unavailable" in got["label"]
+        for ccy in sr._SNAPSHOT:
+            assert ccy in sr._TV_SYMBOLS or ccy in sr._FRED_SERIES, ccy
 
     def test_a_currency_nobody_covers_gets_a_labelled_us_proxy(self):
         got = sr.sovereign_yield("XXX")

@@ -29,6 +29,15 @@ def http_get(url: str, timeout: float = 8.0) -> bytes:
     return r.content
 
 
+def http_post(url: str, body: bytes, timeout: float = 8.0) -> bytes:
+    """POST a JSON body; raw bytes back; raises on any failure. Tests replace this."""
+    import requests
+    r = requests.post(url, data=body, timeout=timeout,
+                      headers={"User-Agent": _UA, "Content-Type": "application/json"})
+    r.raise_for_status()
+    return r.content
+
+
 def cache_dir() -> Optional[str]:
     d = os.getenv("VYNN_CACHE_DIR")
     if not d:
