@@ -352,7 +352,8 @@ def valuation_dispersion(legs: dict):
     lo, hi = min(usable.values()), max(usable.values())
     ratio = hi / lo
 
-    spread_txt = ", ".join(f"{k.replace('_', ' ')} ${v:,.2f}" for k, v in sorted(usable.items(), key=lambda kv: kv[1]))
+    # No currency symbol here: this text reaches EUR and INR listings too.
+    spread_txt = ", ".join(f"{k.replace('_', ' ')} {v:,.2f}" for k, v in sorted(usable.items(), key=lambda kv: kv[1]))
 
     if ratio < 1.3:
         return ratio, "tight", None
@@ -705,6 +706,16 @@ class WriteReportTool(_CtxTool):
         fair_value = vm.get("fair_value") if isinstance(vm, dict) else None
         upside = vm.get("upside_vs_market") if isinstance(vm, dict) else None
         method = vm.get("valuation_method") if isinstance(vm, dict) else None
+        # If a balance-sheet (P/B x ROE) valuation replaced the DCF in state, the
+        # REPORT was still built from the workbook's DCF. The chat then quoted a
+        # fair value the document did not contain (PayPal: $61.01 vs $87.11).
+        # Quote what the report shows; carry the other number alongside it.
+        bank_fair_value = None
+        if isinstance(vm, dict) and vm.get("dcf_fair_value") is not None and method == "justified_pb_roe":
+            bank_fair_value = fair_value
+            fair_value = vm.get("dcf_fair_value")
+            price = vm.get("current_price")
+            upside = (float(fair_value) / float(price) - 1.0) if price and fair_value else upside
         km = state.financial_data.key_metrics if state.financial_data else {}
         mcap = (km.get("market_data", {}) or {}).get("market_cap") if isinstance(km, dict) else None
         warning = _valuation_warning(fair_value, upside, market_cap=mcap, method=method)
@@ -732,6 +743,7 @@ class WriteReportTool(_CtxTool):
             # The rating the report published, so the answer cannot contradict
             # the document the user downloads.
             **_report_headline(state.report.content),
+            **({"bank_fair_value_cross_check": bank_fair_value} if bank_fair_value is not None else {}),
             **({"valuation_method": method} if method else {}),
             **({"valuation_confidence": band} if band else {}),
             **({"data_quality_warning": warning} if warning else {}),

@@ -331,8 +331,26 @@ class AssumptionsTabBuilder:
         
         # Shares Outstanding
         ws.cell(row=18, column=1, value="Shares Outstanding (latest)").font = Font(bold=True)
-        ws.cell(row=18, column=2, value='=SUMIFS(Raw!$D:$D,Raw!$B:$B,"Diluted Average Shares",Raw!$C:$C,$B$2&"*")').number_format = '#,##0'
-        ws.cell(row=18, column=3, value="[From JSON]").font = Font(italic=True, size=9)
+        # Value per share divides by THIS cell. "Diluted Average Shares" is a
+        # period average and lags any issuance: PC Jeweller's was 8.61B against
+        # 9.75B actually outstanding (value overstated 13%); PayPal's 968M
+        # against 855M after buybacks (understated 13%). Prefer the live count
+        # the scraper captured; fall back to the year-end balance-sheet count,
+        # then the average.
+        live_shares = self.llm_assumptions.get("shares_outstanding_current")
+        if isinstance(live_shares, (int, float)) and live_shares > 0:
+            ws.cell(row=18, column=2, value=float(live_shares)).number_format = '#,##0'
+        else:
+            ws.cell(row=18, column=2, value=(
+                '=IFERROR(IF(SUMIFS(Raw!$D:$D,Raw!$B:$B,"Ordinary Shares Number",Raw!$C:$C,$B$2&"*")>0,'
+                'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Ordinary Shares Number",Raw!$C:$C,$B$2&"*"),'
+                'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Diluted Average Shares",Raw!$C:$C,$B$2&"*")),'
+                'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Diluted Average Shares",Raw!$C:$C,$B$2&"*"))'
+            )).number_format = '#,##0'
+        ws.cell(row=18, column=3, value=(
+            "[Live shares outstanding]" if isinstance(live_shares, (int, float)) and live_shares > 0
+            else "[Year-end shares, else diluted average]"
+        )).font = Font(italic=True, size=9)
         
         # Net Debt
         ws.cell(row=19, column=1, value="Net Debt (latest)").font = Font(bold=True)
@@ -345,11 +363,24 @@ class AssumptionsTabBuilder:
         
         # Effective Tax Rate
         ws.cell(row=20, column=1, value="Effective Tax Rate (FY0)").font = Font(bold=True)
+        # Tax Provision / Pretax Income goes negative in a tax-credit year — PC
+        # Jeweller booked a -9.7M provision on 7.1B of pretax income and the DCF
+        # discounted debt at an after-tax cost ABOVE its pre-tax cost. Yahoo
+        # publishes "Tax Rate For Calcs" (0.40 for that same year); use it when
+        # present, fall back to the ratio, and clamp to [0, 50%] either way.
+        # Written with IF only — no MAX/MIN around a function call. Our formula
+        # evaluator (which produces the JSON the report reads) splits MAX/MIN
+        # arguments on commas without honouring the parentheses of a nested
+        # SUMIFS, so MIN(0.5, SUMIFS(...)) evaluated to 0.5 and the shipped
+        # MAX(0, MIN(0.5, IF(...))) evaluated to 0 — zero tax on every forecast
+        # year, which lifted PayPal's perpetual leg from $98 to $146. Excel
+        # computes either form; only this one survives both.
+        calcs = 'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Tax Rate For Calcs",Raw!$C:$C,$B$2&"*")'
+        ratio = ('SUMIFS(Raw!$D:$D,Raw!$B:$B,"Tax Provision",Raw!$C:$C,$B$2&"*")/'
+                 'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Pretax Income",Raw!$C:$C,$B$2&"*")')
         formula = (
-            '=IFERROR('
-            'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Tax Provision",Raw!$C:$C,$B$2&"*")/'
-            'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Pretax Income",Raw!$C:$C,$B$2&"*"),'
-            '"")'
+            f'=IFERROR(IF({calcs}>0,IF({calcs}>0.5,0.5,{calcs}),'
+            f'IF({ratio}<0,0,IF({ratio}>0.5,0.5,{ratio}))),"")'
         )
         ws.cell(row=20, column=2, value=formula).number_format = '0.00%'
         ws.cell(row=20, column=3, value="[From JSON]").font = Font(italic=True, size=9)

@@ -35,15 +35,23 @@ _COST_OF_EQUITY_MAX = 0.14
 _PB_MIN = 0.4
 _PB_MAX = 3.0
 
+# Book value is the right anchor for a BALANCE-SHEET business — banks and
+# insurers, whose assets are financial and marked. It is the wrong anchor for
+# payments, fintech, exchanges and asset managers, whose value is in intangibles
+# and fee streams. "credit services" and the bare word "financial" pulled PayPal
+# into a justified P/B x ROE valuation ($61.01) while its report ran a DCF
+# ($87.11), and the chat told the user a DCF "was not used".
 _FINANCIAL_INDUSTRY_HINTS = (
-    "bank", "insurance", "capital markets", "credit services", "financial",
+    "bank", "insurance", "reinsurance", "thrift", "savings",
 )
 
 
 def is_financial_sector(sector: Optional[str], industry: Optional[str] = None) -> bool:
-    """True when yfinance classifies the company as a financial."""
-    if (sector or "").strip().lower() == "financial services":
-        return True
+    """
+    True for a balance-sheet financial — a bank or insurer — where a justified
+    P/B x ROE valuation is meaningful. Sector alone is not enough: Yahoo files
+    PayPal, Visa, Coinbase and Robinhood under "Financial Services" too.
+    """
     ind = (industry or "").strip().lower()
     return any(h in ind for h in _FINANCIAL_INDUSTRY_HINTS)
 

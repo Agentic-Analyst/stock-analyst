@@ -466,7 +466,14 @@ class FinancialScraper:
                     "short_term_debt": info.get("shortLongTermDebt"),
                     "total_cash": info.get("totalCash"),
                     "net_debt": (info.get("totalDebt", 0) - info.get("totalCash", 0)) if info.get("totalDebt") and info.get("totalCash") else None,
-                    "debt_to_equity": info.get("debtToEquity"),
+                    # yfinance's debtToEquity is a PERCENT (14.27 means 14.27%, i.e.
+                    # 0.14x). It was passed through raw and printed as a ratio, so
+                    # PC Jeweller — total debt at 9% of capital — shipped with
+                    # "debt/equity at 14.27 ... Risk Rating: High". Same unit trap
+                    # as GBp prices. Stored here as a ratio like every other field.
+                    "debt_to_equity": (info["debtToEquity"] / 100.0
+                                       if isinstance(info.get("debtToEquity"), (int, float))
+                                       else None),
                     "current_ratio": info.get("currentRatio"),
                     "quick_ratio": info.get("quickRatio"),
                     "interest_coverage": info.get("interestCoverage"),

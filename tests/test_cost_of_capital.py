@@ -271,11 +271,17 @@ class TestReportShowsTheDerivation:
 
 class TestSensitivityGrid:
     PROJECTIONS = {'fcf': [15.34e9, 14.93e9, 14.35e9, 13.71e9, 12.96e9]}
-    VALUATION = {'dcf_perpetual': {
-        'enterprise_value': 145.7e9,
-        'equity_value': 131.3e9,
-        'intrinsic_value_per_share': 263.7,
-    }}
+    # The grid runs the DCF tab's own model: ten FCF periods and its bridge.
+    VALUATION = {
+        'dcf_perpetual': {'enterprise_value': 145.7e9, 'equity_value': 131.3e9,
+                          'intrinsic_value_per_share': 263.7},
+        'dcf_inputs': {
+            'fcf': [15.34e9, 14.93e9, 14.35e9, 13.71e9, 12.96e9,
+                    13.28e9, 13.62e9, 13.96e9, 14.31e9, 14.67e9],
+            'cash': 8.794e9, 'debt': 36.731e9, 'investments': 13.502e9,
+            'shares': 497_976_118,
+        },
+    }
 
     def _grid(self, wacc=0.0746, g=0.025):
         from src.report_agent import build_sensitivity_grid
@@ -308,7 +314,8 @@ class TestSensitivityGrid:
 
     def test_missing_inputs_yield_no_grid_rather_than_a_wrong_one(self):
         from src.report_agent import build_sensitivity_grid
-        assert build_sensitivity_grid({'fcf': []}, 0.025, self.VALUATION, 0.08) == ""
+        no_inputs = {'dcf_perpetual': self.VALUATION['dcf_perpetual']}
+        assert build_sensitivity_grid(self.PROJECTIONS, 0.025, no_inputs, 0.08) == ""
         assert build_sensitivity_grid(self.PROJECTIONS, 0.025, {}, 0.08) == ""
 
     def test_the_prompt_asks_which_input_dominates(self):
@@ -318,9 +325,9 @@ class TestSensitivityGrid:
         """
         prompt = open(os.path.join(_ROOT, "prompts", "report_valuation.md"),
                       encoding="utf-8").read()
-        assert "{cost_of_capital_table}" in prompt
-        assert "{sensitivity_table}" in prompt
-        assert "most sensitive" in prompt
+        assert "{tables}" in prompt
+        assert "Do NOT reproduce" in prompt
+        assert "which input dominates" in prompt
 
 
 class TestReportAssemblyRuns:

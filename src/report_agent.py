@@ -364,7 +364,19 @@ def extract_cost_of_capital(computed_values: Dict[str, Any]) -> Dict[str, Any]:
         fallback = cells.get(f'({row}, 2)')
         return fallback if isinstance(fallback, (int, float)) else None
 
+    # Provenance lives in column 3 of the Assumptions tab — "[US 10Y 4.78% used
+    # as a proxy — no INR sovereign yield source available]", "[Blume-adjusted
+    # from observed 0.33]". It was written there and never printed, so a rupee
+    # valuation discounted on a US Treasury said nothing about it.
+    assumptions = computed_values.get('Assumptions', {}).get('cells', {}) or {}
+
+    def note(row: int):
+        value = assumptions.get(f'({row}, 3)')
+        return value.strip('[] ') if isinstance(value, str) and value.strip() else None
+
     return {
+        'risk_free_source': note(23),
+        'beta_source': note(25),
         'risk_free_rate': read('Risk-Free Rate (Rf)', 3),
         'equity_risk_premium': read('Equity Risk Premium (ERP)', 4),
         'beta': read('Levered Beta (β)', 5),
@@ -383,29 +395,27 @@ def build_sensitivity_grid(projections: Dict[str, Any], terminal_growth: float,
     """
     Value per share across WACC and terminal growth, as markdown.
 
-    The workbook has a Sensitivity tab, but its interior cells carry formatting
-    and no values, so there is nothing to read back — the grid is recomputed here
-    from the same FCF path, net debt and share count the DCF used.
-
-    This is the table that makes a DCF arguable. Our own numbers show the value
-    moving far more per 50bp of discount rate than per point of growth, which a
-    reader cannot know from a single fair-value figure.
+    Runs the SAME model as the headline. The first version recomputed from the
+    five explicit projection years with a Gordon terminal on FY5, while the DCF
+    tab discounts ten periods — FY1-5 plus a FY6-10 fade — before its terminal.
+    For a flat cash-flow profile the difference was a rounding error; for a
+    growing one it was not: Alnylam's report showed a grid centre of 287 two
+    lines under a headline of $333.84. The workbook's own Sensitivity tab (which
+    does carry values now) reproduces the headline exactly, and so must this.
     """
     try:
-        fcf = [float(x) for x in (projections.get('fcf') or [])][:5]
-        dcf = valuation.get('dcf_perpetual', {}) or {}
-        ev = float(dcf.get('enterprise_value') or 0)
-        equity = float(dcf.get('equity_value') or 0)
-        per_share = float(dcf.get('intrinsic_value_per_share') or 0)
-        if len(fcf) < 5 or not per_share or not equity or not wacc:
+        inputs = valuation.get('dcf_inputs') or {}
+        fcf = [float(x) for x in (inputs.get('fcf') or []) if isinstance(x, (int, float))]
+        cash = float(inputs.get('cash') or 0)
+        debt = float(inputs.get('debt') or 0)
+        investments = float(inputs.get('investments') or 0)
+        shares = float(inputs.get('shares') or 0)
+        if len(fcf) < 5 or shares <= 0 or not wacc:
             return ""
-        net_debt = ev - equity
-        shares = equity / per_share
-        if shares <= 0:
-            return ""
-    except (TypeError, ValueError, ZeroDivisionError):
+    except (TypeError, ValueError):
         return ""
 
+    n = len(fcf)
     waccs = [wacc + d for d in (-0.010, -0.005, 0.0, 0.005, 0.010)]
     growths = [terminal_growth + d for d in (-0.010, -0.005, 0.0, 0.005, 0.010)]
 
@@ -421,8 +431,11 @@ def build_sensitivity_grid(projections: Dict[str, Any], terminal_growth: float,
                 continue
             pv = sum(f / (1 + w) ** (i + 1) for i, f in enumerate(fcf))
             tv = fcf[-1] * (1 + g) / (w - g)
-            value = (pv + tv / (1 + w) ** len(fcf) - net_debt) / shares
-            cells.append(f"{value:,.0f}")
+            value = (pv + tv / (1 + w) ** n + cash - debt + investments) / shares
+            # Whole units for a $300 stock; two decimals for a ₹19 one, where
+            # integer rounding would erase the very differences the grid exists
+            # to show (PC Jeweller: every cell in a row read "19").
+            cells.append(f"{value:,.2f}" if abs(value) < 100 else f"{value:,.0f}")
         label = f"**{w*100:.2f}%**" if abs(w - wacc) < 1e-9 else f"{w*100:.2f}%"
         rows += f"| {label} | " + " | ".join(cells) + " |\n"
 
@@ -489,13 +502,27 @@ def extract_valuation(computed_values: Dict[str, Any]) -> Dict[str, Any]:
         'summary': {
             'dcf_intrinsic': summary.get('(18, 2)', 0),
             'exit_intrinsic': summary.get('(22, 2)', 0),
+            # The third leg of the average. It was blended into row 26 and never
+            # shown, so the two rows a reader could see did not average to the
+            # figure beneath them (PayPal: $98.34 and $89.59 -> "$87.11").
+            'comps_intrinsic': summary.get('(30, 2)'),
             'average_intrinsic': summary.get('(26, 2)', 0),
             'upside': summary.get('(27, 2)', 0),
             'shares_outstanding': summary.get('(8, 2)', 0),
             'cash': summary.get('(14, 2)', 0),
             'debt': summary.get('(15, 2)', 0),
             'net_debt': summary.get('(16, 2)', 0),
-        }
+        },
+        # The DCF tab's own inputs, so anything recomputed for the report — the
+        # sensitivity grid — runs the SAME model as the headline: ten explicit
+        # FCF periods (FY1-5 plus the FY6-10 fade) and the tab's equity bridge.
+        'dcf_inputs': {
+            'fcf': [dcf_tab.get(f'({16}, {c})') for c in range(2, 12)],
+            'cash': dcf_tab.get('(30, 2)'),
+            'debt': dcf_tab.get('(31, 2)'),
+            'investments': dcf_tab.get('(32, 2)'),
+            'shares': dcf_tab.get('(36, 2)'),
+        },
     }
 
 
@@ -771,7 +798,14 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     summary_table += "|--------|-------|\n"
     summary_table += f"| DCF Perpetual Intrinsic Value | {format_number(valuation['dcf_perpetual']['intrinsic_value_per_share'], 2)} |\n"
     summary_table += f"| DCF Exit Multiple Intrinsic Value | {format_number(valuation['dcf_exit']['intrinsic_value_per_share'], 2)} |\n"
-    summary_table += f"| **Average Intrinsic Value** | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
+    # The workbook's average blends a third, market-comps leg. It was omitted
+    # here, so the two rows above visibly failed to average to the row below.
+    comps = valuation['summary'].get('comps_intrinsic')
+    if isinstance(comps, (int, float)) and comps > 0:
+        summary_table += f"| Market Comps Intrinsic Value | {format_number(comps, 2)} |\n"
+        summary_table += f"| **Average Intrinsic Value (3 methods)** | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
+    else:
+        summary_table += f"| **Average Intrinsic Value** | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
     summary_table += f"| Current Market Price | {format_number(company['current_price'], 2)} |\n"
     summary_table += f"| **Implied Upside** | **{format_percent(valuation['summary']['upside'])}** |\n"
     
@@ -800,28 +834,56 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
                 continue
             rendered = format_percent(value) if fmt == 'pct' else f"{value:.2f}"
             coc_table += f"| {label} | {rendered} |\n"
+        # Provenance beneath the numbers. A reader is entitled to know whether
+        # the risk-free rate was a live yield, a dated figure, or — for a
+        # currency we have no sovereign feed for — a US proxy.
+        if coc.get('risk_free_source'):
+            coc_table += f"| Risk-free source | {coc['risk_free_source']} |\n"
+        if coc.get('beta_source'):
+            coc_table += f"| Beta source | {coc['beta_source']} |\n"
 
     sensitivity_table = build_sensitivity_grid(
         projections, assumptions.get('terminal_growth') or 0.025,
         valuation, coc.get('wacc') or assumptions.get('wacc') or 0,
     )
 
-    # Load prompt template and fill in variables
+    # The tables are assembled HERE and returned verbatim. They used to travel
+    # inside the prompt with an instruction to reproduce them exactly, which
+    # left the section's numbers at the model's discretion: PC Jeweller's
+    # report shipped with zero tables — assumptions, cost of capital,
+    # sensitivity, projections, both DCFs and the summary all replaced by three
+    # paragraphs of prose that quoted figures from the grid it had just
+    # declined to print. Numbers = code; the model writes only the commentary.
+    tables_md = (
+        f"### Model Assumptions\n\n{assumptions_table}\n"
+        f"### Cost of Capital\n\n{coc_table or '_Cost-of-capital build unavailable for this model._'}\n\n"
+        f"### Sensitivity: Value per Share by WACC and Terminal Growth\n\n"
+        f"{sensitivity_table or '_Sensitivity grid unavailable for this model._'}\n\n"
+        f"### 5-Year Projections\n\n{projections_table}\n"
+        f"### DCF Valuation — Perpetual Growth Method\n\n{dcf_perp_table}\n"
+        f"### DCF Valuation — Exit Multiple Method\n\n{dcf_exit_table}\n"
+        f"### Valuation Summary\n\n{summary_table}\n"
+    )
+
     prompt_template = load_prompt("report_valuation")
     prompt = prompt_template.format(
         company_name=company['company_name'],
-        assumptions_table=assumptions_table,
-        cost_of_capital_table=coc_table or "_Cost-of-capital build unavailable for this model._",
-        sensitivity_table=sensitivity_table or "_Sensitivity grid unavailable for this model._",
-        projections_table=projections_table,
-        dcf_perp_table=dcf_perp_table,
-        dcf_exit_table=dcf_exit_table,
-        summary_table=summary_table
+        tables=tables_md,
     )
 
     messages = [{"role": "user", "content": prompt}]
     response, cost = llm(messages, temperature=0.5)
-    return response, cost
+
+    # Belt and braces: if the model echoed the tables anyway, do not print them
+    # twice. Any commentary that begins by restating a table heading is cut
+    # back to its prose.
+    commentary = response.strip()
+    for heading in ("### Model Assumptions", "## Model Assumptions", "### Cost of Capital"):
+        if commentary.startswith(heading):
+            commentary = commentary.split("### Commentary", 1)[-1].strip()
+            break
+
+    return f"{tables_md}\n### Commentary\n\n{commentary}", cost
 
 
 def generate_section_news_analysis(data: Dict[str, Any], llm) -> Tuple[str, float]:

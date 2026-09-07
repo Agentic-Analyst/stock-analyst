@@ -314,6 +314,12 @@ def ground_assumptions(
     # the Assumptions tab so its CAPM cells stop being hardcoded constants, and
     # the report prints them so the discount rate can be argued with.
     a["capm"] = capm
+    # Current share count for the per-share bridge. The workbook otherwise
+    # divides by last year's diluted AVERAGE, which lags issuance and buybacks.
+    md = company_data.get("market_data", {}) or {}
+    shares = md.get("shares_outstanding_basic") or md.get("shares_outstanding_diluted")
+    if isinstance(shares, (int, float)) and shares > 0:
+        a["shares_outstanding_current"] = float(shares)
     if llm_wacc is not None and abs(llm_wacc - wacc) > 0.005:
         notes.append(f"WACC {llm_wacc*100:.2f}% (LLM) -> {wacc_note}")
     else:

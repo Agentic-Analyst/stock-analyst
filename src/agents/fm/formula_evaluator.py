@@ -836,7 +836,12 @@ class FormulaEvaluator:
         """AVERAGE function"""
         values = []
         for arg in args:
-            if ':' in arg:
+            if ':' in arg and '(' not in arg:
+                # A bare range like Raw!$D:$D. A function CALL that merely
+                # contains a range — SUMIFS(Raw!$D:$D, ...) — has a paren, and
+                # must be evaluated, not read as a range. Treating it as one
+                # returned nothing, so MIN(0.5, SUMIFS(...)) evaluated to 0.5
+                # and the workbook's tax rate to 0 on every forecast year.
                 values.extend(self._get_range_values(arg, tab))
             else:
                 val = self._eval_expression(arg, tab, row, col)
@@ -844,32 +849,6 @@ class FormulaEvaluator:
         
         numeric_values = [v for v in values if isinstance(v, (int, float))]
         return sum(numeric_values) / len(numeric_values) if numeric_values else 0
-    
-    def _func_min(self, args: List[str], tab: str, row: int, col: int) -> float:
-        """MIN function"""
-        values = []
-        for arg in args:
-            if ':' in arg:
-                values.extend(self._get_range_values(arg, tab))
-            else:
-                val = self._eval_expression(arg, tab, row, col)
-                values.append(val)
-        
-        numeric_values = [v for v in values if isinstance(v, (int, float))]
-        return min(numeric_values) if numeric_values else 0
-    
-    def _func_max(self, args: List[str], tab: str, row: int, col: int) -> float:
-        """MAX function"""
-        values = []
-        for arg in args:
-            if ':' in arg:
-                values.extend(self._get_range_values(arg, tab))
-            else:
-                val = self._eval_expression(arg, tab, row, col)
-                values.append(val)
-        
-        numeric_values = [v for v in values if isinstance(v, (int, float))]
-        return max(numeric_values) if numeric_values else 0
     
     def _func_count(self, args: List[str], tab: str, row: int, col: int) -> int:
         """COUNT function"""
@@ -1159,8 +1138,12 @@ class FormulaEvaluator:
         
         values = []
         for arg in args:
-            if ':' in arg:
-                # Range
+            if ':' in arg and '(' not in arg:
+                # A bare range like Raw!$D:$D. A function CALL that merely
+                # contains a range — SUMIFS(Raw!$D:$D, ...) — has a paren and
+                # must be evaluated, not read as a range. Read as one it
+                # contributed nothing, so MIN(0.5, SUMIFS(...)) returned 0.5 and
+                # the workbook's tax rate evaluated to 0 on every forecast year.
                 range_vals = self._get_range_values(arg, tab)
                 values.extend([v for v in range_vals if isinstance(v, (int, float))])
             else:
@@ -1178,8 +1161,12 @@ class FormulaEvaluator:
         
         values = []
         for arg in args:
-            if ':' in arg:
-                # Range
+            if ':' in arg and '(' not in arg:
+                # A bare range like Raw!$D:$D. A function CALL that merely
+                # contains a range — SUMIFS(Raw!$D:$D, ...) — has a paren and
+                # must be evaluated, not read as a range. Read as one it
+                # contributed nothing, so MIN(0.5, SUMIFS(...)) returned 0.5 and
+                # the workbook's tax rate evaluated to 0 on every forecast year.
                 range_vals = self._get_range_values(arg, tab)
                 values.extend([v for v in range_vals if isinstance(v, (int, float))])
             else:

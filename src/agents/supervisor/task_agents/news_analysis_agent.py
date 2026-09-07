@@ -239,7 +239,15 @@ async def news_analysis_agent(
             catalysts=catalysts_dicts,
             risks=risks_dicts,
             mitigations=mitigations_dicts,
-            overall_sentiment=analysis_summary.get("overall_sentiment", "neutral") if isinstance(analysis_summary, dict) else "neutral",
+            # analyze_all_articles_async returns an AnalysisSummary DATACLASS. The
+            # previous guard tested isinstance(dict), which was never true, so
+            # every run fell to the "neutral" default: ALNY's chat answer said
+            # "neutral" while its own report said BEARISH (87%). Accept either.
+            overall_sentiment=(
+                analysis_summary.get("overall_sentiment", "neutral")
+                if isinstance(analysis_summary, dict)
+                else getattr(analysis_summary, "overall_sentiment", None) or "neutral"
+            ),
             key_themes=[c.type for c in high_conf_catalysts[:5]] if high_conf_catalysts else [],
             screening_data_path=str(data_file),
             llm_cost=state.total_llm_cost
