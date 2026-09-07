@@ -331,8 +331,26 @@ class AssumptionsTabBuilder:
         
         # Shares Outstanding
         ws.cell(row=18, column=1, value="Shares Outstanding (latest)").font = Font(bold=True)
-        ws.cell(row=18, column=2, value='=SUMIFS(Raw!$D:$D,Raw!$B:$B,"Diluted Average Shares",Raw!$C:$C,$B$2&"*")').number_format = '#,##0'
-        ws.cell(row=18, column=3, value="[From JSON]").font = Font(italic=True, size=9)
+        # Value per share divides by THIS cell. "Diluted Average Shares" is a
+        # period average and lags any issuance: PC Jeweller's was 8.61B against
+        # 9.75B actually outstanding (value overstated 13%); PayPal's 968M
+        # against 855M after buybacks (understated 13%). Prefer the live count
+        # the scraper captured; fall back to the year-end balance-sheet count,
+        # then the average.
+        live_shares = self.llm_assumptions.get("shares_outstanding_current")
+        if isinstance(live_shares, (int, float)) and live_shares > 0:
+            ws.cell(row=18, column=2, value=float(live_shares)).number_format = '#,##0'
+        else:
+            ws.cell(row=18, column=2, value=(
+                '=IFERROR(IF(SUMIFS(Raw!$D:$D,Raw!$B:$B,"Ordinary Shares Number",Raw!$C:$C,$B$2&"*")>0,'
+                'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Ordinary Shares Number",Raw!$C:$C,$B$2&"*"),'
+                'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Diluted Average Shares",Raw!$C:$C,$B$2&"*")),'
+                'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Diluted Average Shares",Raw!$C:$C,$B$2&"*"))'
+            )).number_format = '#,##0'
+        ws.cell(row=18, column=3, value=(
+            "[Live shares outstanding]" if isinstance(live_shares, (int, float)) and live_shares > 0
+            else "[Year-end shares, else diluted average]"
+        )).font = Font(italic=True, size=9)
         
         # Net Debt
         ws.cell(row=19, column=1, value="Net Debt (latest)").font = Font(bold=True)
@@ -345,11 +363,24 @@ class AssumptionsTabBuilder:
         
         # Effective Tax Rate
         ws.cell(row=20, column=1, value="Effective Tax Rate (FY0)").font = Font(bold=True)
+        # Tax Provision / Pretax Income goes negative in a tax-credit year — PC
+        # Jeweller booked a -9.7M provision on 7.1B of pretax income and the DCF
+        # discounted debt at an after-tax cost ABOVE its pre-tax cost. Yahoo
+        # publishes "Tax Rate For Calcs" (0.40 for that same year); use it when
+        # present, fall back to the ratio, and clamp to [0, 50%] either way.
+        # Written with IF only — no MAX/MIN around a function call. Our formula
+        # evaluator (which produces the JSON the report reads) splits MAX/MIN
+        # arguments on commas without honouring the parentheses of a nested
+        # SUMIFS, so MIN(0.5, SUMIFS(...)) evaluated to 0.5 and the shipped
+        # MAX(0, MIN(0.5, IF(...))) evaluated to 0 — zero tax on every forecast
+        # year, which lifted PayPal's perpetual leg from $98 to $146. Excel
+        # computes either form; only this one survives both.
+        calcs = 'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Tax Rate For Calcs",Raw!$C:$C,$B$2&"*")'
+        ratio = ('SUMIFS(Raw!$D:$D,Raw!$B:$B,"Tax Provision",Raw!$C:$C,$B$2&"*")/'
+                 'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Pretax Income",Raw!$C:$C,$B$2&"*")')
         formula = (
-            '=IFERROR('
-            'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Tax Provision",Raw!$C:$C,$B$2&"*")/'
-            'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Pretax Income",Raw!$C:$C,$B$2&"*"),'
-            '"")'
+            f'=IFERROR(IF({calcs}>0,IF({calcs}>0.5,0.5,{calcs}),'
+            f'IF({ratio}<0,0,IF({ratio}>0.5,0.5,{ratio}))),"")'
         )
         ws.cell(row=20, column=2, value=formula).number_format = '0.00%'
         ws.cell(row=20, column=3, value="[From JSON]").font = Font(italic=True, size=9)
@@ -384,8 +415,17 @@ class AssumptionsTabBuilder:
 
         _seed(23, "Risk-Free Rate (Rf)", "risk_free_rate", 0.045, '0.00%',
               f"[{capm.get('risk_free_source', '10Y government bond')}]")
-        _seed(24, "Equity Risk Premium (ERP)", "equity_risk_premium", 0.055, '0.00%',
-              "[Mature-market ERP]")
+        # The cell carries the mature-market ERP PLUS the country premium so
+        # the tab's Ke = Rf + beta x B24 reproduces the CAPM's own cost of
+        # equity. The note says what was added.
+        _crp = capm.get("country_risk_premium") or 0.0
+        _pub = capm.get("mature_erp_published")
+        _base = (f"Mature-market ERP {capm.get('equity_risk_premium', 0.055)*100:.1f}% (house assumption"
+                 + (f"; Damodaran's implied base {_pub*100:.2f}%" if isinstance(_pub, (int, float)) else "")
+                 + ")")
+        _seed(24, "Equity Risk Premium (ERP + country premium)", "equity_risk_premium_total", 0.055, '0.00%',
+              f"[{_base} + country premium {_crp*100:.2f}%: {capm.get('crp_source', 'none')}]"
+              if capm else "[Mature-market ERP]")
         _seed(25, "Levered Beta (β)", "beta", 1.0, '0.00',
               f"[{capm.get('beta_source', 'observed beta')}]")
 
@@ -393,18 +433,19 @@ class AssumptionsTabBuilder:
         ws.cell(row=26, column=1, value="Cost of Debt Inputs:").font = Font(bold=True, italic=True, size=10)
 
         _seed(27, "Pre-Tax Cost of Debt (Kd)", "pre_tax_cost_of_debt", 0.055, '0.00%',
-              "[Risk-free + credit spread]")
+              f"[{capm.get('kd_source', 'Risk-free + credit spread')}]")
 
         # Subsection: Capital Structure
         ws.cell(row=28, column=1, value="Capital Structure Weights:").font = Font(bold=True, italic=True, size=10)
 
         _seed(29, "Equity Weight (E/V)", "equity_weight", 0.85, '0.00%',
-              "[Market cap / (market cap + total debt)]")
+              f"[{capm.get('weights_note', 'Market cap / (market cap + total debt)')}]")
         
         # Terminal Growth Rate (row 35 in markdown, row 30 here)
         ws.cell(row=30, column=1, value="Terminal Growth Rate (g)").font = Font(bold=True)
         ws.cell(row=30, column=2, value='=LLM_Inferred!B3').number_format = '0.00%'  # From LLM
-        ws.cell(row=30, column=3, value="[LLM]").font = Font(italic=True, size=9)
+        _tg_note = self.llm_assumptions.get("terminal_growth_note")
+        ws.cell(row=30, column=3, value=f"[{_tg_note}]" if _tg_note else "[LLM]").font = Font(italic=True, size=9)
         
         # Shares Outstanding (row 36 in markdown, row 31 here)
         ws.cell(row=31, column=1, value="Shares Outstanding (for valuation)").font = Font(bold=True)
@@ -416,7 +457,10 @@ class AssumptionsTabBuilder:
         """Apply formatting."""
         ws.column_dimensions['A'].width = 35
         ws.column_dimensions['B'].width = 18
-        for col in ['C', 'D', 'E', 'F', 'G', 'H']:
+        # Column C carries the provenance notes — where the risk-free rate,
+        # the premium and the beta came from — which run to a sentence.
+        ws.column_dimensions['C'].width = 70
+        for col in ['D', 'E', 'F', 'G', 'H']:
             ws.column_dimensions[col].width = 12
         ws.freeze_panes = ws['A2']
     

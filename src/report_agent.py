@@ -208,6 +208,13 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
         # an LVMH report came back with 500 "$" and not one "€", against a
         # brief that explicitly said EUR.
         'currency': basic_info.get('currency') or 'USD',
+        # The listing's own quote, when it differs from the reporting currency:
+        # Shell trades at 3,437p in London and reports in dollars, so the
+        # valuation is in USD and the price was converted to match. A reader
+        # is told both numbers and the rate, or the "$46.43" looks invented.
+        'listing_currency': basic_info.get('listing_currency') or basic_info.get('currency') or 'USD',
+        'current_price_listing': market_data.get('current_price_listing'),
+        'fx_listing_to_financial': market_data.get('fx_listing_to_financial'),
         'current_price': market_data.get('current_price', 0),
         'market_cap': market_data.get('market_cap', 0),
         'enterprise_value': market_data.get('enterprise_value', 0),
@@ -364,7 +371,22 @@ def extract_cost_of_capital(computed_values: Dict[str, Any]) -> Dict[str, Any]:
         fallback = cells.get(f'({row}, 2)')
         return fallback if isinstance(fallback, (int, float)) else None
 
+    # Provenance lives in column 3 of the Assumptions tab — "[US 10Y 4.78% used
+    # as a proxy — no INR sovereign yield source available]", "[Blume-adjusted
+    # from observed 0.33]". It was written there and never printed, so a rupee
+    # valuation discounted on a US Treasury said nothing about it.
+    assumptions = computed_values.get('Assumptions', {}).get('cells', {}) or {}
+
+    def note(row: int):
+        value = assumptions.get(f'({row}, 3)')
+        return value.strip('[] ') if isinstance(value, str) and value.strip() else None
+
     return {
+        'risk_free_source': note(23),
+        'erp_source': note(24),
+        'beta_source': note(25),
+        'kd_source': note(27),
+        'terminal_growth_source': note(30),
         'risk_free_rate': read('Risk-Free Rate (Rf)', 3),
         'equity_risk_premium': read('Equity Risk Premium (ERP)', 4),
         'beta': read('Levered Beta (β)', 5),
@@ -383,31 +405,34 @@ def build_sensitivity_grid(projections: Dict[str, Any], terminal_growth: float,
     """
     Value per share across WACC and terminal growth, as markdown.
 
-    The workbook has a Sensitivity tab, but its interior cells carry formatting
-    and no values, so there is nothing to read back — the grid is recomputed here
-    from the same FCF path, net debt and share count the DCF used.
-
-    This is the table that makes a DCF arguable. Our own numbers show the value
-    moving far more per 50bp of discount rate than per point of growth, which a
-    reader cannot know from a single fair-value figure.
+    Runs the SAME model as the headline. The first version recomputed from the
+    five explicit projection years with a Gordon terminal on FY5, while the DCF
+    tab discounts ten periods — FY1-5 plus a FY6-10 fade — before its terminal.
+    For a flat cash-flow profile the difference was a rounding error; for a
+    growing one it was not: Alnylam's report showed a grid centre of 287 two
+    lines under a headline of $333.84. The workbook's own Sensitivity tab (which
+    does carry values now) reproduces the headline exactly, and so must this.
     """
     try:
-        fcf = [float(x) for x in (projections.get('fcf') or [])][:5]
-        dcf = valuation.get('dcf_perpetual', {}) or {}
-        ev = float(dcf.get('enterprise_value') or 0)
-        equity = float(dcf.get('equity_value') or 0)
-        per_share = float(dcf.get('intrinsic_value_per_share') or 0)
-        if len(fcf) < 5 or not per_share or not equity or not wacc:
+        inputs = valuation.get('dcf_inputs') or {}
+        fcf = [float(x) for x in (inputs.get('fcf') or []) if isinstance(x, (int, float))]
+        cash = float(inputs.get('cash') or 0)
+        debt = float(inputs.get('debt') or 0)
+        investments = float(inputs.get('investments') or 0)
+        shares = float(inputs.get('shares') or 0)
+        if len(fcf) < 5 or shares <= 0 or not wacc:
             return ""
-        net_debt = ev - equity
-        shares = equity / per_share
-        if shares <= 0:
-            return ""
-    except (TypeError, ValueError, ZeroDivisionError):
+    except (TypeError, ValueError):
         return ""
 
+    n = len(fcf)
     waccs = [wacc + d for d in (-0.010, -0.005, 0.0, 0.005, 0.010)]
-    growths = [terminal_growth + d for d in (-0.010, -0.005, 0.0, 0.005, 0.010)]
+    # Two steps either side of the base case. The step shrinks when the base
+    # growth is under 1% (a franc or yuan perpetuity capped at its risk-free
+    # rate) so the axis never goes negative.
+    step = 0.005 if terminal_growth >= 0.01 else max(terminal_growth / 2.0, 0.0)
+    growths = ([terminal_growth + k * step for k in (-2, -1, 0, 1, 2)] if step > 0
+               else [0.0, 0.005, 0.010, 0.015, 0.020])
 
     header = "| WACC \\ terminal g | " + " | ".join(f"{g*100:.1f}%" for g in growths) + " |\n"
     header += "|---" * (len(growths) + 1) + "|\n"
@@ -421,12 +446,54 @@ def build_sensitivity_grid(projections: Dict[str, Any], terminal_growth: float,
                 continue
             pv = sum(f / (1 + w) ** (i + 1) for i, f in enumerate(fcf))
             tv = fcf[-1] * (1 + g) / (w - g)
-            value = (pv + tv / (1 + w) ** len(fcf) - net_debt) / shares
-            cells.append(f"{value:,.0f}")
+            value = (pv + tv / (1 + w) ** n + cash - debt + investments) / shares
+            # Whole units for a $300 stock; two decimals for a ₹19 one, where
+            # integer rounding would erase the very differences the grid exists
+            # to show (PC Jeweller: every cell in a row read "19").
+            cells.append(f"{value:,.2f}" if abs(value) < 100 else f"{value:,.0f}")
         label = f"**{w*100:.2f}%**" if abs(w - wacc) < 1e-9 else f"{w*100:.2f}%"
         rows += f"| {label} | " + " | ".join(cells) + " |\n"
 
     return header + rows
+
+
+def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Carry the model's balance-sheet valuation into the report.
+
+    For a bank or lender the model replaces the FCF DCF with a justified
+    P/B x ROE fair value in state — and left the workbook's DCF at zero. The
+    report was built from the workbook alone, so it printed "DCF $0.00 /
+    Average $0.00 / Implied Upside -100%" and rated Capital One and JPMorgan
+    STRONG SELL, while the chat quoted $159.34 and $304.65 from the real
+    method. Here the report's headline, its summary rows and the numbers the
+    recommendation engine rates on are all set to the method actually used.
+    """
+    if not override or override.get("valuation_method") != "justified_pb_roe":
+        return data
+    fair_value = override.get("fair_value")
+    if not isinstance(fair_value, (int, float)) or fair_value <= 0:
+        return data
+    v = data.get("valuation") or {}
+    price = (data.get("company_overview") or {}).get("current_price") or override.get("current_price")
+    upside = (fair_value / float(price) - 1.0) if price else override.get("upside_vs_market")
+    v["bank"] = {
+        "fair_value": fair_value,
+        "method": "Justified P/B x ROE",
+        "inputs": override.get("bank_inputs") or {},
+    }
+    # The engine and the summary must rate and print the same number.
+    v.setdefault("dcf_perpetual", {})["intrinsic_value_per_share"] = fair_value
+    v.setdefault("dcf_exit", {})["intrinsic_value_per_share"] = fair_value
+    summary = v.setdefault("summary", {})
+    summary["dcf_intrinsic"] = fair_value
+    summary["exit_intrinsic"] = fair_value
+    summary["comps_intrinsic"] = None
+    summary["average_intrinsic"] = fair_value
+    if upside is not None:
+        summary["upside"] = upside
+    data["valuation"] = v
+    return data
 
 
 def extract_projections(computed_values: Dict[str, Any]) -> Dict[str, Any]:
@@ -489,13 +556,27 @@ def extract_valuation(computed_values: Dict[str, Any]) -> Dict[str, Any]:
         'summary': {
             'dcf_intrinsic': summary.get('(18, 2)', 0),
             'exit_intrinsic': summary.get('(22, 2)', 0),
+            # The third leg of the average. It was blended into row 26 and never
+            # shown, so the two rows a reader could see did not average to the
+            # figure beneath them (PayPal: $98.34 and $89.59 -> "$87.11").
+            'comps_intrinsic': summary.get('(30, 2)'),
             'average_intrinsic': summary.get('(26, 2)', 0),
             'upside': summary.get('(27, 2)', 0),
             'shares_outstanding': summary.get('(8, 2)', 0),
             'cash': summary.get('(14, 2)', 0),
             'debt': summary.get('(15, 2)', 0),
             'net_debt': summary.get('(16, 2)', 0),
-        }
+        },
+        # The DCF tab's own inputs, so anything recomputed for the report — the
+        # sensitivity grid — runs the SAME model as the headline: ten explicit
+        # FCF periods (FY1-5 plus the FY6-10 fade) and the tab's equity bridge.
+        'dcf_inputs': {
+            'fcf': [dcf_tab.get(f'({16}, {c})') for c in range(2, 12)],
+            'cash': dcf_tab.get('(30, 2)'),
+            'debt': dcf_tab.get('(31, 2)'),
+            'investments': dcf_tab.get('(32, 2)'),
+            'shares': dcf_tab.get('(36, 2)'),
+        },
     }
 
 
@@ -609,20 +690,35 @@ def _strip_echoed_heading(body: str, title: str) -> str:
     return "\n".join(lines[i:]).lstrip()
 
 
+def _money_symbol() -> str:
+    """The current report's currency symbol; a dollar when no run is pinned."""
+    code = _REPORT_CURRENCY.get()
+    return currency_symbol(code) if code else "$"
+
+
 def format_number(num, decimals=2):
-    """Format number with commas and decimals."""
+    """
+    Format a monetary figure in the REPORT'S currency.
+
+    This hardcoded "$" for years without anyone noticing, because the tables it
+    built travelled inside the LLM prompt and the model rewrote the symbol to
+    match the currency directive while echoing them. Once the tables were
+    emitted by code verbatim, LVMH's projections read "$83.23B" and PC
+    Jeweller's "$44.26B" — 29 and 20 dollar amounts in euro and rupee reports.
+    """
     if num is None:
         return "N/A"
+    sym = _money_symbol()
     try:
         num = float(num)
         if abs(num) >= 1e9:
-            return f"${num/1e9:.{decimals}f}B"
+            return f"{sym}{num/1e9:.{decimals}f}B"
         elif abs(num) >= 1e6:
-            return f"${num/1e6:.{decimals}f}M"
+            return f"{sym}{num/1e6:.{decimals}f}M"
         elif abs(num) >= 1e3:
-            return f"${num/1e3:.{decimals}f}K"
+            return f"{sym}{num/1e3:.{decimals}f}K"
         else:
-            return f"${num:.{decimals}f}"
+            return f"{sym}{num:.{decimals}f}"
     except:
         return str(num)
 
@@ -729,6 +825,9 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     # DCF actually discounted with. Printing it in both places invites the two
     # to drift apart, which is the failure this section is recovering from.
     assumptions_table += f"| Terminal Growth Rate | {format_percent(assumptions['terminal_growth'])} |\n"
+    _tg_src = (data.get('cost_of_capital') or {}).get('terminal_growth_source')
+    if _tg_src and _tg_src.strip().upper() != "LLM":
+        assumptions_table += f"| Terminal growth basis | {_tg_src} |\n"
     assumptions_table += f"| Revenue Growth (FY1) | {format_percent(assumptions['revenue_growth_rates'][0])} |\n"
     assumptions_table += f"| Revenue Growth (FY2) | {format_percent(assumptions['revenue_growth_rates'][1])} |\n"
     assumptions_table += f"| Revenue Growth (FY3) | {format_percent(assumptions['revenue_growth_rates'][2])} |\n"
@@ -771,8 +870,45 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     summary_table += "|--------|-------|\n"
     summary_table += f"| DCF Perpetual Intrinsic Value | {format_number(valuation['dcf_perpetual']['intrinsic_value_per_share'], 2)} |\n"
     summary_table += f"| DCF Exit Multiple Intrinsic Value | {format_number(valuation['dcf_exit']['intrinsic_value_per_share'], 2)} |\n"
-    summary_table += f"| **Average Intrinsic Value** | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
+    # The workbook's average blends a third, market-comps leg. It was omitted
+    # here, so the two rows above visibly failed to average to the row below.
+    bank = valuation.get('bank')
+    if bank:
+        # A balance-sheet financial: the FCF DCF is not meaningful for a bank,
+        # and the model valued it on justified P/B x ROE instead. Say so, and
+        # print that number where the DCF rows would otherwise read 0.00.
+        summary_table = "| Metric | Value |\n|--------|-------|\n"
+        summary_table += f"| Justified P/B x ROE Intrinsic Value | {format_number(bank['fair_value'], 2)} |\n"
+        summary_table += "| FCF DCF | _not applied — balance-sheet financial_ |\n"
+    comps = valuation['summary'].get('comps_intrinsic')
+    if isinstance(comps, (int, float)) and comps > 0 and not bank:
+        summary_table += f"| Market Comps Intrinsic Value | {format_number(comps, 2)} |\n"
+    # The workbook averages only the legs that came out POSITIVE — a negative
+    # per-share value is a method that does not fit the company, not a low
+    # estimate. Say how many actually entered, so "3 methods" is never printed
+    # over an average of two (PC Jeweller: perpetual -2.03, dropped).
+    legs = [valuation['dcf_perpetual']['intrinsic_value_per_share'],
+            valuation['dcf_exit']['intrinsic_value_per_share'], comps]
+    n_in = sum(1 for v in legs if isinstance(v, (int, float)) and v > 0)
+    n_all = sum(1 for v in legs if isinstance(v, (int, float)))
+    if bank:
+        label = "**Intrinsic Value (justified P/B x ROE)**"
+    elif n_in < n_all:
+        label = f"**Average Intrinsic Value ({n_in} of {n_all} methods — negative results excluded)**"
+    elif n_in > 2:
+        label = f"**Average Intrinsic Value ({n_in} methods)**"
+    else:
+        label = "**Average Intrinsic Value**"
+    summary_table += f"| {label} | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
     summary_table += f"| Current Market Price | {format_number(company['current_price'], 2)} |\n"
+    # A listing that trades in another currency: show the quote a holder sees
+    # and the rate behind the converted figure above (Shell: 3,437p / £34.37
+    # in London, $46.43 against USD statements).
+    _lc, _rc = company.get('listing_currency'), company.get('currency')
+    _pl, _fx = company.get('current_price_listing'), company.get('fx_listing_to_financial')
+    if _lc and _rc and _lc != _rc and isinstance(_pl, (int, float)):
+        _rate = f", converted at {_fx:.4f} {_rc}/{_lc}" if isinstance(_fx, (int, float)) else ""
+        summary_table += f"| Price on the listing exchange | {currency_symbol(_lc)}{_pl:,.2f} ({_lc}{_rate}) |\n"
     summary_table += f"| **Implied Upside** | **{format_percent(valuation['summary']['upside'])}** |\n"
     
     # Cost of capital — the derivation, not just the rate. A DCF is mostly an
@@ -785,7 +921,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         coc_table = "| Input | Value |\n|-------|-------|\n"
         for label, key, fmt in (
             ("Risk-free rate", 'risk_free_rate', 'pct'),
-            ("Equity risk premium", 'equity_risk_premium', 'pct'),
+            ("Equity risk premium (incl. country premium)", 'equity_risk_premium', 'pct'),
             ("Levered beta", 'beta', 'num'),
             ("Cost of equity", 'cost_of_equity', 'pct'),
             ("Pre-tax cost of debt", 'pre_tax_cost_of_debt', 'pct'),
@@ -800,28 +936,70 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
                 continue
             rendered = format_percent(value) if fmt == 'pct' else f"{value:.2f}"
             coc_table += f"| {label} | {rendered} |\n"
+        # Provenance beneath the numbers. A reader is entitled to know whether
+        # the risk-free rate was a live yield, a dated figure, or — for a
+        # currency we have no sovereign feed for — a US proxy.
+        if coc.get('risk_free_source'):
+            coc_table += f"| Risk-free source | {coc['risk_free_source']} |\n"
+        if coc.get('beta_source'):
+            coc_table += f"| Beta source | {coc['beta_source']} |\n"
+        if coc.get('erp_source'):
+            coc_table += f"| Premium build | {coc['erp_source']} |\n"
+        if coc.get('kd_source'):
+            coc_table += f"| Cost of debt build | {coc['kd_source']} |\n"
+        if valuation.get('bank'):
+            coc_table += ("\n_The justified P/B x ROE valuation uses the cost of equity from this build "
+                          "(risk-free rate + beta x equity risk premium, held within 8-14%); the WACC "
+                          "and cost of debt describe the cash-flow DCF that was not applied._\n")
 
-    sensitivity_table = build_sensitivity_grid(
-        projections, assumptions.get('terminal_growth') or 0.025,
-        valuation, coc.get('wacc') or assumptions.get('wacc') or 0,
+    # A WACC x growth grid describes an FCF DCF. For a bank the DCF was not
+    # applied, and recomputing it prints a grid of zeros under a P/B x ROE
+    # headline (Capital One, JPMorgan). Say so instead.
+    if valuation.get('bank'):
+        sensitivity_table = "_Not applicable — valued on justified P/B x ROE, not a cash-flow DCF._"
+    else:
+        sensitivity_table = build_sensitivity_grid(
+            projections, assumptions.get('terminal_growth') or 0.025,
+            valuation, coc.get('wacc') or assumptions.get('wacc') or 0,
+        )
+
+    # The tables are assembled HERE and returned verbatim. They used to travel
+    # inside the prompt with an instruction to reproduce them exactly, which
+    # left the section's numbers at the model's discretion: PC Jeweller's
+    # report shipped with zero tables — assumptions, cost of capital,
+    # sensitivity, projections, both DCFs and the summary all replaced by three
+    # paragraphs of prose that quoted figures from the grid it had just
+    # declined to print. Numbers = code; the model writes only the commentary.
+    tables_md = (
+        f"### Model Assumptions\n\n{assumptions_table}\n"
+        f"### Cost of Capital\n\n{coc_table or '_Cost-of-capital build unavailable for this model._'}\n\n"
+        f"### Sensitivity: Value per Share by WACC and Terminal Growth\n\n"
+        f"{sensitivity_table or '_Sensitivity grid unavailable for this model._'}\n\n"
+        f"### 5-Year Projections\n\n{projections_table}\n"
+        f"### DCF Valuation — Perpetual Growth Method\n\n{dcf_perp_table}\n"
+        f"### DCF Valuation — Exit Multiple Method\n\n{dcf_exit_table}\n"
+        f"### Valuation Summary\n\n{summary_table}\n"
     )
 
-    # Load prompt template and fill in variables
     prompt_template = load_prompt("report_valuation")
     prompt = prompt_template.format(
         company_name=company['company_name'],
-        assumptions_table=assumptions_table,
-        cost_of_capital_table=coc_table or "_Cost-of-capital build unavailable for this model._",
-        sensitivity_table=sensitivity_table or "_Sensitivity grid unavailable for this model._",
-        projections_table=projections_table,
-        dcf_perp_table=dcf_perp_table,
-        dcf_exit_table=dcf_exit_table,
-        summary_table=summary_table
+        tables=tables_md,
     )
 
     messages = [{"role": "user", "content": prompt}]
     response, cost = llm(messages, temperature=0.5)
-    return response, cost
+
+    # Belt and braces: if the model echoed the tables anyway, do not print them
+    # twice. Any commentary that begins by restating a table heading is cut
+    # back to its prose.
+    commentary = response.strip()
+    for heading in ("### Model Assumptions", "## Model Assumptions", "### Cost of Capital"):
+        if commentary.startswith(heading):
+            commentary = commentary.split("### Commentary", 1)[-1].strip()
+            break
+
+    return f"{tables_md}\n### Commentary\n\n{commentary}", cost
 
 
 def generate_section_news_analysis(data: Dict[str, Any], llm) -> Tuple[str, float]:
@@ -1240,7 +1418,8 @@ def generate_professional_report(
     financial_json_path: Path,
     computed_values_json_path: Path,
     screening_json_path: Path,
-    logger: Optional[StockAnalystLogger] = None
+    logger: Optional[StockAnalystLogger] = None,
+    valuation_override: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Generate comprehensive professional report using LLM.
     
@@ -1284,6 +1463,7 @@ def generate_professional_report(
         'valuation': extract_valuation(computed_values),
         'news': extract_news_analysis(screening_data),
     }
+    data = apply_valuation_override(data, valuation_override)
     
     if logger:
         logger.info("✅ Extracted structured data")
@@ -1384,7 +1564,8 @@ async def generate_professional_report_async(
     financial_json_path: Path,
     computed_values_json_path: Path,
     screening_json_path: Path,
-    logger: Optional[StockAnalystLogger] = None
+    logger: Optional[StockAnalystLogger] = None,
+    valuation_override: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Parallel counterpart to generate_professional_report.
@@ -1418,6 +1599,7 @@ async def generate_professional_report_async(
         'valuation': extract_valuation(computed_values),
         'news': extract_news_analysis(screening_data),
     }
+    data = apply_valuation_override(data, valuation_override)
 
     llm = get_llm()
     sections: Dict[str, Any] = {}
@@ -1483,6 +1665,7 @@ async def generate_and_save_professional_report_async(
     logger: Optional[StockAnalystLogger] = None,
     output_language: Optional[str] = None,
     brief: Optional[str] = None,
+    valuation_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Path]:
     """Async entry point: generate (parallel sections) + save the report."""
     set_report_language(output_language)
@@ -1517,6 +1700,7 @@ async def generate_and_save_professional_report_async(
         computed_values_json_path=computed_values_path,
         screening_json_path=screening_path,
         logger=logger,
+        valuation_override=valuation_override,
     )
     report_path = save_professional_report(
         report=report, output_dir=report_output_dir, ticker=ticker, logger=logger

@@ -15,6 +15,7 @@ Professional features:
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from ..financial_model_builder import ExcelFormats
@@ -174,7 +175,7 @@ class SensitivityTabBuilder:
         )
         
         # C12-E12: g scenarios (−0.5%, Base, +0.5%)
-        ws.cell(row=12, column=3, value="=$B$7-0.005")  # g - 0.5%
+        ws.cell(row=12, column=3, value="=$B$7-IF($B$7<0.01,$B$7/2,0.005)")  # g - one step (0.5%, or half of a sub-1% base)
         ws.cell(row=12, column=3).number_format = '0.00%'
         ws.cell(row=12, column=3).font = Font(bold=True, size=10)
         ws.cell(row=12, column=3).fill = PatternFill(
@@ -192,7 +193,7 @@ class SensitivityTabBuilder:
             fill_type="solid"
         )
         
-        ws.cell(row=12, column=5, value="=$B$7+0.005")  # g + 0.5%
+        ws.cell(row=12, column=5, value="=$B$7+IF($B$7<0.01,$B$7/2,0.005)")  # g + one step
         ws.cell(row=12, column=5).number_format = '0.00%'
         ws.cell(row=12, column=5).font = Font(bold=True, size=10)
         ws.cell(row=12, column=5).fill = PatternFill(
@@ -220,27 +221,110 @@ class SensitivityTabBuilder:
                 fill_type="solid"
             )
         
-        # Data table area B13:E17 - will be filled by Excel Data Table
-        # Add note about how to create the data table
+        # C13:E17 — the grid itself.
+        #
+        # These cells used to carry formatting and no value, with a note telling
+        # the reader to build the table by hand via Data > What-If Analysis. A
+        # sensitivity grid is the single most useful table in a DCF — it is what
+        # shows that the valuation moves far more per 50bp of discount rate than
+        # per point of growth — and we were shipping it blank in a file sold as a
+        # financial model.
+        #
+        # Excel's own Data Table feature cannot be written by openpyxl, so each
+        # cell instead re-runs the DCF explicitly: ten discounted FCF terms, the
+        # Gordon terminal value, and the equity bridge, over that cell's own WACC
+        # and g. Written as plain arithmetic rather than SUMPRODUCT so our
+        # formula evaluator can compute it too — unsupported functions return a
+        # placeholder, which is how the grid would end up empty a second time.
         for row in range(13, 18):
-            for col in range(2, 6):
-                cell = ws.cell(row=row, column=col)
-                cell.number_format = '$0.00'
+            for col in range(3, 6):
+                cell = ws.cell(row=row, column=col, value=self._value_per_share_formula(row, col))
+                cell.number_format = '#,##0.00'
                 cell.fill = PatternFill(
                     start_color="F0F0F0",
                     end_color="F0F0F0",
                     fill_type="solid"
                 )
-        
-        # Add instruction note
-        ws.cell(row=19, column=1, value="NOTE: Select B12:E17, Data > What-If Analysis > Data Table")
+
+        # Column B rows 13-17 belong to Excel's data-table convention (the corner
+        # sits at B12). With the grid computed per cell they hold nothing, so
+        # they are left unformatted rather than shaded to look like data.
+
+        ws.cell(row=19, column=1,
+                value="Value per share at each WACC (rows) and terminal growth (columns). "
+                      "Recalculates from the DCF tab — change an input there and this updates.")
         ws.cell(row=19, column=1).font = Font(italic=True, size=9, color="666666")
-        ws.cell(row=20, column=1, value="Row input: 'Valuation (DCF)'!$B$23, Column input: 'Valuation (DCF)'!$B$12")
+        ws.cell(row=20, column=1,
+                value="'n/m' means terminal growth meets or exceeds the discount rate, "
+                      "where the Gordon formula has no meaning.")
         ws.cell(row=20, column=1).font = Font(italic=True, size=9, color="666666")
         
         # Blank row
         ws.cell(row=21, column=1, value="")
     
+    def _value_per_share_formula(self, row: int, col: int) -> str:
+        """
+        Re-run the perpetual-growth DCF for one (WACC, g) pair.
+
+        WACC is read from column A of this row, g from row 12 of this column, so
+        each cell is driven by the axes beside it and the whole grid follows the
+        DCF tab's own FCF path and equity bridge.
+
+        Mirrors 'Valuation (DCF)': FCF FY1-FY10 in row 16 columns B..K, terminal
+        value off FY10, then + cash - total debt + investments, over shares. The
+        discount exponent carries the mid-year toggle in $B$4, exactly as the
+        DCF tab's own discount factors do.
+        """
+        dcf = "'Valuation (DCF)'"
+        wacc = f"$A{row}"                       # this row's WACC
+        growth = f"{get_column_letter(col)}$12"  # this column's terminal growth
+
+        # Ten explicit periods, discounted at this cell's WACC.
+        terms = [
+            f"{dcf}!{get_column_letter(2 + i)}$16/(1+{wacc})^({i + 1}-$B$4)"
+            for i in range(10)
+        ]
+        pv_fcf = "+".join(terms)
+
+        # Gordon terminal value off the final explicit year, discounted back.
+        terminal = (f"({dcf}!K$16*(1+{growth})/({wacc}-{growth}))"
+                    f"/(1+{wacc})^(10-$B$4)")
+
+        bridge = f"{dcf}!$B$30-{dcf}!$B$31+{dcf}!$B$32"
+
+        # Guard the degenerate case rather than printing a confident number: at
+        # g >= WACC the perpetuity does not converge.
+        return (f'=IF({wacc}<={growth},"n/m",'
+                f'IFERROR(({pv_fcf}+{terminal}+{bridge})/{dcf}!$B$36,"n/m"))')
+
+
+    def _exit_value_per_share_formula(self, row: int, col: int) -> str:
+        """
+        Re-run the exit-multiple DCF for one (WACC, exit multiple) pair.
+
+        Mirrors 'Valuation (Exit Multiple)': FCF FY1-FY5 in row 7 columns B..F
+        discounted with the mid-year toggle, terminal value = FY5 EBITDA (row 12)
+        times this column's multiple discounted over the tab's own discount
+        period count (row 5, without the mid-year adjustment — the tab discounts
+        its terminal value that way), then cash - debt + investments over shares.
+        """
+        exit_tab = "'Valuation (Exit Multiple)'"
+        wacc = f"$A{row}"                        # this row's WACC
+        multiple = f"{get_column_letter(col)}$22"  # this column's exit multiple
+
+        terms = [
+            f"{exit_tab}!{get_column_letter(2 + i)}$7/(1+{wacc})^({i + 1}-$B$4)"
+            for i in range(5)
+        ]
+        pv_fcf = "+".join(terms)
+        terminal = (f"({exit_tab}!$B$12*{multiple})"
+                    f"/(1+{wacc})^{exit_tab}!$B$5")
+        bridge = f"{exit_tab}!$B$19-{exit_tab}!$B$20+{exit_tab}!$B$21"
+
+        return (f'=IFERROR(({pv_fcf}+{terminal}+{bridge})'
+                f'/{exit_tab}!$B$24,"n/m")')
+
+
     def _setup_exit_multiple_sensitivity(self, ws: Worksheet) -> None:
         """
         Set up Section C: Exit Multiple DCF Sensitivity Table (rows 22-27).
@@ -306,23 +390,32 @@ class SensitivityTabBuilder:
             )
         
         # Data table area B23:G27 - will be filled by Excel Data Table
+        # C23:G27 — the exit-multiple grid, blank for the same reason and fixed
+        # the same way. Each cell re-runs the exit DCF at its own WACC and exit
+        # multiple, mirroring that tab's arithmetic exactly: five discounted FCF
+        # periods carrying the mid-year toggle, a terminal value of FY5 EBITDA
+        # times the multiple discounted over the tab's own period count, then the
+        # equity bridge.
         for row in range(23, 28):
-            for col in range(2, 8):
-                cell = ws.cell(row=row, column=col)
-                cell.number_format = '$0.00'
+            for col in range(3, 8):
+                cell = ws.cell(row=row, column=col,
+                               value=self._exit_value_per_share_formula(row, col))
+                cell.number_format = '#,##0.00'
                 cell.fill = PatternFill(
                     start_color="F0F0F0",
                     end_color="F0F0F0",
                     fill_type="solid"
                 )
-        
-        # Add instruction note
-        ws.cell(row=29, column=1, value="NOTE: Select B22:G27, Data > What-If Analysis > Data Table")
+
+        ws.cell(row=29, column=1,
+                value="Value per share at each WACC (rows) and exit EV/EBITDA multiple "
+                      "(columns). Recalculates from the Exit Multiple tab.")
         ws.cell(row=29, column=1).font = Font(italic=True, size=9, color="666666")
-        ws.cell(row=30, column=1, value="Row input: 'Valuation (Exit Multiple)'!$B$3, Column input: 'Valuation (Exit Multiple)'!$B$2")
+        ws.cell(row=30, column=1,
+                value="Terminal value here is FY5 EBITDA x the exit multiple, so this "
+                      "grid is a view on the exit assumption rather than on perpetual growth.")
         ws.cell(row=30, column=1).font = Font(italic=True, size=9, color="666666")
-        
-        # Blank row
+
         ws.cell(row=31, column=1, value="")
     
     def _setup_summary_block(self, ws: Worksheet) -> None:

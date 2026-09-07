@@ -102,10 +102,22 @@ class RecommendationCalculator:
             hist_vol_annual_pct = 18.0
         
         # 1. DCF average
-        dcf_avg = (dcf_perpetual + dcf_exit) / 2 if dcf_perpetual and dcf_exit else 0
+        # Average only the legs that came out POSITIVE. The truthiness test that
+        # was here dropped a zero but kept a negative, so PC Jeweller's gap was
+        # built on (-2.03 + 6.82) / 2 = 2.40 per share — an 81% "discount" and
+        # a STRONG SELL — while the summary the reader sees averages the
+        # positive legs to 12.14 (a 6% discount). A negative per-share value is
+        # a method that does not fit the company, not a low estimate; the
+        # Summary tab and the dispersion rail already exclude it, and the
+        # rating must be built on the same number the report shows.
+        _legs = [v for v in (dcf_perpetual, dcf_exit) if isinstance(v, (int, float)) and v > 0]
+        dcf_avg = sum(_legs) / len(_legs) if _legs else 0
+        legs_used = len(_legs)
         
         # 2. Raw valuation gap
-        raw_val_gap_pct = ((dcf_avg / current_price - 1) * 100) if current_price > 0 else 0
+        # No usable leg is "no valuation signal", not a 100% discount — that
+        # would rate a company STRONG SELL because both methods broke on it.
+        raw_val_gap_pct = ((dcf_avg / current_price - 1) * 100) if (current_price > 0 and legs_used) else 0
         
         # 3. Adjusted valuation gap (sector premium)
         adj_val_gap_pct = raw_val_gap_pct * (1 - self.sector_adjustment)
@@ -196,6 +208,7 @@ class RecommendationCalculator:
             "price_available": price_available,
             "inputs": {
                 "raw_val_gap_pct": round(raw_val_gap_pct, 2),
+                "dcf_legs_used": legs_used,
                 "sector_premium_adjustment": self.sector_adjustment,
                 "adj_val_gap_pct": round(adj_val_gap_pct, 2),
                 "catalyst_score_pct": round(catalyst_score_pct, 2),
