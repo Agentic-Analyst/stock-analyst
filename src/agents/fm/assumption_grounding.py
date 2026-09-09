@@ -157,7 +157,8 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
-def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
+def capm_components(company_data: Dict[str, Any],
+                    json_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     The full CAPM build, not just the answer.
 
@@ -246,7 +247,7 @@ def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
     erp_total = erp + crp
     erp_published = (load_table() or {}).get("mature_erp")
 
-    tax = _effective_tax_rate(company_data)
+    tax = _effective_tax_rate(company_data, json_data)
     ke = rf + beta * erp_total
     # Corporate debt is priced off the government bond in the same currency,
     # not off the default-free rate: an Indian issuer borrows above the G-Sec,
@@ -376,11 +377,60 @@ def _current_shares(md: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-def _effective_tax_rate(company_data: Dict[str, Any]) -> float:
+def _tax_rate_from_statements(json_data: Dict[str, Any]) -> Optional[float]:
+    """
+    The issuer's own effective tax rate, from its latest income statement.
+
+    Mirrors the workbook's Assumptions!B20 formula, including the edge case its
+    comment records: Tax Provision / Pretax Income goes NEGATIVE in a
+    tax-credit year (PC Jeweller booked a -9.7M provision on 7.1B of pretax
+    income), which would discount debt at an after-tax cost ABOVE its pre-tax
+    cost. Yahoo's "Tax Rate For Calcs" is preferred when present; the ratio is
+    the fallback; both are clamped to (0, 50%].
+    """
+    statements = (json_data or {}).get("financial_statements", {}) or {}
+    income = statements.get("income_statement", {}) or {}
+    periods = sorted((p for p in income if isinstance(p, str)), reverse=True)
+    for period in periods:
+        row = income.get(period) or {}
+        if not isinstance(row, dict):
+            continue
+
+        calcs = row.get("Tax Rate For Calcs")
+        try:
+            rate = float(calcs) if calcs is not None else None
+        except (TypeError, ValueError):
+            rate = None
+        if rate is not None and 0.0 < rate <= 0.5:
+            return rate
+
+        try:
+            provision = float(row.get("Tax Provision"))
+            pretax = float(row.get("Pretax Income"))
+        except (TypeError, ValueError):
+            continue
+        if pretax > 0:
+            ratio = provision / pretax
+            if 0.0 < ratio <= 0.5:
+                return ratio
+    return None
+
+
+def _effective_tax_rate(company_data: Dict[str, Any],
+                        json_data: Optional[Dict[str, Any]] = None) -> float:
     """
     The rate that shields interest. Falls back to a mature-market average
     rather than the US statutory 21%, which is wrong for most of the world and
     was previously applied to every company regardless of domicile.
+
+    THE BUG this fixes: the only source consulted was
+    company_data["growth_profitability"], which the scraper NEVER populates
+    with a tax rate — checked across all 43 real runs on disk, zero contain
+    `effective_tax_rate` or `tax_rate`. So every company on earth was given the
+    same hardcoded default while the report presented WACC as derived from that
+    issuer's own figures. NVDA's real rate is 17.88%, not 25%: ~19bp of WACC,
+    small in itself but a fabricated input on a page whose whole claim is that
+    every input is real and sourced.
     """
     gp = company_data.get("growth_profitability", {}) or {}
     for key in ("effective_tax_rate", "tax_rate"):
@@ -392,6 +442,10 @@ def _effective_tax_rate(company_data: Dict[str, Any]) -> float:
                 continue
             if 0.0 < rate < 0.6:
                 return rate
+
+    from_statements = _tax_rate_from_statements(json_data or {})
+    if from_statements is not None:
+        return from_statements
     return _TAX_DEFAULT
 
 
@@ -464,7 +518,7 @@ def ground_assumptions(
 
     # 1. WACC — always deterministic (the LLM's guess is discarded).
     llm_wacc = a.get("wacc")
-    capm = capm_components(company_data)
+    capm = capm_components(company_data, json_data)
     wacc, wacc_note = compute_capm_wacc(company_data, components=capm)
     a["wacc"] = wacc
     # Publish the derivation, not just the answer. The workbook writes these into
