@@ -686,6 +686,16 @@ class RecommendationEngineV3:
             output.append(f"- 40% × Valuation ({inputs['adj_val_gap_pct']:.1f}%) = {0.4 * inputs['adj_val_gap_pct']:.1f}%")
             output.append(f"- 40% × Net Catalysts/Risks ({inputs['net_catalyst_risk_pct']:.1f}%) = {0.4 * inputs['net_catalyst_risk_pct']:.1f}%")
             output.append(f"- 20% × Momentum ({inputs['momentum_score_pct']:.1f}%) = {0.2 * inputs['momentum_score_pct']:.1f}%")
+            # Show the sum of the three lines above, then the cap as its own
+            # step. Printing the CAPPED total straight under them made the
+            # arithmetic visibly wrong whenever the cap bound.
+            if inputs.get('cap_applied'):
+                output.append(
+                    f"- **Sum**: {inputs['uncapped_expected_return_pct']:.1f}%")
+                output.append(
+                    f"- **Capped at ±{inputs.get('cap_pct', 30):.0f}%** "
+                    f"(a model this far from the market price is more often a broken "
+                    f"assumption than a broken market)")
             output.append(f"- **Total**: {fixed_numbers['expected_return_pct_12m']:.1f}%")
 
             # Conspicuous annotation when the section shipped without full

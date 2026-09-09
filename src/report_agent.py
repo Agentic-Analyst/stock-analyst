@@ -581,9 +581,30 @@ def extract_valuation(computed_values: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def extract_news_analysis(screening_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract news screening analysis."""
+    """
+    Extract news screening analysis.
+
+    `analysis_summary` is carried under BOTH names. The report's own sections
+    read `summary`, but this dict is also handed to RecommendationEngineV3 as
+    its `screening_data` (see generate_recommendation_section), and the engine
+    reads the raw key — `screening_data['analysis_summary']['overall_sentiment']`
+    at recommendation_engine.py:108, and `articles_analyzed` at :146.
+
+    Renaming it here meant both lookups missed on every run ever produced:
+    NVDA's screen was `bearish` over 30 articles and reached the engine as
+    `neutral` over 0. Sentiment is 20% of the expected-return formula through
+    calculate_momentum, so every bearish screen scored 3pp too optimistic and
+    every bullish one 3pp too pessimistic. Worse, `articles_analyzed == 0` trips
+    the has_news_evidence guard, so a run with real news could disable its own
+    citations and claim the news evidence was unavailable.
+
+    Keeping both keys fixes the engine without breaking the report sections that
+    already read `summary`.
+    """
+    summary = screening_data.get('analysis_summary', {})
     return {
-        'summary': screening_data.get('analysis_summary', {}),
+        'summary': summary,
+        'analysis_summary': summary,
         'catalysts': screening_data.get('catalysts', []),
         'risks': screening_data.get('risks', []),
         'mitigations': screening_data.get('mitigations', []),

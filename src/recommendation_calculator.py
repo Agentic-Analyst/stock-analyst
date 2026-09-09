@@ -133,6 +133,12 @@ class RecommendationCalculator:
         )
         
         # 5. Apply volatility caps (unless survival risk)
+        # The uncapped figure is kept so the report can show its own arithmetic
+        # honestly: the three weighted lines sum to THIS, not to the capped
+        # total, and printing the sum under a different total made the
+        # methodology section visibly not add up (a shipped VOO report showed
+        # -32.0 +2.6 -2.0 under a Total of -30.0).
+        uncapped_expected_return_pct = expected_return_pct
         if not survival_risk:
             expected_return_pct = max(
                 min(expected_return_pct, self.MAX_12M_MOVEMENT * 100),
@@ -215,7 +221,12 @@ class RecommendationCalculator:
                 "risk_score_pct": round(risk_score_pct, 2),
                 "net_catalyst_risk_pct": round(net_catalyst_risk_pct, 2),
                 "momentum_score_pct": round(momentum_score_pct, 2),
-                "hist_vol_annual_pct": round(hist_vol_annual_pct, 2)
+                "hist_vol_annual_pct": round(hist_vol_annual_pct, 2),
+                "uncapped_expected_return_pct": round(uncapped_expected_return_pct, 2),
+                "cap_applied": bool(
+                    abs(uncapped_expected_return_pct - expected_return_pct) > 0.05
+                ),
+                "cap_pct": self.MAX_12M_MOVEMENT * 100,
             }
         }
     
