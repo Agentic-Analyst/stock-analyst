@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+import contextvars
 import json
 
 from llms.config import get_llm
@@ -33,6 +34,9 @@ def load_prompt(prompt_name: str) -> str:
     prompt_path = Path(__file__).parent.parent / "prompts" / f"{prompt_name}.md"
     with open(prompt_path, 'r') as f:
         return f.read()
+
+
+from src.currency import currency_symbol  # noqa: E402
 
 
 def load_financial_json(json_path: Path) -> Dict[str, Any]:
@@ -47,20 +51,46 @@ def load_computed_values_json(json_path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
+# The currency this summary is denominated in, set from the run's own listing
+# currency before any figure is formatted. A ContextVar rather than a global so
+# concurrent runs in one process cannot bleed into each other.
+_SUMMARY_CURRENCY: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "financial_summary_currency", default="")
+
+
+def set_summary_currency(code: Optional[str]) -> None:
+    """Pin the currency for the summary being generated. None clears it."""
+    _SUMMARY_CURRENCY.set((code or "").strip())
+
+
+def _money_symbol() -> str:
+    code = _SUMMARY_CURRENCY.get()
+    return currency_symbol(code) if code else "$"
+
+
 def format_number(num, decimals=2):
-    """Format number with commas and appropriate unit suffix."""
+    """
+    Format a monetary figure in the SUMMARY'S currency.
+
+    This hardcoded "$", so every figure in a euro, yen or rupee summary was
+    labelled as dollars — the identical defect report_agent.format_number was
+    fixed for (LVMH's projections read "$83.23B"), on a file the fix was never
+    applied to. The summary is downloadable as a PDF, so those figures reach a
+    user directly.
+    """
     if num is None:
         return "N/A"
+    sym = _money_symbol()
     try:
         num = float(num)
         if abs(num) >= 1e9:
-            return f"${num/1e9:.{decimals}f}B"
+            return f"{sym}{num/1e9:.{decimals}f}B"
         elif abs(num) >= 1e6:
-            return f"${num/1e6:.{decimals}f}M"
+            return f"{sym}{num/1e6:.{decimals}f}M"
         elif abs(num) >= 1e3:
-            return f"${num/1e3:.{decimals}f}K"
+            return f"{sym}{num/1e3:.{decimals}f}K"
         else:
-            return f"${num:.{decimals}f}"
+            return f"{sym}{num:.{decimals}f}"
     except:
         return str(num)
 
@@ -84,9 +114,15 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
     capital_structure = company_data.get('capital_structure', {})
     growth_profitability = company_data.get('growth_profitability', {})
     forward_guidance = company_data.get('forward_guidance', {})
-    
+
+    # Pin the currency here rather than at the call site: every figure this
+    # summary formats flows from this dict, so pinning where the data is read
+    # means a new entry point cannot forget to do it and silently print dollars.
+    set_summary_currency(basic_info.get('currency'))
+
     return {
         'ticker': financial_data.get('ticker', 'N/A'),
+        'currency': basic_info.get('currency') or '',
         'company_name': basic_info.get('long_name', 'Unknown Company'),
         'sector': basic_info.get('sector', 'N/A'),
         'industry': basic_info.get('industry', 'N/A'),
