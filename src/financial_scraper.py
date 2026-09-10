@@ -90,6 +90,41 @@ def _price_in_major_units(price, currency):
         return price
 
 
+def _analyst_target_in_financial_currency(target, info):
+    """A provider quote target in the same units/currency as model fair value."""
+    return _price_in_financial_currency(
+        _price_in_major_units(target, info.get("currency")), info)
+
+
+def _convert_consensus_prices(consensus, company_data):
+    """Normalize an external provider's quote-currency targets for the model."""
+    if not isinstance(consensus, dict) or not consensus:
+        return consensus or {}
+    target = consensus.get("price_target")
+    if not isinstance(target, dict):
+        return consensus
+    # Yahoo targets were normalized when `forward_guidance` was built. When a
+    # plan-limited Finnhub response falls back to that section, converting it
+    # here again would multiply cross-currency listings twice.
+    if target.get("source") == "yahoo_finance":
+        return consensus
+    basic = company_data.get("basic_info", {}) or {}
+    market = company_data.get("market_data", {}) or {}
+    listing = basic.get("listing_currency")
+    financial = basic.get("currency")
+    rate = market.get("fx_listing_to_financial")
+    factor = 1.0
+    if listing and financial and listing != financial and isinstance(rate, (int, float)):
+        factor *= float(rate)
+    if factor != 1.0:
+        for key in ("mean", "median", "high", "low"):
+            value = target.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                target[key] = float(value) * factor
+    target["currency"] = financial or listing
+    return consensus
+
+
 class FinancialScraper:
     """Financial statements scraper for collecting precise financial data."""
     
@@ -541,11 +576,20 @@ class FinancialScraper:
                         info.get("currency"),
                     ),
                     "fx_listing_to_financial": _fx_listing_to_financial(info),
-                    "previous_close": _price_in_major_units(info.get("previousClose"), info.get("currency")),
+                    "previous_close": _analyst_target_in_financial_currency(
+                        info.get("previousClose"), info),
+                    "previous_close_listing": _price_in_major_units(
+                        info.get("previousClose"), info.get("currency")),
                     "market_cap": info.get("marketCap"),
                     "enterprise_value": info.get("enterpriseValue"),
-                    "52_week_high": _price_in_major_units(info.get("fiftyTwoWeekHigh"), info.get("currency")),
-                    "52_week_low": _price_in_major_units(info.get("fiftyTwoWeekLow"), info.get("currency")),
+                    "52_week_high": _analyst_target_in_financial_currency(
+                        info.get("fiftyTwoWeekHigh"), info),
+                    "52_week_low": _analyst_target_in_financial_currency(
+                        info.get("fiftyTwoWeekLow"), info),
+                    "52_week_high_listing": _price_in_major_units(
+                        info.get("fiftyTwoWeekHigh"), info.get("currency")),
+                    "52_week_low_listing": _price_in_major_units(
+                        info.get("fiftyTwoWeekLow"), info.get("currency")),
                     "dividend_yield": info.get("dividendYield"),
                     "ex_dividend_date": info.get("exDividendDate"),
                     "dividend_rate": info.get("dividendRate"),
@@ -615,10 +659,14 @@ class FinancialScraper:
                 
                 # 7. Management Guidance & Analyst Estimates
                 "forward_guidance": {
-                    "target_high_price": info.get("targetHighPrice"),
-                    "target_low_price": info.get("targetLowPrice"),
-                    "target_mean_price": info.get("targetMeanPrice"),
-                    "target_median_price": info.get("targetMedianPrice"),
+                    "target_high_price": _analyst_target_in_financial_currency(
+                        info.get("targetHighPrice"), info),
+                    "target_low_price": _analyst_target_in_financial_currency(
+                        info.get("targetLowPrice"), info),
+                    "target_mean_price": _analyst_target_in_financial_currency(
+                        info.get("targetMeanPrice"), info),
+                    "target_median_price": _analyst_target_in_financial_currency(
+                        info.get("targetMedianPrice"), info),
                     "recommendation_mean": info.get("recommendationMean"),
                     "recommendation_key": info.get("recommendationKey"),
                     "number_of_analyst_opinions": info.get("numberOfAnalystOpinions"),
@@ -794,6 +842,7 @@ class FinancialScraper:
         modeling_data = {
             "ticker": self.ticker,
             "scraped_at": datetime.utcnow().isoformat(),
+            "analysis_model_version": os.getenv("ANALYSIS_MODEL_VERSION") or "unversioned",
             "data_type": "annual" if annual else "quarterly",
             "data_purpose": "financial_modeling",
             
@@ -853,6 +902,49 @@ class FinancialScraper:
         # 4. Scrape analyst data
         self._log("info", "Collecting analyst estimates...")
         modeling_data["analyst_data"] = self.scrape_analyst_estimates()
+        try:
+            from analyst_consensus import collect_consensus
+            company_data = modeling_data.get("company_data", {}) or {}
+            guidance = company_data.get("forward_guidance", {}) or {}
+            currency = (company_data.get("basic_info", {}) or {}).get("currency")
+            consensus = collect_consensus(
+                self.ticker, guidance, currency=currency)
+            consensus = _convert_consensus_prices(consensus, company_data)
+            if consensus:
+                modeling_data["analyst_data"]["consensus"] = consensus
+                company_data["analyst_consensus"] = consensus
+                # Keep legacy consumers working while attaching source/date in
+                # `analyst_consensus` for every new consumer.
+                target = consensus.get("price_target", {}) or {}
+                recommendation = consensus.get("recommendation", {}) or {}
+                for source_key, legacy_key in (
+                    ("mean", "target_mean_price"),
+                    ("median", "target_median_price"),
+                    ("high", "target_high_price"),
+                    ("low", "target_low_price"),
+                ):
+                    if target.get(source_key):
+                        guidance[legacy_key] = target[source_key]
+                if target.get("analyst_count"):
+                    guidance["number_of_analyst_opinions"] = target["analyst_count"]
+                if recommendation.get("label"):
+                    guidance["recommendation_key"] = recommendation["label"]
+                company_data["forward_guidance"] = guidance
+        except Exception as error:
+            # External consensus is an optional cross-check. Financial
+            # statements and the model remain available if a provider is down.
+            self._log("warning", f"Analyst consensus unavailable: {type(error).__name__}")
+
+        # 4b. A real comparable-company set, when explicitly enabled. The old
+        # "comps" leg reused this company's own current multiple, so it was a
+        # market-price echo rather than an independent methodology.
+        try:
+            from peer_comps import collect_peer_comps
+            peer_comps = collect_peer_comps(self.ticker)
+            if peer_comps:
+                modeling_data["industry_data"]["peer_comps"] = peer_comps
+        except Exception as error:
+            self._log("warning", f"Peer comps unavailable: {type(error).__name__}")
         time.sleep(0.5)
         
         # 5. Calculate advanced metrics for modeling
@@ -1263,5 +1355,3 @@ class FinancialScraper:
                 "quarterly": (self.financials_dir / "financials_quarterly_modeling_latest.json").exists()
             }
         }
-
-

@@ -128,3 +128,81 @@ def test_the_cap_is_reported_so_the_report_can_name_it():
     calc = RecommendationCalculator(sector="Technology")
     i = calc.calculate_fixed_numbers(**numbers())["inputs"]
     assert i["cap_pct"] == 30.0
+
+
+def test_rating_uses_the_same_blended_fair_value_the_report_shows():
+    calc = RecommendationCalculator(sector="Technology")
+    out = calc.calculate_fixed_numbers(**numbers(
+        current_price=200.0,
+        dcf_perpetual=50.0,
+        dcf_exit=60.0,
+        fair_value=220.0,
+        catalyst_score_pct=0.0,
+        risk_score_pct=0.0,
+        momentum_score_pct=0.0,
+    ))
+    assert out["inputs"]["valuation_basis"] == "blended_fair_value"
+    assert out["inputs"]["raw_val_gap_pct"] == 10.0
+    assert out["expected_return_pct_12m"] == 4.0
+    assert out["rating"] == "HOLD"
+
+
+def test_rating_bands_are_symmetric_around_hold():
+    calc = RecommendationCalculator()
+    assert calc._determine_rating(7.99) == "HOLD"
+    assert calc._determine_rating(-7.99) == "HOLD"
+    assert calc._determine_rating(8.0) == "BUY"
+    assert calc._determine_rating(-8.0) == "SELL"
+    assert calc._determine_rating(20.0) == "STRONG BUY"
+    assert calc._determine_rating(-20.0) == "STRONG SELL"
+
+
+def test_consensus_is_recorded_as_a_cross_check_not_added_to_return():
+    calc = RecommendationCalculator()
+    out = calc.calculate_fixed_numbers(**numbers(
+        current_price=100.0,
+        dcf_perpetual=100.0,
+        dcf_exit=100.0,
+        fair_value=100.0,
+        analyst_target=150.0,
+        analyst_count=25,
+        catalyst_score_pct=0.0,
+        risk_score_pct=0.0,
+        momentum_score_pct=0.0,
+    ))
+    assert out["expected_return_pct_12m"] == 0.0
+    assert out["inputs"]["analyst_target_gap_pct"] == 50.0
+    assert out["inputs"]["analyst_count"] == 25
+
+
+def test_well_covered_opposite_consensus_reduces_extreme_conviction_symmetrically():
+    calc = RecommendationCalculator()
+    common = dict(
+        catalyst_score_pct=0.0, risk_score_pct=0.0,
+        momentum_score_pct=0.0, hist_vol_annual_pct=20.0,
+        analyst_count=20,
+    )
+    bearish = calc.calculate_fixed_numbers(
+        ticker="X", current_price=100.0, dcf_perpetual=30.0, dcf_exit=30.0,
+        fair_value=30.0, analyst_target=120.0, **common)
+    bullish = calc.calculate_fixed_numbers(
+        ticker="X", current_price=100.0, dcf_perpetual=170.0, dcf_exit=170.0,
+        fair_value=170.0, analyst_target=80.0, **common)
+    assert bearish["expected_return_pct_12m"] == -28.0
+    assert bearish["rating"] == "SELL"
+    assert bullish["expected_return_pct_12m"] == 28.0
+    assert bullish["rating"] == "BUY"
+    assert bearish["rating_confidence"] == bullish["rating_confidence"] == "low"
+    assert bearish["inputs"]["consensus_alignment"] == "conflicting"
+
+
+def test_historical_volatility_uses_saved_daily_prices():
+    from report_agent import historical_volatility_pct
+
+    closes = [100 * (1.01 if i % 2 else 0.99) ** i for i in range(40)]
+    data = {"market_data": {"historical_prices": {"prices": {
+        f"2026-01-{i + 1:02d}": {"close": close}
+        for i, close in enumerate(closes)
+    }}}}
+    value = historical_volatility_pct(data)
+    assert isinstance(value, float) and value > 0

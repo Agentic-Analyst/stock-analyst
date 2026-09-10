@@ -98,9 +98,18 @@ class RecommendationEngineV3:
         dcf_perpetual = dcf_perpetual_raw if dcf_perpetual_raw is not None else 0
         dcf_exit = dcf_exit_raw if dcf_exit_raw is not None else 0
         
-        # Estimate volatility from company data or use default
-        # TODO: Calculate actual historical volatility from price data
-        hist_vol_annual_pct = 18.0  # Default for tech stocks
+        # Annualized realized volatility is derived from the saved daily price
+        # history. Fall back only for legacy artifacts without that field.
+        hist_vol_annual_pct = company_data.get('hist_vol_annual_pct')
+        if not isinstance(hist_vol_annual_pct, (int, float)) or hist_vol_annual_pct <= 0:
+            hist_vol_annual_pct = 18.0
+
+        summary = valuation_data.get('summary', {}) or {}
+        fair_value = summary.get('average_intrinsic')
+        analyst_target = company_data.get('target_mean_price')
+        analyst_count = company_data.get('num_analysts')
+        consensus = company_data.get('analyst_consensus', {}) or {}
+        target_meta = consensus.get('price_target', {}) or {}
         
         # Calculate catalyst, risk, and momentum scores
         catalysts = screening_data.get('catalysts', [])
@@ -129,7 +138,12 @@ class RecommendationEngineV3:
             risk_score_pct=risk_score,
             momentum_score_pct=momentum_score,
             hist_vol_annual_pct=hist_vol_annual_pct,
-            survival_risk=False
+            survival_risk=False,
+            fair_value=fair_value,
+            analyst_target=analyst_target,
+            analyst_count=analyst_count,
+            analyst_source=target_meta.get('source'),
+            analyst_as_of=target_meta.get('as_of') or consensus.get('captured_at'),
         )
         
         # Step 3: Build evidence pack
@@ -596,6 +610,9 @@ class RecommendationEngineV3:
             ccy = getattr(self, "_ccy", "$")
             priced = fixed_numbers.get("price_available", True)
             output.append(f"### Investment Rating: {fixed_numbers['rating']}")
+            output.append(
+                f"**Rating Confidence**: "
+                f"{fixed_numbers.get('rating_confidence', 'moderate').title()}")
             if priced:
                 output.append(f"\n**12-Month Price Target**: {ccy}{fixed_numbers['targets']['m12']['price']:.2f}")
                 output.append(f"**Expected Return**: {fixed_numbers['expected_return_pct_12m']:+.1f}%")
@@ -676,9 +693,17 @@ class RecommendationEngineV3:
             # Add calculation transparency
             output.append(f"\n---\n### Calculation Methodology\n")
             inputs = fixed_numbers['inputs']
-            output.append(f"- **Raw Valuation Gap**: {inputs['raw_val_gap_pct']:.1f}%")
-            output.append(f"- **Sector Premium Adjustment**: {inputs['sector_premium_adjustment']*100:.0f}%")
-            output.append(f"- **Adjusted Valuation Gap**: {inputs['adj_val_gap_pct']:.1f}%")
+            basis = inputs.get('valuation_basis', 'valuation')
+            output.append(f"- **Valuation Gap ({basis.replace('_', ' ')})**: {inputs['raw_val_gap_pct']:.1f}%")
+            if inputs.get('analyst_target_gap_pct') is not None:
+                output.append(
+                    f"- **Analyst Consensus Cross-check**: "
+                    f"{inputs['analyst_target_gap_pct']:+.1f}% "
+                    f"({inputs.get('analyst_count', 0)} analysts; "
+                    f"{inputs.get('analyst_source') or 'source unavailable'}; "
+                    f"as of {inputs.get('analyst_as_of') or 'date unavailable'}; "
+                    f"alignment: {inputs.get('consensus_alignment', 'unavailable')}; "
+                    f"not included in intrinsic value)")
             output.append(f"- **Catalyst Score**: +{inputs['catalyst_score_pct']:.1f}%")
             output.append(f"- **Risk Score**: -{inputs['risk_score_pct']:.1f}%")
             output.append(f"- **Momentum Score**: {inputs['momentum_score_pct']:+.1f}%")

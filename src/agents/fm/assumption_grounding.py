@@ -697,23 +697,61 @@ def ground_assumptions(
 
     a["exit_multiple"] = exit_m
 
-    # 5. Market-comps leg parameters (the third method on the football
-    #    field): the company's own forward-looking multiples, mildly
-    #    de-rated, applied to FY2 projections. P/S covers pre-EBITDA names.
+    # 5. Market-comps leg parameters (the second methodology in the headline
+    # blend). Prefer a same-subindustry median backed by at least three actual
+    # peers. Fall back to the legacy self-multiple proxy when the licensed
+    # provider is disabled/unavailable; provenance makes the distinction clear.
+    peer_comps = (((json_data or {}).get("industry_data") or {}).get("peer_comps") or {})
+    peer_ev = peer_comps.get("median_ev_ebitda")
+    peer_ps = peer_comps.get("median_price_sales")
+    peer_ev_count = int(peer_comps.get("ev_ebitda_peer_count") or 0)
+    peer_ps_count = int(peer_comps.get("price_sales_peer_count") or 0)
     ev_eb = vm.get("enterprise_to_ebitda")
-    a["comps_ev_ebitda"] = (
-        _clamp(0.9 * float(ev_eb), 6.0, 25.0) if ev_eb and ev_eb > 0 else 0.0
-    )
     ps = vm.get("price_to_sales")
-    a["comps_ps"] = _clamp(0.9 * float(ps), 0.5, 40.0) if ps and ps > 0 else 0.0
+    ev_from_peers = bool(peer_ev and peer_ev > 0 and peer_ev_count >= 3)
+    ps_from_peers = bool(peer_ps and peer_ps > 0 and peer_ps_count >= 3)
+    if ev_from_peers:
+        a["comps_ev_ebitda"] = _clamp(float(peer_ev), 4.0, 30.0)
+    else:
+        a["comps_ev_ebitda"] = (
+            _clamp(0.9 * float(ev_eb), 6.0, 25.0) if ev_eb and ev_eb > 0 else 0.0
+        )
+    if ps_from_peers:
+        a["comps_ps"] = _clamp(float(peer_ps), 0.5, 40.0)
+    else:
+        a["comps_ps"] = _clamp(0.9 * float(ps), 0.5, 40.0) if ps and ps > 0 else 0.0
+    real_peers = ev_from_peers or ps_from_peers
+    a["comps_ev_source"] = "finnhub_peer_median" if ev_from_peers else "self_multiple_proxy"
+    a["comps_ps_source"] = "finnhub_peer_median" if ps_from_peers else "self_multiple_proxy"
+    a["comps_source"] = (
+        a["comps_ev_source"] if a["comps_ev_source"] == a["comps_ps_source"]
+        else "mixed_peer_and_self_proxy"
+    )
+    a["comps_peer_count"] = max(
+        peer_ev_count if ev_from_peers else 0,
+        peer_ps_count if ps_from_peers else 0,
+    )
     fg = company_data.get("forward_guidance", {}) or {}
     tgt = fg.get("target_mean_price")
     a["analyst_target_mean"] = float(tgt) if tgt and tgt > 0 else 0.0
+    consensus = company_data.get("analyst_consensus", {}) or {}
+    target_meta = consensus.get("price_target", {}) or {}
+    recommendation_meta = consensus.get("recommendation", {}) or {}
+    a["analyst_target_low"] = float(target_meta.get("low") or 0.0)
+    a["analyst_target_high"] = float(target_meta.get("high") or 0.0)
+    a["analyst_count"] = int(target_meta.get("analyst_count") or 0)
+    a["analyst_consensus_source"] = target_meta.get("source")
+    a["analyst_consensus_as_of"] = target_meta.get("as_of") or consensus.get("captured_at")
+    a["analyst_consensus_rating"] = recommendation_meta.get("label")
     if a["comps_ev_ebitda"] or a["comps_ps"]:
         notes.append(
-            f"Comps leg: EV/EBITDA {a['comps_ev_ebitda']:.1f}x / "
+            f"Comps leg (EV/EBITDA {a['comps_ev_source']}; "
+            f"P/S {a['comps_ps_source']}"
+            + (f"; up to {a['comps_peer_count']} peers" if real_peers else "")
+            + f"): EV/EBITDA {a['comps_ev_ebitda']:.1f}x / "
             f"P/S {a['comps_ps']:.1f}x on FY2 projections"
-            + (f"; analyst mean target ${a['analyst_target_mean']:.2f}"
+            + (f"; analyst mean target {a['analyst_target_mean']:.2f} "
+               f"({a['analyst_count']} analysts, {a['analyst_consensus_source'] or 'source unavailable'})"
                if a["analyst_target_mean"] else "")
         )
 

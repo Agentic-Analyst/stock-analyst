@@ -343,7 +343,7 @@ Because the agent decides scope, most conversational questions — a price check
 
 - Python 3.11
 - API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `SERPAPI_API_KEY`
-- Optional: `MONGO_URI` + `MONGO_DB` (article cache + session memory), `FRED_API_KEY` (free; enables `get_macro`), `CHAT_MODEL` (defaults to `gpt-5.4-mini`)
+- Optional: `MONGO_URI` + `MONGO_DB` (article cache + session memory), `FRED_API_KEY` (free; enables `get_macro`), `CHAT_MODEL` (defaults to `gpt-5.4-mini`), and `FINNHUB_API_KEY` (licensed analyst consensus; set `PEER_COMPS_ENABLED=true` only after checking plan coverage and rate limits)
 
 ### Installation
 

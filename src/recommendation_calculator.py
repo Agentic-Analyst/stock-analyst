@@ -22,38 +22,27 @@ class RecommendationCalculator:
     All numbers are computed using transparent, auditable formulas.
     """
     
-    # Sector-specific premium adjustments
-    # Quality companies in these sectors often trade above DCF
-    SECTOR_PREMIUM_ADJUSTMENTS = {
-        "Technology": 0.50,  # Ecosystem value, network effects
-        "Healthcare": 0.30,  # R&D pipeline value, regulatory moats
-        "Consumer Discretionary": 0.20,  # Brand value
-        "Consumer Staples": 0.15,
-        "Financial Services": 0.10,
-        "Industrials": 0.15,
-        "default": 0.20
-    }
-    
     # Volatility caps for price movements
     MAX_3M_MOVEMENT = 0.12   # ±12%
     MAX_6M_MOVEMENT = 0.20   # ±20%
     MAX_12M_MOVEMENT = 0.30  # ±30%
     
-    # Rating bands (based on expected return)
+    # Symmetric rating bands. The old table called -5% a SELL but required
+    # +10% for BUY, mechanically creating more sell calls from equal noise.
     RATING_BANDS = {
         "STRONG BUY": (20.0, float('inf')),
-        "BUY": (10.0, 20.0),
-        "HOLD": (-5.0, 10.0),
-        "SELL": (-20.0, -5.0),
+        "BUY": (8.0, 20.0),
+        "HOLD": (-8.0, 8.0),
+        "SELL": (-20.0, -8.0),
         "STRONG SELL": (float('-inf'), -20.0)
     }
     
     def __init__(self, sector: str = "default"):
         self.sector = sector
-        self.sector_adjustment = self.SECTOR_PREMIUM_ADJUSTMENTS.get(
-            sector, 
-            self.SECTOR_PREMIUM_ADJUSTMENTS["default"]
-        )
+        # Kept in the payload as zero for compatibility with old reports. A
+        # sector label is not measured evidence that half of a technology
+        # valuation gap should disappear, which is what the old table did.
+        self.sector_adjustment = 0.0
     
     def calculate_fixed_numbers(
         self,
@@ -65,7 +54,12 @@ class RecommendationCalculator:
         risk_score_pct: float,
         momentum_score_pct: float,
         hist_vol_annual_pct: float,
-        survival_risk: bool = False
+        survival_risk: bool = False,
+        fair_value: Optional[float] = None,
+        analyst_target: Optional[float] = None,
+        analyst_count: Optional[int] = None,
+        analyst_source: Optional[str] = None,
+        analyst_as_of: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Calculate all fixed numbers deterministically.
@@ -114,13 +108,27 @@ class RecommendationCalculator:
         dcf_avg = sum(_legs) / len(_legs) if _legs else 0
         legs_used = len(_legs)
         
-        # 2. Raw valuation gap
+        # 2. Raw valuation gap. Rate on the same headline fair value the user
+        # sees. Previously the dashboard blended DCF and comps, while this
+        # engine silently discarded comps and recomputed a DCF-only view.
+        fair_value_available = (
+            isinstance(fair_value, (int, float)) and not isinstance(fair_value, bool)
+            and math.isfinite(float(fair_value)) and float(fair_value) > 0
+        )
+        valuation_value = float(fair_value) if fair_value_available else dcf_avg
+        valuation_basis = "blended_fair_value" if fair_value_available else "dcf_average"
+
         # No usable leg is "no valuation signal", not a 100% discount — that
         # would rate a company STRONG SELL because both methods broke on it.
-        raw_val_gap_pct = ((dcf_avg / current_price - 1) * 100) if (current_price > 0 and legs_used) else 0
+        valuation_available = fair_value_available or bool(legs_used)
+        raw_val_gap_pct = (
+            (valuation_value / current_price - 1) * 100
+            if current_price > 0 and valuation_available else 0
+        )
         
-        # 3. Adjusted valuation gap (sector premium)
-        adj_val_gap_pct = raw_val_gap_pct * (1 - self.sector_adjustment)
+        # 3. No unmeasured sector haircut. The 40% weight below already models
+        # partial 12-month convergence toward a longer-duration fair value.
+        adj_val_gap_pct = raw_val_gap_pct
         
         # 4. Expected return (weighted formula)
         # 40% valuation + 40% catalysts/risks + 20% momentum
@@ -199,7 +207,41 @@ class RecommendationCalculator:
         # instead of letting the band table hand back a default that reads as
         # a considered call.
         rating = self._determine_rating(expected_return_pct) if price_available else "NOT RATED"
+
+        analyst_target_value = (
+            float(analyst_target)
+            if isinstance(analyst_target, (int, float))
+            and not isinstance(analyst_target, bool)
+            and math.isfinite(float(analyst_target)) and float(analyst_target) > 0
+            else None
+        )
+        analyst_gap_pct = (
+            (analyst_target_value / current_price - 1) * 100
+            if analyst_target_value is not None and current_price > 0 else None
+        )
         
+        # Human consensus is not intrinsic value, but a well-covered opposite
+        # view is evidence that our model may be missing an assumption. Keep
+        # the arithmetic untouched and reduce only the conviction of an
+        # extreme call. The rule is symmetric for bullish and bearish models.
+        consensus_alignment = "unavailable"
+        rating_confidence = "moderate"
+        count = int(analyst_count or 0)
+        if analyst_gap_pct is not None and count >= 5:
+            model_direction = 1 if raw_val_gap_pct >= 8 else (-1 if raw_val_gap_pct <= -8 else 0)
+            analyst_direction = 1 if analyst_gap_pct >= 8 else (-1 if analyst_gap_pct <= -8 else 0)
+            if model_direction and analyst_direction and model_direction != analyst_direction:
+                consensus_alignment = "conflicting"
+                rating_confidence = "low"
+                if rating == "STRONG BUY":
+                    rating = "BUY"
+                elif rating == "STRONG SELL":
+                    rating = "SELL"
+            elif model_direction and model_direction == analyst_direction:
+                consensus_alignment = "supportive"
+            else:
+                consensus_alignment = "mixed"
+
         # 10. Build complete fixed numbers payload
         return {
             "as_of": str(date.today()),
@@ -208,6 +250,7 @@ class RecommendationCalculator:
             "expected_return_pct_12m": round(expected_return_pct, 2),
             "targets": targets_with_ranges,
             "rating": rating,
+            "rating_confidence": rating_confidence,
             # Downstream must be able to distinguish "no view" from "neutral
             # view": the report narrative, the price-target table and the
             # answer all read this.
@@ -215,8 +258,16 @@ class RecommendationCalculator:
             "inputs": {
                 "raw_val_gap_pct": round(raw_val_gap_pct, 2),
                 "dcf_legs_used": legs_used,
+                "valuation_basis": valuation_basis,
+                "valuation_value": round(valuation_value, 2) if valuation_available else None,
                 "sector_premium_adjustment": self.sector_adjustment,
                 "adj_val_gap_pct": round(adj_val_gap_pct, 2),
+                "analyst_target": round(analyst_target_value, 2) if analyst_target_value else None,
+                "analyst_target_gap_pct": round(analyst_gap_pct, 2) if analyst_gap_pct is not None else None,
+                "analyst_count": count,
+                "analyst_source": analyst_source,
+                "analyst_as_of": analyst_as_of,
+                "consensus_alignment": consensus_alignment,
                 "catalyst_score_pct": round(catalyst_score_pct, 2),
                 "risk_score_pct": round(risk_score_pct, 2),
                 "net_catalyst_risk_pct": round(net_catalyst_risk_pct, 2),
@@ -238,10 +289,18 @@ class RecommendationCalculator:
     
     def _determine_rating(self, expected_return_pct: float) -> str:
         """Determine rating based on expected return."""
-        for rating, (lower, upper) in self.RATING_BANDS.items():
-            if lower <= expected_return_pct < upper:
-                return rating
-        return "HOLD"  # Default
+        # Spell out the boundaries so exactly -8% maps to SELL just as exactly
+        # +8% maps to BUY. A tuple loop cannot make both inner boundaries
+        # inclusive without overlapping intervals.
+        if expected_return_pct >= 20.0:
+            return "STRONG BUY"
+        if expected_return_pct >= 8.0:
+            return "BUY"
+        if expected_return_pct > -8.0:
+            return "HOLD"
+        if expected_return_pct > -20.0:
+            return "SELL"
+        return "STRONG SELL"
     
     def estimate_catalyst_impact(self, catalysts: list) -> float:
         """

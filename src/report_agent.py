@@ -22,6 +22,8 @@ import contextvars
 # deploy: the helper referenced `re` at call time and the module never
 # imported it.
 import re
+import math
+import statistics
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -30,6 +32,24 @@ import json
 from llms.config import get_llm
 from logger import StockAnalystLogger
 from recommendation_engine import RecommendationEngineV3
+
+
+def historical_volatility_pct(financial_data: Dict[str, Any]) -> Optional[float]:
+    """Annualized close-to-close volatility from the persisted daily history."""
+    prices = (((financial_data.get("market_data") or {}).get("historical_prices") or {})
+              .get("prices") or {})
+    closes = []
+    for day in sorted(prices):
+        row = prices.get(day) or {}
+        close = row.get("close")
+        if (isinstance(close, (int, float)) and not isinstance(close, bool)
+                and math.isfinite(float(close)) and close > 0):
+            closes.append(float(close))
+    if len(closes) < 31:
+        return None
+    returns = [math.log(current / previous)
+               for previous, current in zip(closes, closes[1:])]
+    return round(statistics.stdev(returns) * math.sqrt(252) * 100, 2)
 
 
 # Free-text output language for the report narrative. Set once per report run
@@ -192,6 +212,7 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
     capital_structure = company_data.get('capital_structure', {})
     growth_profitability = company_data.get('growth_profitability', {})
     forward_guidance = company_data.get('forward_guidance', {})
+    analyst_consensus = company_data.get('analyst_consensus', {}) or {}
     
     return {
         'ticker': financial_data.get('ticker', 'N/A'),
@@ -248,6 +269,8 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
         'target_low_price': forward_guidance.get('target_low_price', 0),
         'recommendation': forward_guidance.get('recommendation_key', 'N/A'),
         'num_analysts': forward_guidance.get('number_of_analyst_opinions', 0),
+        'analyst_consensus': analyst_consensus,
+        'hist_vol_annual_pct': historical_volatility_pct(financial_data),
     }
 
 
@@ -560,6 +583,7 @@ def extract_valuation(computed_values: Dict[str, Any]) -> Dict[str, Any]:
             # shown, so the two rows a reader could see did not average to the
             # figure beneath them (PayPal: $98.34 and $89.59 -> "$87.11").
             'comps_intrinsic': summary.get('(30, 2)'),
+            'analyst_target': summary.get('(31, 2)'),
             'average_intrinsic': summary.get('(26, 2)', 0),
             'upside': summary.get('(27, 2)', 0),
             'shares_outstanding': summary.get('(8, 2)', 0),
@@ -904,6 +928,11 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     comps = valuation['summary'].get('comps_intrinsic')
     if isinstance(comps, (int, float)) and comps > 0 and not bank:
         summary_table += f"| Market Comps Intrinsic Value | {format_number(comps, 2)} |\n"
+    analyst_target = valuation['summary'].get('analyst_target')
+    if isinstance(analyst_target, (int, float)) and analyst_target > 0:
+        summary_table += (
+            f"| Analyst Consensus Target (cross-check only) | "
+            f"{format_number(analyst_target, 2)} |\n")
     # The workbook averages only the legs that came out POSITIVE — a negative
     # per-share value is a method that does not fit the company, not a low
     # estimate. Say how many actually entered, so "3 methods" is never printed

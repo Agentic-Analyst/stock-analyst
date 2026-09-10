@@ -37,7 +37,11 @@ class SummaryTabBuilder:
     """
     
     def __init__(self, comps_ev_ebitda: float = 0.0, comps_ps: float = 0.0,
-                 analyst_target: float = 0.0):
+                 comps_source: str = None, comps_peer_count: int = 0,
+                 analyst_target: float = 0.0, analyst_target_low: float = 0.0,
+                 analyst_target_high: float = 0.0, analyst_count: int = 0,
+                 analyst_source: str = None, analyst_as_of: str = None,
+                 analyst_rating: str = None):
         """
         Initialize the Summary builder.
 
@@ -47,7 +51,15 @@ class SummaryTabBuilder:
         """
         self.comps_ev_ebitda = float(comps_ev_ebitda or 0.0)
         self.comps_ps = float(comps_ps or 0.0)
+        self.comps_source = comps_source or "unavailable"
+        self.comps_peer_count = int(comps_peer_count or 0)
         self.analyst_target = float(analyst_target or 0.0)
+        self.analyst_target_low = float(analyst_target_low or 0.0)
+        self.analyst_target_high = float(analyst_target_high or 0.0)
+        self.analyst_count = int(analyst_count or 0)
+        self.analyst_source = analyst_source or "source unavailable"
+        self.analyst_as_of = analyst_as_of or "date unavailable"
+        self.analyst_rating = (analyst_rating or "not available").replace("_", " ")
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -361,13 +373,27 @@ class SummaryTabBuilder:
         ws.cell(row=30, column=2).number_format = '$0.00'
         ws.cell(row=30, column=2).font = Font(bold=True, size=11)
         ws.cell(row=30, column=7,
-                value=f"EV/EBITDA {self.comps_ev_ebitda:.1f}x / P/S {self.comps_ps:.1f}x on FY2 (0 = n/a)")
+                value=(f"EV/EBITDA {self.comps_ev_ebitda:.1f}x / "
+                       f"P/S {self.comps_ps:.1f}x on FY2; {self.comps_source}; "
+                       f"{self.comps_peer_count} peers (0 = n/a)"))
         ws.cell(row=30, column=7).font = Font(italic=True, size=9)
 
         # Row 31: analyst consensus, reference only (never in the blend)
         ws.cell(row=31, column=1, value="Analyst Consensus Target (reference)")
         ws.cell(row=31, column=2, value=self.analyst_target if self.analyst_target > 0 else 0)
         ws.cell(row=31, column=2).number_format = '$0.00'
+        if self.analyst_target > 0:
+            target_range = (
+                f"; range {self.analyst_target_low:.2f}-{self.analyst_target_high:.2f}"
+                if self.analyst_target_low > 0 and self.analyst_target_high > 0 else ""
+            )
+            ws.cell(
+                row=31, column=7,
+                value=(f"{self.analyst_source}; {self.analyst_count} analysts; "
+                       f"{self.analyst_rating}; as of {self.analyst_as_of}{target_range}; "
+                       "cross-check only, excluded from intrinsic value"),
+            )
+            ws.cell(row=31, column=7).font = Font(italic=True, size=9)
         ws.cell(row=32, column=1, value="")
         
         # Row 33: Revenue (FY5)
