@@ -243,7 +243,8 @@ class SummaryTabBuilder:
         Set up Blended Valuation & Market Comparison section (rows 26-29).
         
         Rows:
-        26: Average of Methods = AVERAGE(B18, B22)
+        26: Blended fair value = mean(DCF view, market comps), where the
+            DCF view is itself the mean of the two positive DCF legs.
         27: Upside vs Market = IFERROR(B26/B9-1, "")
         28: Premium (Exit vs Perpetual) = IFERROR(B22/B18-1, "")
         29: Market Enterprise Value = B10 - B14 + B15 - B16
@@ -256,18 +257,38 @@ class SummaryTabBuilder:
         # Row 26: Average of Methods
         ws.cell(row=26, column=1, value="Average of Methods (Per-Share)")
         ws.cell(row=26, column=1).font = Font(bold=True, size=12)
-        # Blended fair value over the VALID legs (10Y DCF, exit multiple,
-        # market comps): a leg only enters the blend when positive, so a
-        # broken/unfit method cannot drag the headline below zero. When no
-        # leg is valid, fall back to the plain DCF average — the negative
-        # number then trips the UNRELIABLE valuation rail downstream.
+        # Blended fair value: the DCF VIEW and the market view, 50/50.
+        #
+        # This used to be a flat average over the three valid legs — the two
+        # DCF legs and market comps counting one vote each. The two DCF legs
+        # are not independent: they share the WACC, the projected free cash
+        # flow and the terminal logic, and differ only in how the terminal
+        # value is taken. On AAPL they came out $111.85 and $116.93, 4.5%
+        # apart. Counting them separately therefore gave one discounted-cash-
+        # flow opinion TWO THIRDS of the headline number and the only
+        # market-anchored leg one third, so whenever the DCF disagreed with
+        # the market the DCF won by construction. Over 49 stored theses the
+        # median name landed 15.7% below market and 69% were negative.
+        #
+        # Collapsing the DCF legs into a single view first, then blending that
+        # against comps, gives each METHODOLOGY one vote instead of giving one
+        # methodology two. It is not an attempt to talk the number up: where
+        # both approaches agree the result is unchanged, and it is the
+        # disagreement — which is information — that is no longer resolved 2:1
+        # in advance.
+        #
+        # A leg still only enters when positive, so a broken method cannot
+        # drag the headline below zero, and when nothing is valid it falls
+        # back to the plain DCF average whose negative value trips the
+        # UNRELIABLE valuation rail downstream.
+        _dcf_n = '(($B$18>0)+($B$22>0))'
+        _dcf_avg = f'((MAX($B$18,0)+MAX($B$22,0))/{_dcf_n})'
         ws.cell(
             row=26, column=2,
             value=(
-                '=IF((($B$18>0)+($B$22>0)+($B$30>0))=0,'
-                'AVERAGE($B$18,$B$22),'
-                '(MAX($B$18,0)+MAX($B$22,0)+MAX($B$30,0))'
-                '/(($B$18>0)+($B$22>0)+($B$30>0)))'
+                f'=IF({_dcf_n}=0,'
+                'IF($B$30>0,$B$30,AVERAGE($B$18,$B$22)),'
+                f'IF($B$30>0,({_dcf_avg}+$B$30)/2,{_dcf_avg}))'
             ),
         )
         ws.cell(row=26, column=2).number_format = '$0.00'

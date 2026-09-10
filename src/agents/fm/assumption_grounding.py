@@ -72,6 +72,33 @@ _ESTABLISHED_OM = 0.05      # margin anchoring applies above this trailing OM
 
 
 def _mature_erp() -> float:
+    """
+    The mature-market equity risk premium.
+
+    ORDER MATTERS, and it used to be wrong. This returned the _ERP house
+    assumption of 5.5% while `load_table()` — already called a few lines from
+    the only use site — carried Damodaran's PUBLISHED implied premium of about
+    4.2%. The published figure was read solely to print in the provenance
+    note, so every workbook said, in effect, "we used 5.5%; Damodaran says
+    4.2%" and then valued the company off the higher number.
+
+    That was not a small conservatism. It runs through the model twice: the
+    inflated WACC discounts the perpetuity leg directly, AND it lowers the
+    exit-multiple ceiling in `defensible_multiple`, because that ceiling is a
+    function of WACC. Both DCF legs move together off this one input, which is
+    why they agreed with each other and disagreed with the market. Measured
+    over 49 stored theses, the median name came out 15.7% BELOW market and 69%
+    were negative — a valuation engine that rated two thirds of large-cap
+    America a sell.
+
+    A published, dated, citable number is also the whole premise of the
+    product. Preferring a house assumption over the source we already fetch is
+    the one thing this page cannot afford to do.
+
+    So: an explicit env override still wins (it is how a desk states a view),
+    then Damodaran's published figure, then the embedded constant as a floor
+    for when the fetch and the snapshot are both unavailable.
+    """
     import os
     raw = os.getenv("EQUITY_RISK_PREMIUM")
     if raw:
@@ -81,6 +108,19 @@ def _mature_erp() -> float:
                 return value
         except ValueError:
             pass
+    try:
+        # Imported here, not at module scope: country_risk reaches the network
+        # on first use and this module is imported during model build.
+        from .country_risk import load_table
+        published = (load_table() or {}).get("mature_erp")
+    except Exception:
+        # A failed fetch must never break model generation; fall through to
+        # the embedded snapshot value below.
+        published = None
+    # The band is a sanity gate, not a preference: a parse failure that yields
+    # 0.4 or 0.0004 must not silently become the discount rate.
+    if isinstance(published, (int, float)) and 0.03 <= float(published) <= 0.09:
+        return float(published)
     return _ERP
 
 
