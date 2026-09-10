@@ -235,7 +235,10 @@ class TestCapmIntegration:
         published = country_risk_premium("India")[0]         # Damodaran: Baa3, 2.85% in Jan 2026
         assert 0.02 <= published <= 0.04
         assert c["country_risk_premium"] == pytest.approx(published)
-        assert c["equity_risk_premium_total"] == pytest.approx(0.055 + published)
+        # The mature ERP is read from the engine, not pinned: it is Damodaran's
+        # published implied premium and legitimately moves on each update.
+        # What this asserts is the COMPOSITION, which does not.
+        assert c["equity_risk_premium_total"] == pytest.approx(ag._mature_erp() + published)
         assert c["cost_of_equity"] == pytest.approx(
             c["risk_free_rate"] + c["beta"] * c["equity_risk_premium_total"])
         assert "India" in c["crp_source"] and "Damodaran" in c["crp_source"]
@@ -275,8 +278,9 @@ class TestCapmIntegration:
                                 "market_data": {"market_cap": 4e12}, "growth_profitability": {}})
         assert 0.001 < c["country_risk_premium"] < 0.005
         assert c["country_risk_premium"] == pytest.approx(c["sovereign_default_spread"])
-        assert c["equity_risk_premium_total"] == pytest.approx(0.055 + c["country_risk_premium"])
-        naive = c["sovereign_yield"] + c["beta"] * 0.055
+        _mature = ag._mature_erp()
+        assert c["equity_risk_premium_total"] == pytest.approx(_mature + c["country_risk_premium"])
+        naive = c["sovereign_yield"] + c["beta"] * _mature
         assert abs(c["cost_of_equity"] - naive) < 0.0005
 
     def test_an_aaa_market_is_unchanged_by_the_premium(self, monkeypatch):
@@ -288,5 +292,7 @@ class TestCapmIntegration:
                                 "market_data": {"market_cap": 3e11}, "growth_profitability": {}})
         assert c["country_risk_premium"] == 0.0
         assert c["sovereign_default_spread"] == 0.0
-        assert c["equity_risk_premium_total"] == pytest.approx(0.055)
+        # No country premium, so the total IS the mature ERP — whatever
+        # Damodaran currently publishes it as.
+        assert c["equity_risk_premium_total"] == pytest.approx(ag._mature_erp())
         assert c["risk_free_rate"] == c["sovereign_yield"]

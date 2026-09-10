@@ -35,6 +35,7 @@ from src.agents.fm.assumption_grounding import (
     risk_free_details,
     risk_free_rate,
 )
+from src.agents.fm import assumption_grounding as _ag
 from src.agents.fm.sovereign_rates import _SNAPSHOT
 
 # LVMH as scraped, the run that exposed this.
@@ -168,8 +169,15 @@ class TestRiskFreeBuild:
     def test_mature_erp_can_be_overridden(self, monkeypatch):
         monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.05")
         assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(0.05)
+        # An out-of-band override is ignored. The fallback used to be the 5.5%
+        # house constant; it is now Damodaran's published implied premium,
+        # which is the point of the change — so assert the fallback IS the
+        # engine's resolved figure rather than re-pinning a literal.
         monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.5")
-        assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(0.055)
+        monkeypatch.delenv("EQUITY_RISK_PREMIUM", raising=False)
+        _fallback = _ag._mature_erp()
+        monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.5")
+        assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(_fallback)
 
     def test_the_build_is_published_for_the_workbook_and_report(self):
         c = capm_components(INDIAN_MIDCAP)
