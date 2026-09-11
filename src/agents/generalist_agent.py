@@ -12,7 +12,7 @@ Tools available (see agents/tools/):
   * our four pipeline agents wrapped as tools: get_financials, build_model,
     analyze_news, write_report (all Phase 1–4 behaviour intact inside them);
   * keyless data tools: resolve_symbol (any-language), get_prices, get_technicals,
-    get_global_news, and get_macro (when the free FRED key is set).
+    get_global_news, get_fund, and get_macro (when the free FRED key is set).
 
 Contracts preserved for the rest of the stack:
   * When a run commits to a single ticker, the AgentContext prints
@@ -37,6 +37,7 @@ from agents.tools.data_tools import build_data_tools
 from agents.tools.capital_markets_tools import build_capital_markets_tools
 from agents.tools.prediction_market_tools import build_prediction_market_tools
 from agents.tools.crypto_tools import build_crypto_tools
+from agents.tools.fund_tools import build_fund_tools
 from agents.tools.ui_tools import build_ui_tools
 
 
@@ -58,6 +59,7 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 - **A market/macro question** ("how would falling rates affect banks?", "what happened in markets today?"): answer as an expert. Pull live data when it sharpens the answer — `get_macro` for rates/inflation/yield-curve, `get_global_news` for today's market news, `get_prices`/`get_technicals` for specific names. If a data tool isn't available, answer from your own knowledge and say it isn't live.
 - **A trading strategy / watchlist** ("the market looks weak, flag breakdowns on my names — losing the 200-day"): ENGAGE with it as a strategist. Discuss the setup, and if names are given, use `get_technicals` to check the actual levels (200-day, RSI, etc.). Be honest that you don't place live alerts, but still give real value.
 - **Cryptocurrency** ("what's the outlook for Bitcoin", "how has ETH done", "is Solana a buy"): use `get_crypto` for a live snapshot (spot, 24h/7d/30d/YTD move, market cap, 52-week range), and `get_technicals` on the coin's `-USD` symbol (e.g. BTC-USD) for RSI/moving-average levels. Crypto has NO fundamentals, earnings, or DCF — NEVER call get_financials, build_model, write_report, or compare_tickers for a coin. For event odds ("will BTC hit $100k") use `get_prediction_markets`. Frame crypto honestly: price/momentum/market-structure and macro context, not a valuation.
+- **ETF or mutual fund** ("analyze VOO", "what does QQQ own", "is this fund expensive"): use `get_fund` for fees, holdings, allocation, portfolio characteristics, adjusted-price performance, volatility, and drawdown. Use `get_prices`/`get_technicals` only when a chart or technical levels help. A fund is a portfolio, not an operating company — NEVER call get_financials, build_model, compare_tickers, or write_report for it. Do not infer a benchmark from a category label; without a verified benchmark, say tracking error and relative performance are unavailable.
 - **Options / derivatives** ("price a 30-day NVDA 150 call", "what's the delta on this put"): use `price_option` for Black-Scholes value + Greeks. It fetches spot and estimates volatility from history if you don't supply them.
 - **Portfolio / risk** ("what's AAPL's Sharpe / max drawdown", "how should I weight these names"): use `compute_risk_metrics` for risk-adjusted performance, and `optimize_portfolio` for suggested weights (max-Sharpe or risk-parity). Explain trade-offs; don't present weights as guaranteed.
 - **Forward-looking event odds** ("is the market pricing a Fed rate cut", "odds of a recession"): use `get_prediction_markets` for live market-implied probabilities. For a SPECIFIC event pass a topic; for a broad "what's happening in prediction markets / what are the big odds lately" call it with NO topic to get the biggest live markets. Great alongside `get_macro` and news for macro/political/crypto events (not single stocks).
@@ -165,7 +167,7 @@ _EQUITY_TICKER = re.compile(r"^[A-Z0-9]{1,12}(?:\.[A-Z0-9]{1,4})?$")
 # Asks the prompt itself rules out of write_report: screeners, baskets,
 # sectors, crypto, indices, macro.
 _NOT_A_SINGLE_COMPANY = re.compile(
-    r"\b(?:portfolio|watchlist|screen(?:er|ing)?|sector|industry|index|indices|etf|crypto(?:currency)?|"
+    r"\b(?:portfolio|watchlist|screen(?:er|ing)?|sector|industry|index|indices|etf|funds?|mutual\s+fund|crypto(?:currency)?|"
     r"bitcoin|ethereum|solana|gold|silver|oil|commodit(?:y|ies)|the\s+market|macro|economy|top\s+\d+|"
     r"\d+\s+(?:cheapest|best|stocks|companies|names)|peers?|versus|vs\.?|compare|comparison)\b", re.I)
 
@@ -229,6 +231,7 @@ class GeneralistAgent:
         self.registry.register_all(build_capital_markets_tools())
         self.registry.register_all(build_prediction_market_tools())
         self.registry.register_all(build_crypto_tools())
+        self.registry.register_all(build_fund_tools())
         self.registry.register_all(build_ui_tools(self.ctx))
         self.total_cost = 0.0
         self._called_once = set()  # for non-repeatable dedup (none currently, future-proof)
@@ -262,6 +265,7 @@ class GeneralistAgent:
             "get_global_news": "🔍 Checking the latest market news",
             "get_macro": f"🏢 Fetching macro data {args.get('indicator', '')}".strip(),
             "get_crypto": f"💰 Fetching crypto market data for {args.get('asset', '')}".strip(),
+            "get_fund": f"📊 Fetching fund holdings and performance for {t}",
             "show_chart": f"📈 Rendering the live chart for {args.get('symbol', '')}".strip(),
         }
         return mapping.get(tool_name, "")
@@ -517,7 +521,7 @@ class GeneralistAgent:
         used = self._tools_used
         if "write_report" in used or "read_report" in used:
             return final_text
-        if used & {"compare_tickers", "get_crypto", "get_prediction_markets"}:
+        if used & {"compare_tickers", "get_crypto", "get_fund", "get_prediction_markets"}:
             return final_text
         if not wants_report(self.user_prompt) or _NOT_A_SINGLE_COMPANY.search(self.user_prompt or ""):
             return final_text

@@ -77,6 +77,12 @@ def _pct(v, already_pct: bool = False) -> Optional[str]:
     return f"{n:+.1f}%"
 
 
+def _ratio_pct(v) -> Optional[str]:
+    """Unsigned two-decimal percent for small ratios such as fund fees."""
+    n = _num(v)
+    return f"{n * 100:.2f}%" if n is not None else None
+
+
 def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
     """
     Map one tool result to displayable findings.
@@ -120,6 +126,19 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
         chg = _pct(result.get("change_24h_pct"), already_pct=True)
         if px:
             add("price", result.get("symbol") or result.get("asset") or "Price", px, chg)
+
+    elif tool == "get_fund":
+        operations = result.get("operations")
+        expense = operations.get("expense_ratio") if isinstance(operations, dict) else None
+        if isinstance(expense, dict):
+            category_fee = _ratio_pct(expense.get("category"))
+            add("metric", "Expense ratio", _ratio_pct(expense.get("fund")),
+                f"category {category_fee}" if category_fee else None)
+        performance = result.get("performance")
+        returns = performance.get("returns") if isinstance(performance, dict) else None
+        if isinstance(returns, dict):
+            add("metric", "1-year return", _pct(returns.get("one_year")),
+                "adjusted close")
 
     elif tool == "get_financials":
         add("company", result.get("company_name") or "Company",

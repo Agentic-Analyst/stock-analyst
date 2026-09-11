@@ -48,6 +48,18 @@ async def financial_data_agent(
         # Use state's analysis_path directly (already a Path object or string)
         analysis_path = Path(state.analysis_path) if isinstance(state.analysis_path, str) else state.analysis_path
         scraper = FinancialScraper(state.ticker, analysis_path)
+
+        # This pipeline builds issuer financial statements and a DCF. Yahoo can
+        # return prices for funds, crypto, indices, and other instruments too,
+        # but treating that as company data produces plausible-looking nonsense.
+        # Keep the prompt-level routing rule backed by a hard boundary here.
+        instrument_info = scraper.yf_ticker.info or {}
+        quote_type = str(instrument_info.get("quoteType") or "").strip().upper()
+        if quote_type and quote_type != "EQUITY":
+            raise ValueError(
+                f"{state.ticker} is classified as {quote_type}, not an operating "
+                "company; issuer financials and DCF are disabled for this instrument"
+            )
         
         # Use effective logger from state
         effective_logger = state.get_effective_logger("financial_data_agent")

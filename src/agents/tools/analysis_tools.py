@@ -972,6 +972,13 @@ class CompareTickersTool(_CtxTool):
                 info = yf.Ticker(tkr).info or {}
             except Exception as e:
                 return {"ticker": tkr, "error": f"lookup failed: {e}"}
+            quote_type = str(info.get("quoteType") or "").strip().upper()
+            if quote_type and quote_type != "EQUITY":
+                return {
+                    "ticker": tkr,
+                    "error": (f"{quote_type} is not an operating company; use the "
+                              "asset-specific research tool"),
+                }
             if not info.get("regularMarketPrice") and not info.get("currentPrice"):
                 return {"ticker": tkr, "error": "no data (unknown ticker?)"}
 

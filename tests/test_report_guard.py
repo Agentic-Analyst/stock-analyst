@@ -214,6 +214,7 @@ class TestTheGuard:
 
     @pytest.mark.parametrize("prompt,used,ticker", [
         ("write me a report on Bitcoin", {"get_crypto"}, None),
+        ("write me a report on VOO", {"get_fund"}, None),
         ("Give me a report on the 5 cheapest semiconductor stocks", {"compare_tickers"}, "NVDA"),
         ("Prepare a research report for NVDA and AMD", {"compare_tickers"}, "NVDA"),
         ("Write a market report on how the S&P did this week", {"get_prices"}, None),
@@ -251,6 +252,8 @@ class TestForcedTextTurns:
         from agents.generalist_agent import SYSTEM_PROMPT
         assert "A request for a REPORT on a single listed company is a request to call `write_report`" in SYSTEM_PROMPT
         assert "a declined offer" in SYSTEM_PROMPT
+        assert "use `get_fund`" in SYSTEM_PROMPT
+        assert "NEVER call get_financials, build_model, compare_tickers, or write_report for it" in SYSTEM_PROMPT
 
 
 class TestProviderRawShape:

@@ -55,6 +55,22 @@ def test_the_legacy_price_key_still_works():
     assert any(f["kind"] == "price" for f in out)
 
 
+# ---------------------------------------------------------------- fund
+
+def test_a_fund_run_emits_fee_and_performance_facts():
+    out = extract_findings("get_fund", {
+        "status": "ok", "symbol": "VOO",
+        "operations": {"expense_ratio": {"fund": 0.0003, "category": 0.0075}},
+        "performance": {"returns": {"one_year": 0.18}},
+    })
+    assert out == [
+        {"kind": "metric", "label": "Expense ratio", "value": "0.03%",
+         "sub": "category 0.75%"},
+        {"kind": "metric", "label": "1-year return", "value": "+18.0%",
+         "sub": "adjusted close"},
+    ]
+
+
 # ------------------------------------------------------------ analyze_news
 
 NEWS = {
