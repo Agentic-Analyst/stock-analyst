@@ -225,9 +225,9 @@ class TestRefusesToGuess:
 
 class TestCapMakesModelsConsistent:
     """
-    The cap in assumption_grounding and the verdict here must agree.
+    The projected-conversion workbook cap and the verdict here must agree.
 
-    Grounding now clamps the exit multiple to
+    The workbook can clamp the exit multiple to
     defensible_multiple(r, wacc, MAX_SUSTAINABLE_GROWTH). A model capped that
     way lands exactly on the boundary, so the verdict must call it consistent —
     a strict `>` condemned the very models the cap had just fixed, which is how
@@ -265,14 +265,17 @@ class TestCapMakesModelsConsistent:
         )
         assert res["verdict"] == "growth_not_sustainable"
 
-    def test_cash_conversion_extraction_rejects_nonsense(self):
-        from src.agents.fm.assumption_grounding import _terminal_cash_conversion
-        mk = lambda fcf, ebitda: {"financial_statements": {
-            "cash_flow": {"2025-12-31": {"Free Cash Flow": fcf}},
-            "income_statement": {"2025-12-31": {"EBITDA": ebitda}}}}
-        assert _terminal_cash_conversion(mk(60, 100)) == 0.6
-        assert _terminal_cash_conversion(mk(-10, 100)) is None   # negative FCF
-        assert _terminal_cash_conversion(mk(60, -100)) is None   # negative EBITDA
-        assert _terminal_cash_conversion(mk(300, 100)) is None   # r=3.0, mislabelled
-        assert _terminal_cash_conversion(mk(1, 100)) is None     # r=0.01, mislabelled
-        assert _terminal_cash_conversion({}) is None
+    def test_workbook_cap_uses_projected_conversion_and_currency_growth_ceiling(self):
+        import openpyxl
+        from src.agents.fm.tabs.tab_valuation_exit_multiple_dcf import (
+            ValuationExitMultipleDCFBuilder,
+        )
+
+        ws = ValuationExitMultipleDCFBuilder(
+            exit_multiple=20.0, growth_cap=0.0231,
+        ).create_tab(openpyxl.Workbook())
+        formula = ws["B13"].value
+        assert "$F$7/$B$12" in formula
+        assert "0.0231000000" in formula
+        assert "Historical" not in formula
+        assert "projected FY5" in ws["G13"].value

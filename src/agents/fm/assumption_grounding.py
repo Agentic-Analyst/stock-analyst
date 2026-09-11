@@ -25,8 +25,9 @@ This module grounds those parameters from observable data AFTER inference:
                   glide between. Hypergrowth/loss-making names keep the LLM's
                   convergence path untouched — that path IS the story there.
   * Exit multiple— 0.8x the company's CURRENT EV/EBITDA (a 20% de-rating
-                  over five years), clamped to [8x, 30x]; 15x fallback when
-                  current EV/EBITDA is unavailable or negative.
+                  over five years), clamped to [8x, 22x]; 15x fallback when
+                  current EV/EBITDA is unavailable or negative. The workbook
+                  can reduce it further from projected FY5 cash conversion.
 
 Every override is returned as a human-readable note and logged, so the
 workbook's provenance stays auditable.
@@ -507,41 +508,6 @@ def _anchor_path(path: List[float], trailing: float,
     return new, True
 
 
-def _terminal_cash_conversion(json_data: Dict[str, Any]) -> Optional[float]:
-    """
-    FCF / EBITDA from the most recent reported year.
-
-    This is the `r` the terminal-value identity needs. It is a proxy — the true
-    figure is the TERMINAL year's conversion, which does not exist until the
-    projection is built — but a mature company's conversion is stable enough
-    that using the latest actual is far better than leaving the exit multiple
-    unchecked entirely.
-
-    Returns None when either line is missing or non-positive; the caller must
-    then leave the multiple alone rather than cap it on a guess.
-    """
-    try:
-        fs = (json_data or {}).get("financial_statements", {}) or {}
-        cf = fs.get("cash_flow", {}) or {}
-        inc = fs.get("income_statement", {}) or {}
-        if not cf or not inc:
-            return None
-        year = sorted(cf.keys(), reverse=True)[0]
-        fcf = (cf.get(year) or {}).get("Free Cash Flow")
-        ebitda = (inc.get(year) or {}).get("EBITDA") or (inc.get(year) or {}).get("Normalized EBITDA")
-        if ebitda is None:
-            ebitda = (cf.get(year) or {}).get("EBITDA")
-        fcf, ebitda = float(fcf), float(ebitda)
-        if ebitda <= 0 or fcf <= 0:
-            return None
-        r = fcf / ebitda
-        # Outside this band the inputs are almost certainly mislabelled rather
-        # than describing a real business.
-        return r if 0.05 <= r <= 1.5 else None
-    except (TypeError, ValueError, IndexError, KeyError):
-        return None
-
-
 def ground_assumptions(
     assumptions: Dict[str, Any],
     json_data: Dict[str, Any],
@@ -651,7 +617,7 @@ def ground_assumptions(
             f"Exit multiple {exit_m:.1f}x fallback (current EV/EBITDA "
             f"unavailable/negative)"
         )
-    # CAP THE MULTIPLE AT WHAT SUSTAINABLE GROWTH CAN JUSTIFY.
+    # Record the growth ceiling the WORKBOOK will use to cap the multiple.
     #
     # Everything above sources the exit multiple from what the company trades
     # at TODAY, which embeds today's growth expectations. It is then applied to
@@ -665,35 +631,20 @@ def ground_assumptions(
     # gap between the two DCF legs — the thing the dispersion rail could only
     # report after the fact.
     #
-    # Inverting the terminal-value identity gives the highest multiple a
-    # defensible perpetual growth rate supports; anything above it is a claim
-    # that the company outgrows the economy forever. Capping here makes the
-    # model internally consistent BY CONSTRUCTION instead of contradicting
-    # itself and being flagged afterwards.
-    r_conv = _terminal_cash_conversion(json_data)
-    if r_conv is not None:
-        try:
-            from src.agents.fm.terminal_value import defensible_multiple, sustainable_growth_cap
-            # The same cap the perpetuity leg lives under: nominal GDP, or the
-            # currency's risk-free rate when that is lower (yen, franc, yuan).
-            # Capping one leg and not the other is how they diverge.
-            g_cap = sustainable_growth_cap(capm.get("risk_free_rate"))
-            ceiling = defensible_multiple(r_conv, a["wacc"], g_cap)
-            if ceiling and ceiling > 0 and exit_m > ceiling:
-                notes.append(
-                    f"Exit multiple {exit_m:.1f}x -> {ceiling:.1f}x (capped: above "
-                    f"{ceiling:.1f}x the multiple implies perpetual growth over "
-                    f"{g_cap*100:.1f}%, i.e. faster than the economy "
-                    f"forever; cash conversion {r_conv:.2f}, WACC {a['wacc']*100:.2f}%)"
-                )
-                exit_m = ceiling
-            elif ceiling is None:
-                notes.append(f"Exit-multiple cap not applicable: WACC {a['wacc']*100:.2f}% is at or "
-                             f"below the {g_cap*100:.2f}% growth cap")
-            a["sustainable_growth_cap"] = g_cap
-        except Exception as _cap_err:
-            # A grounding refinement must never break model generation.
-            notes.append(f"Exit-multiple cap skipped ({_cap_err})")
+    # The previous implementation applied the identity here with the latest
+    # HISTORICAL FCF / EBITDA ratio. That is not terminal cash conversion. It
+    # silently treated current growth investment as permanent: MSFT's 32%
+    # historical conversion cut a 15.3x input to 6.4x even though the completed
+    # projection normalized to 61%. The exit tab already has both projected
+    # FY5 FCF and EBITDA, so that is the first point where a defensible cap can
+    # be calculated. Keep the observable input intact until then.
+    from src.agents.fm.terminal_value import sustainable_growth_cap
+    g_cap = sustainable_growth_cap(capm.get("risk_free_rate"))
+    a["sustainable_growth_cap"] = g_cap
+    notes.append(
+        f"Exit-multiple sustainability cap deferred to projected FY5 cash "
+        f"conversion (perpetual growth ceiling {g_cap*100:.2f}%)"
+    )
 
     a["exit_multiple"] = exit_m
 

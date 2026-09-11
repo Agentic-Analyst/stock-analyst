@@ -237,7 +237,8 @@ class FinancialModelBuilder:
         self.projections_builder = ProjectionsTabBuilder()
         self.perpetual_growth_dcf_builder = ValuationPerpetualGrowthDCFBuilder()
         self.exit_multiple_dcf_builder = ValuationExitMultipleDCFBuilder(
-            exit_multiple=self.llm_assumptions.get('exit_multiple', 20.0)
+            exit_multiple=self.llm_assumptions.get('exit_multiple', 20.0),
+            growth_cap=self.llm_assumptions.get('sustainable_growth_cap', 0.04),
         )
         self.sensitivity_builder = SensitivityTabBuilder()
         self.summary_builder = SummaryTabBuilder(

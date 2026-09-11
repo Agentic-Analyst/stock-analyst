@@ -42,19 +42,28 @@ class ValuationExitMultipleDCFBuilder:
     - Market price comparison
     """
     
-    def __init__(self, projection_years: int = 5, exit_multiple: float = 20.0):
+    def __init__(self, projection_years: int = 5, exit_multiple: float = 20.0,
+                 growth_cap: float = 0.04):
         """
         Initialize the Exit Multiple DCF builder.
 
         exit_multiple: terminal EV/EBITDA — grounded per company by
-        assumption_grounding (0.8x current EV/EBITDA, clamped 8-30x); the
-        old hardcoded 20.0x applied one multiple to every sector.
+        assumption_grounding (0.8x current EV/EBITDA, clamped 8-22x), then
+        bounded from projected FY5 cash conversion; the old hardcoded 20.0x
+        applied one multiple to every sector.
         
         Args:
             projection_years: Number of projection years (default: 5)
+            growth_cap: Maximum sustainable perpetual growth used to test the
+                multiple, already bounded by the cash-flow currency's rate.
         """
         self.projection_years = projection_years
         self.exit_multiple = float(exit_multiple)
+        try:
+            parsed_cap = float(growth_cap)
+        except (TypeError, ValueError):
+            parsed_cap = 0.04
+        self.growth_cap = max(0.0, min(0.04, parsed_cap))
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -224,7 +233,7 @@ class ValuationExitMultipleDCFBuilder:
         # company outgrows the economy forever:
         #
         #   r       = terminal FCF / terminal EBITDA  =  $F$7 / $B$12
-        #   ceiling = r * 1.04 / (WACC - 0.04)
+        #   ceiling = r * (1 + g_cap) / (WACC - g_cap)
         #
         # MIN() so this can only ever REDUCE the multiple, never inflate it.
         #
@@ -248,18 +257,26 @@ class ValuationExitMultipleDCFBuilder:
         # Convergence is not correctness. There the raw input is left untouched
         # and fm/terminal_value.py reports the projection as unusable instead.
         #
-        # WACC must also sit comfortably above the 4% cap or the denominator
-        # collapses.
+        # WACC must also sit comfortably above the cap or the denominator
+        # collapses. `g_cap` is currency-specific: 4% for USD when rates allow,
+        # but lower for currencies such as JPY.
+        cap = self.growth_cap
         ws.cell(row=13, column=1, value="Exit Multiple (EV/EBITDA)")
         ws.cell(
             row=13, column=2,
             value=(
-                '=IF(AND($B$12>0,$B$2>0.045,$F$7/$B$12>=0.30),'
-                'MIN($B$3,($F$7/$B$12)*1.04/($B$2-0.04)),'
+                f'=IF(AND($B$12>0,$B$2>{cap + 0.005:.10f},$F$7/$B$12>=0.30),'
+                f'MIN($B$3,($F$7/$B$12)*{1 + cap:.10f}/($B$2-{cap:.10f})),'
                 '$B$3)'
             ),
         )
         ws.cell(row=13, column=2).number_format = '0.0"x"'
+        ws.cell(
+            row=13, column=7,
+            value=(f"Cap uses projected FY5 FCF / EBITDA and a "
+                   f"{cap*100:.2f}% sustainable-growth ceiling"),
+        )
+        ws.cell(row=13, column=7).font = Font(italic=True, size=9)
         
         # Row 14: Terminal Value (Un-discounted)
         ws.cell(row=14, column=1, value="Terminal Value (Un-discounted)")

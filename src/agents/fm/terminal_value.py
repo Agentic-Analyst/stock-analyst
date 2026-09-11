@@ -228,7 +228,7 @@ def reconcile(
     # The strongest failure first: an exit multiple that cannot be justified at
     # ANY sustainable growth rate is wrong on its own terms, regardless of what
     # the perpetuity happens to assume.
-    # Tolerance, not strictness. The grounding step now CAPS the exit multiple
+    # Tolerance, not strictness. The exit-multiple workbook can cap the input
     # at exactly defensible_multiple(r, wacc, MAX_SUSTAINABLE_GROWTH), so a
     # correctly capped model lands on the boundary and inverts back to
     # MAX_SUSTAINABLE_GROWTH plus floating-point dust. A strict `>` then
