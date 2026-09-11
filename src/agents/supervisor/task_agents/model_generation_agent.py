@@ -313,6 +313,13 @@ async def model_generation_agent(
                     elif bank.get("upside_vs_market") is not None:
                         valuation_metrics["upside_vs_market"] = bank["upside_vs_market"]
                     valuation_metrics["valuation_method"] = "justified_pb_roe"
+                    # The FCF methods were explicitly superseded because they
+                    # are structurally inapplicable to this balance-sheet
+                    # business. Their dispersion must not lower confidence in,
+                    # or withhold, the bank method that replaced them.
+                    valuation_metrics.pop("dispersion_band", None)
+                    valuation_metrics.pop("dispersion_ratio", None)
+                    valuation_metrics.pop("valuation_warning", None)
                     for k, v in bank["inputs"].items():
                         assumptions[f"bank_{k}"] = v
                     model_type = "bank_justified_pb_roe"

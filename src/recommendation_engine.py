@@ -110,6 +110,7 @@ class RecommendationEngineV3:
         analyst_count = company_data.get('num_analysts')
         consensus = company_data.get('analyst_consensus', {}) or {}
         target_meta = consensus.get('price_target', {}) or {}
+        valuation_reliability = valuation_data.get('reliability') or {}
         
         # Calculate catalyst, risk, and momentum scores
         catalysts = screening_data.get('catalysts', [])
@@ -144,6 +145,7 @@ class RecommendationEngineV3:
             analyst_count=analyst_count,
             analyst_source=target_meta.get('source'),
             analyst_as_of=target_meta.get('as_of') or consensus.get('captured_at'),
+            valuation_reliability=valuation_reliability,
         )
         
         # Step 3: Build evidence pack
@@ -564,6 +566,18 @@ class RecommendationEngineV3:
                 "thesis that news evidence was unavailable at generation time.\n"
             )
 
+        if not fixed_numbers.get("rating_available", True) and fixed_numbers.get("price_available"):
+            prompt += (
+                "\n\n---\n"
+                "## OVERRIDE — VALUATION POINT ESTIMATE WITHHELD\n"
+                "The valuation methods do not converge. The deterministic rating is "
+                "NOT RATED and every price-target field is null. Do not invent, infer, "
+                "or recommend a buy/sell rating, point fair value, upside percentage, "
+                "entry point, or price target. Explain the disagreement between methods, "
+                "use only the supported valuation range in valuation_reliability, and "
+                "focus actions on what evidence or assumptions would resolve it.\n"
+            )
+
         return prompt
     
     def _extract_json(self, response: str) -> Dict[str, Any]:
@@ -609,14 +623,15 @@ class RecommendationEngineV3:
             # Header
             ccy = getattr(self, "_ccy", "$")
             priced = fixed_numbers.get("price_available", True)
+            rated = fixed_numbers.get("rating_available", priced)
             output.append(f"### Investment Rating: {fixed_numbers['rating']}")
-            output.append(
-                f"**Rating Confidence**: "
-                f"{fixed_numbers.get('rating_confidence', 'moderate').title()}")
-            if priced:
+            if rated:
+                output.append(
+                    f"**Rating Confidence**: "
+                    f"{fixed_numbers.get('rating_confidence', 'moderate').title()}")
                 output.append(f"\n**12-Month Price Target**: {ccy}{fixed_numbers['targets']['m12']['price']:.2f}")
                 output.append(f"**Expected Return**: {fixed_numbers['expected_return_pct_12m']:+.1f}%")
-            else:
+            elif not priced:
                 # Without a market price a target is not a low estimate, it is
                 # arithmetic on a denominator we never had. Say that instead of
                 # printing a confident "0.00".
@@ -625,6 +640,23 @@ class RecommendationEngineV3:
                     "target, upside or rating can be derived. The intrinsic value below "
                     "still stands on its own; compare it against the price on the "
                     "company's primary listing."
+                )
+            else:
+                reliability = (fixed_numbers.get('inputs') or {}).get('valuation_reliability') or {}
+                low, high = reliability.get('range_low'), reliability.get('range_high')
+                band = reliability.get('band') or 'unavailable'
+                output.append(f"**Valuation Confidence**: {band.title()}")
+                output.append("**Point Estimate**: Withheld")
+                range_text = ""
+                if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+                    range_text = f" The model outputs span {ccy}{low:,.2f}–{ccy}{high:,.2f}."
+                    output.append(
+                        f"**Supported Valuation Range**: {ccy}{low:,.2f} – {ccy}{high:,.2f}"
+                    )
+                output.append(
+                    "\n**No point rating or price target is published.** "
+                    f"{fixed_numbers.get('rating_withheld_reason') or 'The valuation is not reliable enough for a directional call.'}"
+                    f"{range_text}"
                 )
             
             # Thesis
@@ -636,9 +668,9 @@ class RecommendationEngineV3:
             output.append(response_data.get('valuation_perspective', ''))
             
             # Price Targets — omitted entirely when there is no price to target.
-            if priced:
+            if rated:
                 output.append(f"\n### Price Targets\n")
-            for period, label in ([] if not priced else [('m3', '3-Month'), ('m6', '6-Month'), ('m12', '12-Month')]):
+            for period, label in ([] if not rated else [('m3', '3-Month'), ('m6', '6-Month'), ('m12', '12-Month')]):
                 target = fixed_numbers['targets'][period]
                 driver = response_data.get('price_targets', {}).get(period, {}).get('driver', 'N/A')
                 output.append(f"**{label}**: {ccy}{target['price']:.2f} (Range: {ccy}{target['range_low']:.2f} - {ccy}{target['range_high']:.2f})")
@@ -673,7 +705,7 @@ class RecommendationEngineV3:
                             output.append(f"  - Watch: {', '.join(watch)}\n")
             
             # Action
-            action = response_data.get('action', {})
+            action = response_data.get('action', {}) if rated else {}
             if action:
                 output.append(f"\n### Recommended Action\n")
                 if action.get('buyers'):
@@ -694,7 +726,14 @@ class RecommendationEngineV3:
             output.append(f"\n---\n### Calculation Methodology\n")
             inputs = fixed_numbers['inputs']
             basis = inputs.get('valuation_basis', 'valuation')
-            output.append(f"- **Valuation Gap ({basis.replace('_', ' ')})**: {inputs['raw_val_gap_pct']:.1f}%")
+            if rated:
+                output.append(f"- **Valuation Gap ({basis.replace('_', ' ')})**: {inputs['raw_val_gap_pct']:.1f}%")
+            else:
+                reliability = inputs.get('valuation_reliability') or {}
+                band = reliability.get('band') or 'unavailable'
+                ratio = reliability.get('dispersion_ratio')
+                detail = f", {ratio:.1f}x dispersion" if isinstance(ratio, (int, float)) else ""
+                output.append(f"- **Valuation Reliability**: {band.replace('-', ' ').title()}{detail}")
             if inputs.get('analyst_target_gap_pct') is not None:
                 output.append(
                     f"- **Analyst Consensus Cross-check**: "
@@ -704,24 +743,26 @@ class RecommendationEngineV3:
                     f"as of {inputs.get('analyst_as_of') or 'date unavailable'}; "
                     f"alignment: {inputs.get('consensus_alignment', 'unavailable')}; "
                     f"not included in intrinsic value)")
-            output.append(f"- **Catalyst Score**: +{inputs['catalyst_score_pct']:.1f}%")
-            output.append(f"- **Risk Score**: -{inputs['risk_score_pct']:.1f}%")
-            output.append(f"- **Momentum Score**: {inputs['momentum_score_pct']:+.1f}%")
-            output.append(f"\n**Expected Return Formula**:")
-            output.append(f"- 40% × Valuation ({inputs['adj_val_gap_pct']:.1f}%) = {0.4 * inputs['adj_val_gap_pct']:.1f}%")
-            output.append(f"- 40% × Net Catalysts/Risks ({inputs['net_catalyst_risk_pct']:.1f}%) = {0.4 * inputs['net_catalyst_risk_pct']:.1f}%")
-            output.append(f"- 20% × Momentum ({inputs['momentum_score_pct']:.1f}%) = {0.2 * inputs['momentum_score_pct']:.1f}%")
+            if rated:
+                output.append(f"- **Catalyst Score**: +{inputs['catalyst_score_pct']:.1f}%")
+                output.append(f"- **Risk Score**: -{inputs['risk_score_pct']:.1f}%")
+                output.append(f"- **Momentum Score**: {inputs['momentum_score_pct']:+.1f}%")
+                output.append(f"\n**Expected Return Formula**:")
+                output.append(f"- 40% × Valuation ({inputs['adj_val_gap_pct']:.1f}%) = {0.4 * inputs['adj_val_gap_pct']:.1f}%")
+                output.append(f"- 40% × Net Catalysts/Risks ({inputs['net_catalyst_risk_pct']:.1f}%) = {0.4 * inputs['net_catalyst_risk_pct']:.1f}%")
+                output.append(f"- 20% × Momentum ({inputs['momentum_score_pct']:.1f}%) = {0.2 * inputs['momentum_score_pct']:.1f}%")
             # Show the sum of the three lines above, then the cap as its own
             # step. Printing the CAPPED total straight under them made the
             # arithmetic visibly wrong whenever the cap bound.
-            if inputs.get('cap_applied'):
+            if rated and inputs.get('cap_applied'):
                 output.append(
                     f"- **Sum**: {inputs['uncapped_expected_return_pct']:.1f}%")
                 output.append(
                     f"- **Capped at ±{inputs.get('cap_pct', 30):.0f}%** "
                     f"(a model this far from the market price is more often a broken "
                     f"assumption than a broken market)")
-            output.append(f"- **Total**: {fixed_numbers['expected_return_pct_12m']:.1f}%")
+            if rated:
+                output.append(f"- **Total**: {fixed_numbers['expected_return_pct_12m']:.1f}%")
 
             # Conspicuous annotation when the section shipped without full
             # citation validation — readers must not mistake it for a fully
@@ -774,26 +815,33 @@ class RecommendationEngineV3:
         """
         ccy = getattr(self, "_ccy", "$")
         lines = [f"### Investment Rating: {fixed_numbers.get('rating', 'NOT RATED')}"]
-        lines.append(
-            f"**Rating Confidence**: "
-            f"{fixed_numbers.get('rating_confidence', 'moderate').title()}"
-        )
-        if fixed_numbers.get("price_available", True):
+        rated = fixed_numbers.get("rating_available", fixed_numbers.get("price_available", True))
+        confidence = fixed_numbers.get('rating_confidence')
+        if rated or (fixed_numbers.get('rating') != 'NOT RATED' and confidence):
+            lines.append(
+                f"**Rating Confidence**: "
+                f"{(confidence or 'moderate').title()}"
+            )
+        if rated:
             target = (fixed_numbers.get("targets") or {}).get("m12") or {}
             if target.get("price") is not None:
                 lines.append(f"\n**12-Month Price Target**: {ccy}{target['price']:.2f}")
             expected = fixed_numbers.get("expected_return_pct_12m")
             if expected is not None:
                 lines.append(f"**Expected Return**: {expected:+.1f}%")
-        else:
+        elif not fixed_numbers.get("price_available", True):
             lines.append(
                 "\n**No market price was available for this listing**, so no price "
                 "target, upside or rating can be derived."
             )
+        else:
+            lines.append(
+                "\n**No point rating or price target is published.** "
+                f"{fixed_numbers.get('rating_withheld_reason') or 'The valuation is not reliable enough for a directional call.'}"
+            )
         lines.append(
             "\n> **Note**: the narrative for this section could not be rendered, so "
-            "only the model's computed figures are shown. The valuation, price "
-            "target and rating above are unaffected — they are calculated in code, "
-            "not written by the model."
+            "only the model's deterministic conclusion is shown. Published ratings "
+            "and targets are calculated in code, not written by the model."
         )
         return "\n".join(lines)

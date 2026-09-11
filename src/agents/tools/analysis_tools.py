@@ -630,7 +630,7 @@ class BuildModelTool(_CtxTool):
         }
         positive_legs = [v for v in legs_pub.values() if v > 0]
         withheld = False
-        if band == "unreliable" and len(positive_legs) >= 2:
+        if method != "justified_pb_roe" and band == "unreliable" and len(positive_legs) >= 2:
             withheld = True
             fair_value_out, upside_out = None, None
             low, high = min(positive_legs), max(positive_legs)
@@ -854,6 +854,34 @@ class WriteReportTool(_CtxTool):
         # Dispersion leads: it explains the headline rather than the reverse.
         warning = " ".join(p for p in (spread_note, warning) if p) or None
 
+        # Match the report's publication boundary. The workbook retains the
+        # arithmetic midpoint for audit, but when the methods disagree by more
+        # than 2.5x neither the report nor the chat response may elevate it to a
+        # fair value. Publish the football-field range instead.
+        legs_pub = {
+            key: value for key, value in {
+                "perpetual_dcf": vm.get("perpetual_price") if isinstance(vm, dict) else None,
+                "exit_multiple_dcf": vm.get("exit_multiple_price") if isinstance(vm, dict) else None,
+                "market_comps": vm.get("comps_price") if isinstance(vm, dict) else None,
+            }.items() if isinstance(value, (int, float))
+        }
+        positive_legs = [value for value in legs_pub.values() if value > 0]
+        withheld = method != "justified_pb_roe" and band == "unreliable" and len(positive_legs) >= 2
+        if withheld:
+            fair_value = None
+            upside = None
+            range_fields = {
+                "fair_value_withheld": True,
+                "fair_value_range_low": round(min(positive_legs), 2),
+                "fair_value_range_high": round(max(positive_legs), 2),
+                "fair_value_withheld_reason": (
+                    "The valuation methods disagree by more than 2.5x. The report "
+                    "publishes the supported range and no directional rating or target."
+                ),
+            }
+        else:
+            range_fields = {}
+
         return tool_ok(
             ticker=ticker,
             report_path=state.report.report_path,
@@ -862,6 +890,8 @@ class WriteReportTool(_CtxTool):
             **_listing_price_note(state),
             fair_value=fair_value,
             upside_vs_market=upside,
+            **range_fields,
+            **({"valuation_legs": legs_pub} if legs_pub else {}),
             overall_sentiment=na.overall_sentiment if na else None,
             # The rating the report published, so the answer cannot contradict
             # the document the user downloads.

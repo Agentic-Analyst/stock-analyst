@@ -552,7 +552,52 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
     method. Here the report's headline, its summary rows and the numbers the
     recommendation engine rates on are all set to the method actually used.
     """
-    if not override or override.get("valuation_method") != "justified_pb_roe":
+    if not override:
+        return data
+
+    # Dispersion is computed after the workbook is built, so the workbook
+    # loader cannot see it on its own. Carry that result into every report
+    # consumer before applying any method-specific override. A midpoint made
+    # from methods that disagree by >2.5x remains in the workbook for audit,
+    # but it is not a publishable fair value.
+    band = (override.get("dispersion_band")
+            if override.get("valuation_method") != "justified_pb_roe" else None)
+    if band:
+        v = data.get("valuation") or {}
+        summary = v.get("summary") or {}
+        legs = {
+            "perpetual_dcf": override.get("perpetual_price"),
+            "exit_multiple_dcf": override.get("exit_multiple_price"),
+            "market_comps": override.get("comps_price"),
+        }
+        fallbacks = {
+            "perpetual_dcf": (v.get("dcf_perpetual") or {}).get("intrinsic_value_per_share"),
+            "exit_multiple_dcf": (v.get("dcf_exit") or {}).get("intrinsic_value_per_share"),
+            "market_comps": summary.get("comps_intrinsic"),
+        }
+        for name, fallback in fallbacks.items():
+            if not isinstance(legs.get(name), (int, float)):
+                legs[name] = fallback
+        legs = {
+            name: float(value) for name, value in legs.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+        positive = [value for value in legs.values() if value > 0]
+        withheld = band == "unreliable" and len(positive) >= 2
+        reliability = {
+            "band": band,
+            "dispersion_ratio": override.get("dispersion_ratio"),
+            "warning": override.get("valuation_warning"),
+            "legs": legs,
+            "point_estimate_withheld": withheld,
+        }
+        if positive:
+            reliability["range_low"] = min(positive)
+            reliability["range_high"] = max(positive)
+        v["reliability"] = reliability
+        data["valuation"] = v
+
+    if override.get("valuation_method") != "justified_pb_roe":
         return data
     fair_value = override.get("fair_value")
     if not isinstance(fair_value, (int, float)) or fair_value <= 0:
@@ -1010,6 +1055,8 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
             valuation['dcf_exit']['intrinsic_value_per_share'], comps]
     n_in = sum(1 for v in legs if isinstance(v, (int, float)) and v > 0)
     n_all = sum(1 for v in legs if isinstance(v, (int, float)))
+    reliability = valuation.get('reliability') or {}
+    point_withheld = bool(reliability.get('point_estimate_withheld'))
     if bank:
         label = "**Intrinsic Value (justified P/B x ROE)**"
     elif n_in < n_all:
@@ -1018,7 +1065,20 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         label = f"**Average Intrinsic Value ({n_in} methods)**"
     else:
         label = "**Average Intrinsic Value**"
-    summary_table += f"| {label} | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
+    if point_withheld:
+        ratio = reliability.get('dispersion_ratio')
+        ratio_text = f" ({ratio:.1f}x dispersion)" if isinstance(ratio, (int, float)) else ""
+        summary_table += (
+            f"| **Point Estimate** | **Withheld — valuation methods do not converge{ratio_text}** |\n"
+        )
+        low, high = reliability.get('range_low'), reliability.get('range_high')
+        if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+            summary_table += (
+                f"| **Supported Valuation Range** | **{format_number(low, 2)} – "
+                f"{format_number(high, 2)}** |\n"
+            )
+    else:
+        summary_table += f"| {label} | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
     summary_table += f"| Current Market Price | {format_number(company['current_price'], 2)} |\n"
     # A listing that trades in another currency: show the quote a holder sees
     # and the rate behind the converted figure above (Shell: 3,437p / £34.37
@@ -1028,7 +1088,14 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     if _lc and _rc and _lc != _rc and isinstance(_pl, (int, float)):
         _rate = f", converted at {_fx:.4f} {_rc}/{_lc}" if isinstance(_fx, (int, float)) else ""
         summary_table += f"| Price on the listing exchange | {currency_symbol(_lc)}{_pl:,.2f} ({_lc}{_rate}) |\n"
-    summary_table += f"| **Implied Upside** | **{format_percent(valuation['summary']['upside'])}** |\n"
+    if point_withheld:
+        summary_table += "| **Implied Upside** | _not meaningful without a defensible point estimate_ |\n"
+    else:
+        summary_table += f"| **Implied Upside** | **{format_percent(valuation['summary']['upside'])}** |\n"
+
+    reliability_note = ""
+    if reliability.get('warning'):
+        reliability_note = f"\n> **Valuation reliability warning:** {reliability['warning']}\n"
 
     # Reverse DCF makes the disagreement between price and model observable
     # without blending the market price into fair value.  It holds the model's
@@ -1131,7 +1198,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         f"### DCF Valuation — Exit Multiple Method\n\n{dcf_exit_table}\n"
         f"### Market-Implied Expectations (Reverse DCF)\n\n{reverse_table}\n\n"
         f"### Analyst Consensus Cross-Check\n\n{analyst_consensus_table}\n\n"
-        f"### Valuation Summary\n\n{summary_table}\n"
+        f"### Valuation Summary\n\n{summary_table}\n{reliability_note}"
     )
 
     prompt_template = load_prompt("report_valuation")
@@ -1210,13 +1277,28 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
     valuation = data['valuation']
     news = data['news']
     
+    reliability = valuation.get('reliability') or {}
+    if reliability.get('point_estimate_withheld'):
+        low, high = reliability.get('range_low'), reliability.get('range_high')
+        if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+            intrinsic_value = (
+                f"point estimate withheld; methods span {format_number(low, 2)}–"
+                f"{format_number(high, 2)}"
+            )
+        else:
+            intrinsic_value = "point estimate withheld because valuation methods do not converge"
+        upside = "not meaningful — point estimate withheld"
+    else:
+        intrinsic_value = format_number(valuation['summary']['average_intrinsic'], 2)
+        upside = format_percent(valuation['summary']['upside'])
+
     # Load prompt template and fill in variables
     prompt_template = load_prompt("report_investment_thesis")
     prompt = prompt_template.format(
         company_name=company['company_name'],
         current_price=format_number(company['current_price'], 2),
-        intrinsic_value=format_number(valuation['summary']['average_intrinsic'], 2),
-        upside=format_percent(valuation['summary']['upside']),
+        intrinsic_value=intrinsic_value,
+        upside=upside,
         sentiment=news['summary'].get('overall_sentiment', 'neutral').upper(),
         num_catalysts=len(news['catalysts']),
         num_risks=len(news['risks'])
@@ -1273,6 +1355,20 @@ def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], l
     company = data['company_overview']
     valuation = data['valuation']
     
+    reliability = valuation.get('reliability') or {}
+    if reliability.get('point_estimate_withheld'):
+        low, high = reliability.get('range_low'), reliability.get('range_high')
+        if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+            intrinsic_value = (
+                f"withheld; methods span {format_number(low, 2)}–{format_number(high, 2)}"
+            )
+        else:
+            intrinsic_value = "withheld because valuation methods do not converge"
+        upside = "not meaningful — point estimate withheld"
+    else:
+        intrinsic_value = format_number(valuation['summary']['average_intrinsic'], 2)
+        upside = format_percent(valuation['summary']['upside'])
+
     # Extract key points from recommendation section
     recommendation_preview = sections['recommendation'][:1000]
     
@@ -1280,9 +1376,9 @@ def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], l
     prompt_template = load_prompt("report_executive_summary")
     prompt = prompt_template.format(
         company_name=company['company_name'],
-        intrinsic_value=format_number(valuation['summary']['average_intrinsic'], 2),
+        intrinsic_value=intrinsic_value,
         current_price=format_number(company['current_price'], 2),
-        upside=format_percent(valuation['summary']['upside']),
+        upside=upside,
         recommendation_preview=recommendation_preview
     )
 

@@ -208,6 +208,46 @@ def test_fallback_recommendation_keeps_the_rating_confidence():
     assert "**Rating Confidence**: Low" in text
 
 
+def test_unreliable_valuation_cannot_publish_a_rating_or_target():
+    calc = RecommendationCalculator()
+    out = calc.calculate_fixed_numbers(**numbers(
+        current_price=100.0,
+        dcf_perpetual=25.0,
+        dcf_exit=125.0,
+        fair_value=75.0,
+        valuation_reliability={
+            "band": "unreliable",
+            "dispersion_ratio": 5.0,
+            "point_estimate_withheld": True,
+            "range_low": 25.0,
+            "range_high": 125.0,
+        },
+    ))
+    assert out["rating"] == "NOT RATED"
+    assert out["rating_available"] is False
+    assert out["rating_confidence"] is None
+    assert out["expected_return_pct_12m"] is None
+    assert out["targets"]["m12"]["price"] is None
+    assert "do not converge" in out["rating_withheld_reason"]
+
+
+def test_wide_valuation_keeps_the_view_but_lowers_confidence():
+    calc = RecommendationCalculator()
+    out = calc.calculate_fixed_numbers(**numbers(
+        valuation_reliability={
+            "band": "wide",
+            "dispersion_ratio": 2.0,
+            "point_estimate_withheld": False,
+            "range_low": 240.0,
+            "range_high": 480.0,
+        },
+    ))
+    assert out["rating_available"] is True
+    assert out["rating"] != "NOT RATED"
+    assert out["rating_confidence"] == "low"
+    assert out["targets"]["m12"]["price"] is not None
+
+
 def test_historical_volatility_uses_saved_daily_prices():
     from report_agent import historical_volatility_pct
 

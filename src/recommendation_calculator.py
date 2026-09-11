@@ -60,6 +60,7 @@ class RecommendationCalculator:
         analyst_count: Optional[int] = None,
         analyst_source: Optional[str] = None,
         analyst_as_of: Optional[str] = None,
+        valuation_reliability: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Calculate all fixed numbers deterministically.
@@ -200,13 +201,19 @@ class RecommendationCalculator:
             }
         }
         
+        reliability = valuation_reliability or {}
+        point_estimate_withheld = bool(reliability.get("point_estimate_withheld"))
+
         # 9. Determine rating
         #
         # A rating is a statement about price versus value. With no market
         # price there is no such statement to make, so this returns NOT RATED
         # instead of letting the band table hand back a default that reads as
         # a considered call.
-        rating = self._determine_rating(expected_return_pct) if price_available else "NOT RATED"
+        rating_available = bool(
+            price_available and valuation_available and not point_estimate_withheld
+        )
+        rating = self._determine_rating(expected_return_pct) if rating_available else "NOT RATED"
 
         analyst_target_value = (
             float(analyst_target)
@@ -225,9 +232,9 @@ class RecommendationCalculator:
         # the arithmetic untouched and reduce only the conviction of an
         # extreme call. The rule is symmetric for bullish and bearish models.
         consensus_alignment = "unavailable"
-        rating_confidence = "moderate"
+        rating_confidence = "moderate" if rating_available else None
         count = int(analyst_count or 0)
-        if analyst_gap_pct is not None and count >= 5:
+        if analyst_gap_pct is not None and count >= 5 and rating_available:
             model_direction = 1 if raw_val_gap_pct >= 8 else (-1 if raw_val_gap_pct <= -8 else 0)
             analyst_direction = 1 if analyst_gap_pct >= 8 else (-1 if analyst_gap_pct <= -8 else 0)
             if model_direction and analyst_direction and model_direction != analyst_direction:
@@ -242,19 +249,54 @@ class RecommendationCalculator:
             else:
                 consensus_alignment = "mixed"
 
+        # A wide or single-method valuation can still support a directional
+        # view, but the model evidence is weaker than a converged football
+        # field. Make that visible without changing the arithmetic. An
+        # unreliable field is different: there is no defensible midpoint to
+        # rate, so all point targets and expected-return outputs are null.
+        reliability_band = reliability.get("band")
+        if rating_available and reliability_band in {"wide", "single-method"}:
+            rating_confidence = "low"
+
+        if point_estimate_withheld:
+            rating_withheld_reason = (
+                "Valuation methods do not converge, so no defensible point "
+                "estimate exists for a directional rating or price target."
+            )
+        elif not valuation_available:
+            rating_withheld_reason = (
+                "No usable intrinsic-value method produced a positive result."
+            )
+        elif not price_available:
+            rating_withheld_reason = "No market price was available for this listing."
+        else:
+            rating_withheld_reason = None
+
+        if not rating_available and price_available:
+            expected_return_output = None
+            targets_output = {
+                period: {"price": None, "range_low": None, "range_high": None}
+                for period in ("m3", "m6", "m12")
+            }
+        else:
+            expected_return_output = round(expected_return_pct, 2)
+            targets_output = targets_with_ranges
+
         # 10. Build complete fixed numbers payload
         return {
             "as_of": str(date.today()),
             "ticker": ticker,
             "current_price": current_price,
-            "expected_return_pct_12m": round(expected_return_pct, 2),
-            "targets": targets_with_ranges,
+            "expected_return_pct_12m": expected_return_output,
+            "targets": targets_output,
             "rating": rating,
             "rating_confidence": rating_confidence,
             # Downstream must be able to distinguish "no view" from "neutral
             # view": the report narrative, the price-target table and the
             # answer all read this.
             "price_available": price_available,
+            "rating_available": rating_available,
+            "rating_withheld_reason": rating_withheld_reason,
             "inputs": {
                 "raw_val_gap_pct": round(raw_val_gap_pct, 2),
                 "dcf_legs_used": legs_used,
@@ -268,6 +310,7 @@ class RecommendationCalculator:
                 "analyst_source": analyst_source,
                 "analyst_as_of": analyst_as_of,
                 "consensus_alignment": consensus_alignment,
+                "valuation_reliability": reliability or None,
                 "catalyst_score_pct": round(catalyst_score_pct, 2),
                 "risk_score_pct": round(risk_score_pct, 2),
                 "net_catalyst_risk_pct": round(net_catalyst_risk_pct, 2),
