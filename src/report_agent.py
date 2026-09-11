@@ -591,6 +591,15 @@ def extract_valuation(computed_values: Dict[str, Any]) -> Dict[str, Any]:
             'debt': summary.get('(15, 2)', 0),
             'net_debt': summary.get('(16, 2)', 0),
         },
+        'reverse_dcf': {
+            # Report-only diagnostic.  These cells reverse the perpetual DCF
+            # from the current market EV; none of them enter intrinsic value.
+            'market_enterprise_value': summary.get('(51, 2)'),
+            'pv_explicit_fcf': summary.get('(52, 2)'),
+            'market_implied_terminal_fcf': summary.get('(53, 2)'),
+            'model_terminal_fcf': summary.get('(54, 2)'),
+            'market_implied_vs_model': summary.get('(55, 2)'),
+        },
         # The DCF tab's own inputs, so anything recomputed for the report — the
         # sensitivity grid — runs the SAME model as the headline: ten explicit
         # FCF periods (FY1-5 plus the FY6-10 fade) and the tab's equity bridge.
@@ -960,6 +969,35 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         _rate = f", converted at {_fx:.4f} {_rc}/{_lc}" if isinstance(_fx, (int, float)) else ""
         summary_table += f"| Price on the listing exchange | {currency_symbol(_lc)}{_pl:,.2f} ({_lc}{_rate}) |\n"
     summary_table += f"| **Implied Upside** | **{format_percent(valuation['summary']['upside'])}** |\n"
+
+    # Reverse DCF makes the disagreement between price and model observable
+    # without blending the market price into fair value.  It holds the model's
+    # explicit path, WACC, terminal growth and actual terminal horizon fixed,
+    # then solves for the post-horizon cash flow required to reproduce today's
+    # enterprise value.
+    reverse = valuation.get('reverse_dcf') or {}
+    reverse_values = (
+        reverse.get('market_enterprise_value'),
+        reverse.get('pv_explicit_fcf'),
+        reverse.get('market_implied_terminal_fcf'),
+        reverse.get('model_terminal_fcf'),
+        reverse.get('market_implied_vs_model'),
+    )
+    if bank:
+        reverse_table = "_Not applicable — valued on justified P/B x ROE, not a cash-flow DCF._"
+    elif all(isinstance(value, (int, float)) for value in reverse_values):
+        reverse_table = "| Metric | Value |\n|--------|-------|\n"
+        reverse_table += f"| Market Enterprise Value | {format_number(reverse_values[0])} |\n"
+        reverse_table += f"| PV of Explicit FCF (FY1-FY10) | {format_number(reverse_values[1])} |\n"
+        reverse_table += f"| Market-Implied Terminal FCF (Post-Horizon) | {format_number(reverse_values[2])} |\n"
+        reverse_table += f"| Model Terminal FCF (Post-Horizon) | {format_number(reverse_values[3])} |\n"
+        reverse_table += f"| Market-Implied FCF vs Model | {format_percent(reverse_values[4])} |\n"
+        reverse_table += (
+            "\n_Diagnostic only: this holds the explicit cash flows, terminal assumptions and discounting fixed. "
+            "It is not a price target and is excluded from fair value._\n"
+        )
+    else:
+        reverse_table = "_Unavailable — the source workbook does not contain the reverse-DCF diagnostic._"
     
     # Cost of capital — the derivation, not just the rate. A DCF is mostly an
     # argument about the discount rate: on these projections the value moves far
@@ -1028,6 +1066,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         f"### 5-Year Projections\n\n{projections_table}\n"
         f"### DCF Valuation — Perpetual Growth Method\n\n{dcf_perp_table}\n"
         f"### DCF Valuation — Exit Multiple Method\n\n{dcf_exit_table}\n"
+        f"### Market-Implied Expectations (Reverse DCF)\n\n{reverse_table}\n\n"
         f"### Valuation Summary\n\n{summary_table}\n"
     )
 

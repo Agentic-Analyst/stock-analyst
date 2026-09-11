@@ -10,6 +10,7 @@ This module creates the Summary tab following investment banking standards:
 - Blended valuation & market comparison (average, upside, premium)
 - Sanity metrics (terminal year revenue, EBITDA, FCF, multiples, yields)
 - Quality assurance flags (WACC > g, DFs ≤ 1, shares > 0, MYD toggle wired)
+- Market-implied terminal cash flow (reverse DCF; diagnostic only)
 
 All formulas reference the correct cells from existing tabs:
 - Valuation (DCF): B12 (WACC), B23 (g), B27 (EV), B30 (Cash), B31 (Debt), 
@@ -86,6 +87,7 @@ class SummaryTabBuilder:
         self._setup_blended_valuation(ws)
         self._setup_sanity_metrics(ws)
         self._setup_qa_flags(ws)
+        self._setup_market_implied_expectations(ws)
         
         # Format the sheet
         self._format_sheet(ws)
@@ -478,6 +480,63 @@ class SummaryTabBuilder:
         ws.cell(row=46, column=1, value="Check: Mid-Year toggle wired")
         ws.cell(row=46, column=2, value="=OR('Sensitivity'!$B$2=\"No\",'Sensitivity'!$B$2=\"Yes\")")
         ws.cell(row=46, column=2).alignment = Alignment(horizontal="center")
+
+    def _setup_market_implied_expectations(self, ws: Worksheet) -> None:
+        """Show what terminal cash flow the current market EV implies.
+
+        This is deliberately a diagnostic, not another valuation leg.  It
+        algebraically reverses the perpetual-growth DCF while holding the
+        model's explicit cash flows, terminal assumptions and discounting fixed:
+
+            implied terminal FCF
+              = (market EV - PV explicit FCF)
+                * model terminal FCF / PV(model terminal value)
+
+        Keeping it outside rows 13-31 prevents the market price from feeding
+        back into intrinsic value.  Referencing the model's actual terminal
+        value PV also preserves its five-year fallback for non-positive-FCF
+        cases rather than assuming every valuation used a ten-year horizon.
+        """
+        ws.cell(row=50, column=1, value="MARKET-IMPLIED EXPECTATIONS (REVERSE DCF)")
+        ws.cell(row=50, column=1).font = Font(bold=True, size=11, underline="single")
+
+        ws.cell(row=51, column=1, value="Market Enterprise Value")
+        ws.cell(row=51, column=2, value="=$B$29")
+        ws.cell(row=51, column=2).number_format = '[$$-409]#,##0.0,,," B"'
+
+        ws.cell(row=52, column=1, value="PV of Explicit FCF (FY1-FY10)")
+        ws.cell(row=52, column=2, value="='Valuation (DCF)'!$B$19")
+        ws.cell(row=52, column=2).number_format = '[$$-409]#,##0.0,,," B"'
+
+        ws.cell(row=53, column=1, value="Market-Implied Terminal FCF (Post-Horizon)")
+        ws.cell(
+            row=53,
+            column=2,
+            value=(
+                '=IFERROR(($B$51-$B$52)*'
+                "'Valuation (DCF)'!$B$24/'Valuation (DCF)'!$B$26,\"\")"
+            ),
+        )
+        ws.cell(row=53, column=2).number_format = '[$$-409]#,##0.0,,," B"'
+        ws.cell(row=53, column=2).font = Font(bold=True)
+
+        ws.cell(row=54, column=1, value="Model Terminal FCF (Post-Horizon)")
+        ws.cell(row=54, column=2, value="='Valuation (DCF)'!$B$24")
+        ws.cell(row=54, column=2).number_format = '[$$-409]#,##0.0,,," B"'
+
+        ws.cell(row=55, column=1, value="Market-Implied FCF vs Model")
+        ws.cell(row=55, column=2, value='=IFERROR($B$53/$B$54-1,"")')
+        ws.cell(row=55, column=2).number_format = '0.0%'
+
+        ws.cell(
+            row=56,
+            column=1,
+            value=(
+                "Diagnostic only: holds the explicit cash flows, terminal assumptions and discounting fixed; "
+                "it is not a price target and is excluded from fair value."
+            ),
+        )
+        ws.cell(row=56, column=1).font = Font(italic=True, size=9, color="808080")
     
     def _format_sheet(self, ws: Worksheet) -> None:
         """Apply general formatting to the sheet."""
