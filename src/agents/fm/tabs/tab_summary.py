@@ -461,12 +461,12 @@ class SummaryTabBuilder:
         
         # Row 43: Check DF ≤ 1 (Perpetual)
         ws.cell(row=43, column=1, value="Check: DF ≤ 1 (Perpetual)")
-        ws.cell(row=43, column=2, value="=MAX('Valuation (DCF)'!$B$17:'Valuation (DCF)'!$F$17)<=1")
+        ws.cell(row=43, column=2, value="=MAX('Valuation (DCF)'!$B$17:$F$17)<=1")
         ws.cell(row=43, column=2).alignment = Alignment(horizontal="center")
         
         # Row 44: Check DF ≤ 1 (Exit Multiple)
         ws.cell(row=44, column=1, value="Check: DF ≤ 1 (Exit Multiple)")
-        ws.cell(row=44, column=2, value="=MAX('Valuation (Exit Multiple)'!$B$8:'Valuation (Exit Multiple)'!$F$8)<=1")
+        ws.cell(row=44, column=2, value="=MAX('Valuation (Exit Multiple)'!$B$8:$F$8)<=1")
         ws.cell(row=44, column=2).alignment = Alignment(horizontal="center")
         
         # Row 45: Check Shares > 0 & Price > 0
