@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -5,7 +6,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from analyst_consensus import FinnhubConsensusClient, collect_consensus, yahoo_snapshot
+import analyst_consensus
+from analyst_consensus import (
+    BenzingaConsensusClient,
+    FinnhubConsensusClient,
+    TipRanksConsensusClient,
+    collect_consensus,
+    yahoo_snapshot,
+)
 
 
 class Response:
@@ -27,6 +35,35 @@ class Session:
     def get(self, url, **kwargs):
         self.calls.append((url, kwargs))
         return self.responses[url.rsplit("/", 1)[-1]]
+
+
+class StaticClient:
+    def __init__(self, payload):
+        self.payload, self.calls = payload, []
+
+    def fetch(self, ticker, *, currency=None):
+        self.calls.append((ticker, currency))
+        return self.payload
+
+
+class McpResponse:
+    def __init__(self, payload=None, *, text=None, headers=None, error=False):
+        self.text = text if text is not None else json.dumps(payload or {})
+        self.headers = headers or {"content-type": "application/json"}
+        self.error = error
+
+    def raise_for_status(self):
+        if self.error:
+            raise RuntimeError("denied")
+
+
+class McpSession:
+    def __init__(self, responses):
+        self.responses, self.calls = list(responses), []
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.responses.pop(0)
 
 
 YAHOO = {
@@ -67,6 +104,150 @@ def test_finnhub_uses_header_auth_and_normalizes_counts():
     assert out["recommendation"]["total"] == 36
     assert all(call[1]["headers"] == {"X-Finnhub-Token": "secret"} for call in session.calls)
     assert all("secret" not in call[0] for call in session.calls)
+
+
+def test_benzinga_consensus_is_normalized_with_unique_analyst_count():
+    session = Session({
+        "consensus-ratings": Response({
+            "aggregate_ratings": {
+                "strong_buy": 7, "buy": 12, "hold": 5, "sell": 2,
+            },
+            "consensus_price_target": 293.69,
+            "consensus_rating": "BUY",
+            "consensus_rating_val": 3.92,
+            "high_price_target": 350,
+            "low_price_target": 200,
+            "total_analyst_count": 50,
+            "unique_analyst_count": 26,
+            "updated_at": "2026-09-10T20:00:00Z",
+        }),
+    })
+
+    out = BenzingaConsensusClient("secret", session=session).fetch(
+        "aapl", currency="USD")
+
+    assert out["price_target"] == {
+        "mean": 293.69,
+        "median": None,
+        "high": 350.0,
+        "low": 200.0,
+        "analyst_count": 26,
+        "currency": "USD",
+        "as_of": "2026-09-10T20:00:00Z",
+        "source": "benzinga",
+    }
+    assert out["recommendation"]["label"] == "buy"
+    assert out["recommendation"]["unique_analyst_count"] == 26
+    assert out["recommendation"]["total_rating_count"] == 50
+    params = session.calls[0][1]["params"]
+    assert params["token"] == "secret"
+    assert params["parameters[tickers]"] == "AAPL"
+    assert "secret" not in session.calls[0][0]
+
+
+def test_auto_prefers_benzinga_without_spending_fallback_calls(monkeypatch):
+    benzinga = StaticClient({
+        "captured_at": "2026-09-10T20:00:00Z",
+        "providers": ["benzinga"],
+        "price_target": {"mean": 225.0, "analyst_count": 20,
+                         "currency": "USD", "source": "benzinga"},
+        "recommendation": {"label": "buy", "source": "benzinga"},
+    })
+    finnhub = StaticClient({"providers": ["finnhub"]})
+    tipranks = StaticClient({"providers": ["tipranks"]})
+    monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "auto")
+    monkeypatch.delenv("ANALYST_CONSENSUS_SECONDARY", raising=False)
+
+    out = collect_consensus(
+        "AAPL", YAHOO, currency="USD", client=finnhub,
+        benzinga_client=benzinga, tipranks_client=tipranks)
+
+    assert out["price_target"]["source"] == "benzinga"
+    assert out["providers"] == ["benzinga", "yahoo_finance"]
+    assert len(benzinga.calls) == 1
+    assert finnhub.calls == []
+    assert tipranks.calls == []
+
+
+def test_undercovered_benzinga_snapshot_cannot_replace_broad_yahoo_consensus(monkeypatch):
+    benzinga = StaticClient({
+        "captured_at": "2026-09-11T23:00:00Z",
+        "providers": ["benzinga"],
+        "price_target": {"mean": 400.0, "analyst_count": 1,
+                         "currency": "USD", "source": "benzinga"},
+        "recommendation": {"label": "buy", "unique_analyst_count": 1,
+                           "source": "benzinga"},
+    })
+    monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "auto")
+    monkeypatch.setenv("ANALYST_CONSENSUS_MIN_ANALYSTS", "3")
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+
+    out = collect_consensus(
+        "AAPL", YAHOO, currency="USD", benzinga_client=benzinga)
+
+    assert out["price_target"]["mean"] == 210.0
+    assert out["price_target"]["source"] == "yahoo_finance"
+    assert out["providers"] == ["yahoo_finance", "benzinga"]
+    assert out["source_snapshots"]["benzinga"]["price_target"]["mean"] == 400.0
+
+
+def test_tipranks_mcp_is_normalized_and_one_call_per_worker_is_enforced(monkeypatch):
+    monkeypatch.setenv("TIPRANKS_MAX_CALLS_PER_WORKER", "1")
+    monkeypatch.setattr(analyst_consensus, "_tipranks_calls", 0)
+    assets = {"assetsData": [{
+        "ticker": "AAPL",
+        "analystConsensus": "Moderate Buy",
+        "priceTarget": 335.87,
+        "url": "https://www.tipranks.com/stocks/aapl",
+    }]}
+    session = McpSession([
+        McpResponse({"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {}}}),
+        McpResponse(text="", headers={}),
+        McpResponse({
+            "jsonrpc": "2.0", "id": 2,
+            "result": {"content": [{"type": "text", "text": json.dumps(assets)}],
+                       "isError": False},
+        }),
+    ])
+    client = TipRanksConsensusClient("secret", session=session)
+
+    out = client.fetch("aapl", currency="USD")
+
+    assert out["price_target"]["mean"] == 335.87
+    assert out["price_target"]["analyst_count"] == 0
+    assert out["recommendation"]["label"] == "buy"
+    assert out["price_target"]["source_url"].endswith("/aapl")
+    assert client.fetch("MSFT", currency="USD") == {}
+    assert len(session.calls) == 3
+    assert all(call[1]["params"] == {"apikey": "secret"} for call in session.calls)
+
+
+def test_explicit_tipranks_secondary_is_evidence_not_the_primary_target(monkeypatch):
+    benzinga = StaticClient({
+        "captured_at": "2026-09-10T20:00:00Z",
+        "providers": ["benzinga"],
+        "price_target": {"mean": 225.0, "analyst_count": 20,
+                         "currency": "USD", "source": "benzinga"},
+        "recommendation": {"label": "buy", "source": "benzinga"},
+    })
+    tipranks = StaticClient({
+        "captured_at": "2026-09-10T20:00:00Z",
+        "providers": ["tipranks"],
+        "price_target": {"mean": 235.0, "analyst_count": 0,
+                         "currency": "USD", "source": "tipranks"},
+        "recommendation": {"label": "hold", "source": "tipranks"},
+    })
+    monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "auto")
+    monkeypatch.setenv("ANALYST_CONSENSUS_SECONDARY", "tipranks")
+
+    out = collect_consensus(
+        "AAPL", YAHOO, currency="USD",
+        benzinga_client=benzinga, tipranks_client=tipranks)
+
+    assert out["price_target"]["mean"] == 225.0
+    assert out["providers"] == ["benzinga", "yahoo_finance", "tipranks"]
+    assert out["source_snapshots"]["tipranks"]["price_target"]["mean"] == 235.0
+    assert out["source_comparison"]["recommendation"]["directional_agreement"] is False
 
 
 def test_denied_price_target_keeps_recommendations_and_yahoo_target(monkeypatch):
@@ -114,6 +295,7 @@ def test_two_provider_snapshots_stay_separate_and_report_disagreement(monkeypatc
 
 def test_no_provider_network_is_required_without_a_key(monkeypatch):
     monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "auto")
+    monkeypatch.delenv("BENZINGA_API_KEY", raising=False)
     monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
     assert collect_consensus("AAPL", YAHOO)["providers"] == ["yahoo_finance"]
 
@@ -179,3 +361,32 @@ def test_report_renders_provider_targets_without_blending_them(monkeypatch):
     assert "| Yahoo Finance | $210.00 USD |" in table
     assert "provider mean-target spread is 4.7%" in table
     assert "kept separate and excluded from intrinsic value" in table
+
+
+def test_report_attributes_tipranks_secondary(monkeypatch):
+    from src.report_agent import build_analyst_consensus_table
+
+    benzinga = StaticClient({
+        "captured_at": "2026-09-10T20:00:00Z",
+        "providers": ["benzinga"],
+        "price_target": {"mean": 225.0, "analyst_count": 20,
+                         "currency": "USD", "source": "benzinga"},
+        "recommendation": {"label": "buy", "source": "benzinga"},
+    })
+    tipranks = StaticClient({
+        "captured_at": "2026-09-10T20:00:00Z",
+        "providers": ["tipranks"],
+        "price_target": {"mean": 235.0, "analyst_count": 0,
+                         "currency": "USD", "source": "tipranks"},
+        "recommendation": {"label": "hold", "source": "tipranks"},
+    })
+    monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "auto")
+    monkeypatch.setenv("ANALYST_CONSENSUS_SECONDARY", "tipranks")
+    consensus = collect_consensus(
+        "AAPL", YAHOO, currency="USD",
+        benzinga_client=benzinga, tipranks_client=tipranks)
+
+    table = build_analyst_consensus_table(consensus)
+
+    assert "| TipRanks | $235.00 USD |" in table
+    assert "Data by TipRanks" in table

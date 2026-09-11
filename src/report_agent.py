@@ -311,7 +311,8 @@ def build_analyst_consensus_table(consensus: Dict[str, Any]) -> str:
         count = target.get('analyst_count') or recommendation.get('total') or "N/A"
         rating = str(recommendation.get('label') or "N/A").replace('_', ' ').title()
         as_of = target.get('as_of') or recommendation.get('period') or snapshot.get('captured_at') or "N/A"
-        provider = str(source).replace('_', ' ').title()
+        provider = ("TipRanks" if source == "tipranks"
+                    else str(source).replace('_', ' ').title())
         table += f"| {provider} | {money(mean)} | {target_range} | {count} | {rating} | {as_of} |\n"
         rows += 1
 
@@ -322,6 +323,8 @@ def build_analyst_consensus_table(consensus: Dict[str, Any]) -> str:
     target_comparison = comparison.get('price_target') or {}
     recommendation_comparison = comparison.get('recommendation') or {}
     notes = ["Provider snapshots are kept separate and excluded from intrinsic value."]
+    if "tipranks" in snapshots:
+        notes.append("TipRanks fields: Data by TipRanks.")
     spread = target_comparison.get('mean_target_spread_pct')
     if target_comparison.get('comparable') and isinstance(spread, (int, float)):
         notes.append(f"The provider mean-target spread is {spread:.1f}%.")

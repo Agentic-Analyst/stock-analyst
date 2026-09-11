@@ -364,7 +364,7 @@ Because the agent decides scope, most conversational questions — a price check
 
 - Python 3.11
 - API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `SERPAPI_API_KEY`
-- Optional: `MONGO_URI` + `MONGO_DB` (article cache + session memory), `FRED_API_KEY` (free; enables `get_macro`), `CHAT_MODEL` (defaults to `gpt-5.4-mini`), and `FINNHUB_API_KEY` (licensed analyst consensus; set `PEER_COMPS_ENABLED=true` only after checking plan coverage and rate limits)
+- Optional: `MONGO_URI` + `MONGO_DB` (article cache + session memory), `FRED_API_KEY` (free; enables `get_macro`), `CHAT_MODEL` (defaults to `gpt-5.4-mini`), and licensed analyst consensus through `BENZINGA_API_KEY` or `FINNHUB_API_KEY`. `ANALYST_CONSENSUS_SECONDARY=tipranks` enables one attributed TipRanks cross-check per worker when `TIPRANKS_API_KEY` is present; it is not used for calibration. Set `PEER_COMPS_ENABLED=true` only after checking plan coverage and rate limits.
 
 ### Installation
 
