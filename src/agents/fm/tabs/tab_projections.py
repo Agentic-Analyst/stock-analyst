@@ -224,8 +224,16 @@ class ProjectionsTabBuilder:
         # a negative "fair value". The margin path already encodes the
         # convergence story; the projections must actually use it.
         # MAX(0, ...) guards the degenerate case where the op-margin path
-        # exceeds gross margin; IFERROR falls back to base-year scaling when
-        # the LLM path is unavailable.
+        # exceeds gross margin.
+        #
+        # Some issuers do not disclose R&D and SG&A as separate statement
+        # lines. Both historical cells are then zero. The former IFERROR
+        # fallback scaled those missing zeroes forever, effectively deleting
+        # all operating expense: Walmart's intended 4.2% operating margin
+        # became 24.9%, and its fair value was overstated by several times.
+        # Missing disclosure may change the display split, never total opex.
+        # Put the unallocated remainder in SG&A so EBIT always reconciles to
+        # the grounded operating-margin path.
         ws.cell(row=7, column=1, value="R&D")
         for i in range(self.projection_years):
             col = 2 + i
@@ -234,8 +242,7 @@ class ProjectionsTabBuilder:
 
             formula = (
                 f'=IFERROR(MAX(0,{col_letter}5-{col_letter}3*LLM_Inferred!{llm_col}7)'
-                f'*Historical!$F$6/(Historical!$F$6+Historical!$F$7),'
-                f'Historical!$F$6*({col_letter}3/Historical!$F$3))'
+                f'*Historical!$F$6/(Historical!$F$6+Historical!$F$7),0)'
             )
             ws.cell(row=7, column=col, value=formula)
             ws.cell(row=7, column=col).number_format = ExcelFormats.CURRENCY
@@ -248,9 +255,8 @@ class ProjectionsTabBuilder:
             llm_col = chr(66 + i)
 
             formula = (
-                f'=IFERROR(MAX(0,{col_letter}5-{col_letter}3*LLM_Inferred!{llm_col}7)'
-                f'*Historical!$F$7/(Historical!$F$6+Historical!$F$7),'
-                f'Historical!$F$7*({col_letter}3/Historical!$F$3))'
+                f'=MAX(0,{col_letter}5-{col_letter}3*LLM_Inferred!{llm_col}7)'
+                f'-{col_letter}7'
             )
             ws.cell(row=8, column=col, value=formula)
             ws.cell(row=8, column=col).number_format = ExcelFormats.CURRENCY
