@@ -1387,6 +1387,30 @@ def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], l
     return response, cost
 
 
+def valuation_publication_status(data: Dict[str, Any]) -> str:
+    """Code-generated publication boundary, independent of any LLM section."""
+    reliability = ((data.get('valuation') or {}).get('reliability') or {})
+    if not reliability.get('point_estimate_withheld'):
+        return ""
+    band = str(reliability.get('band') or 'unavailable').title()
+    lines = [
+        "### Valuation Publication Status",
+        "",
+        f"**Valuation Confidence**: {band}",
+        "**Point Estimate**: Withheld",
+    ]
+    low, high = reliability.get('range_low'), reliability.get('range_high')
+    if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+        lines.append(
+            f"**Supported Valuation Range**: {format_number(low, 2)} – {format_number(high, 2)}"
+        )
+    lines.append(
+        "No directional rating, price target or implied-upside percentage is published "
+        "because the valuation methods do not converge."
+    )
+    return "\n".join(lines) + "\n\n"
+
+
 def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) -> str:
     """Integrate all sections into final report with header/footer.
     
@@ -1465,10 +1489,13 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
 ---
 """)
     
-    # Valuation
+    # Valuation. The publication status is assembled in code rather than left
+    # inside the recommendation section: if that independent LLM section
+    # fails, the report and API still cannot resurrect a withheld midpoint.
+    publication_status = valuation_publication_status(data)
     report_parts.append(f"""## Financial Model & Valuation
 
-{_strip_echoed_heading(sections['valuation'], "Financial Model & Valuation")}
+{publication_status}{_strip_echoed_heading(sections['valuation'], "Financial Model & Valuation")}
 
 ---
 """)

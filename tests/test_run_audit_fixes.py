@@ -715,6 +715,15 @@ class TestUnreliableValuationReachesTheReport:
         assert "point estimate withheld" in seen[0]
         assert "$87.11" not in seen[0]
 
+    def test_code_assembly_keeps_the_marker_when_a_narrative_section_fails(self):
+        from src.report_agent import apply_valuation_override, valuation_publication_status
+        data = apply_valuation_override(_valuation_data(comps=744.86), self.OVERRIDE)
+        status = valuation_publication_status(data)
+        assert "**Valuation Confidence**: Unreliable" in status
+        assert "**Point Estimate**: Withheld" in status
+        assert "**Supported Valuation Range**: $188.30 – $744.86" in status
+        assert "No directional rating" in status
+
 
 class TestDepositaryReceiptGuard:
     """
