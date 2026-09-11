@@ -23,6 +23,10 @@ current_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(current_dir.parent.parent.parent))  # Add 'src' to path
 
 from llms.config import get_llm
+from ..financial_metrics import (
+    depreciation_and_amortization,
+    depreciation_excel_formula,
+)
 
 
 class AssumptionsTabBuilder:
@@ -217,7 +221,7 @@ class AssumptionsTabBuilder:
         formula_fy0 = (
             '=IFERROR('
             '(SUMIFS(Raw!$D:$D,Raw!$B:$B,"Operating Income",Raw!$C:$C,$B$2&"*")+'
-            'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Depreciation And Amortization",Raw!$C:$C,$B$2&"*"))/'
+            f'{depreciation_excel_formula("$B$2")})/'
             'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Total Revenue",Raw!$C:$C,$B$2&"*"),'
             '"")'
         )
@@ -523,7 +527,7 @@ def infer_assumptions_with_llm(json_data: Dict[str, Any]) -> Dict[str, Any]:
     operating_income = latest_income.get('Operating Income') or 0
     operating_margin_fy0 = (operating_income / revenue_fy0 * 100) if (revenue_fy0 and operating_income) else 0
     
-    da = latest_income.get('Depreciation And Amortization') or 0
+    da = depreciation_and_amortization(fs, latest_year) or 0
     ebitda = operating_income + da
     ebitda_margin_fy0 = (ebitda / revenue_fy0 * 100) if (revenue_fy0 and ebitda) else 0
     

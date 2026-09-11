@@ -19,6 +19,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment
 
 from ..financial_model_builder import ExcelFormats
+from ..financial_metrics import depreciation_excel_formula
 
 
 class HistoricalTabBuilder:
@@ -226,7 +227,12 @@ class HistoricalTabBuilder:
                 
                 col_letter = chr(65 + col - 1)
                 
-                if raw_field is None:
+                if row == 18:
+                    # D&A labels vary between otherwise identical Yahoo
+                    # responses. Match the statement as well as the field so
+                    # aliases do not double count the same reported value.
+                    formula = f'={depreciation_excel_formula(f"{col_letter}$1")}'
+                elif raw_field is None:
                     # Calculated formulas
                     if row == 5:  # Gross Profit
                         formula = f'={col_letter}3-{col_letter}4'
