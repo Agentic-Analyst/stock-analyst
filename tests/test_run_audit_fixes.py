@@ -579,6 +579,57 @@ class TestBankValuationReachesTheReport:
         assert d['valuation']['dcf_perpetual']['intrinsic_value_per_share'] == 159.34
         assert d['valuation']['dcf_exit']['intrinsic_value_per_share'] == 159.34
 
+    def test_modeling_json_builds_the_same_override_for_the_comprehensive_path(self):
+        from src.agents.fm.bank_valuation import build_bank_valuation_override
+
+        financial_data = {
+            'company_data': {
+                'basic_info': {
+                    'sector': 'Financial Services',
+                    'industry': 'Banks - Diversified',
+                },
+                'valuation_metrics': {'book_value': 133.007},
+                'growth_profitability': {'return_on_equity': 0.17789},
+                'market_data': {'current_price': 353.56},
+                'capital_structure': {'beta': 1.11},
+            },
+            'modeling_metrics': {'financial_ratios': {'financial_profile': {
+                'interest_income_to_revenue': 1.06,
+            }}},
+        }
+        capm = {
+            'risk_free_rate': 0.0471,
+            'equity_risk_premium_total': 0.0443,
+            'beta': 1.11,
+        }
+        override = build_bank_valuation_override(financial_data, 0.025, capm)
+
+        assert override['valuation_method'] == 'justified_pb_roe'
+        assert override['fair_value'] > 0
+        assert override['current_price'] == 353.56
+        assert override['bank_inputs']['cost_of_equity_source'].endswith('(CAPM build)')
+
+    def test_low_interest_share_does_not_misclassify_a_payment_processor(self):
+        from src.agents.fm.bank_valuation import build_bank_valuation_override
+
+        financial_data = {
+            'company_data': {
+                'basic_info': {
+                    'sector': 'Financial Services',
+                    'industry': 'Credit Services',
+                },
+                'valuation_metrics': {'book_value': 20.0},
+                'growth_profitability': {'return_on_equity': 0.20},
+                'market_data': {'current_price': 80.0},
+                'capital_structure': {'beta': 1.0},
+            },
+            'modeling_metrics': {'financial_ratios': {'financial_profile': {
+                'interest_income_to_revenue': 0.02,
+            }}},
+        }
+
+        assert build_bank_valuation_override(financial_data) is None
+
     def test_non_bank_data_is_untouched(self):
         from src.report_agent import apply_valuation_override
         d = self._data()

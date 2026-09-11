@@ -1796,7 +1796,8 @@ def save_professional_report(
 def generate_and_save_professional_report(
     analysis_path: Path,
     ticker: str,
-    logger: Optional[StockAnalystLogger] = None
+    logger: Optional[StockAnalystLogger] = None,
+    valuation_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Path]:
     """Main entry point: Generate and save professional report.
     
@@ -1827,7 +1828,8 @@ def generate_and_save_professional_report(
         financial_json_path=financials_path,
         computed_values_json_path=computed_values_path,
         screening_json_path=screening_path,
-        logger=logger
+        logger=logger,
+        valuation_override=valuation_override,
     )
     
     # Save report

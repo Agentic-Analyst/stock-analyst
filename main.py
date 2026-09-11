@@ -234,7 +234,8 @@ class ComprehensiveStockAnalysisPipeline:
                 report, report_path = generate_and_save_professional_report(
                     self.analysis_path,
                     self.ticker,
-                    self.logger  # Pass logger instance
+                    self.logger,  # Pass logger instance
+                    valuation_override=model_results.get("valuation_override"),
                 )
                 
                 self.logger.info(f"✅ Professional report generated successfully")
@@ -375,10 +376,44 @@ class ComprehensiveStockAnalysisPipeline:
             except Exception as eval_error:
                 self.logger.warning(f"⚠️  Formula evaluation encountered issues: {eval_error}")
                 # Continue execution even if evaluation fails
+
+            # The default comprehensive pipeline is also used by scheduled
+            # canonical refreshes. Its report must receive the same
+            # balance-sheet valuation as the chat-agent path; otherwise a bank
+            # completes with a zero industrial DCF and is recorded as a
+            # confident STRONG SELL.
+            valuation_override = None
+            try:
+                import json
+                from src.agents.fm.bank_valuation import build_bank_valuation_override
+
+                with open(json_file, "r", encoding="utf-8") as financial_file:
+                    financial_data = json.load(financial_file)
+                assumptions = builder.llm_assumptions or {}
+                valuation_override = build_bank_valuation_override(
+                    financial_data,
+                    terminal_growth=assumptions.get("terminal_growth_rate"),
+                    capm=assumptions.get("capm"),
+                )
+                if valuation_override:
+                    bank_inputs = valuation_override.get("bank_inputs") or {}
+                    self.logger.info(
+                        "🏦 Balance-sheet valuation selected: justified P/B x ROE "
+                        f"fair value ${valuation_override['fair_value']:.2f} "
+                        f"(P/B {bank_inputs.get('justified_pb', 0):.2f}); "
+                        "industrial DCF suppressed in the report"
+                    )
+            except Exception as bank_error:
+                # Classification/override is a refinement; keep the existing
+                # model artifact available if its inputs are incomplete.
+                self.logger.warning(f"⚠️  Bank valuation override unavailable: {bank_error}")
             
             # Update statistics
             self.stats["model_generation"] = {
-                "model_type": "comprehensive_dcf",
+                "model_type": (
+                    "bank_justified_pb_roe" if valuation_override
+                    else "comprehensive_dcf"
+                ),
                 "projection_years": 5,
                 "strategy_used": "llm_inferred",
                 "excel_path": str(output_file),
@@ -398,7 +433,11 @@ class ComprehensiveStockAnalysisPipeline:
             }
             self.logger.stage_end("FINANCIAL MODEL GENERATION", True, stats)
             
-            return {"success": True, "excel_path": str(output_file)}
+            return {
+                "success": True,
+                "excel_path": str(output_file),
+                "valuation_override": valuation_override,
+            }
             
         except Exception as e:
             self.logger.error(f"❌ Financial model generation failed: {e}")
