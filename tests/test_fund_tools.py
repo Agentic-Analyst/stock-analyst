@@ -98,7 +98,9 @@ def test_invalid_fund_symbol_is_rejected_before_vendor_code(monkeypatch):
     assert result["status"] == "error"
 
 
-def test_company_financial_pipeline_hard_rejects_a_fund(monkeypatch, tmp_path):
+@pytest.mark.parametrize("quote_type", ["ETF", "CRYPTOCURRENCY"])
+def test_company_financial_pipeline_hard_rejects_a_non_equity(
+        monkeypatch, tmp_path, quote_type):
     import importlib
 
     module = importlib.import_module(
@@ -108,7 +110,7 @@ def test_company_financial_pipeline_hard_rejects_a_fund(monkeypatch, tmp_path):
     class FundScraper:
         def __init__(self, _ticker, _path):
             self.yf_ticker = type("FundTicker", (), {
-                "info": {"quoteType": "ETF"},
+                "info": {"quoteType": quote_type},
             })()
 
     monkeypatch.setattr(module, "FinancialScraper", FundScraper)
