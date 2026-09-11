@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import os
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -76,6 +77,132 @@ def _recommendation(counts: Dict[str, Any], *, period: Optional[str],
         "period": period,
         "source": source,
     }
+
+
+def _source_name(payload: Dict[str, Any]) -> Optional[str]:
+    """Resolve the provider attached to one normalized provider response."""
+    target = payload.get("price_target") or {}
+    recommendation = payload.get("recommendation") or {}
+    providers = payload.get("providers") or []
+    source = target.get("source") or recommendation.get("source")
+    if not source and len(providers) == 1:
+        source = providers[0]
+    return str(source) if source else None
+
+
+def _snapshot(payload: Dict[str, Any]) -> tuple[Optional[str], Dict[str, Any]]:
+    """Copy only source-owned evidence; never recursively copy comparisons."""
+    source = _source_name(payload)
+    if not source:
+        return None, {}
+    record = {
+        "captured_at": payload.get("captured_at"),
+        "price_target": deepcopy(payload.get("price_target") or {}),
+        "recommendation": deepcopy(payload.get("recommendation") or {}),
+    }
+    if payload.get("partial_errors"):
+        record["partial_errors"] = list(payload["partial_errors"])
+    return source, record
+
+
+def _rating_direction(label: Any) -> Optional[str]:
+    normalized = str(label or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"strong_buy", "buy", "outperform", "overweight"}:
+        return "bullish"
+    if normalized in {"hold", "neutral", "market_perform", "equal_weight"}:
+        return "neutral"
+    if normalized in {"strong_sell", "sell", "underperform", "underweight"}:
+        return "bearish"
+    return None
+
+
+def _compare_source_snapshots(snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Return objective cross-source metadata without manufacturing a consensus.
+
+    Provider means remain separate.  We report their max/min spread only when
+    every included target has the same known currency; no target is averaged
+    and none of this metadata enters intrinsic value.
+    """
+    means: Dict[str, float] = {}
+    currencies: Dict[str, str] = {}
+    labels: Dict[str, str] = {}
+    directions: Dict[str, str] = {}
+    for source, snapshot in snapshots.items():
+        target = snapshot.get("price_target") or {}
+        mean = _positive(target.get("mean"))
+        if mean is not None:
+            means[source] = mean
+            currency = str(target.get("currency") or "").strip().upper()
+            if currency:
+                currencies[source] = currency
+
+        recommendation = snapshot.get("recommendation") or {}
+        label = recommendation.get("label")
+        if label:
+            labels[source] = str(label)
+            direction = _rating_direction(label)
+            if direction:
+                directions[source] = direction
+
+    comparable = (
+        len(means) >= 2
+        and len(currencies) == len(means)
+        and len(set(currencies.values())) == 1
+    )
+    price_comparison: Dict[str, Any] = {
+        "source_count": len(means),
+        "mean_by_source": means,
+        "currency_by_source": currencies,
+        "comparable": comparable,
+    }
+    if comparable:
+        low, high = min(means.values()), max(means.values())
+        midpoint = (low + high) / 2.0
+        price_comparison.update({
+            "mean_target_low": low,
+            "mean_target_high": high,
+            "mean_target_spread_pct": round((high - low) / midpoint * 100.0, 2),
+        })
+
+    recommendation_comparison: Dict[str, Any] = {
+        "source_count": len(labels),
+        "label_by_source": labels,
+        "direction_by_source": directions,
+    }
+    if len(labels) >= 2:
+        recommendation_comparison["exact_agreement"] = len(set(labels.values())) == 1
+    if len(directions) >= 2:
+        recommendation_comparison["directional_agreement"] = len(set(directions.values())) == 1
+
+    return {
+        "price_target": price_comparison,
+        "recommendation": recommendation_comparison,
+    }
+
+
+def refresh_source_comparison(consensus: Dict[str, Any]) -> Dict[str, Any]:
+    """Recompute comparison metadata after currency normalization."""
+    snapshots = consensus.get("source_snapshots") or {}
+    if isinstance(snapshots, dict) and snapshots:
+        consensus["source_comparison"] = _compare_source_snapshots(snapshots)
+    return consensus
+
+
+def _with_source_evidence(out: Dict[str, Any], *payloads: Dict[str, Any]) -> Dict[str, Any]:
+    if not out:
+        return {}
+    result = deepcopy(out)
+    snapshots: Dict[str, Dict[str, Any]] = {}
+    for payload in payloads:
+        if not payload:
+            continue
+        source, record = _snapshot(payload)
+        if source:
+            snapshots[source] = record
+    if snapshots:
+        result["source_snapshots"] = snapshots
+        result["source_comparison"] = _compare_source_snapshots(snapshots)
+    return result
 
 
 def yahoo_snapshot(guidance: Optional[Dict[str, Any]], *,
@@ -185,20 +312,21 @@ class FinnhubConsensusClient:
 
 def _merge(primary: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
     if not primary:
-        return fallback
+        return _with_source_evidence(fallback, fallback)
     if not fallback:
-        return primary
-    out = dict(primary)
+        return _with_source_evidence(primary, primary)
+    out = deepcopy(primary)
     out["providers"] = list(dict.fromkeys(
         list(primary.get("providers") or []) + list(fallback.get("providers") or [])))
     for section in ("price_target", "recommendation"):
         if not out.get(section):
-            out[section] = fallback.get(section) or {}
-    return out
+            out[section] = deepcopy(fallback.get(section) or {})
+    return _with_source_evidence(out, primary, fallback)
 
 
 def collect_consensus(ticker: str, yahoo_guidance: Optional[Dict[str, Any]], *,
                       currency: Optional[str] = None,
+                      quote_currency: Optional[str] = None,
                       client: Optional[FinnhubConsensusClient] = None) -> Dict[str, Any]:
     """Collect configured consensus, falling back section-by-section to Yahoo."""
     provider = (os.getenv("ANALYST_CONSENSUS_PROVIDER", "auto") or "auto").strip().lower()
@@ -206,11 +334,13 @@ def collect_consensus(ticker: str, yahoo_guidance: Optional[Dict[str, Any]], *,
         return {}
     fallback = yahoo_snapshot(yahoo_guidance, currency=currency)
     if provider not in ("auto", "finnhub"):
-        return fallback
+        return _merge({}, fallback)
     if client is None:
         key = (os.getenv("FINNHUB_API_KEY") or "").strip()
         if not key:
-            return fallback
+            return _merge({}, fallback)
         client = FinnhubConsensusClient(key)
-    return _merge(client.fetch(ticker, currency=currency), fallback)
-
+    return _merge(
+        client.fetch(ticker, currency=quote_currency or currency),
+        fallback,
+    )

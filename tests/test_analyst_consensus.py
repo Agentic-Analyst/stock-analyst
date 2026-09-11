@@ -86,6 +86,32 @@ def test_denied_price_target_keeps_recommendations_and_yahoo_target(monkeypatch)
     assert out["providers"] == ["finnhub", "yahoo_finance"]
 
 
+def test_two_provider_snapshots_stay_separate_and_report_disagreement(monkeypatch):
+    session = Session({
+        "price-target": Response({"targetMean": 220, "targetMedian": 215,
+                                  "targetHigh": 280, "targetLow": 160,
+                                  "numberAnalysts": 35, "lastUpdated": "2026-09-09"}),
+        "recommendation": Response([
+            {"period": "2026-09-01", "strongBuy": 10, "buy": 20, "hold": 5,
+             "sell": 1, "strongSell": 0},
+        ]),
+    })
+    monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "finnhub")
+    out = collect_consensus(
+        "AAPL", YAHOO, currency="USD", quote_currency="USD",
+        client=FinnhubConsensusClient("secret", session=session))
+
+    assert out["price_target"]["mean"] == 220.0  # explicit primary; never averaged
+    assert out["source_snapshots"]["finnhub"]["price_target"]["mean"] == 220.0
+    assert out["source_snapshots"]["yahoo_finance"]["price_target"]["mean"] == 210.0
+    price = out["source_comparison"]["price_target"]
+    assert price["source_count"] == 2
+    assert price["mean_target_spread_pct"] == 4.65
+    recommendation = out["source_comparison"]["recommendation"]
+    assert recommendation["exact_agreement"] is False
+    assert recommendation["directional_agreement"] is True
+
+
 def test_no_provider_network_is_required_without_a_key(monkeypatch):
     monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "auto")
     monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
@@ -105,3 +131,51 @@ def test_yahoo_quote_targets_are_converted_to_the_model_currency(monkeypatch):
         lambda source, target: 1.35 if (source, target) == ("GBP", "USD") else None)
     info = {"currency": "GBp", "financialCurrency": "USD"}
     assert scraper._analyst_target_in_financial_currency(4000.0, info) == 54.0
+
+
+def test_each_provider_snapshot_is_currency_normalized_before_comparison(monkeypatch):
+    import src.financial_scraper as scraper
+
+    session = Session({
+        "price-target": Response({"targetMean": 220, "targetHigh": 260,
+                                  "targetLow": 180, "numberAnalysts": 20}),
+        "recommendation": Response([]),
+    })
+    monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "finnhub")
+    out = collect_consensus(
+        "SHEL.L", YAHOO, currency="USD", quote_currency="GBP",
+        client=FinnhubConsensusClient("secret", session=session))
+    company = {
+        "basic_info": {"listing_currency": "GBP", "currency": "USD"},
+        "market_data": {"fx_listing_to_financial": 1.35},
+    }
+
+    normalized = scraper._convert_consensus_prices(out, company)
+    assert normalized["price_target"]["mean"] == 297.0
+    assert normalized["source_snapshots"]["finnhub"]["price_target"]["mean"] == 297.0
+    assert normalized["source_snapshots"]["yahoo_finance"]["price_target"]["mean"] == 210.0
+    assert set(normalized["source_comparison"]["price_target"]["currency_by_source"].values()) == {"USD"}
+
+
+def test_report_renders_provider_targets_without_blending_them(monkeypatch):
+    from src.report_agent import build_analyst_consensus_table
+
+    session = Session({
+        "price-target": Response({"targetMean": 220, "targetMedian": 215,
+                                  "targetHigh": 280, "targetLow": 160,
+                                  "numberAnalysts": 35, "lastUpdated": "2026-09-09"}),
+        "recommendation": Response([
+            {"period": "2026-09-01", "strongBuy": 10, "buy": 20, "hold": 5,
+             "sell": 1, "strongSell": 0},
+        ]),
+    })
+    monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "finnhub")
+    consensus = collect_consensus(
+        "AAPL", YAHOO, currency="USD", quote_currency="USD",
+        client=FinnhubConsensusClient("secret", session=session))
+    table = build_analyst_consensus_table(consensus)
+
+    assert "| Finnhub | $220.00 USD |" in table
+    assert "| Yahoo Finance | $210.00 USD |" in table
+    assert "provider mean-target spread is 4.7%" in table
+    assert "kept separate and excluded from intrinsic value" in table

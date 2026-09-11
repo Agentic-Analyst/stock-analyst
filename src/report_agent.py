@@ -274,6 +274,66 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def build_analyst_consensus_table(consensus: Dict[str, Any]) -> str:
+    """Render provider snapshots separately; never manufacture a blended target."""
+    consensus = consensus or {}
+    snapshots = consensus.get('source_snapshots') or {}
+    if not isinstance(snapshots, dict) or not snapshots:
+        return "_Provider-level analyst consensus snapshots unavailable._"
+
+    table = (
+        "| Provider | Mean Target | Target Range | Analysts | Rating | As Of |\n"
+        "|----------|-------------|--------------|----------|--------|-------|\n"
+    )
+    rows = 0
+    for source, snapshot in snapshots.items():
+        snapshot = snapshot or {}
+        target = snapshot.get('price_target') or {}
+        recommendation = snapshot.get('recommendation') or {}
+        mean = target.get('mean')
+        low, high = target.get('low'), target.get('high')
+        currency = target.get('currency')
+
+        def money(value: Any) -> str:
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return "N/A"
+            symbol = currency_symbol(currency) if currency else _money_symbol()
+            suffix = f" {currency}" if currency else ""
+            return f"{symbol}{value:,.2f}{suffix}"
+
+        if not target and not recommendation:
+            continue
+        target_range = (
+            f"{money(low)} to {money(high)}"
+            if isinstance(low, (int, float)) and isinstance(high, (int, float))
+            else "N/A"
+        )
+        count = target.get('analyst_count') or recommendation.get('total') or "N/A"
+        rating = str(recommendation.get('label') or "N/A").replace('_', ' ').title()
+        as_of = target.get('as_of') or recommendation.get('period') or snapshot.get('captured_at') or "N/A"
+        provider = str(source).replace('_', ' ').title()
+        table += f"| {provider} | {money(mean)} | {target_range} | {count} | {rating} | {as_of} |\n"
+        rows += 1
+
+    if not rows:
+        return "_Provider-level analyst consensus snapshots unavailable._"
+
+    comparison = consensus.get('source_comparison') or {}
+    target_comparison = comparison.get('price_target') or {}
+    recommendation_comparison = comparison.get('recommendation') or {}
+    notes = ["Provider snapshots are kept separate and excluded from intrinsic value."]
+    spread = target_comparison.get('mean_target_spread_pct')
+    if target_comparison.get('comparable') and isinstance(spread, (int, float)):
+        notes.append(f"The provider mean-target spread is {spread:.1f}%.")
+    directional = recommendation_comparison.get('directional_agreement')
+    if directional is not None:
+        notes.append(
+            "Provider recommendation directions agree."
+            if directional else "Provider recommendation directions disagree."
+        )
+    return table + "\n_" + " ".join(notes) + "_"
+
+
 def extract_historical_financials(financial_data: Dict[str, Any]) -> Dict[str, Any]:
     """Extract 5-year historical financial statements."""
     statements = financial_data.get('financial_statements', {})
@@ -998,6 +1058,9 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         )
     else:
         reverse_table = "_Unavailable — the source workbook does not contain the reverse-DCF diagnostic._"
+
+    analyst_consensus_table = build_analyst_consensus_table(
+        company.get('analyst_consensus') or {})
     
     # Cost of capital — the derivation, not just the rate. A DCF is mostly an
     # argument about the discount rate: on these projections the value moves far
@@ -1067,6 +1130,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         f"### DCF Valuation — Perpetual Growth Method\n\n{dcf_perp_table}\n"
         f"### DCF Valuation — Exit Multiple Method\n\n{dcf_exit_table}\n"
         f"### Market-Implied Expectations (Reverse DCF)\n\n{reverse_table}\n\n"
+        f"### Analyst Consensus Cross-Check\n\n{analyst_consensus_table}\n\n"
         f"### Valuation Summary\n\n{summary_table}\n"
     )
 

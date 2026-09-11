@@ -97,32 +97,50 @@ def _analyst_target_in_financial_currency(target, info):
 
 
 def _convert_consensus_prices(consensus, company_data):
-    """Normalize an external provider's quote-currency targets for the model."""
+    """Normalize every provider target to the model's financial currency."""
     if not isinstance(consensus, dict) or not consensus:
         return consensus or {}
-    target = consensus.get("price_target")
-    if not isinstance(target, dict):
-        return consensus
-    # Yahoo targets were normalized when `forward_guidance` was built. When a
-    # plan-limited Finnhub response falls back to that section, converting it
-    # here again would multiply cross-currency listings twice.
-    if target.get("source") == "yahoo_finance":
-        return consensus
     basic = company_data.get("basic_info", {}) or {}
     market = company_data.get("market_data", {}) or {}
     listing = basic.get("listing_currency")
     financial = basic.get("currency")
     rate = market.get("fx_listing_to_financial")
-    factor = 1.0
-    if listing and financial and listing != financial and isinstance(rate, (int, float)):
-        factor *= float(rate)
-    if factor != 1.0:
-        for key in ("mean", "median", "high", "low"):
-            value = target.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                target[key] = float(value) * factor
-    target["currency"] = financial or listing
-    return consensus
+
+    targets = []
+    root_target = consensus.get("price_target")
+    if isinstance(root_target, dict):
+        targets.append(root_target)
+    snapshots = consensus.get("source_snapshots") or {}
+    if isinstance(snapshots, dict):
+        for snapshot in snapshots.values():
+            target = (snapshot or {}).get("price_target")
+            if isinstance(target, dict):
+                targets.append(target)
+
+    seen = set()
+    for target in targets:
+        if id(target) in seen:
+            continue
+        seen.add(id(target))
+        source_currency = target.get("currency") or listing
+        # Yahoo targets were normalized when `forward_guidance` was built.
+        # Other provider targets are listing-currency quotes. Currency equality
+        # also makes this idempotent if normalization is called more than once.
+        should_convert = (
+            target.get("source") != "yahoo_finance"
+            and listing and financial and listing != financial
+            and source_currency == listing
+            and isinstance(rate, (int, float))
+        )
+        if should_convert:
+            for key in ("mean", "median", "high", "low"):
+                value = target.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    target[key] = float(value) * float(rate)
+        target["currency"] = financial or source_currency or listing
+
+    from analyst_consensus import refresh_source_comparison
+    return refresh_source_comparison(consensus)
 
 
 class FinancialScraper:
@@ -907,8 +925,10 @@ class FinancialScraper:
             company_data = modeling_data.get("company_data", {}) or {}
             guidance = company_data.get("forward_guidance", {}) or {}
             currency = (company_data.get("basic_info", {}) or {}).get("currency")
+            quote_currency = (company_data.get("basic_info", {}) or {}).get("listing_currency")
             consensus = collect_consensus(
-                self.ticker, guidance, currency=currency)
+                self.ticker, guidance, currency=currency,
+                quote_currency=quote_currency)
             consensus = _convert_consensus_prices(consensus, company_data)
             if consensus:
                 modeling_data["analyst_data"]["consensus"] = consensus
