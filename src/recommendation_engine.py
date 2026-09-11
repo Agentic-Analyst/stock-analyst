@@ -774,6 +774,10 @@ class RecommendationEngineV3:
         """
         ccy = getattr(self, "_ccy", "$")
         lines = [f"### Investment Rating: {fixed_numbers.get('rating', 'NOT RATED')}"]
+        lines.append(
+            f"**Rating Confidence**: "
+            f"{fixed_numbers.get('rating_confidence', 'moderate').title()}"
+        )
         if fixed_numbers.get("price_available", True):
             target = (fixed_numbers.get("targets") or {}).get("m12") or {}
             if target.get("price") is not None:

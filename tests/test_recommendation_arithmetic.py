@@ -196,6 +196,18 @@ def test_well_covered_opposite_consensus_reduces_extreme_conviction_symmetricall
     assert bearish["inputs"]["consensus_alignment"] == "conflicting"
 
 
+def test_fallback_recommendation_keeps_the_rating_confidence():
+    from recommendation_engine import RecommendationEngineV3
+
+    text = RecommendationEngineV3()._minimal_recommendation({
+        "rating": "SELL",
+        "rating_confidence": "low",
+        "price_available": False,
+    })
+    assert "### Investment Rating: SELL" in text
+    assert "**Rating Confidence**: Low" in text
+
+
 def test_historical_volatility_uses_saved_daily_prices():
     from report_agent import historical_volatility_pct
 
