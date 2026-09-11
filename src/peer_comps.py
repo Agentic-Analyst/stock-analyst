@@ -14,7 +14,11 @@ FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 MAX_PEERS = 10
 
 EV_EBITDA_KEYS = (
-    "evToEbitdaTTM", "currentEv/ebitdaTTM", "enterpriseValueOverEBITDATTM",
+    # ``evEbitdaTTM`` is the spelling returned by Finnhub's live
+    # /stock/metric endpoint. Keep the historical aliases because provider
+    # payloads and saved fixtures have used each of them over time.
+    "evEbitdaTTM", "evToEbitdaTTM", "currentEv/ebitdaTTM",
+    "enterpriseValueOverEBITDATTM",
 )
 PRICE_SALES_KEYS = (
     "priceToSalesTTM", "psTTM", "price/salesTTM",
@@ -137,4 +141,3 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
         "ev_ebitda_peer_count": len(ev_values),
         "price_sales_peer_count": len(ps_values),
     }
-

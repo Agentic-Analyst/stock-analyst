@@ -13,7 +13,8 @@ class Client:
 
     def metrics(self, ticker):
         return {
-            "MSFT": {"evToEbitdaTTM": 24.0, "priceToSalesTTM": 9.0},
+            # Current Finnhub /stock/metric field spelling.
+            "MSFT": {"evEbitdaTTM": 24.0, "priceToSalesTTM": 9.0},
             "GOOG": {"currentEv/ebitdaTTM": 18.0, "psTTM": 7.0},
             "DELL": {"enterpriseValueOverEBITDATTM": 12.0, "price/salesTTM": 1.0},
             "HPQ": {"evToEbitdaTTM": -1.0, "priceToSalesTTM": 0.6},
