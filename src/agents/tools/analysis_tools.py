@@ -669,7 +669,8 @@ class BuildModelTool(_CtxTool):
         mcap = (km.get("market_data", {}) or {}).get("market_cap") if isinstance(km, dict) else None
         # The market cap is in the LISTING's currency, so the mega-cap rail
         # needs to know which one before comparing it to a threshold.
-        mcap_ccy = ((km.get("basic_info", {}) or {}).get("currency")
+        mcap_ccy = (((km.get("basic_info", {}) or {}).get("listing_currency")
+                     or (km.get("basic_info", {}) or {}).get("currency"))
                     if isinstance(km, dict) else None)
         warning = _valuation_warning(fair_value, upside, market_cap=mcap,
                                      method=method, currency=mcap_ccy)
@@ -780,6 +781,13 @@ class BuildModelTool(_CtxTool):
             # Publish the legs and the confidence band so the answer can show a
             # football field instead of a false point estimate.
             **({"valuation_legs": legs_pub} if legs_pub else {}),
+            **({
+                "market_implied_terminal_fcf": vm.get("market_implied_terminal_fcf"),
+                "market_implied_fcf_vs_model": vm.get("market_implied_fcf_vs_model"),
+            } if isinstance(vm, dict)
+                and isinstance(vm.get("market_implied_terminal_fcf"), (int, float))
+                and isinstance(vm.get("market_implied_fcf_vs_model"), (int, float))
+                else {}),
             **({"valuation_spread_ratio": round(ratio, 2)} if ratio else {}),
             **({"valuation_confidence": band} if band else {}),
             **({"valuation_method": method} if method else {}),
@@ -950,7 +958,8 @@ class WriteReportTool(_CtxTool):
         mcap = (km.get("market_data", {}) or {}).get("market_cap") if isinstance(km, dict) else None
         # The market cap is in the LISTING's currency, so the mega-cap rail
         # needs to know which one before comparing it to a threshold.
-        mcap_ccy = ((km.get("basic_info", {}) or {}).get("currency")
+        mcap_ccy = (((km.get("basic_info", {}) or {}).get("listing_currency")
+                     or (km.get("basic_info", {}) or {}).get("currency"))
                     if isinstance(km, dict) else None)
         warning = _valuation_warning(fair_value, upside, market_cap=mcap,
                                      method=method, currency=mcap_ccy)
@@ -1026,6 +1035,9 @@ class WriteReportTool(_CtxTool):
                   "the user. When `fair_value_withheld` is true, state the supplied "
                   "`fair_value_withheld_reason`; do not substitute dispersion as the "
                   "reason and do not turn range endpoints into scenario targets. "
+                  "When market-implied terminal FCF fields are present, explain the "
+                  "valuation gap with that reverse-DCF evidence instead of merely "
+                  "calling the assumptions suspect. "
                   "If `rating` is present, state THAT rating — it is the "
                   "one printed in the report the user can open, and it is computed "
                   "from the model rather than judged. Do not substitute your own "

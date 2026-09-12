@@ -41,22 +41,77 @@ def test_too_few_observations_do_not_create_a_fake_comps_view():
     assert collect_peer_comps("X", client=Sparse()) == {}
 
 
+def test_tiny_peers_cannot_validate_a_dominant_company(monkeypatch):
+    class Sized(Client):
+        def metrics(self, ticker):
+            metric = super().metrics(ticker)
+            metric["marketCapitalization"] = {
+                "MSFT": 300_000, "GOOG": 200_000, "DELL": 100_000, "HPQ": 40_000,
+            }[ticker]
+            return metric
+
+    monkeypatch.setenv("PEER_COMPS_MIN_SIZE_RATIO", "0.05")
+    # Subject is $4.9T; every returned peer is below 5% of its size except MSFT,
+    # leaving fewer than three usable observations.
+    assert collect_peer_comps(
+        "AAPL", client=Sized(), max_peers=10, subject_market_cap=4_900_000_000_000,
+    ) == {}
+
+
+def test_megacap_can_use_bounded_sector_leaders_when_subindustry_is_too_small(monkeypatch):
+    class SectorLeaders(Client):
+        def peers(self, ticker):
+            return ["DELL", "HPQ"]
+
+        def metrics(self, ticker):
+            return {
+                "MSFT": {"evEbitdaTTM": 25.0, "priceToSalesTTM": 10.0,
+                         "marketCapitalization": 3_500_000},
+                "NVDA": {"evEbitdaTTM": 30.0, "priceToSalesTTM": 20.0,
+                         "marketCapitalization": 4_000_000},
+                "GOOGL": {"evEbitdaTTM": 20.0, "priceToSalesTTM": 8.0,
+                          "marketCapitalization": 3_000_000},
+            }.get(ticker, {"evEbitdaTTM": 10.0, "marketCapitalization": 100_000})
+
+    monkeypatch.setenv("PEER_COMPS_MIN_SIZE_RATIO", "0.05")
+    out = collect_peer_comps(
+        "AAPL", client=SectorLeaders(), max_peers=3,
+        subject_market_cap=4_900_000_000_000, sector="Technology",
+        fallback_symbols=["AAPL", "MSFT", "NVDA", "GOOGL"],
+    )
+    assert out["grouping"] == "sector_leaders"
+    assert out["peer_universe_source"] == "yahoo_sector_leaders"
+    assert out["median_ev_ebitda"] == 25.0
+    assert out["ev_ebitda_peer_count"] == 3
+
+
 def test_feature_is_off_by_default_without_an_injected_client(monkeypatch):
     monkeypatch.delenv("PEER_COMPS_ENABLED", raising=False)
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
     assert collect_peer_comps("AAPL") == {}
 
 
-def test_configuration_status_explains_key_present_but_feature_disabled(monkeypatch):
+def test_configuration_status_auto_enables_when_key_is_present(monkeypatch):
     monkeypatch.setenv("FINNHUB_API_KEY", "secret")
     monkeypatch.delenv("PEER_COMPS_ENABLED", raising=False)
     status = configuration_status()
     assert status == {
-        "enabled": False,
+        "mode": "auto",
+        "enabled": True,
         "provider": "finnhub",
         "provider_key_configured": True,
-        "ready": False,
-        "blockers": ["PEER_COMPS_ENABLED is not true"],
+        "ready": True,
+        "blockers": [],
     }
+
+
+def test_explicit_false_still_disables_peer_comps(monkeypatch):
+    monkeypatch.setenv("FINNHUB_API_KEY", "secret")
+    monkeypatch.setenv("PEER_COMPS_ENABLED", "false")
+    status = configuration_status()
+    assert status["mode"] == "disabled"
+    assert status["ready"] is False
+    assert status["blockers"] == ["PEER_COMPS_ENABLED explicitly disables peer comps"]
 
 
 def test_grounding_prefers_real_peer_median_over_self_multiple(monkeypatch):

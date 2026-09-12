@@ -28,6 +28,20 @@ class RecommendationValidator:
     # Pattern to find sentences (handle abbreviations like U.S., Dr., etc.)
     # Split on . ! ? but not on abbreviations
     SENTENCE_PATTERN = re.compile(r'(?<!\b[A-Z])(?<!\b[A-Z][a-z])(?<!\bU\.S)(?<!\bU\.K)(?<!\bDr)(?<!\bMr)(?<!\bMs)(?<!\bInc)(?<!\bCo)(?<!\bCorp)(?<!\betc)(?<!\bi\.e)(?<!\be\.g)[.!?]+(?=\s+[A-Z]|$)', re.MULTILINE)
+
+    # Generic investment-language overlap does not prove that a source
+    # supports a claim. These terms are removed before checking semantic
+    # overlap so an unrelated article containing "growth" and "risk" cannot
+    # launder a sentence through a valid [E#] token.
+    _SUPPORT_STOPWORDS = {
+        "about", "after", "again", "against", "also", "and", "because",
+        "been", "before", "being", "between", "both", "business", "but",
+        "catalyst", "company", "could", "current", "driver", "earnings",
+        "from", "growth", "have", "into", "investment", "likely", "market",
+        "more", "price", "rating", "revenue", "risk", "should", "stock",
+        "target", "than", "that", "their", "there", "these", "they", "this",
+        "through", "valuation", "were", "will", "with", "would", "year",
+    }
     
     def validate_and_correct(
         self,
@@ -108,6 +122,18 @@ class RecommendationValidator:
                     f"Removed {removed} invalid citation(s) (no evidence pack)"
                 )
 
+        # A citation ID being real is necessary, not sufficient. Check that
+        # every sentence carrying [E#] has actual topical or numeric support in
+        # the cited evidence. This catches citation laundering: attaching an
+        # unrelated but valid headline to a confident claim.
+        support_issues = self._validate_citation_support(response_data, evidence_pack)
+        if citation_enforcement and support_issues:
+            validation_report["errors"].append(
+                f"{len(support_issues)} cited claim(s) are not supported by their evidence"
+            )
+            validation_report["citation_support_issues"] = support_issues[:10]
+            validation_report["valid"] = False
+
         # 3. Check citation coverage
         coverage = self._check_citation_coverage(
             response_data,
@@ -134,6 +160,131 @@ class RecommendationValidator:
             validation_report["warnings"].extend(unsupported)
         
         return response_data, validation_report
+
+    @classmethod
+    def _support_tokens(cls, text: str) -> Set[str]:
+        tokens = set()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", text or ""):
+            token = token.lower().replace("’", "'").strip("'")
+            if token.endswith("'s"):
+                token = token[:-2]
+            # A light stem catches stabilize/stabilized and launch/launches
+            # without introducing an NLP dependency into the safety boundary.
+            for suffix in ("ingly", "edly", "ation", "ments", "ment", "ies", "ing", "ed", "es", "s"):
+                if token.endswith(suffix) and len(token) - len(suffix) >= 4:
+                    token = token[:-len(suffix)]
+                    break
+            if len(token) >= 4 and token not in cls._SUPPORT_STOPWORDS:
+                tokens.add(token)
+        return tokens
+
+    @staticmethod
+    def _support_numbers(text: str) -> Set[str]:
+        normalized = set()
+        for value in re.findall(r"(?<![A-Za-z])[-+]?\d[\d,]*(?:\.\d+)?", text or ""):
+            value = value.replace(",", "")
+            if "." in value:
+                value = value.rstrip("0").rstrip(".")
+            normalized.add(value)
+        return normalized
+
+    @classmethod
+    def _citation_supported(
+        cls, sentence: str, cited_ids: Set[str], evidence_by_id: Dict[str, Dict[str, Any]],
+    ) -> bool:
+        evidence = " ".join(
+            " ".join(str(item.get(field) or "") for field in (
+                "title", "source", "snippet", "reasoning", "type", "date",
+            ))
+            for evidence_id in cited_ids
+            for item in [evidence_by_id.get(evidence_id) or {}]
+        )
+        if not evidence.strip():
+            return False
+        claim = cls.EVIDENCE_PATTERN.sub("", sentence)
+        claim_numbers = cls._support_numbers(claim)
+        evidence_numbers = cls._support_numbers(evidence)
+        if claim_numbers and not claim_numbers.issubset(evidence_numbers):
+            return False
+        overlap = cls._support_tokens(claim).intersection(cls._support_tokens(evidence))
+        return len(overlap) >= 2 or any(len(token) >= 7 for token in overlap)
+
+    def _validate_citation_support(
+        self, response_data: Dict[str, Any], evidence_pack: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        evidence_by_id = {
+            str(item.get("id")): item
+            for item in (evidence_pack or {}).get("evidence", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        if not evidence_by_id:
+            return []
+        issues = []
+        for text in self._all_text(response_data):
+            for sentence in re.split(self.SENTENCE_PATTERN, text or ""):
+                cited = {f"E{number}" for number in self.EVIDENCE_PATTERN.findall(sentence)}
+                if cited and cited.issubset(evidence_by_id) and not self._citation_supported(
+                    sentence, cited, evidence_by_id
+                ):
+                    issues.append({
+                        "claim": sentence.strip()[:300],
+                        "citations": sorted(cited),
+                    })
+        return issues
+
+    def strip_unsupported_citations(
+        self, response_data: Dict[str, Any], evidence_pack: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], int]:
+        """Remove citations that fail support validation after rewrite attempts."""
+        evidence_by_id = {
+            str(item.get("id")): item
+            for item in (evidence_pack or {}).get("evidence", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        removed = 0
+
+        def clean(text: str) -> str:
+            nonlocal removed
+            pieces = re.split(r"(?<=[.!?])(?=\s|$)", text)
+            cleaned = []
+            for piece in pieces:
+                cited = {f"E{number}" for number in self.EVIDENCE_PATTERN.findall(piece)}
+                if cited and not self._citation_supported(piece, cited, evidence_by_id):
+                    count = len(self.EVIDENCE_PATTERN.findall(piece))
+                    piece = self.EVIDENCE_PATTERN.sub("", piece)
+                    piece = re.sub(r" {2,}", " ", piece)
+                    piece = re.sub(r"\s+([.,;:!?])", r"\1", piece)
+                    removed += count
+                cleaned.append(piece)
+            return "".join(cleaned).strip()
+
+        def walk(node):
+            if isinstance(node, dict):
+                return {key: walk(value) for key, value in node.items()}
+            if isinstance(node, list):
+                return [walk(value) for value in node]
+            if isinstance(node, str):
+                return clean(node)
+            return node
+
+        return walk(response_data), removed
+
+    @staticmethod
+    def _all_text(response_data: Dict[str, Any]) -> List[str]:
+        values = []
+
+        def walk(node):
+            if isinstance(node, dict):
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+            elif isinstance(node, str):
+                values.append(node)
+
+        walk(response_data or {})
+        return values
     
     def _extract_json(self, response: str) -> Dict[str, Any]:
         """Extract JSON from LLM response with robust cleaning."""

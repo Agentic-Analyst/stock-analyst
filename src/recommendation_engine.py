@@ -116,6 +116,19 @@ class RecommendationEngineV3:
         catalysts = screening_data.get('catalysts', [])
         risks = screening_data.get('risks', [])
         sentiment = screening_data.get('analysis_summary', {}).get('overall_sentiment', 'neutral')
+        freshness = screening_data.get('freshness') or {}
+        # A thin/stale article set may be useful context, but it is not enough
+        # evidence to move a deterministic rating.  Old cached Apple stories
+        # previously supplied 40% of the expected-return formula indefinitely.
+        if freshness and freshness.get('status') != 'fresh':
+            catalysts = []
+            risks = []
+            sentiment = 'neutral'
+            self._log(
+                "⚠️  News evidence is not fresh/complete enough for rating inputs; "
+                "catalyst, risk and sentiment adjustments set to neutral",
+                "warning",
+            )
         
         catalyst_score = self.calculator.estimate_catalyst_impact(catalysts)
         risk_score = self.calculator.estimate_risk_impact(risks)
@@ -151,11 +164,20 @@ class RecommendationEngineV3:
         # Step 3: Build evidence pack
         evidence_pack = self.evidence_extractor.build_evidence_pack(screening_data)
 
+        # Limited coverage can be displayed as preliminary context in the news
+        # section, but it is not a representative evidence base for a rating.
+        # Passing those few items into the explainer caused it to extrapolate a
+        # complete thesis, fabricate event dates, and attach valid-looking
+        # citations to claims the cited headline did not support.
+        if freshness and freshness.get('status') != 'fresh':
+            evidence_pack['evidence'] = []
+
         # A pack with no items — or whose only item is the generic
         # "market analysis of 0 articles" summary — carries no citable news.
         # Treat it as empty everywhere (prompt, validator, appendix) so the
         # model is never asked to cite evidence that does not exist. Note:
-        # when real articles exist but produced no catalysts/risks, the
+        # when sufficiently broad real coverage exists but produced no
+        # catalysts/risks, the
         # summary item IS legitimate evidence and citations stay enabled.
         evidence_items = evidence_pack.get('evidence', [])
         articles_analyzed = (screening_data or {}).get(
@@ -352,6 +374,14 @@ class RecommendationEngineV3:
                 self._log(f"\n⚠️  Maximum rewrite attempts ({max_rewrite_attempts}) reached", "warning")
                 self._log(f"Final coverage: {coverage_pct:.1f}% — delivering degraded (numbers unaffected)", "warning")
                 valid_ids = {ev['id'] for ev in evidence_pack.get('evidence', [])}
+                corrected_json, unsupported_removed = self.validator.strip_unsupported_citations(
+                    corrected_json, evidence_pack
+                )
+                if unsupported_removed:
+                    self._log(
+                        f"Removed {unsupported_removed} unsupported citation(s) before delivery",
+                        "warning",
+                    )
                 corrected_json, removed = self.validator.strip_citations(
                     corrected_json, valid_ids
                 )
@@ -368,6 +398,14 @@ class RecommendationEngineV3:
             # Defensive: any remaining invalid state degrades the same way
             # rather than aborting the report.
             valid_ids = {ev['id'] for ev in evidence_pack.get('evidence', [])}
+            corrected_json, unsupported_removed = self.validator.strip_unsupported_citations(
+                corrected_json, evidence_pack
+            )
+            if unsupported_removed:
+                self._log(
+                    f"Removed {unsupported_removed} unsupported citation(s) before delivery",
+                    "warning",
+                )
             corrected_json, removed = self.validator.strip_citations(
                 corrected_json, valid_ids
             )
@@ -563,7 +601,11 @@ class RecommendationEngineV3:
                 "citation requirement above: do NOT write any [E#] citation "
                 "anywhere in your response. Base the narrative solely on "
                 "FIXED_NUMBERS and COMPANY_CONTEXT, and make clear in the "
-                "thesis that news evidence was unavailable at generation time.\n"
+                "thesis that news evidence was unavailable or insufficient at "
+                "generation time. Leave catalysts and risks empty; do not name "
+                "events, competitors, sector averages, or event dates that are "
+                "not explicitly present in those two inputs. Monitoring items "
+                "may name metric categories, but no purported scheduled dates.\n"
             )
 
         if not fixed_numbers.get("rating_available", True) and fixed_numbers.get("price_available"):

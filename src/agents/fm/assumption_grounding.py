@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import math
 import os
+import statistics
 from typing import Any, Dict, List, Optional, Tuple
 
 _ERP = 0.055                # mature-market equity risk premium; in the range
@@ -48,11 +49,13 @@ _TAX_DEFAULT = 0.25         # mature-market average; overridden by the
 _BETA_MIN, _BETA_MAX = 0.5, 2.0
 _WACC_MIN, _WACC_MAX = 0.06, 0.20   # disclosure band, not a clamp
 _TG_MIN, _TG_MAX = 0.02, 0.03
+_TERMINAL_GROWTH_BASE = 0.025
 _EXIT_HAIRCUT = 0.8
 # Terminal-year multiples above ~22x are rarely defensible in any sector.
 _EXIT_MIN, _EXIT_MAX = 8.0, 22.0
 _EXIT_FALLBACK = 15.0
 _ESTABLISHED_OM = 0.05      # margin anchoring applies above this trailing OM
+_CONSENSUS_FADE_FACTORS = (0.67, 0.40, 0.20)
 
 
 # The risk-free rate is built from two published inputs, both printed:
@@ -431,6 +434,19 @@ def _tax_rate_from_statements(json_data: Dict[str, Any]) -> Optional[float]:
     cost. Yahoo's "Tax Rate For Calcs" is preferred when present; the ratio is
     the fallback; both are clamped to (0, 50%].
     """
+    bridge = (json_data or {}).get("ttm_bridge") or {}
+    if bridge.get("status") == "current":
+        row = bridge.get("income_statement") or {}
+        provision = _number(row, "Tax Provision")
+        pretax = _number(row, "Pretax Income")
+        if pretax is not None and pretax > 0 and provision is not None:
+            ratio = provision / pretax
+            if 0.0 < ratio <= 0.5:
+                return ratio
+        calcs = _number(row, "Tax Rate For Calcs")
+        if calcs is not None and 0.0 < calcs <= 0.5:
+            return calcs
+
     statements = (json_data or {}).get("financial_statements", {}) or {}
     income = statements.get("income_statement", {}) or {}
     periods = sorted((p for p in income if isinstance(p, str)), reverse=True)
@@ -510,6 +526,127 @@ def _anchor_path(path: List[float], trailing: float,
     return new, True
 
 
+def _ordered_statement_rows(json_data: Dict[str, Any], statement: str) -> List[Dict[str, Any]]:
+    rows = (((json_data or {}).get("financial_statements") or {}).get(statement) or {})
+    if not isinstance(rows, dict):
+        return []
+    return [row for _, row in sorted(rows.items(), key=lambda pair: str(pair[0]), reverse=True)
+            if isinstance(row, dict)]
+
+
+def _number(row: Dict[str, Any], *keys: str) -> Optional[float]:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = float(value)
+            if math.isfinite(value):
+                return value
+    return None
+
+
+def _historical_margin(json_data: Dict[str, Any], numerator: str) -> List[float]:
+    values = []
+    bridge = (json_data or {}).get("ttm_bridge") or {}
+    if bridge.get("status") == "current":
+        row = bridge.get("income_statement") or {}
+        revenue = _number(row, "Total Revenue", "Operating Revenue")
+        amount = _number(row, numerator)
+        if numerator == "EBITDA" and amount is None:
+            operating = _number(row, "Operating Income")
+            da = _number(
+                bridge.get("cash_flow") or {},
+                "Depreciation And Amortization",
+                "Depreciation Amortization Depletion",
+                "Depreciation",
+            )
+            if operating is not None and da is not None:
+                amount = operating + da
+        if revenue and revenue > 0 and amount is not None:
+            ratio = amount / revenue
+            if -0.50 <= ratio <= 1.00:
+                values.append(ratio)
+    for row in _ordered_statement_rows(json_data, "income_statement"):
+        revenue = _number(row, "Total Revenue", "Operating Revenue")
+        amount = _number(row, numerator)
+        if revenue and revenue > 0 and amount is not None:
+            ratio = amount / revenue
+            if -0.50 <= ratio <= 1.00:
+                values.append(ratio)
+        if len(values) >= 3:
+            break
+    return values
+
+
+def _deterministic_margin_path(
+    trailing: Optional[float], history: List[float], years: int = 5,
+) -> Optional[List[float]]:
+    observed = [float(value) for value in history if isinstance(value, (int, float))]
+    start = float(trailing) if isinstance(trailing, (int, float)) else (observed[0] if observed else None)
+    if start is None or not math.isfinite(start):
+        return None
+    target = statistics.median(observed) if observed else start
+    # Historical normalization is bounded so a one-off accounting swing cannot
+    # imply implausible multi-year margin movement.
+    target = _clamp(target, start - 0.05, start + 0.05)
+    if years <= 1:
+        return [start]
+    return [start + (target - start) * index / (years - 1) for index in range(years)]
+
+
+def _working_capital_history(json_data: Dict[str, Any], metric: str) -> List[float]:
+    statements = (json_data or {}).get("financial_statements") or {}
+    income = statements.get("income_statement") or {}
+    balance = statements.get("balance_sheet") or {}
+    periods = sorted(set(income).intersection(balance), key=str, reverse=True)
+    values = []
+    bridge = (json_data or {}).get("ttm_bridge") or {}
+    if bridge.get("status") == "current":
+        inc = bridge.get("income_statement") or {}
+        bal = bridge.get("balance_sheet") or {}
+        revenue = _number(inc, "Total Revenue", "Operating Revenue")
+        cogs = _number(inc, "Cost Of Revenue", "Reconciled Cost Of Revenue")
+        if metric == "dso_days":
+            numerator, denominator = _number(bal, "Accounts Receivable", "Receivables"), revenue
+        elif metric == "dio_days":
+            numerator, denominator = _number(bal, "Inventory"), cogs
+        else:
+            numerator, denominator = _number(bal, "Accounts Payable", "Payables"), cogs
+        if numerator is not None and denominator and denominator > 0:
+            days = numerator / denominator * 365.0
+            if 0 <= days <= 365:
+                values.append(days)
+    for period in periods:
+        inc = income.get(period) or {}
+        bal = balance.get(period) or {}
+        revenue = _number(inc, "Total Revenue", "Operating Revenue")
+        cogs = _number(inc, "Cost Of Revenue", "Reconciled Cost Of Revenue")
+        if metric == "dso_days":
+            numerator = _number(bal, "Accounts Receivable", "Receivables")
+            denominator = revenue
+        elif metric == "dio_days":
+            numerator = _number(bal, "Inventory")
+            denominator = cogs
+        else:
+            numerator = _number(bal, "Accounts Payable", "Payables")
+            denominator = cogs
+        if numerator is not None and denominator and denominator > 0:
+            days = numerator / denominator * 365.0
+            if 0 <= days <= 365:
+                values.append(days)
+        if len(values) >= 3:
+            break
+    return values
+
+
+def _normalized_history_path(values: List[float], years: int = 5) -> Optional[List[float]]:
+    if not values:
+        return None
+    start = float(values[0])
+    target = statistics.median(values)
+    target = _clamp(target, max(0.0, start - 30.0), start + 30.0)
+    return [start + (target - start) * index / (years - 1) for index in range(years)]
+
+
 def ground_assumptions(
     assumptions: Dict[str, Any],
     json_data: Dict[str, Any],
@@ -523,6 +660,8 @@ def ground_assumptions(
     company_data = (json_data or {}).get("company_data", {}) or {}
     gp = company_data.get("growth_profitability", {}) or {}
     vm = company_data.get("valuation_metrics", {}) or {}
+    bridge = (json_data or {}).get("ttm_bridge") or {}
+    current_bridge = bridge if bridge.get("status") == "current" else {}
 
     # 1. WACC — always deterministic (the LLM's guess is discarded).
     llm_wacc = a.get("wacc")
@@ -542,55 +681,91 @@ def ground_assumptions(
     else:
         notes.append(wacc_note)
 
-    # 2. Terminal growth — clamp, then cap at the currency's risk-free rate.
-    tg = a.get("terminal_growth_rate")
-    if tg is not None:
-        tg_c = _clamp(float(tg), _TG_MIN, _TG_MAX)
-        if abs(tg_c - tg) > 1e-9:
-            notes.append(f"Terminal growth {tg*100:.2f}% -> {tg_c*100:.2f}% (clamped)")
-        # A company cannot outgrow its currency's economy forever, and the
-        # risk-free rate is the market's estimate of that economy's long-run
-        # nominal growth (Damodaran's cap). The 2-3% band is a dollar band:
-        # once yen and yuan cash flows were discounted at their own rates, a
-        # 2.5% perpetuity against a 2.3% JPY or 1.1% CNY risk-free rate put
-        # Toyota at 2.5x its price and Alibaba at 1.5x — the terminal value,
-        # not the business, was doing the valuing.
-        rf_cap = capm.get("risk_free_rate")
-        if isinstance(rf_cap, (int, float)) and tg_c > rf_cap:
-            tg_c = max(0.0, float(rf_cap))
-            cap_note = (f"capped at the {capm.get('currency')} risk-free rate "
-                        f"{tg_c*100:.2f}% — a perpetuity cannot outgrow its currency's economy")
-            notes.append(f"Terminal growth {cap_note}")
-            a["terminal_growth_note"] = cap_note
-        elif abs(tg_c - tg) > 1e-9:
-            a["terminal_growth_note"] = f"LLM {tg*100:.2f}% clamped to {tg_c*100:.2f}%"
-        a["terminal_growth_rate"] = tg_c
+    # 2. Terminal growth — a deterministic long-run base, capped at the
+    #    currency's risk-free rate. Letting a prose model choose anywhere in a
+    #    superficially safe 2-3% band still moved the most valuation-sensitive
+    #    DCF input between identical runs. Company-specific uncertainty belongs
+    #    in the sensitivity table, not in an unexplained point assumption.
+    requested_tg = a.get("terminal_growth_rate")
+    tg_c = _TERMINAL_GROWTH_BASE
+    if isinstance(requested_tg, (int, float)) and not isinstance(requested_tg, bool):
+        if math.isfinite(float(requested_tg)) and abs(float(requested_tg) - tg_c) > 1e-9:
+            notes.append(
+                f"Terminal growth {float(requested_tg)*100:.2f}% (model) -> "
+                f"{tg_c*100:.2f}% deterministic long-run base"
+            )
+    # A company cannot outgrow its currency's economy forever, and the
+    # risk-free rate is the market's estimate of that economy's long-run
+    # nominal growth (Damodaran's cap). The 2-3% band is a dollar band:
+    # once yen and yuan cash flows were discounted at their own rates, a
+    # 2.5% perpetuity against a 2.3% JPY or 1.1% CNY risk-free rate put
+    # Toyota at 2.5x its price and Alibaba at 1.5x — the terminal value,
+    # not the business, was doing the valuing.
+    rf_cap = capm.get("risk_free_rate")
+    if isinstance(rf_cap, (int, float)) and tg_c > rf_cap:
+        tg_c = max(0.0, float(rf_cap))
+        terminal_note = (
+            f"deterministic {_TERMINAL_GROWTH_BASE*100:.2f}% long-run base capped "
+            f"at the {capm.get('currency')} risk-free rate {tg_c*100:.2f}% — "
+            "a perpetuity cannot outgrow its currency's economy"
+        )
+        notes.append(f"Terminal growth {terminal_note}")
+    else:
+        terminal_note = (
+            f"deterministic {_TERMINAL_GROWTH_BASE*100:.2f}% long-run nominal "
+            "growth base"
+        )
+    a["terminal_growth_note"] = terminal_note
+    a["terminal_growth_rate"] = tg_c
 
-    # 3. Margin anchoring — established-profitability companies only. For a
-    #    loss-making hypergrowth name the LLM's convergence path is the
-    #    valuation story and must not be dragged back to negative trailing.
-    t_om = gp.get("operating_margins")
-    t_em = gp.get("ebitda_margins")
-    t_gm = gp.get("gross_margins")
-    if t_om is not None and t_om >= _ESTABLISHED_OM:
-        for key, trailing, label in (
-            ("operating_margins", t_om, "operating"),
-            ("ebitda_margins", t_em, "EBITDA"),
-            ("gross_margins", t_gm, "gross"),
+    # 3. Mature-company margins are observable operating inputs, not creative
+    #    writing.  Start at the current trailing margin and normalize to the
+    #    median of the last three fiscal years.  This makes identical source
+    #    data produce identical cash flows while retaining LLM judgment only
+    #    for genuinely loss-making/hypergrowth paths.
+    bridge_income = current_bridge.get("income_statement") or {}
+    bridge_cash = current_bridge.get("cash_flow") or {}
+    bridge_revenue = _number(bridge_income, "Total Revenue", "Operating Revenue")
+    bridge_operating = _number(bridge_income, "Operating Income")
+    bridge_gross = _number(bridge_income, "Gross Profit")
+    bridge_da = _number(
+        bridge_cash, "Depreciation And Amortization",
+        "Depreciation Amortization Depletion", "Depreciation",
+    )
+    t_om = (
+        bridge_operating / bridge_revenue
+        if bridge_revenue and bridge_operating is not None else gp.get("operating_margins")
+    )
+    t_em = (
+        (bridge_operating + bridge_da) / bridge_revenue
+        if bridge_revenue and bridge_operating is not None and bridge_da is not None
+        else gp.get("ebitda_margins")
+    )
+    t_gm = (
+        bridge_gross / bridge_revenue
+        if bridge_revenue and bridge_gross is not None else gp.get("gross_margins")
+    )
+    operating_history = _historical_margin(json_data, "Operating Income")
+    operating_anchor = (
+        float(t_om) if isinstance(t_om, (int, float)) and not isinstance(t_om, bool)
+        else (operating_history[0] if operating_history else None)
+    )
+    if operating_anchor is not None and operating_anchor >= _ESTABLISHED_OM:
+        for key, trailing, label, statement_field, history in (
+            ("operating_margins", t_om, "operating", "Operating Income", operating_history),
+            ("ebitda_margins", t_em, "EBITDA", "EBITDA", None),
+            ("gross_margins", t_gm, "gross", "Gross Profit", None),
         ):
-            if trailing is None or trailing <= 0:
-                continue
-            path = a.get(key)
-            if not isinstance(path, list):
-                continue
-            new, changed = _anchor_path([float(x) for x in path], float(trailing))
-            if changed:
-                notes.append(
-                    f"{label} margin path anchored to trailing {trailing*100:.1f}%: "
-                    f"FY1 {path[0]*100:.1f}->{new[0]*100:.1f}%, "
-                    f"FY5 {path[-1]*100:.1f}->{new[-1]*100:.1f}%"
-                )
+            new = _deterministic_margin_path(
+                trailing, history if history is not None else _historical_margin(json_data, statement_field)
+            )
+            if new:
                 a[key] = new
+                notes.append(
+                    f"{label} margin path grounded to observed results: "
+                    f"FY1 trailing {new[0]*100:.1f}% -> FY5 normalized "
+                    f"three-year median {new[-1]*100:.1f}%"
+                )
 
         # Internal consistency: gross >= EBITDA >= operating, year by year.
         oms = a.get("operating_margins") or []
@@ -605,11 +780,52 @@ def ground_assumptions(
         if gms:
             a["gross_margins"] = gms
 
+    # Working-capital days are likewise mechanical historical ratios.  Use the
+    # latest year and glide to the three-year median instead of accepting a
+    # different LLM guess on each run.
+    grounded_working_capital = []
+    for key, label in (("dso_days", "DSO"), ("dio_days", "DIO"), ("dpo_days", "DPO")):
+        history = _working_capital_history(json_data, key)
+        path = _normalized_history_path(history)
+        if path:
+            a[key] = path
+            grounded_working_capital.append(
+                f"{label} {path[0]:.1f}->{path[-1]:.1f} days"
+            )
+    if grounded_working_capital:
+        a["working_capital_source"] = "latest_actual_to_three_year_median"
+        notes.append("Working capital grounded to statements: " + ", ".join(grounded_working_capital))
+
+    # Current quarterly balance sheet and TTM reinvestment intensities update
+    # only the places where an annual snapshot goes stale. Annual revenue still
+    # anchors FY1, so current-year/+1y fiscal consensus remains aligned.
+    if current_bridge:
+        normalized = current_bridge.get("normalized") or {}
+        basis = {
+            "basis": "ttm",
+            "period_end": current_bridge.get("latest_period"),
+            "quarter_periods": current_bridge.get("quarter_periods") or [],
+        }
+        for key in (
+            "capex_to_revenue", "da_to_revenue", "cash",
+            "short_term_investments", "total_debt",
+        ):
+            value = normalized.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+                basis[key] = float(value)
+        a["modeling_basis"] = basis
+        notes.append(
+            f"TTM/current balance-sheet bridge used through {basis['period_end']} "
+            "for reinvestment intensity and the equity bridge"
+        )
+
     # Near-term revenue is an observable consensus input, not something the
     # language model should replace with a generic mature-company curve. The
     # Yahoo estimate table maps 0y/+1y to the first two unreported fiscal
-    # years. Require real breadth and leave FY3-FY5 as explicit model
-    # assumptions so consensus does not silently become the whole DCF.
+    # years. Once both anchors have real breadth, FY3-FY5 follow a deterministic
+    # convergence curve toward terminal growth. Previously those years were
+    # whatever JSON the LLM happened to return: two identical AAPL runs could
+    # use 7/4.5/3% or 7.5/6/5% and publish different valuations.
     revenue_estimates = ((json_data or {}).get("analyst_data", {}) or {}).get(
         "revenue_estimates", {}) or {}
     growth_path = a.get("revenue_growth_rates")
@@ -630,8 +846,23 @@ def ground_assumptions(
                 grounded_growth[offset] = float(growth)
                 used.append(f"FY{offset + 1} {float(growth) * 100:.1f}% ({int(count)} analysts)")
         if used:
+            if len(used) == 2 and len(grounded_growth) >= 5:
+                fy2 = grounded_growth[1]
+                terminal = float(a.get("terminal_growth_rate") or _TG_MIN)
+                grounded_growth[2:5] = [
+                    terminal + (fy2 - terminal) * factor
+                    for factor in _CONSENSUS_FADE_FACTORS
+                ]
+                used.append(
+                    "FY3-FY5 deterministic fade to terminal growth "
+                    f"({grounded_growth[2]*100:.1f}%/{grounded_growth[3]*100:.1f}%/"
+                    f"{grounded_growth[4]*100:.1f}%)"
+                )
             a["revenue_growth_rates"] = grounded_growth
-            a["revenue_growth_source"] = "yahoo_analyst_consensus_near_term"
+            a["revenue_growth_source"] = (
+                "yahoo_analyst_consensus_with_deterministic_fade"
+                if len(used) == 3 else "yahoo_analyst_consensus_near_term"
+            )
             notes.append("Revenue growth anchored to consensus: " + ", ".join(used))
 
     # 4. Exit multiple — company-specific, never one-size-fits-all.

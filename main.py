@@ -44,7 +44,7 @@ from datetime import datetime
 import json
 import time
 
-from src.config import MAX_ARTICLES
+from src.config import MAX_ARTICLES, NEWS_MIN_FRESH_ARTICLES
 
 # Add src directory to path for imports
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
@@ -176,7 +176,10 @@ class ComprehensiveStockAnalysisPipeline:
         
         if financial_results.get("success"):
             # Step 2: Financial Model Generation
-            self.logger.stage_start("FINANCIAL MODEL GENERATION", "Building DCF model with LLM-inferred assumptions")
+            self.logger.stage_start(
+                "FINANCIAL MODEL GENERATION",
+                "Building DCF model with source-grounded assumptions",
+            )
             model_results = self.run_model_generation_stage()
         else:
             self.logger.error("❌ Skipping model generation due to failed financial scraping")
@@ -192,7 +195,7 @@ class ComprehensiveStockAnalysisPipeline:
         self.logger.info("🔍 Checking for existing filtered articles in database...")
         existing_articles = self.article_screener.load_articles_from_db(limit=MAX_ARTICLES)
 
-        if len(existing_articles) >= MAX_ARTICLES:
+        if len(existing_articles) >= NEWS_MIN_FRESH_ARTICLES:
             # Fast path: Articles already in database
             self.logger.info(f"✅ Found {len(existing_articles)} recent articles in database")
             self.logger.info("⚡ Fast path: Skipping scraping & filtering, loading from database")
@@ -204,7 +207,10 @@ class ComprehensiveStockAnalysisPipeline:
             skip_scraping = True
         else:
             # Need to scrape: Not enough articles in database
-            self.logger.info(f"⚠️  Only found {len(existing_articles)} articles in database (need {MAX_ARTICLES})")
+            self.logger.info(
+                f"⚠️  Only found {len(existing_articles)} fresh articles in "
+                f"database (need {NEWS_MIN_FRESH_ARTICLES})"
+            )
             self.logger.info("🔄 Full pipeline: Will scrape → filter → save to DB → screen")
             skip_scraping = False
 
@@ -355,7 +361,7 @@ class ComprehensiveStockAnalysisPipeline:
             
             # Build the model using NEW FinancialModelBuilder
             # This automatically calls LLM to infer all assumptions
-            self.logger.info(f"📊 Building model with LLM-inferred assumptions...")
+            self.logger.info("📊 Building model with source-grounded assumptions...")
             
             builder = create_financial_model(
                 ticker=self.ticker,

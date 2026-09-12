@@ -12,7 +12,7 @@ Professional-grade DCF valuation following investment banking standards:
 - Sanity check ratios (EV/EBITDA, P/E, FCF Yield)
 """
 
-from typing import Optional
+from typing import Any, Dict, Optional
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -42,7 +42,8 @@ class ValuationPerpetualGrowthDCFBuilder:
     - Share count units clarified (absolute count)
     """
     
-    def __init__(self, projection_years: int = 5):
+    def __init__(self, projection_years: int = 5,
+                 modeling_basis: Optional[Dict[str, Any]] = None):
         """
         Initialize the Valuation DCF builder.
         
@@ -50,6 +51,7 @@ class ValuationPerpetualGrowthDCFBuilder:
             projection_years: Number of projection years (default: 5)
         """
         self.projection_years = projection_years
+        self.modeling_basis = modeling_basis or {}
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -361,18 +363,48 @@ class ValuationPerpetualGrowthDCFBuilder:
         
         # Row 30: Cash & Equivalents
         ws.cell(row=30, column=1, value="Add: Cash & Equivalents")
-        ws.cell(row=30, column=2, value='=Historical!F30')  # From Historical row 30 (Cash)
+        current_cash = self.modeling_basis.get("cash")
+        ws.cell(
+            row=30, column=2,
+            value=(float(current_cash) if isinstance(current_cash, (int, float))
+                   and not isinstance(current_cash, bool) else '=Historical!F30'),
+        )
         ws.cell(row=30, column=2).number_format = ExcelFormats.CURRENCY
+        if isinstance(current_cash, (int, float)) and not isinstance(current_cash, bool):
+            ws.cell(
+                row=30, column=7,
+                value=f"Current quarterly balance sheet through {self.modeling_basis.get('period_end')}",
+            ).font = Font(italic=True, size=9)
         
         # Row 31: Total Debt
         ws.cell(row=31, column=1, value="Less: Total Debt")
-        ws.cell(row=31, column=2, value='=Historical!F35')  # From Historical row 35 (Total Debt)
+        current_debt = self.modeling_basis.get("total_debt")
+        ws.cell(
+            row=31, column=2,
+            value=(float(current_debt) if isinstance(current_debt, (int, float))
+                   and not isinstance(current_debt, bool) else '=Historical!F35'),
+        )
         ws.cell(row=31, column=2).number_format = ExcelFormats.CURRENCY
+        if isinstance(current_debt, (int, float)) and not isinstance(current_debt, bool):
+            ws.cell(
+                row=31, column=7,
+                value=f"Current quarterly balance sheet through {self.modeling_basis.get('period_end')}",
+            ).font = Font(italic=True, size=9)
         
         # Row 32: Investments / Non-operating Assets
         ws.cell(row=32, column=1, value="Add: Investments / Non-operating Assets")
-        ws.cell(row=32, column=2, value='=Historical!F31')  # From Historical row 31 (ST Investments)
+        current_investments = self.modeling_basis.get("short_term_investments")
+        ws.cell(
+            row=32, column=2,
+            value=(float(current_investments) if isinstance(current_investments, (int, float))
+                   and not isinstance(current_investments, bool) else '=Historical!F31'),
+        )
         ws.cell(row=32, column=2).number_format = ExcelFormats.CURRENCY
+        if isinstance(current_investments, (int, float)) and not isinstance(current_investments, bool):
+            ws.cell(
+                row=32, column=7,
+                value=f"Current quarterly balance sheet through {self.modeling_basis.get('period_end')}",
+            ).font = Font(italic=True, size=9)
         
         # Row 33: Equity Value
         ws.cell(row=33, column=1, value="Equity Value (Firm Value)")

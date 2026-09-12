@@ -1277,6 +1277,7 @@ Provide a helpful, informative answer:"""
                         fair_value = valuation_metrics["fair_value"]
                         current_price = valuation_metrics.get("current_price")
                         upside_pct = valuation_metrics.get("upside_vs_market", 0) * 100
+                        point_withheld = bool(valuation_metrics.get("point_estimate_withheld"))
                         
                         parts.append(f"Generated {self.state.financial_model.model_type} valuation model")
                         # The listing's own currency, not a hardcoded dollar.
@@ -1286,13 +1287,39 @@ Provide a helpful, informative answer:"""
                             _sym = currency_symbol(_bi.get("currency") or "USD")
                         except Exception:
                             _sym = "$"
-                        parts.append(f"Fair Value: {_sym}{fair_value:.2f}")
+                        if point_withheld:
+                            legs = [
+                                valuation_metrics.get("perpetual_price"),
+                                valuation_metrics.get("exit_multiple_price"),
+                                valuation_metrics.get("comps_price"),
+                            ]
+                            positive = [float(value) for value in legs
+                                        if isinstance(value, (int, float)) and value > 0]
+                            if positive:
+                                parts.append(
+                                    f"Supported valuation-method range: {_sym}{min(positive):.2f}-"
+                                    f"{_sym}{max(positive):.2f}; no point fair value or rating"
+                                )
+                            parts.append(
+                                "Publication reason: "
+                                + str(valuation_metrics.get("publication_withheld_reason")
+                                      or "valuation evidence is insufficient")
+                            )
+                        else:
+                            parts.append(f"Fair Value: {_sym}{fair_value:.2f}")
                         
                         if current_price:
                             parts.append(f"Current Price: {_sym}{current_price:.2f}")
-                            if abs(upside_pct) > 0.1:  # Only mention if significant
+                            if not point_withheld and abs(upside_pct) > 0.1:  # Only mention if significant
                                 direction = "upside" if upside_pct > 0 else "downside"
                                 parts.append(f"{abs(upside_pct):.1f}% {direction}")
+                        implied_fcf = valuation_metrics.get("market_implied_terminal_fcf")
+                        implied_gap = valuation_metrics.get("market_implied_fcf_vs_model")
+                        if isinstance(implied_fcf, (int, float)) and isinstance(implied_gap, (int, float)):
+                            parts.append(
+                                f"Reverse DCF: market price requires post-horizon FCF of "
+                                f"{_sym}{implied_fcf/1e9:,.1f}B, {implied_gap:+.0%} versus the model"
+                            )
                         
                         # Key model assumptions
                         if assumptions:
@@ -1333,7 +1360,18 @@ Provide a helpful, informative answer:"""
                     
                     # Basic counts and sentiment
                     parts.append(f"Analyzed {self.state.news_analysis.articles_count} articles")
-                    parts.append(f"Overall sentiment: {self.state.news_analysis.overall_sentiment}")
+                    freshness = self.state.news_analysis.freshness or {}
+                    if freshness:
+                        parts.append(
+                            f"Freshness coverage: {freshness.get('status', 'unavailable')} "
+                            f"({freshness.get('fresh_articles', 0)} articles inside "
+                            f"{freshness.get('max_age_days', 'unknown')} days; "
+                            f"{freshness.get('stale_articles_excluded', 0)} stale excluded)"
+                        )
+                    if not freshness or freshness.get("status") == "fresh":
+                        parts.append(f"Overall sentiment: {self.state.news_analysis.overall_sentiment}")
+                    else:
+                        parts.append("Overall sentiment: unavailable because fresh coverage is insufficient")
                     
                     # Detailed catalyst information
                     if self.state.news_analysis.catalysts:
@@ -1515,4 +1553,3 @@ Provide a helpful, informative answer:"""
         
         self.logger.info("=" * 80)
         self.logger.info("")
-

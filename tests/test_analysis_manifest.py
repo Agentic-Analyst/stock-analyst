@@ -29,3 +29,13 @@ def test_material_configuration_change_changes_the_fingerprint():
     changed = {**base, "PEER_COMPS_ENABLED": "true"}
     assert (build_analysis_manifest(base)["configuration_sha256"] !=
             build_analysis_manifest(changed)["configuration_sha256"])
+
+
+def test_manifest_tracks_current_financial_and_peer_policy():
+    base = {"ANALYSIS_MODEL_VERSION": "release-1"}
+    financial_policy = {**base, "QUARTERLY_STATEMENT_MAX_AGE_DAYS": "120"}
+    peer_policy = {**base, "PEER_COMPS_REQUEST_DELAY_SECONDS": "2.0"}
+
+    base_hash = build_analysis_manifest(base)["configuration_sha256"]
+    assert build_analysis_manifest(financial_policy)["configuration_sha256"] != base_hash
+    assert build_analysis_manifest(peer_policy)["configuration_sha256"] != base_hash

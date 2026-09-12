@@ -149,6 +149,8 @@ async def model_generation_agent(
                 exit_multiple = None
                 ebitda_terminal = None
                 fcf_terminal = None
+                market_implied_terminal_fcf = None
+                market_implied_vs_model = None
                 revenue_growth_rates = []
                 
                 for cell_key, cell_value in summary_cells.items():
@@ -185,6 +187,10 @@ async def model_generation_agent(
                             ebitda_terminal = cell_value
                         elif label.strip().startswith("FCF (FY") and col == 2:
                             fcf_terminal = cell_value
+                        elif "Market-Implied Terminal FCF" in label and col == 2:
+                            market_implied_terminal_fcf = cell_value
+                        elif "Market-Implied FCF vs Model" in label and col == 2:
+                            market_implied_vs_model = cell_value
                 
                 # Extract revenue growth rates from LLM_Inferred tab
                 llm_inferred_cells = computed_data.get("LLM_Inferred", {}).get("cells", {})
@@ -211,6 +217,10 @@ async def model_generation_agent(
                     valuation_metrics["current_price"] = current_price
                 if upside_vs_market is not None:
                     valuation_metrics["upside_vs_market"] = upside_vs_market
+                if market_implied_terminal_fcf is not None:
+                    valuation_metrics["market_implied_terminal_fcf"] = market_implied_terminal_fcf
+                if market_implied_vs_model is not None:
+                    valuation_metrics["market_implied_fcf_vs_model"] = market_implied_vs_model
                 # Consensus remains outside intrinsic value, but its coverage
                 # and target are needed by the publication boundary.  A large
                 # mega-cap DCF gap that independent evidence does not support
@@ -276,11 +286,16 @@ async def model_generation_agent(
                         state.log_action("model_generation_agent", f"⚠️ {spread_note}")
 
                     raw = state.financial_data.raw_data or {}
+                    from src.financial_freshness import financial_statement_freshness
+                    # Recompute from source periods for every run. A cached
+                    # "current" flag must not keep aging statements current.
+                    financial_freshness = financial_statement_freshness(raw)
+                    valuation_metrics["financial_freshness"] = financial_freshness
                     company = raw.get("company_data") or {}
                     market = company.get("market_data") or {}
                     basic = company.get("basic_info") or {}
                     market_cap = market.get("market_cap")
-                    currency = basic.get("currency")
+                    currency = basic.get("listing_currency") or basic.get("currency")
                     is_mega_cap = bool(
                         isinstance(market_cap, (int, float))
                         and not isinstance(market_cap, bool)
@@ -305,6 +320,16 @@ async def model_generation_agent(
                         state.log_action(
                             "model_generation_agent",
                             f"⚠️ Point estimate and rating withheld: {withheld_reason}",
+                        )
+                    if financial_freshness.get("status") in {"stale", "unavailable"}:
+                        freshness_reason = financial_freshness.get("reason") or (
+                            "The financial statements needed for the valuation are unavailable."
+                        )
+                        valuation_metrics["point_estimate_withheld"] = True
+                        valuation_metrics["publication_withheld_reason"] = freshness_reason
+                        state.log_action(
+                            "model_generation_agent",
+                            f"⚠️ Point estimate and rating withheld: {freshness_reason}",
                         )
                 except Exception as _disp_err:
                     # Never let a diagnostic break model generation.
@@ -333,55 +358,87 @@ async def model_generation_agent(
         # dcf_* keys for transparency.
         model_type = "comprehensive_dcf"
         try:
-            from src.agents.fm.bank_valuation import (
-                is_financial_sector, compute_bank_fair_value
+            from src.agents.fm.bank_valuation import build_bank_valuation_override
+            raw_financials = state.financial_data.raw_data if state.financial_data else {}
+            bank_override = build_bank_valuation_override(
+                raw_financials or {}, assumptions.get("terminal_growth"), capm=_capm
             )
-            basic_info = {}
-            company_data = {}
-            if state.financial_data:
-                basic_info = (state.financial_data.key_metrics or {}).get("basic_info", {}) or {}
-                company_data = (state.financial_data.raw_data or {}).get("company_data", {}) or {}
-            _ratios = (state.financial_data.key_metrics or {}).get("ratios", {}) if state.financial_data else {}
-            if is_financial_sector(basic_info.get("sector"), basic_info.get("industry"),
-                                   (_ratios or {}).get("interest_income_to_revenue")):
-                bank = compute_bank_fair_value(
-                    company_data, assumptions.get("terminal_growth"), capm=_capm
+            if bank_override:
+                bank = {
+                    "fair_value": bank_override["fair_value"],
+                    "upside_vs_market": bank_override.get("upside_vs_market"),
+                    "inputs": bank_override.get("bank_inputs") or {},
+                }
+                company_data = (raw_financials or {}).get("company_data", {}) or {}
+                if valuation_metrics.get("fair_value") is not None:
+                    valuation_metrics["dcf_fair_value"] = valuation_metrics["fair_value"]
+                ref_price = valuation_metrics.get("current_price") or (
+                    (company_data.get("market_data", {}) or {}).get("current_price")
                 )
-                if bank:
-                    if valuation_metrics.get("fair_value") is not None:
-                        valuation_metrics["dcf_fair_value"] = valuation_metrics["fair_value"]
-                    ref_price = valuation_metrics.get("current_price") or (
-                        (company_data.get("market_data", {}) or {}).get("current_price")
+                valuation_metrics["fair_value"] = bank["fair_value"]
+                if ref_price:
+                    valuation_metrics["upside_vs_market"] = (
+                        bank["fair_value"] / float(ref_price) - 1.0
                     )
-                    valuation_metrics["fair_value"] = bank["fair_value"]
-                    if ref_price:
-                        valuation_metrics["upside_vs_market"] = (
-                            bank["fair_value"] / float(ref_price) - 1.0
-                        )
-                    elif bank.get("upside_vs_market") is not None:
-                        valuation_metrics["upside_vs_market"] = bank["upside_vs_market"]
-                    valuation_metrics["valuation_method"] = "justified_pb_roe"
-                    # The FCF methods were explicitly superseded because they
-                    # are structurally inapplicable to this balance-sheet
-                    # business. Their dispersion must not lower confidence in,
-                    # or withhold, the bank method that replaced them.
-                    valuation_metrics.pop("dispersion_band", None)
-                    valuation_metrics.pop("dispersion_ratio", None)
-                    valuation_metrics.pop("valuation_warning", None)
-                    for k, v in bank["inputs"].items():
-                        assumptions[f"bank_{k}"] = v
-                    model_type = "bank_justified_pb_roe"
-                    state.log_action(
-                        "model_generation_agent",
-                        f"🏦 Financial-sector valuation: justified P/B x ROE fair value "
-                        f"${bank['fair_value']:.2f} (P/B {bank['inputs']['justified_pb']:.2f}, "
-                        f"ROE {bank['inputs']['roe']*100:.1f}%, r {bank['inputs']['cost_of_equity']*100:.1f}%) "
-                        f"— FCF DCF suppressed as not meaningful for financials"
+                elif bank.get("upside_vs_market") is not None:
+                    valuation_metrics["upside_vs_market"] = bank["upside_vs_market"]
+                valuation_metrics["valuation_method"] = "justified_pb_roe"
+                # The FCF methods were explicitly superseded because they
+                # are structurally inapplicable to this balance-sheet
+                # business. Their dispersion must not lower confidence in,
+                # or withhold, the bank method that replaced them.
+                valuation_metrics.pop("dispersion_band", None)
+                valuation_metrics.pop("dispersion_ratio", None)
+                valuation_metrics.pop("valuation_warning", None)
+                # A publication block derived from the discarded FCF legs is
+                # not evidence against the replacement bank method. Reapply
+                # only method-independent input-quality boundaries below.
+                valuation_metrics.pop("point_estimate_withheld", None)
+                valuation_metrics.pop("publication_withheld_reason", None)
+                financial_freshness = valuation_metrics.get("financial_freshness") or {}
+                if financial_freshness.get("status") in {"stale", "unavailable"}:
+                    valuation_metrics["point_estimate_withheld"] = True
+                    valuation_metrics["publication_withheld_reason"] = (
+                        financial_freshness.get("reason")
+                        or "The financial statements needed for the valuation are unavailable."
                     )
+                for k, v in bank["inputs"].items():
+                    assumptions[f"bank_{k}"] = v
+                model_type = "bank_justified_pb_roe"
+                state.log_action(
+                    "model_generation_agent",
+                    f"🏦 Financial-sector valuation: justified P/B x ROE fair value "
+                    f"${bank['fair_value']:.2f} (P/B {bank['inputs']['justified_pb']:.2f}, "
+                    f"ROE {bank['inputs']['roe']*100:.1f}%, r {bank['inputs']['cost_of_equity']*100:.1f}%) "
+                    f"— FCF DCF suppressed as not meaningful for financials"
+                )
         except Exception as bank_error:
             state.log_action(
                 "model_generation_agent",
                 f"⚠️  Bank valuation override skipped: {bank_error}"
+            )
+
+        # Method suitability is separate from whether the spreadsheet could
+        # finish its arithmetic. Loss-making/pre-revenue companies still get
+        # auditable DCF scenarios, but those scenarios cannot become a point
+        # value or rating merely because every formula evaluated.
+        try:
+            from src.valuation_methodology import assess_valuation_methodology
+            raw = state.financial_data.raw_data if state.financial_data else {}
+            suitability = assess_valuation_methodology(raw or {})
+            valuation_metrics["method_suitability"] = suitability
+            if not suitability.get("publication_allowed"):
+                valuation_metrics["point_estimate_withheld"] = True
+                valuation_metrics["publication_withheld_reason"] = suitability.get("reason")
+                state.log_action(
+                    "model_generation_agent",
+                    "⚠️ Point estimate and rating withheld by method-suitability check: "
+                    + str(suitability.get("reason")),
+                )
+        except Exception as suitability_error:
+            state.log_action(
+                "model_generation_agent",
+                f"method-suitability check skipped: {suitability_error}",
             )
 
         # Update FinancialState with generated model

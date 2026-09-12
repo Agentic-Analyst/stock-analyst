@@ -149,7 +149,7 @@ The agent treats everything except the operator's own system prompt as data, at 
 
 The core discipline of the system: **the LLM never invents a number.**
 
-Valuation is owned by code, not the model. A symbolic DCF engine computes every figure; the LLM only *infers assumptions* (WACC, growth rates, margins) and *writes the narrative* around results it is handed. A validator then verifies that every number in the report matches what the engine computed.
+Valuation is owned by code, not the prose model. A symbolic DCF engine computes every figure. Cost of capital is derived from published market inputs; near-term growth uses sufficiently broad analyst revenue estimates; established-company margins, working capital, the later growth fade, and terminal growth are grounded deterministically to source data or disclosed house assumptions. The LLM remains a bounded fallback for profiles that cannot be grounded mechanically and writes commentary around code-generated tables. Recommendation fields are then validated against the deterministic calculator.
 
 ```
 RecommendationCalculator  ->  EvidenceExtractor  ->  LLM narrative  ->  RecommendationValidator
@@ -194,7 +194,7 @@ A comprehensive analysis produces three artifacts.
 
 **1. 10-tab Excel DCF Model** ([AAPL sample](samples/AAPL_financial_model.xlsx) · [META sample](samples/META_financial_model.xlsx))
 
-Live formulas throughout — the Assumptions tab pulls from LLM-inferred projections; Projections references Assumptions; Valuation references Projections; Summary cross-references everything with QA flags. Changing a single assumption (e.g. FY3 revenue growth) cascades through projections, valuation, sensitivity, and summary automatically.
+Live formulas throughout — the Assumptions tab pulls from grounded projection inputs; Projections references Assumptions; Valuation references Projections; Summary cross-references everything with QA flags. Changing a single assumption (e.g. FY3 revenue growth) cascades through projections, valuation, sensitivity, and summary automatically.
 
 <details>
 <summary>Workbook structure (10 tabs)</summary>
@@ -309,7 +309,7 @@ Each of the 10 Excel tabs is built by a dedicated module (a builder-per-tab desi
 - **Live formulas** — the workbook, not a text output, is the source of truth; assumptions cascade through projections, valuation, sensitivity, and summary.
 - **QA gates** — the Summary tab runs sanity checks (E/V + D/V = 1, WACC > g, DF ≤ 1, positive share count) and flags violations.
 - **Cost of capital from published data, not the model** — the discount rate is built by code and every input is printed with its source. The risk-free rate is the 10-year government yield in the currency of the cash flows (the ECB curve for the euro, Japan's Ministry of Finance for the yen, `^TNX` for the dollar, then TradingView's daily screen, then FRED's monthly OECD series for ~20 currencies, so a rate is never more than a day or two old when the screen answers) less the sovereign's rating-based default spread; the equity risk premium is Damodaran's published implied mature-market premium plus the country premium, with 5.5% used only as the embedded fallback when the published table is unavailable; beta is regressed on the listing's home index and Blume-adjusted; the cost of debt sits on the government yield. Feeds are cached on the analysis volume and fall back to a dated snapshot, and the report says which one answered. `RISK_FREE_<CCY>`, `CRP_<COUNTRY>` and `EQUITY_RISK_PREMIUM` override any of it without a deploy.
-- **LLM-inferred operating assumptions, calibrated** — growth, margins and reinvestment come from the model, anchored to historicals and sector benchmarks.
+- **Deterministically grounded operating assumptions** — near-term growth uses broad analyst revenue consensus, mature-company margins and working capital normalize from reported history, and only unsupported/hypergrowth cases retain model judgment.
 - **Formula evaluator** — a built-in evaluator computes the workbook's values into JSON, so downstream code (the report, the recommendation calculator) reads exact figures rather than re-deriving them.
 
 ---
@@ -320,7 +320,7 @@ Each of the 10 Excel tabs is built by a dedicated module (a builder-per-tab desi
 
 A three-stage funnel — scrape (SerpAPI / Google News) → filter for relevance (LLM) → screen for insight (LLM) — extracting structured catalysts, risks, and mitigations with confidence scores, timelines, and cited source quotes.
 
-Screening is **parallelized**: up to 50 articles are batched and the batches dispatched concurrently under a concurrency cap (`asyncio.gather` + semaphore), collapsing a serial ~170s stage to roughly the slowest batch. LLM calls run through an async client with exponential backoff and a process-wide circuit breaker that fails fast on a provider outage — the guard against retry-storm tail runs. Recent articles are cached in MongoDB, so a repeated ticker skips the scrape/filter stages entirely.
+Screening is **parallelized**: up to 50 articles are batched and the batches dispatched concurrently under a concurrency cap (`asyncio.gather` + semaphore), collapsing a serial ~170s stage to roughly the slowest batch. LLM calls run through an async client with exponential backoff and a process-wide circuit breaker that fails fast on a provider outage — the guard against retry-storm tail runs. Cached articles suppress a refresh only when enough source-dated items fall inside the configured freshness window; ingestion time never makes an old or undated article current.
 
 ---
 
@@ -364,7 +364,7 @@ Because the agent decides scope, most conversational questions — a price check
 
 - Python 3.11
 - API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `SERPAPI_API_KEY`
-- Optional: `MONGO_URI` + `MONGO_DB` (article cache + session memory), `FRED_API_KEY` (free; enables `get_macro`), `CHAT_MODEL` (defaults to `gpt-5.4-mini`), and licensed analyst consensus through `BENZINGA_API_KEY` or `FINNHUB_API_KEY`. TipRanks must remain off for durable worker artifacts under ordinary MCP terms; set `TIPRANKS_DURABLE_OUTPUTS_LICENSED=true` only after receiving explicit storage and redistribution rights. Set `PEER_COMPS_ENABLED=true` only after checking Finnhub plan coverage and rate limits.
+- Optional: `MONGO_URI` + `MONGO_DB` (article cache + session memory), `FRED_API_KEY` (free; enables `get_macro`), `CHAT_MODEL` (defaults to `gpt-5.4-mini`), and licensed analyst consensus through `BENZINGA_API_KEY` or `FINNHUB_API_KEY`. TipRanks must remain off for durable worker artifacts under ordinary MCP terms; set `TIPRANKS_DURABLE_OUTPUTS_LICENSED=true` only after receiving explicit storage and redistribution rights. Peer comps default to `PEER_COMPS_ENABLED=auto` and activate when `FINNHUB_API_KEY` is present; set the flag to `false` to disable them explicitly.
 
 ### Installation
 
@@ -496,7 +496,7 @@ prompts/                        # 34 externalized prompt templates
 ## Known limitations
 
 - **News freshness.** SerpAPI's Google News results can lag breaking news by 15–30 minutes; not suitable for intraday signals.
-- **LLM assumption quality.** DCF assumptions are LLM-inferred and calibrated, but edge-case companies (pre-revenue biotech, SPACs, recent IPOs with thin history) can produce unreasonable values. The Summary QA flags catch some of these.
+- **Model calibration is not yet an accuracy claim.** Established-company inputs are now grounded and exceptional/uncorroborated outputs are withheld, but the rating weights and difficult profiles (pre-revenue biotech, SPACs, recent IPOs with thin history) still require a clean, versioned cross-sectional cohort and a genuine 12-month outcome backtest before they can be called calibrated.
 - **Companies a DCF does not fit.** Pre-revenue and deeply FCF-negative businesses yield negative intrinsic values under both DCF methods; no assumption set repairs this, because discounted cash flow is the wrong instrument for them. The blend excludes failed legs and the dispersion rail states plainly when a fair value rests on one surviving method — but the honest output in these cases is a range and a caveat, not a price target.
 - **Yahoo Finance rate limiting.** `yfinance` can throttle under heavy concurrent use; the client retries with backoff but does not queue requests across simultaneous analyses.
 - **Symbol resolution.** Non-Latin names are resolved via the model's transliteration plus search; obscure or ambiguously-named companies may need the ticker stated explicitly.

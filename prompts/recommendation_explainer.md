@@ -20,6 +20,10 @@ You will receive:
 - ❌ Make claims without citing evidence
 - ❌ Use generic filler or boilerplate language
 - ❌ Write ANY sentence about company performance, products, competition, or risks without [E#]
+- ❌ Treat a valid citation ID as permission to add facts the cited title,
+  snippet, and reasoning do not actually contain
+- ❌ State a sector/peer average, event date, earnings date, launch date, or
+  numeric operating claim unless that exact fact appears in the cited evidence
 
 **DO**:
 - ✅ Use FIXED_NUMBERS values exactly as provided
@@ -31,6 +35,11 @@ You will receive:
 - ✅ If the EVIDENCE_PACK contains no items, do not fabricate citations — write the narrative without [E#] and state that news evidence is unavailable
 - ✅ Provide comprehensive but concise explanations
 - ✅ Connect narrative to quantitative inputs
+- ✅ Use EVIDENCE_PACK only for claims that it directly supports. A citation
+  must entail the sentence; topical similarity is not enough
+- ✅ Treat FIXED_NUMBERS and COMPANY_CONTEXT as model/provider inputs, not news
+  evidence. Never attach an unrelated [E#] merely to satisfy coverage
+- ✅ If a date is not explicitly supplied, write "date unavailable" or omit it
 - ✅ **MANDATORY**: Achieve 95%+ citation coverage - COUNT YOUR CITATIONS
 
 ## INPUT DATA
@@ -118,9 +127,9 @@ Return STRICT JSON with this structure:
     "watch": ["Upcoming dated event or metric", "Leading indicator with threshold", "Binary catalyst"]
   }},
   
-  "monitoring_plan": [
-    "Next earnings call (specify date if known) [E#] - watch for specific metrics",
-    "Product launch or event (specify date) [E#] - success criteria",
+    "monitoring_plan": [
+    "Next earnings call (include a date only when explicitly present in evidence) [E#] - watch for specific metrics",
+    "Product launch or event (include a date only when explicitly present in evidence) [E#] - success criteria",
     "Regulatory decision or macro event - timing and impact",
     "Key operating metrics - thresholds for thesis change"
   ],

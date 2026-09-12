@@ -8,6 +8,7 @@ Each piece of evidence gets an ID, date, source, and relevance score.
 
 from typing import Dict, Any, List
 from datetime import datetime
+from urllib.parse import urlparse
 
 
 class EvidenceExtractor:
@@ -50,10 +51,11 @@ class EvidenceExtractor:
             quotes = cat.get('direct_quotes', [])
             snippet = quotes[0].get('quote', cat.get('description', '')) if quotes else cat.get('description', '')
             
-            # Determine date - try to extract from article URL or use analysis date
-            # NOTE: Ideally extract from article metadata; for now use analysis timestamp
-            # TODO: Extract actual publish dates from scraped article data
-            date_str = self._extract_date(screening_data.get('timestamp', ''))
+            # The evidence date is the source's publication date, never the
+            # day on which our model happened to read it.
+            date_str = self._extract_date(
+                source_articles[0].get('publish_date', '') if source_articles else ''
+            )
             
             # Assess source quality (primary > tier-1 > tier-2 > syndication)
             source_quality = self._assess_source_quality(source_url, source_title)
@@ -94,7 +96,9 @@ class EvidenceExtractor:
             quotes = risk.get('direct_quotes', [])
             snippet = quotes[0].get('quote', risk.get('description', '')) if quotes else risk.get('description', '')
             
-            date_str = self._extract_date(screening_data.get('timestamp', ''))
+            date_str = self._extract_date(
+                source_articles[0].get('publish_date', '') if source_articles else ''
+            )
             source_quality = self._assess_source_quality(source_url, source_title)
             
             evidence_list.append({
@@ -115,11 +119,16 @@ class EvidenceExtractor:
         
         # Add summary evidence
         summary = screening_data.get('analysis_summary', {})
-        if summary:
+        freshness = screening_data.get('freshness') or {}
+        # A computed market-wide sentiment label is only meaningful when the
+        # configured minimum fresh coverage was met. It must not become a
+        # synthetic citation that launders a handful of headlines into a broad
+        # bullish/bearish market claim.
+        if summary and (not freshness or freshness.get('status') == 'fresh'):
             evidence_id = f"E{evidence_counter}"
             evidence_counter += 1
             
-            date_str = self._extract_date(screening_data.get('timestamp', ''))
+            date_str = self._extract_date(freshness.get('newest_published_at', ''))
             
             evidence_list.append({
                 "id": evidence_id,
@@ -147,8 +156,7 @@ class EvidenceExtractor:
         except:
             pass
         
-        # Default to today
-        return datetime.now().strftime('%Y-%m-%d')
+        return "date unavailable"
     
     def _assess_source_quality(self, url: str, title: str) -> str:
         """
@@ -156,14 +164,21 @@ class EvidenceExtractor:
         
         Returns: 'primary', 'tier-1', 'tier-2', or 'syndication'
         """
-        url_lower = url.lower()
+        url_lower = (url or '').lower()
+        try:
+            host = (urlparse(url_lower).hostname or '').removeprefix('www.')
+        except ValueError:
+            host = ''
+
+        def on_domain(domain: str) -> bool:
+            return host == domain or host.endswith('.' + domain)
         
         # Primary sources (company filings, official sources)
-        primary_indicators = [
-            'sec.gov', '10-q', '10-k', 'earnings', 'investor.apple.com',
-            'apple.com/newsroom', 'doj.gov', 'ec.europa.eu', 'ftc.gov'
-        ]
-        if any(ind in url_lower or ind in title.lower() for ind in primary_indicators):
+        primary_domains = {
+            'sec.gov', 'investor.apple.com', 'apple.com', 'doj.gov',
+            'ec.europa.eu', 'ftc.gov',
+        }
+        if any(on_domain(domain) for domain in primary_domains):
             return 'primary'
         
         # Tier-1 outlets (authoritative financial media)
@@ -171,7 +186,7 @@ class EvidenceExtractor:
             'wsj.com', 'bloomberg.com', 'reuters.com', 'ft.com',
             'economist.com', 'apnews.com', 'nytimes.com/business'
         ]
-        if any(outlet in url_lower for outlet in tier1_outlets):
+        if any(on_domain(outlet) for outlet in tier1_outlets):
             return 'tier-1'
         
         # Tier-2 outlets (reputable business media)
@@ -179,15 +194,15 @@ class EvidenceExtractor:
             'cnbc.com', 'forbes.com', 'investopedia.com', 'seekingalpha.com',
             'marketwatch.com', 'barrons.com', 'businessinsider.com'
         ]
-        if any(outlet in url_lower for outlet in tier2_outlets):
+        if any(on_domain(outlet) for outlet in tier2_outlets):
             return 'tier-2'
         
         # Syndication / aggregators (lower quality)
         syndication_indicators = [
             'financialcontent.com', 'tradingview.com/news', 'zacks.com',
-            'invezz.com', 'yahoo.com/finance', 'benzinga.com'
+            'invezz.com', 'finance.yahoo.com', 'yahoo.com', 'benzinga.com'
         ]
-        if any(ind in url_lower for ind in syndication_indicators):
+        if any(on_domain(ind.split('/')[0]) for ind in syndication_indicators):
             return 'syndication'
         
         # Default to tier-2 if unknown

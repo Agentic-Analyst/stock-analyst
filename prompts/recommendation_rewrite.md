@@ -48,6 +48,10 @@ Take the JSON structure above and rewrite these TEXT fields ONLY:
 - Cite evidence IDs not in the valid list above
 - Make specific claims without [E#] citations
 - Invent facts or figures not in evidence
+- Use a citation for a claim that its title, snippet, and reasoning do not
+  directly support; topical similarity is not support
+- Add sector/peer averages or event dates unless the exact fact is present in
+  the cited evidence
 - Change the JSON structure or field names
 - Leave ANY material sentence without a citation
 
@@ -55,6 +59,8 @@ Take the JSON structure above and rewrite these TEXT fields ONLY:
 - Keep ALL numeric fields EXACTLY as shown above
 - Add [E#] to EVERY sentence with a factual claim
 - Use ONLY valid evidence IDs from the list
+- Remove or qualify any unsupported claim instead of decorating it with the
+  nearest citation. If a date is not supplied, omit it or say it is unavailable
 - Be professional, specific, and compelling
 - ACHIEVE 95%+ citation coverage (THIS IS MANDATORY)
 - Cite primary sources when discussing financial figures
