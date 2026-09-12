@@ -318,7 +318,7 @@ class HistoricalTabBuilder:
         """
         balance_rows = [
             (30, "Cash And Cash Equivalents", "Cash And Cash Equivalents", ExcelFormats.CURRENCY, False),
-            (31, "Short Term Investments", "Cash Cash Equivalents And Short Term Investments", ExcelFormats.CURRENCY, False),
+            (31, "Short Term Investments", None, ExcelFormats.CURRENCY, False),
             (32, "Accounts Receivable", "Accounts Receivable", ExcelFormats.CURRENCY, False),
             (33, "Inventory", "Inventory", ExcelFormats.CURRENCY, False),
             (34, "Accounts Payable", "Accounts Payable", ExcelFormats.CURRENCY, False),
@@ -344,6 +344,25 @@ class HistoricalTabBuilder:
                 if raw_field is None:
                     if row == 37:  # Net Debt (improved: Total Debt - Cash - ST Investments)
                         formula = f'={col_letter}35-{col_letter}30-{col_letter}31'
+                    elif row == 31:
+                        # Yahoo's combined field already includes cash. Adding
+                        # it beside row 30 double-counted cash in every DCF.
+                        other = (
+                            f'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Other Short Term Investments",'
+                            f'Raw!$C:$C,{col_letter}$1&"*")'
+                        )
+                        combined = (
+                            f'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Cash Cash Equivalents And Short Term Investments",'
+                            f'Raw!$C:$C,{col_letter}$1&"*")'
+                        )
+                        short_term = (
+                            f'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Short Term Investments",'
+                            f'Raw!$C:$C,{col_letter}$1&"*")'
+                        )
+                        formula = (
+                            f'=IF({other}<>0,{other},IF({short_term}<>0,{short_term},'
+                            f'IF({combined}>{col_letter}30,{combined}-{col_letter}30,0)))'
+                        )
                     elif row == 39:  # DSO (Days Sales Outstanding)
                         formula = f'=IFERROR(ROUND({col_letter}32/({col_letter}3/365),2),"")'
                     elif row == 40:  # DIO (Days Inventory Outstanding)

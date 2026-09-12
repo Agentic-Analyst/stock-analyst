@@ -234,6 +234,7 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
         'company_name': basic_info.get('long_name', 'Unknown Company'),
         'sector': basic_info.get('sector', 'N/A'),
         'industry': basic_info.get('industry', 'N/A'),
+        'quote_type': basic_info.get('quote_type'),
         'description': basic_info.get('business_summary', ''),
         'website': basic_info.get('website', ''),
         'employees': basic_info.get('employees', 0),
@@ -580,9 +581,14 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
     # but it is not a publishable fair value.
     band = (override.get("dispersion_band")
             if override.get("valuation_method") != "justified_pb_roe" else None)
-    if band or override.get("point_estimate_withheld"):
+    if (
+        band or override.get("point_estimate_withheld")
+        or override.get("financial_freshness")
+        or override.get("method_suitability")
+    ):
         v = data.get("valuation") or {}
         summary = v.get("summary") or {}
+        existing_reliability = v.get("reliability") or {}
         legs = {
             "perpetual_dcf": override.get("perpetual_price"),
             "exit_multiple_dcf": override.get("exit_multiple_price"),
@@ -617,6 +623,7 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
                 part for part in (publication_warning, reliability_warning) if part
             )
         reliability = {
+            **existing_reliability,
             "band": band,
             "dispersion_ratio": override.get("dispersion_ratio"),
             "warning": reliability_warning,
@@ -624,6 +631,7 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
             "point_estimate_withheld": withheld,
             "withheld_reason": withheld_reason,
             "financial_freshness": override.get("financial_freshness"),
+            "method_suitability": override.get("method_suitability"),
         }
         if positive:
             reliability["range_low"] = min(positive)
@@ -671,11 +679,6 @@ def enforce_valuation_publication_boundary(
     one rule while leaving the workbook's raw calculations intact for audit.
     """
     valuation = data.get("valuation") or {}
-    # A bank-appropriate justified P/B valuation has already replaced the FCF
-    # DCF. Dispersion between the deliberately suppressed DCF legs is not a
-    # quality signal for that method.
-    if valuation.get("bank"):
-        return data
 
     from src.agents.tools.analysis_tools import (
         _megacap_threshold,
@@ -683,6 +686,7 @@ def enforce_valuation_publication_boundary(
         valuation_publication_boundary,
     )
     from src.financial_freshness import financial_statement_freshness
+    from src.valuation_methodology import assess_valuation_methodology
 
     summary = valuation.get("summary") or {}
     legs = {
@@ -694,7 +698,10 @@ def enforce_valuation_publication_boundary(
         ),
         "market_comps": summary.get("comps_intrinsic"),
     }
-    ratio, band, warning = valuation_dispersion(legs)
+    is_bank = bool(valuation.get("bank"))
+    ratio, band, warning = (
+        (None, None, None) if is_bank else valuation_dispersion(legs)
+    )
     existing = valuation.get("reliability") or {}
     band = existing.get("band") or band
     ratio = existing.get("dispersion_ratio") or ratio
@@ -712,15 +719,22 @@ def enforce_valuation_publication_boundary(
         and not isinstance(market_cap, bool)
         and market_cap >= _megacap_threshold(market_cap_currency)
     )
-    withheld, reason = valuation_publication_boundary(
-        band=band,
-        legs=legs,
-        fair_value=summary.get("average_intrinsic"),
-        current_price=company.get("current_price"),
-        is_mega_cap=is_mega_cap,
-        analyst_target=company.get("target_mean_price"),
-        analyst_count=company.get("num_analysts"),
-    )
+    # The mega-cap corroboration rule is specifically a DCF publication
+    # boundary. A justified P/B/ROE bank value has already replaced those FCF
+    # legs, so the discarded DCF cannot veto the appropriate bank method.
+    # Freshness and method suitability are reapplied independently below.
+    if is_bank:
+        withheld, reason = False, None
+    else:
+        withheld, reason = valuation_publication_boundary(
+            band=band,
+            legs=legs,
+            fair_value=summary.get("average_intrinsic"),
+            current_price=company.get("current_price"),
+            is_mega_cap=is_mega_cap,
+            analyst_target=company.get("target_mean_price"),
+            analyst_count=company.get("num_analysts"),
+        )
 
     # Financial freshness is a hard input-quality boundary. Refresh time is
     # intentionally ignored: re-downloading an old annual period does not make
@@ -734,14 +748,21 @@ def enforce_valuation_publication_boundary(
             "The financial statements required by the valuation are unavailable."
         )
 
-    if existing.get("point_estimate_withheld"):
+    suitability = assess_valuation_methodology(financial_data or {})
+    if not suitability.get("publication_allowed"):
+        method_reason = suitability.get("reason") or (
+            "The available data does not support a publishable point valuation."
+        )
+        if suitability.get("specialized_service") or not withheld:
+            reason = method_reason
+        withheld = True
+
+    if existing.get("point_estimate_withheld") and not is_bank:
         withheld = True
         reason = existing.get("withheld_reason") or reason
 
-    if not (band or withheld):
-        return data
     return apply_valuation_override(data, {
-        "valuation_method": "dcf",
+        "valuation_method": "justified_pb_roe" if is_bank else "dcf",
         "perpetual_price": legs["perpetual_dcf"],
         "exit_multiple_price": legs["exit_multiple_dcf"],
         "comps_price": legs["market_comps"],
@@ -751,6 +772,7 @@ def enforce_valuation_publication_boundary(
         "point_estimate_withheld": withheld,
         "publication_withheld_reason": reason,
         "financial_freshness": freshness,
+        "method_suitability": suitability,
     })
 
 
@@ -1029,6 +1051,77 @@ def _markdown_cell(value: Any, limit: int = 160) -> str:
     return text.replace("|", "\\|")[:limit]
 
 
+_NARRATIVE_QUANTITY = re.compile(
+    r"(?P<money>(?P<ccy>USD|EUR|GBP|JPY|CNY|HKD|INR|CHF|CAD|AUD|[$€£¥₹])\s*"
+    r"(?P<money_num>[-+]?\d[\d,]*(?:\.\d+)?)\s*"
+    r"(?P<money_scale>trillion|billion|million|thousand|[TMBK])?)"
+    r"|(?P<pct>[-+]?\d[\d,]*(?:\.\d+)?\s*%)"
+    r"|(?P<multiple>[-+]?\d[\d,]*(?:\.\d+)?\s*x\b)",
+    re.IGNORECASE,
+)
+
+
+def _narrative_quantities(text: str) -> list[tuple[str, Optional[str], float]]:
+    """Parse money, percentages and valuation multiples from narrative text."""
+    scales = {
+        "": 1.0, "k": 1e3, "thousand": 1e3, "m": 1e6, "million": 1e6,
+        "b": 1e9, "billion": 1e9, "t": 1e12, "trillion": 1e12,
+    }
+    out = []
+    for match in _NARRATIVE_QUANTITY.finditer(text or ""):
+        if match.group("money"):
+            value = float(match.group("money_num").replace(",", ""))
+            value *= scales.get((match.group("money_scale") or "").lower(), 1.0)
+            out.append(("money", (match.group("ccy") or "").upper(), value))
+        elif match.group("pct"):
+            out.append(("percent", None, float(match.group("pct").rstrip("% ").replace(",", ""))))
+        else:
+            out.append(("multiple", None, float(match.group("multiple")[:-1].strip().replace(",", ""))))
+    return out
+
+
+def sanitize_narrative_numbers(response: str, validated_prompt: str) -> tuple[str, int]:
+    """Omit LLM sentences containing figures absent from validated inputs.
+
+    Code-built tables remain the numerical source of truth. The model may
+    explain those numbers, but it may not introduce a new monetary amount,
+    percentage, or valuation multiple in surrounding prose.
+    """
+    allowed = _narrative_quantities(validated_prompt)
+
+    def supported(candidate: tuple[str, Optional[str], float]) -> bool:
+        kind, currency, value = candidate
+        for allowed_kind, allowed_currency, allowed_value in allowed:
+            if kind != allowed_kind:
+                continue
+            if kind == "money" and currency != allowed_currency:
+                continue
+            tolerance = max(0.005, abs(allowed_value) * 0.00005)
+            if abs(value - allowed_value) <= tolerance:
+                return True
+        return False
+
+    removed = 0
+    output_lines = []
+    for line in (response or "").splitlines():
+        pieces = re.split(r"(?<=[.!?])(?=\s|$)", line)
+        kept = []
+        for piece in pieces:
+            quantities = _narrative_quantities(piece)
+            if quantities and any(not supported(quantity) for quantity in quantities):
+                removed += 1
+                continue
+            kept.append(piece)
+        joined = "".join(kept).strip()
+        if joined:
+            output_lines.append(joined)
+    cleaned = "\n".join(output_lines).strip()
+    if removed:
+        note = "_Unsupported numerical commentary was omitted; validated tables remain authoritative._"
+        cleaned = f"{cleaned}\n\n{note}" if cleaned else note
+    return cleaned, removed
+
+
 def generate_section_company_overview(data: Dict[str, Any], llm) -> Tuple[str, float]:
     """Generate Company Overview section."""
     company = data['company_overview']
@@ -1053,6 +1146,7 @@ def generate_section_company_overview(data: Dict[str, Any], llm) -> Tuple[str, f
 
     messages = [{"role": "user", "content": prompt}]
     response, cost = llm(messages, temperature=0.5)
+    response, _ = sanitize_narrative_numbers(response, prompt)
     statistics_table = (
         "### Key Statistics\n\n"
         "| Metric | Value |\n|---|---|\n"
@@ -1115,6 +1209,7 @@ def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[s
 
     messages = [{"role": "user", "content": prompt}]
     response, cost = llm(messages, temperature=0.5)
+    response, _ = sanitize_narrative_numbers(response, prompt)
     tables = (
         f"### Historical Financial Data ({len(years)} Years)\n\n{revenue_table}\n"
         f"### Year-over-Year Growth Rates\n\n{growth_table}\n"
@@ -1256,6 +1351,23 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     if reliability.get('warning'):
         reliability_note = f"\n> **Valuation reliability warning:** {reliability['warning']}\n"
 
+    freshness = reliability.get('financial_freshness') or {}
+    suitability = reliability.get('method_suitability') or {}
+    method_basis_table = "| Control | Result |\n|---|---|\n"
+    method_basis_table += (
+        f"| Primary method | {_markdown_cell(suitability.get('primary_method') or ('justified_pb_roe' if bank else 'dcf'))} |\n"
+    )
+    method_basis_table += (
+        f"| Financial basis | {_markdown_cell(str(freshness.get('basis') or 'unavailable').upper())}"
+        f" through {_markdown_cell(freshness.get('latest_period') or 'unavailable')} |\n"
+    )
+    method_basis_table += (
+        f"| Method suitability | {_markdown_cell(suitability.get('quality') or 'unavailable')} |\n"
+    )
+    sotp_status = (suitability.get('sotp') or {}).get('status')
+    if sotp_status and sotp_status != 'not_indicated':
+        method_basis_table += f"| SOTP cross-check | {_markdown_cell(sotp_status)} |\n"
+
     # Reverse DCF makes the disagreement between price and model observable
     # without blending the market price into fair value.  It holds the model's
     # explicit path, WACC, terminal growth and actual terminal horizon fixed,
@@ -1348,6 +1460,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     # paragraphs of prose that quoted figures from the grid it had just
     # declined to print. Numbers = code; the model writes only the commentary.
     tables_md = (
+        f"### Valuation Method & Data Basis\n\n{method_basis_table}\n"
         f"### Model Assumptions\n\n{assumptions_table}\n"
         f"### Cost of Capital\n\n{coc_table or '_Cost-of-capital build unavailable for this model._'}\n\n"
         f"### Sensitivity: Value per Share by WACC and Terminal Growth\n\n"
@@ -1376,6 +1489,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
 
     messages = [{"role": "user", "content": prompt}]
     response, cost = llm(messages, temperature=0.5)
+    response, _ = sanitize_narrative_numbers(response, prompt)
 
     # Belt and braces: if the model echoed the tables anyway, do not print them
     # twice. Any commentary that begins by restating a table heading is cut
@@ -1469,6 +1583,7 @@ def generate_section_news_analysis(data: Dict[str, Any], llm) -> Tuple[str, floa
 
     messages = [{"role": "user", "content": prompt}]
     response, cost = llm(messages, temperature=0.5)
+    response, _ = sanitize_narrative_numbers(response, prompt)
     freshness_line = ""
     if freshness:
         freshness_line = (
@@ -1555,6 +1670,7 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
 
     messages = [{"role": "user", "content": prompt}]
     response, cost = llm(messages, temperature=0.6)
+    response, _ = sanitize_narrative_numbers(response, prompt)
     return response, cost
 
 

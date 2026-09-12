@@ -434,6 +434,19 @@ def _tax_rate_from_statements(json_data: Dict[str, Any]) -> Optional[float]:
     cost. Yahoo's "Tax Rate For Calcs" is preferred when present; the ratio is
     the fallback; both are clamped to (0, 50%].
     """
+    bridge = (json_data or {}).get("ttm_bridge") or {}
+    if bridge.get("status") == "current":
+        row = bridge.get("income_statement") or {}
+        provision = _number(row, "Tax Provision")
+        pretax = _number(row, "Pretax Income")
+        if pretax is not None and pretax > 0 and provision is not None:
+            ratio = provision / pretax
+            if 0.0 < ratio <= 0.5:
+                return ratio
+        calcs = _number(row, "Tax Rate For Calcs")
+        if calcs is not None and 0.0 < calcs <= 0.5:
+            return calcs
+
     statements = (json_data or {}).get("financial_statements", {}) or {}
     income = statements.get("income_statement", {}) or {}
     periods = sorted((p for p in income if isinstance(p, str)), reverse=True)
@@ -533,6 +546,25 @@ def _number(row: Dict[str, Any], *keys: str) -> Optional[float]:
 
 def _historical_margin(json_data: Dict[str, Any], numerator: str) -> List[float]:
     values = []
+    bridge = (json_data or {}).get("ttm_bridge") or {}
+    if bridge.get("status") == "current":
+        row = bridge.get("income_statement") or {}
+        revenue = _number(row, "Total Revenue", "Operating Revenue")
+        amount = _number(row, numerator)
+        if numerator == "EBITDA" and amount is None:
+            operating = _number(row, "Operating Income")
+            da = _number(
+                bridge.get("cash_flow") or {},
+                "Depreciation And Amortization",
+                "Depreciation Amortization Depletion",
+                "Depreciation",
+            )
+            if operating is not None and da is not None:
+                amount = operating + da
+        if revenue and revenue > 0 and amount is not None:
+            ratio = amount / revenue
+            if -0.50 <= ratio <= 1.00:
+                values.append(ratio)
     for row in _ordered_statement_rows(json_data, "income_statement"):
         revenue = _number(row, "Total Revenue", "Operating Revenue")
         amount = _number(row, numerator)
@@ -567,6 +599,22 @@ def _working_capital_history(json_data: Dict[str, Any], metric: str) -> List[flo
     balance = statements.get("balance_sheet") or {}
     periods = sorted(set(income).intersection(balance), key=str, reverse=True)
     values = []
+    bridge = (json_data or {}).get("ttm_bridge") or {}
+    if bridge.get("status") == "current":
+        inc = bridge.get("income_statement") or {}
+        bal = bridge.get("balance_sheet") or {}
+        revenue = _number(inc, "Total Revenue", "Operating Revenue")
+        cogs = _number(inc, "Cost Of Revenue", "Reconciled Cost Of Revenue")
+        if metric == "dso_days":
+            numerator, denominator = _number(bal, "Accounts Receivable", "Receivables"), revenue
+        elif metric == "dio_days":
+            numerator, denominator = _number(bal, "Inventory"), cogs
+        else:
+            numerator, denominator = _number(bal, "Accounts Payable", "Payables"), cogs
+        if numerator is not None and denominator and denominator > 0:
+            days = numerator / denominator * 365.0
+            if 0 <= days <= 365:
+                values.append(days)
     for period in periods:
         inc = income.get(period) or {}
         bal = balance.get(period) or {}
@@ -612,6 +660,8 @@ def ground_assumptions(
     company_data = (json_data or {}).get("company_data", {}) or {}
     gp = company_data.get("growth_profitability", {}) or {}
     vm = company_data.get("valuation_metrics", {}) or {}
+    bridge = (json_data or {}).get("ttm_bridge") or {}
+    current_bridge = bridge if bridge.get("status") == "current" else {}
 
     # 1. WACC — always deterministic (the LLM's guess is discarded).
     llm_wacc = a.get("wacc")
@@ -673,9 +723,28 @@ def ground_assumptions(
     #    median of the last three fiscal years.  This makes identical source
     #    data produce identical cash flows while retaining LLM judgment only
     #    for genuinely loss-making/hypergrowth paths.
-    t_om = gp.get("operating_margins")
-    t_em = gp.get("ebitda_margins")
-    t_gm = gp.get("gross_margins")
+    bridge_income = current_bridge.get("income_statement") or {}
+    bridge_cash = current_bridge.get("cash_flow") or {}
+    bridge_revenue = _number(bridge_income, "Total Revenue", "Operating Revenue")
+    bridge_operating = _number(bridge_income, "Operating Income")
+    bridge_gross = _number(bridge_income, "Gross Profit")
+    bridge_da = _number(
+        bridge_cash, "Depreciation And Amortization",
+        "Depreciation Amortization Depletion", "Depreciation",
+    )
+    t_om = (
+        bridge_operating / bridge_revenue
+        if bridge_revenue and bridge_operating is not None else gp.get("operating_margins")
+    )
+    t_em = (
+        (bridge_operating + bridge_da) / bridge_revenue
+        if bridge_revenue and bridge_operating is not None and bridge_da is not None
+        else gp.get("ebitda_margins")
+    )
+    t_gm = (
+        bridge_gross / bridge_revenue
+        if bridge_revenue and bridge_gross is not None else gp.get("gross_margins")
+    )
     operating_history = _historical_margin(json_data, "Operating Income")
     operating_anchor = (
         float(t_om) if isinstance(t_om, (int, float)) and not isinstance(t_om, bool)
@@ -726,6 +795,29 @@ def ground_assumptions(
     if grounded_working_capital:
         a["working_capital_source"] = "latest_actual_to_three_year_median"
         notes.append("Working capital grounded to statements: " + ", ".join(grounded_working_capital))
+
+    # Current quarterly balance sheet and TTM reinvestment intensities update
+    # only the places where an annual snapshot goes stale. Annual revenue still
+    # anchors FY1, so current-year/+1y fiscal consensus remains aligned.
+    if current_bridge:
+        normalized = current_bridge.get("normalized") or {}
+        basis = {
+            "basis": "ttm",
+            "period_end": current_bridge.get("latest_period"),
+            "quarter_periods": current_bridge.get("quarter_periods") or [],
+        }
+        for key in (
+            "capex_to_revenue", "da_to_revenue", "cash",
+            "short_term_investments", "total_debt",
+        ):
+            value = normalized.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+                basis[key] = float(value)
+        a["modeling_basis"] = basis
+        notes.append(
+            f"TTM/current balance-sheet bridge used through {basis['period_end']} "
+            "for reinvestment intensity and the equity bridge"
+        )
 
     # Near-term revenue is an observable consensus input, not something the
     # language model should replace with a generic mature-company curve. The

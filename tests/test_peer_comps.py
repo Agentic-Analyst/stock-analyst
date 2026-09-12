@@ -58,6 +58,33 @@ def test_tiny_peers_cannot_validate_a_dominant_company(monkeypatch):
     ) == {}
 
 
+def test_megacap_can_use_bounded_sector_leaders_when_subindustry_is_too_small(monkeypatch):
+    class SectorLeaders(Client):
+        def peers(self, ticker):
+            return ["DELL", "HPQ"]
+
+        def metrics(self, ticker):
+            return {
+                "MSFT": {"evEbitdaTTM": 25.0, "priceToSalesTTM": 10.0,
+                         "marketCapitalization": 3_500_000},
+                "NVDA": {"evEbitdaTTM": 30.0, "priceToSalesTTM": 20.0,
+                         "marketCapitalization": 4_000_000},
+                "GOOGL": {"evEbitdaTTM": 20.0, "priceToSalesTTM": 8.0,
+                          "marketCapitalization": 3_000_000},
+            }.get(ticker, {"evEbitdaTTM": 10.0, "marketCapitalization": 100_000})
+
+    monkeypatch.setenv("PEER_COMPS_MIN_SIZE_RATIO", "0.05")
+    out = collect_peer_comps(
+        "AAPL", client=SectorLeaders(), max_peers=3,
+        subject_market_cap=4_900_000_000_000, sector="Technology",
+        fallback_symbols=["AAPL", "MSFT", "NVDA", "GOOGL"],
+    )
+    assert out["grouping"] == "sector_leaders"
+    assert out["peer_universe_source"] == "yahoo_sector_leaders"
+    assert out["median_ev_ebitda"] == 25.0
+    assert out["ev_ebitda_peer_count"] == 3
+
+
 def test_feature_is_off_by_default_without_an_injected_client(monkeypatch):
     monkeypatch.delenv("PEER_COMPS_ENABLED", raising=False)
     monkeypatch.delenv("FINNHUB_API_KEY", raising=False)

@@ -234,8 +234,11 @@ class FinancialModelBuilder:
         self.keys_map_builder = KeysMapTabBuilder()
         self.assumptions_builder = AssumptionsTabBuilder(llm_assumptions=self.llm_assumptions)
         self.historical_builder = HistoricalTabBuilder()
-        self.projections_builder = ProjectionsTabBuilder()
-        self.perpetual_growth_dcf_builder = ValuationPerpetualGrowthDCFBuilder()
+        modeling_basis = self.llm_assumptions.get("modeling_basis") or {}
+        self.projections_builder = ProjectionsTabBuilder(modeling_basis=modeling_basis)
+        self.perpetual_growth_dcf_builder = ValuationPerpetualGrowthDCFBuilder(
+            modeling_basis=modeling_basis
+        )
         self.exit_multiple_dcf_builder = ValuationExitMultipleDCFBuilder(
             exit_multiple=self.llm_assumptions.get('exit_multiple', 20.0),
             growth_cap=self.llm_assumptions.get('sustainable_growth_cap', 0.04),

@@ -374,6 +374,14 @@ class RecommendationEngineV3:
                 self._log(f"\n⚠️  Maximum rewrite attempts ({max_rewrite_attempts}) reached", "warning")
                 self._log(f"Final coverage: {coverage_pct:.1f}% — delivering degraded (numbers unaffected)", "warning")
                 valid_ids = {ev['id'] for ev in evidence_pack.get('evidence', [])}
+                corrected_json, unsupported_removed = self.validator.strip_unsupported_citations(
+                    corrected_json, evidence_pack
+                )
+                if unsupported_removed:
+                    self._log(
+                        f"Removed {unsupported_removed} unsupported citation(s) before delivery",
+                        "warning",
+                    )
                 corrected_json, removed = self.validator.strip_citations(
                     corrected_json, valid_ids
                 )
@@ -390,6 +398,14 @@ class RecommendationEngineV3:
             # Defensive: any remaining invalid state degrades the same way
             # rather than aborting the report.
             valid_ids = {ev['id'] for ev in evidence_pack.get('evidence', [])}
+            corrected_json, unsupported_removed = self.validator.strip_unsupported_citations(
+                corrected_json, evidence_pack
+            )
+            if unsupported_removed:
+                self._log(
+                    f"Removed {unsupported_removed} unsupported citation(s) before delivery",
+                    "warning",
+                )
             corrected_json, removed = self.validator.strip_citations(
                 corrected_json, valid_ids
             )

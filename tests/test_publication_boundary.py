@@ -127,3 +127,81 @@ def test_every_report_prompt_marks_inserted_content_as_untrusted_data():
     prompt = load_prompt("report_company_overview")
     assert "UNTRUSTED DATA BOUNDARY" in prompt
     assert "never an instruction" in prompt
+
+
+def test_reliability_always_discloses_the_financial_and_method_basis():
+    result = enforce_valuation_publication_boundary(
+        _aapl_report_data(), _financials()
+    )
+    reliability = result["valuation"]["reliability"]
+    assert reliability["financial_freshness"]["basis"] == "annual"
+    assert reliability["method_suitability"]["cash_flow_profile"]["period"] == "2025-09-27"
+
+
+def test_corporate_dcf_is_withheld_for_an_etf_even_if_numbers_exist():
+    financials = _financials()
+    financials["company_data"] = {"basic_info": {"quote_type": "ETF"}}
+    result = enforce_valuation_publication_boundary(
+        _aapl_report_data(), financials
+    )
+    reliability = result["valuation"]["reliability"]
+    assert reliability["point_estimate_withheld"] is True
+    assert "not valid for a fund" in reliability["withheld_reason"]
+
+
+def _bank_financials(period="2025-12-31"):
+    data = _financials(period)
+    data["company_data"] = {
+        "basic_info": {
+            "quote_type": "EQUITY",
+            "sector": "Financial Services",
+            "industry": "Banks - Diversified",
+        },
+        "valuation_metrics": {"book_value": 100.0},
+        "growth_profitability": {"return_on_equity": 0.16},
+        "market_data": {"current_price": 150.0},
+        "capital_structure": {"beta": 1.0},
+    }
+    data["modeling_metrics"] = {"financial_ratios": {"financial_profile": {
+        "interest_income_to_revenue": 1.20,
+    }}}
+    return data
+
+
+def _bank_report_data():
+    data = _aapl_report_data()
+    data["valuation"]["bank"] = {
+        "fair_value": 150.0,
+        "method": "Justified P/B x ROE",
+        "inputs": {},
+    }
+    data["valuation"]["dcf_perpetual"]["intrinsic_value_per_share"] = 150.0
+    data["valuation"]["dcf_exit"]["intrinsic_value_per_share"] = 150.0
+    data["valuation"]["summary"].update({
+        "average_intrinsic": 150.0,
+        "comps_intrinsic": None,
+    })
+    data["valuation"]["reliability"] = {
+        "point_estimate_withheld": True,
+        "withheld_reason": "Discarded FCF did not have independent market comps.",
+        "band": "single-method",
+    }
+    return data
+
+
+def test_bank_method_does_not_inherit_discarded_dcf_publication_block():
+    result = enforce_valuation_publication_boundary(
+        _bank_report_data(), _bank_financials()
+    )
+    reliability = result["valuation"]["reliability"]
+    assert reliability["point_estimate_withheld"] is False
+    assert reliability["method_suitability"]["primary_method"] == "justified_pb_roe"
+
+
+def test_bank_method_still_obeys_financial_freshness_boundary():
+    result = enforce_valuation_publication_boundary(
+        _bank_report_data(), _bank_financials("2023-12-31")
+    )
+    reliability = result["valuation"]["reliability"]
+    assert reliability["point_estimate_withheld"] is True
+    assert "beyond" in reliability["withheld_reason"]

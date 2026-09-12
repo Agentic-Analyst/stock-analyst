@@ -9,9 +9,24 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
+import yfinance as yf
 
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 MAX_PEERS = 10
+_MEGACAP_SECTOR_FALLBACK_USD = 250_000_000_000
+_YAHOO_SECTOR_KEYS = {
+    "basic materials": "basic-materials",
+    "communication services": "communication-services",
+    "consumer cyclical": "consumer-cyclical",
+    "consumer defensive": "consumer-defensive",
+    "energy": "energy",
+    "financial services": "financial-services",
+    "healthcare": "healthcare",
+    "industrials": "industrials",
+    "real estate": "real-estate",
+    "technology": "technology",
+    "utilities": "utilities",
+}
 
 EV_EBITDA_KEYS = (
     # ``evEbitdaTTM`` is the spelling returned by Finnhub's live
@@ -116,10 +131,25 @@ class FinnhubPeerClient:
         return (value.get("metric") or {}) if isinstance(value, dict) else {}
 
 
+def _yahoo_sector_leaders(sector: Optional[str]) -> List[str]:
+    """Best-effort broad-sector leaders for mega-caps with no size peers."""
+    key = _YAHOO_SECTOR_KEYS.get(str(sector or "").strip().lower())
+    if not key:
+        return []
+    try:
+        frame = yf.Sector(key).top_companies
+        return [str(symbol).strip().upper() for symbol in frame.index]
+    except Exception:
+        return []
+
+
 def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = None,
                        max_peers: Optional[int] = None,
-                       subject_market_cap: Optional[float] = None) -> Dict[str, Any]:
+                       subject_market_cap: Optional[float] = None,
+                       sector: Optional[str] = None,
+                       fallback_symbols: Optional[List[str]] = None) -> Dict[str, Any]:
     """Median trading multiples for same-subindustry peers; empty if unavailable."""
+    owns_client = client is None
     if client is None:
         if not enabled():
             return {}
@@ -141,8 +171,27 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
     except (TypeError, ValueError):
         configured = 6
     limit = max(1, min(configured, MAX_PEERS))
+    # Finnhub's sub-industry list for a dominant company can contain only much
+    # smaller hardware vendors (AAPL -> DELL/WDC/HPE/HPQ). The 5% size floor
+    # correctly rejects them all, but that also left every mega-cap with no
+    # independent market leg. For USD mega-caps only, use Yahoo's transparent
+    # top-sector roster as a broader fallback universe while retaining Finnhub
+    # as the multiples source and all size/multiple bounds.
+    try:
+        use_sector_fallback = bool(
+            subject_market_cap
+            and float(subject_market_cap) >= _MEGACAP_SECTOR_FALLBACK_USD
+            and sector
+        )
+    except (TypeError, ValueError):
+        use_sector_fallback = False
+    leaders = (
+        list(fallback_symbols) if fallback_symbols is not None
+        else (_yahoo_sector_leaders(sector) if use_sector_fallback else [])
+    )
+    universe = leaders + list(peers) if leaders else list(peers)
     symbols = []
-    for raw in peers:
+    for raw in universe:
         symbol = str(raw or "").strip().upper()
         if symbol and symbol != ticker and symbol not in symbols:
             symbols.append(symbol)
@@ -164,6 +213,12 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
     except ValueError:
         minimum_size_ratio = 0.05
     minimum_size_ratio = max(0.01, min(1.0, minimum_size_ratio))
+    try:
+        request_delay = max(
+            0.0, float(os.getenv("PEER_COMPS_REQUEST_DELAY_SECONDS", "1.05") or 1.05)
+        )
+    except ValueError:
+        request_delay = 1.05
     # One worker already makes several vendor requests and multiple workers can
     # coexist. Avoid a per-worker burst that multiplies into account-wide 429s.
     for symbol in symbols:
@@ -171,7 +226,11 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
             metric = client.metrics(symbol)
         except Exception:
             failed_symbols.append(symbol)
+            if owns_client and request_delay:
+                time.sleep(request_delay)
             continue
+        if owns_client and request_delay:
+            time.sleep(request_delay)
         ev_ebitda = _first(metric, EV_EBITDA_KEYS)
         price_sales = _first(metric, PRICE_SALES_KEYS)
         market_cap_m = _first(metric, MARKET_CAP_KEYS)
@@ -201,7 +260,10 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
     return {
         "source": "finnhub",
         "captured_at": datetime.now(timezone.utc).isoformat(),
-        "grouping": "subIndustry",
+        "grouping": "sector_leaders" if leaders else "subIndustry",
+        "peer_universe_source": (
+            "yahoo_sector_leaders" if leaders else "finnhub_subindustry"
+        ),
         "requested_peers": symbols,
         "observations": observations,
         "median_ev_ebitda": round(statistics.median(ev_values), 4)
@@ -214,7 +276,8 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
         "size_excluded_symbols": size_excluded_symbols,
         "minimum_subject_size_ratio": minimum_size_ratio if subject_market_cap_m else None,
         "methodology": (
-            "same-subindustry median of bounded trailing multiples; peers must be "
+            ("broad-sector mega-cap median" if leaders else "same-subindustry median")
+            + " of bounded trailing multiples; peers must be "
             f"within {minimum_size_ratio:.0%}x-{1/minimum_size_ratio:.0f}x of subject market cap"
             if subject_market_cap_m else
             "same-subindustry median of bounded trailing multiples"

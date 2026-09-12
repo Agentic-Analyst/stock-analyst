@@ -211,7 +211,10 @@ class FinancialScraper:
     
     def _log(self, level: str, message: str):
         """Log message using logger if available, otherwise print."""
-        getattr(self.logger, level)(message)
+        if self.logger is not None:
+            getattr(self.logger, level)(message)
+        else:
+            print(message)
     
     def _ensure_directories(self):
         """Create necessary directories."""
@@ -560,6 +563,34 @@ class FinancialScraper:
             self._log("error", f"Failed to scrape cash flow: {e}")
             self.failed_statements += 1
             return {}
+
+    def _scrape_quarterly_bridge_statements(self) -> Dict[str, Dict[str, Any]]:
+        """Best-effort quarterly inputs for the TTM bridge.
+
+        These are additive quality inputs, not required annual statements, so
+        a provider gap must not increment ``failed_statements`` and abort an
+        otherwise valid analysis. ``build_ttm_bridge`` decides whether the
+        three feeds align closely enough to use.
+        """
+        sources = {
+            "income_statement": "quarterly_financials",
+            "balance_sheet": "quarterly_balance_sheet",
+            "cash_flow": "quarterly_cashflow",
+        }
+        result = {}
+        for name, attribute in sources.items():
+            try:
+                result[name] = self._clean_financial_data(
+                    getattr(self.yf_ticker, attribute)
+                )
+            except Exception as error:
+                self._log(
+                    "warning",
+                    f"Quarterly {name.replace('_', ' ')} unavailable for TTM bridge: "
+                    f"{type(error).__name__}",
+                )
+                result[name] = {}
+        return result
     
     def scrape_comprehensive_company_data(self) -> Dict[str, Any]:
         """
@@ -585,6 +616,7 @@ class FinancialScraper:
                     "employees": info.get("fullTimeEmployees"),
                     "country": info.get("country"),
                     "exchange": info.get("exchange"),
+                    "quote_type": info.get("quoteType"),
                     # Pence-quoted listings are reported in pounds, to match the
                     # market cap and the financial statements (see _price_in_major_units).
                     # A listing that trades in one currency and reports in another
@@ -911,6 +943,12 @@ class FinancialScraper:
                 "balance_sheet": {},
                 "cash_flow": {}
             },
+
+            # Kept separate from annual history. When four aligned quarters
+            # exist they refresh current margins/reinvestment and the equity
+            # bridge without becoming overlapping annual columns.
+            "quarterly_financial_statements": {},
+            "ttm_bridge": {},
             
             # Comprehensive company data for modeling
             "company_data": {},
@@ -941,6 +979,34 @@ class FinancialScraper:
         
         modeling_data["financial_statements"]["cash_flow"] = self.scrape_cash_flow(annual)
         time.sleep(0.5)
+
+        if annual:
+            self._log("info", "Collecting quarterly statements for the TTM bridge...")
+            quarterly = self._scrape_quarterly_bridge_statements()
+            modeling_data["quarterly_financial_statements"] = quarterly
+            from src.financial_period_bridge import build_ttm_bridge
+            modeling_data["ttm_bridge"] = build_ttm_bridge(quarterly)
+            bridge = modeling_data["ttm_bridge"]
+            if bridge.get("status") == "current":
+                self._log(
+                    "info",
+                    f"✅ TTM bridge current through {bridge.get('latest_period')} "
+                    f"({', '.join(bridge.get('quarter_periods') or [])})",
+                )
+            else:
+                self._log(
+                    "warning",
+                    "TTM bridge unavailable; annual modeling basis retained: "
+                    + str(bridge.get("reason") or bridge.get("status")),
+                )
+        else:
+            from src.financial_period_bridge import build_ttm_bridge
+            modeling_data["quarterly_financial_statements"] = dict(
+                modeling_data["financial_statements"]
+            )
+            modeling_data["ttm_bridge"] = build_ttm_bridge(
+                modeling_data["quarterly_financial_statements"]
+            )
         
         # 2. Scrape comprehensive company data
         self._log("info", "Collecting comprehensive company data...")
@@ -1020,7 +1086,8 @@ class FinancialScraper:
                     else None
                 )
                 peer_comps = collect_peer_comps(
-                    self.ticker, subject_market_cap=subject_market_cap
+                    self.ticker, subject_market_cap=subject_market_cap,
+                    sector=basic.get("sector"),
                 )
                 if peer_comps:
                     modeling_data["industry_data"]["peer_comps"] = peer_comps
@@ -1041,6 +1108,8 @@ class FinancialScraper:
         modeling_data["data_summary"] = self._generate_data_summary(modeling_data)
         from src.financial_freshness import financial_statement_freshness
         modeling_data["financial_freshness"] = financial_statement_freshness(modeling_data)
+        from src.valuation_methodology import assess_valuation_methodology
+        modeling_data["valuation_methodology"] = assess_valuation_methodology(modeling_data)
         
         self._log("info", f"Financial modeling data collection completed for {self.ticker}")
         return modeling_data
@@ -1109,7 +1178,8 @@ class FinancialScraper:
             "cash_flow_periods": len(statements.get("cash_flow", {})),
             "company_data_available": bool(data.get("company_data")),
             "market_data_available": bool(data.get("market_data", {}).get("historical_prices")),
-            "analyst_data_available": bool(data.get("analyst_data"))
+            "analyst_data_available": bool(data.get("analyst_data")),
+            "ttm_bridge_current": (data.get("ttm_bridge") or {}).get("status") == "current",
         }
         
         return summary

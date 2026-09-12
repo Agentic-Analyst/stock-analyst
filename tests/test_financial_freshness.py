@@ -2,8 +2,25 @@ from datetime import datetime, timezone
 
 from src.financial_freshness import financial_statement_freshness
 
-
 NOW = datetime(2026, 9, 12, tzinfo=timezone.utc)
+
+
+def quarterly_statements():
+    periods = ("2026-06-30", "2026-03-31", "2025-12-31", "2025-09-30")
+    return {
+        "income_statement": {
+            period: {"Total Revenue": 100, "Operating Income": 20}
+            for period in periods
+        },
+        "balance_sheet": {
+            period: {"Cash And Cash Equivalents": 20}
+            for period in periods
+        },
+        "cash_flow": {
+            period: {"Operating Cash Flow": 30, "Capital Expenditure": -10}
+            for period in periods
+        },
+    }
 
 
 def test_current_annual_statement_is_accepted(monkeypatch):
@@ -16,6 +33,7 @@ def test_current_annual_statement_is_accepted(monkeypatch):
         },
     }, as_of=NOW)
     assert result["status"] == "current"
+    assert result["basis"] == "annual"
     assert result["latest_period"] == "2025-09-30"
 
 
@@ -80,3 +98,19 @@ def test_future_period_cannot_establish_freshness():
         },
     }, as_of=NOW)
     assert result["status"] == "unavailable"
+
+
+def test_newer_valid_ttm_period_becomes_the_freshness_basis(monkeypatch):
+    monkeypatch.setenv("QUARTERLY_STATEMENT_MAX_AGE_DAYS", "150")
+    result = financial_statement_freshness({
+        "financial_statements": {
+            "income_statement": {"2025-09-30": {}},
+            "balance_sheet": {"2025-09-30": {}},
+            "cash_flow": {"2025-09-30": {}},
+        },
+        "quarterly_financial_statements": quarterly_statements(),
+    }, as_of=NOW)
+    assert result["status"] == "current"
+    assert result["basis"] == "ttm"
+    assert result["latest_period"] == "2026-06-30"
+    assert result["annual_latest_period"] == "2025-09-30"

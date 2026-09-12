@@ -13,7 +13,7 @@ Professional-grade financial model following investment banking standards:
 - Unlevered FCF = NOPAT + D&A + Capex - ΔNWC (leases treated as debt)
 """
 
-from typing import List
+from typing import Any, Dict, Optional
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -44,7 +44,8 @@ class ProjectionsTabBuilder:
     All formulas exactly match professional investment banking standards.
     """
     
-    def __init__(self, projection_years: int = 5):
+    def __init__(self, projection_years: int = 5,
+                 modeling_basis: Optional[Dict[str, Any]] = None):
         """
         Initialize the Projections builder.
         
@@ -52,6 +53,7 @@ class ProjectionsTabBuilder:
             projection_years: Number of projection years (default: 5)
         """
         self.projection_years = projection_years
+        self.modeling_basis = modeling_basis or {}
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -312,11 +314,19 @@ class ProjectionsTabBuilder:
         """
         # Row 12: Depreciation & Amortization
         ws.cell(row=12, column=1, value="Depreciation & Amortization")
+        da_ratio = self.modeling_basis.get("da_to_revenue")
+        use_ttm_da = (
+            isinstance(da_ratio, (int, float)) and not isinstance(da_ratio, bool)
+            and 0 <= float(da_ratio) <= 0.50
+        )
         for i in range(self.projection_years):
             col = 2 + i
             col_letter = chr(64 + col)  # B, C, D, E, F
             
-            formula = f'=Historical!$F$18*({col_letter}3/Historical!$F$3)'
+            formula = (
+                f'={col_letter}3*{float(da_ratio):.12f}' if use_ttm_da else
+                f'=Historical!$F$18*({col_letter}3/Historical!$F$3)'
+            )
             ws.cell(row=12, column=col, value=formula)
             ws.cell(row=12, column=col).number_format = ExcelFormats.CURRENCY
         
@@ -328,15 +338,26 @@ class ProjectionsTabBuilder:
         # allowance). Holding the base-year ratio flat — 75% of revenue for a
         # company mid build-out — compounded capex to ~$2.4B on $3.2B revenue
         # in FY5 and single-handedly forced FCF (and the DCF) deeply negative.
+        capex_ratio = self.modeling_basis.get("capex_to_revenue")
+        use_ttm_capex = (
+            isinstance(capex_ratio, (int, float)) and not isinstance(capex_ratio, bool)
+            and -1.0 <= float(capex_ratio) <= 0.0
+        )
         for i in range(self.projection_years):
             col = 2 + i
             col_letter = chr(64 + col)  # B, C, D, E, F
             frac = i / max(1, self.projection_years - 1)  # 0 .. 1 across FY1..FY5
 
-            formula = (
-                f'={col_letter}3*((Historical!$F$24/Historical!$F$3)*{1 - frac:.2f}'
-                f'-1.1*ABS(Historical!$F$18)/Historical!$F$3*{frac:.2f})'
-            )
+            if use_ttm_capex and use_ttm_da:
+                formula = (
+                    f'={col_letter}3*({float(capex_ratio):.12f}*{1 - frac:.2f}'
+                    f'-1.1*{float(da_ratio):.12f}*{frac:.2f})'
+                )
+            else:
+                formula = (
+                    f'={col_letter}3*((Historical!$F$24/Historical!$F$3)*{1 - frac:.2f}'
+                    f'-1.1*ABS(Historical!$F$18)/Historical!$F$3*{frac:.2f})'
+                )
             ws.cell(row=13, column=1, value="Capital Expenditure")
             ws.cell(row=13, column=col, value=formula)
             ws.cell(row=13, column=col).number_format = ExcelFormats.CURRENCY
