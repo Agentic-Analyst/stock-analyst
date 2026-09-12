@@ -123,7 +123,8 @@ async def model_generation_agent(
         
         # The grounded cost-of-capital build, so the bank valuation and the
         # terminal-value reconciliation use the same numbers the workbook did.
-        _capm = (getattr(builder, "llm_assumptions", None) or {}).get("capm") or {}
+        _grounded = getattr(builder, "llm_assumptions", None) or {}
+        _capm = _grounded.get("capm") or {}
         # Extract valuation metrics from computed values JSON
         valuation_metrics = {}
         assumptions = {}
@@ -210,6 +211,15 @@ async def model_generation_agent(
                     valuation_metrics["current_price"] = current_price
                 if upside_vs_market is not None:
                     valuation_metrics["upside_vs_market"] = upside_vs_market
+                # Consensus remains outside intrinsic value, but its coverage
+                # and target are needed by the publication boundary.  A large
+                # mega-cap DCF gap that independent evidence does not support
+                # must not become a precise rating merely because the workbook
+                # arithmetic completed.
+                if isinstance(_grounded.get("analyst_target_mean"), (int, float)):
+                    valuation_metrics["analyst_target"] = _grounded["analyst_target_mean"]
+                if isinstance(_grounded.get("analyst_count"), (int, float)):
+                    valuation_metrics["analyst_count"] = int(_grounded["analyst_count"])
                 
                 # Populate assumptions dictionary
                 if wacc is not None:
@@ -244,7 +254,11 @@ async def model_generation_agent(
                 # -$6.98) and $31.78 was the market-comps leg alone. The number
                 # presented as a DCF was not one.
                 try:
-                    from src.agents.tools.analysis_tools import valuation_dispersion
+                    from src.agents.tools.analysis_tools import (
+                        _megacap_threshold,
+                        valuation_dispersion,
+                        valuation_publication_boundary,
+                    )
                     ratio, band, spread_note = valuation_dispersion({
                         "perpetual DCF": perpetual_price,
                         "exit multiple DCF": exit_multiple_price,
@@ -260,6 +274,38 @@ async def model_generation_agent(
                         # in the run's info.log afterwards.
                         valuation_metrics["valuation_warning"] = spread_note
                         state.log_action("model_generation_agent", f"⚠️ {spread_note}")
+
+                    raw = state.financial_data.raw_data or {}
+                    company = raw.get("company_data") or {}
+                    market = company.get("market_data") or {}
+                    basic = company.get("basic_info") or {}
+                    market_cap = market.get("market_cap")
+                    currency = basic.get("currency")
+                    is_mega_cap = bool(
+                        isinstance(market_cap, (int, float))
+                        and not isinstance(market_cap, bool)
+                        and market_cap >= _megacap_threshold(currency)
+                    )
+                    withheld, withheld_reason = valuation_publication_boundary(
+                        band=band,
+                        legs={
+                            "perpetual_dcf": perpetual_price,
+                            "exit_multiple_dcf": exit_multiple_price,
+                            "market_comps": comps_price,
+                        },
+                        fair_value=average_price,
+                        current_price=current_price,
+                        is_mega_cap=is_mega_cap,
+                        analyst_target=valuation_metrics.get("analyst_target"),
+                        analyst_count=valuation_metrics.get("analyst_count"),
+                    )
+                    if withheld:
+                        valuation_metrics["point_estimate_withheld"] = True
+                        valuation_metrics["publication_withheld_reason"] = withheld_reason
+                        state.log_action(
+                            "model_generation_agent",
+                            f"⚠️ Point estimate and rating withheld: {withheld_reason}",
+                        )
                 except Exception as _disp_err:
                     # Never let a diagnostic break model generation.
                     state.log_action(

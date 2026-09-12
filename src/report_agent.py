@@ -586,13 +586,28 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         }
         positive = [value for value in legs.values() if value > 0]
-        withheld = band == "unreliable" and len(positive) >= 2
+        withheld = bool(override.get("point_estimate_withheld")) or (
+            band == "unreliable" and len(positive) >= 2
+        )
+        withheld_reason = override.get("publication_withheld_reason")
+        if withheld and not withheld_reason:
+            withheld_reason = (
+                "The valuation methods do not converge, so no defensible point "
+                "estimate exists."
+            )
+        reliability_warning = override.get("valuation_warning")
+        if withheld_reason:
+            publication_warning = f"PUBLICATION BOUNDARY: {withheld_reason}"
+            reliability_warning = " ".join(
+                part for part in (publication_warning, reliability_warning) if part
+            )
         reliability = {
             "band": band,
             "dispersion_ratio": override.get("dispersion_ratio"),
-            "warning": override.get("valuation_warning"),
+            "warning": reliability_warning,
             "legs": legs,
             "point_estimate_withheld": withheld,
+            "withheld_reason": withheld_reason,
         }
         if positive:
             reliability["range_low"] = min(positive)
@@ -1070,8 +1085,14 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     if point_withheld:
         ratio = reliability.get('dispersion_ratio')
         ratio_text = f" ({ratio:.1f}x dispersion)" if isinstance(ratio, (int, float)) else ""
+        if reliability.get('band') == 'single-method':
+            withheld_label = "Withheld — DCF-only result lacks independent corroboration"
+        elif reliability.get('band') == 'unreliable':
+            withheld_label = f"Withheld — valuation methods do not converge{ratio_text}"
+        else:
+            withheld_label = "Withheld — exceptional gap is not independently corroborated"
         summary_table += (
-            f"| **Point Estimate** | **Withheld — valuation methods do not converge{ratio_text}** |\n"
+            f"| **Point Estimate** | **{withheld_label}** |\n"
         )
         low, high = reliability.get('range_low'), reliability.get('range_high')
         if isinstance(low, (int, float)) and isinstance(high, (int, float)):
@@ -1208,6 +1229,14 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         company_name=company['company_name'],
         tables=tables_md,
     )
+    if point_withheld:
+        prompt += (
+            "\n\nPublication override: the point estimate is withheld for this exact reason: "
+            f"{reliability.get('withheld_reason') or 'the evidence is not sufficient for a point call'} "
+            "Do not replace that reason with a claim that the methods fail to converge "
+            "unless the confidence band is explicitly 'unreliable'. Call the endpoints "
+            "model-method outputs, not bull/base/bear price targets."
+        )
 
     messages = [{"role": "user", "content": prompt}]
     response, cost = llm(messages, temperature=0.5)
@@ -1284,11 +1313,11 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
         low, high = reliability.get('range_low'), reliability.get('range_high')
         if isinstance(low, (int, float)) and isinstance(high, (int, float)):
             intrinsic_value = (
-                f"point estimate withheld; methods span {format_number(low, 2)}–"
+                f"point estimate withheld; model cases span {format_number(low, 2)}–"
                 f"{format_number(high, 2)}"
             )
         else:
-            intrinsic_value = "point estimate withheld because valuation methods do not converge"
+            intrinsic_value = "point estimate withheld because the evidence is not sufficient for publication"
         upside = "not meaningful — point estimate withheld"
     else:
         intrinsic_value = format_number(valuation['summary']['average_intrinsic'], 2)
@@ -1305,6 +1334,14 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
         num_catalysts=len(news['catalysts']),
         num_risks=len(news['risks'])
     )
+    if reliability.get('point_estimate_withheld'):
+        prompt += (
+            "\n\nPublication override: no directional rating or point target is supported. "
+            "Discuss bull and bear OPERATING cases, but do not convert the valuation-range "
+            "endpoints into bull/base/bear price targets and do not announce a bullish or "
+            "bearish investment stance. The model cases are methodology outputs, not "
+            "probability-weighted scenarios."
+        )
 
     messages = [{"role": "user", "content": prompt}]
     response, cost = llm(messages, temperature=0.6)
@@ -1365,7 +1402,7 @@ def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], l
                 f"withheld; methods span {format_number(low, 2)}–{format_number(high, 2)}"
             )
         else:
-            intrinsic_value = "withheld because valuation methods do not converge"
+            intrinsic_value = "withheld because the evidence is not sufficient for publication"
         upside = "not meaningful — point estimate withheld"
     else:
         intrinsic_value = format_number(valuation['summary']['average_intrinsic'], 2)
@@ -1406,9 +1443,12 @@ def valuation_publication_status(data: Dict[str, Any]) -> str:
         lines.append(
             f"**Supported Valuation Range**: {format_number(low, 2)} – {format_number(high, 2)}"
         )
+    reason = reliability.get('withheld_reason')
+    if reason:
+        lines.append(str(reason))
     lines.append(
         "No directional rating, price target or implied-upside percentage is published "
-        "because the valuation methods do not converge."
+        "because the valuation evidence is not sufficient for a defensible point call."
     )
     return "\n".join(lines) + "\n\n"
 

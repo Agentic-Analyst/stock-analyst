@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from peer_comps import collect_peer_comps
+from peer_comps import collect_peer_comps, configuration_status
 
 
 class Client:
@@ -44,6 +44,19 @@ def test_too_few_observations_do_not_create_a_fake_comps_view():
 def test_feature_is_off_by_default_without_an_injected_client(monkeypatch):
     monkeypatch.delenv("PEER_COMPS_ENABLED", raising=False)
     assert collect_peer_comps("AAPL") == {}
+
+
+def test_configuration_status_explains_key_present_but_feature_disabled(monkeypatch):
+    monkeypatch.setenv("FINNHUB_API_KEY", "secret")
+    monkeypatch.delenv("PEER_COMPS_ENABLED", raising=False)
+    status = configuration_status()
+    assert status == {
+        "enabled": False,
+        "provider": "finnhub",
+        "provider_key_configured": True,
+        "ready": False,
+        "blockers": ["PEER_COMPS_ENABLED is not true"],
+    }
 
 
 def test_grounding_prefers_real_peer_median_over_self_multiple(monkeypatch):

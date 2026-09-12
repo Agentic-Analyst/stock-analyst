@@ -259,10 +259,17 @@ class RecommendationCalculator:
             rating_confidence = "low"
 
         if point_estimate_withheld:
-            rating_withheld_reason = (
-                "Valuation methods do not converge, so no defensible point "
-                "estimate exists for a directional rating or price target."
-            )
+            rating_withheld_reason = reliability.get("withheld_reason")
+            if not rating_withheld_reason and reliability.get("band") == "unreliable":
+                rating_withheld_reason = (
+                    "Valuation methods do not converge, so no defensible point "
+                    "estimate exists for a directional rating or price target."
+                )
+            if not rating_withheld_reason:
+                rating_withheld_reason = (
+                    "Valuation evidence is not sufficient for a defensible point "
+                    "estimate, directional rating, or price target."
+                )
         elif not valuation_available:
             rating_withheld_reason = (
                 "No usable intrinsic-value method produced a positive result."

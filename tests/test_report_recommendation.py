@@ -282,6 +282,7 @@ class TestUnreliableValuation:
             self._withheld(), {"evidence": []}, {}, {}, citations_enabled=False)
         assert "VALUATION POINT ESTIMATE WITHHELD" in prompt
         assert "Do not invent" in prompt
+        assert "must not use the valuation-range endpoints as scenario price targets" in prompt
 
     def test_full_engine_carries_reliability_into_the_calculator(self, engine):
         company = {
