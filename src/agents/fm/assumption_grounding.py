@@ -716,7 +716,12 @@ def ground_assumptions(
     # EV/EBITDA produces enterprise value and is discounted at WACC. P/S
     # produces equity value and must use the cost of equity instead.
     a["comps_enterprise_discount_rate"] = a.get("wacc")
-    a["comps_equity_discount_rate"] = a.get("cost_of_equity")
+    # cost_of_equity lives inside the capm block published at a["capm"], never
+    # on `a` itself — unlike wacc on the line above, which IS a top-level key
+    # (set at :531 beside a["capm"] at :535). Reading it off `a` made this
+    # unconditionally None. Nothing consumes the key yet, so no valuation was
+    # wrong; it was a trap set for the first reader who trusted the name.
+    a["comps_equity_discount_rate"] = a.get("capm", {}).get("cost_of_equity")
     fg = company_data.get("forward_guidance", {}) or {}
     tgt = fg.get("target_mean_price")
     a["analyst_target_mean"] = float(tgt) if tgt and tgt > 0 else 0.0
