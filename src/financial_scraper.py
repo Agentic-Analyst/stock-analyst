@@ -1009,7 +1009,19 @@ class FinancialScraper:
                     "Peer comps skipped: " + "; ".join(peer_status["blockers"]),
                 )
             else:
-                peer_comps = collect_peer_comps(self.ticker)
+                basic = company_data.get("basic_info", {}) or {}
+                market = company_data.get("market_data", {}) or {}
+                # Finnhub reports market cap in USD millions.  Apply the size
+                # screen only where the subject value is also USD, avoiding a
+                # silent cross-currency comparison for foreign listings.
+                subject_market_cap = (
+                    market.get("market_cap")
+                    if str(basic.get("currency") or "").upper() == "USD"
+                    else None
+                )
+                peer_comps = collect_peer_comps(
+                    self.ticker, subject_market_cap=subject_market_cap
+                )
                 if peer_comps:
                     modeling_data["industry_data"]["peer_comps"] = peer_comps
                 else:
@@ -1027,6 +1039,8 @@ class FinancialScraper:
         
         # 6. Generate data summary
         modeling_data["data_summary"] = self._generate_data_summary(modeling_data)
+        from src.financial_freshness import financial_statement_freshness
+        modeling_data["financial_freshness"] = financial_statement_freshness(modeling_data)
         
         self._log("info", f"Financial modeling data collection completed for {self.ticker}")
         return modeling_data

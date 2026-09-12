@@ -37,6 +37,7 @@ def extract_news_analysis(screening_data: Dict[str, Any]) -> Dict[str, Any]:
     """Extract news screening analysis."""
     return {
         'summary': screening_data.get('analysis_summary', {}),
+        'freshness': screening_data.get('freshness', {}),
         'catalysts': screening_data.get('catalysts', []),
         'risks': screening_data.get('risks', []),
         'mitigations': screening_data.get('mitigations', []),
@@ -317,4 +318,3 @@ def generate_and_save_news_summary(
         logger.info(f"   • File size: {summary_path.stat().st_size:,} bytes")
     
     return summary, summary_path, cost
-

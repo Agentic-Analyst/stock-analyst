@@ -155,12 +155,12 @@ class AssumptionsTabBuilder:
         # WACC
         ws.cell(row=4, column=1, value="WACC").font = Font(bold=True)
         ws.cell(row=4, column=2, value='=LLM_Inferred!B2').number_format = '0.00%'
-        ws.cell(row=4, column=3, value="[LLM]").font = Font(italic=True, size=9)
+        ws.cell(row=4, column=3, value="[Derived CAPM / observed capital structure]").font = Font(italic=True, size=9)
         
         # Terminal Growth Rate
         ws.cell(row=5, column=1, value="Terminal Growth Rate (g)").font = Font(bold=True)
         ws.cell(row=5, column=2, value='=LLM_Inferred!B3').number_format = '0.00%'
-        ws.cell(row=5, column=3, value="[LLM]").font = Font(italic=True, size=9)
+        ws.cell(row=5, column=3, value="[Grounded to long-run band and currency risk-free cap]").font = Font(italic=True, size=9)
     
     def _setup_revenue_growth(self, ws: Worksheet) -> None:
         """Set up revenue growth with formulas."""
@@ -449,7 +449,10 @@ class AssumptionsTabBuilder:
         ws.cell(row=30, column=1, value="Terminal Growth Rate (g)").font = Font(bold=True)
         ws.cell(row=30, column=2, value='=LLM_Inferred!B3').number_format = '0.00%'  # From LLM
         _tg_note = self.llm_assumptions.get("terminal_growth_note")
-        ws.cell(row=30, column=3, value=f"[{_tg_note}]" if _tg_note else "[LLM]").font = Font(italic=True, size=9)
+        ws.cell(row=30, column=3, value=(
+            f"[{_tg_note}]" if _tg_note
+            else "[Grounded to long-run band and currency risk-free cap]"
+        )).font = Font(italic=True, size=9)
         
         # Shares Outstanding (row 36 in markdown, row 31 here)
         ws.cell(row=31, column=1, value="Shares Outstanding (for valuation)").font = Font(bold=True)

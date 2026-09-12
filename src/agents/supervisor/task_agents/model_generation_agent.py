@@ -149,6 +149,8 @@ async def model_generation_agent(
                 exit_multiple = None
                 ebitda_terminal = None
                 fcf_terminal = None
+                market_implied_terminal_fcf = None
+                market_implied_vs_model = None
                 revenue_growth_rates = []
                 
                 for cell_key, cell_value in summary_cells.items():
@@ -185,6 +187,10 @@ async def model_generation_agent(
                             ebitda_terminal = cell_value
                         elif label.strip().startswith("FCF (FY") and col == 2:
                             fcf_terminal = cell_value
+                        elif "Market-Implied Terminal FCF" in label and col == 2:
+                            market_implied_terminal_fcf = cell_value
+                        elif "Market-Implied FCF vs Model" in label and col == 2:
+                            market_implied_vs_model = cell_value
                 
                 # Extract revenue growth rates from LLM_Inferred tab
                 llm_inferred_cells = computed_data.get("LLM_Inferred", {}).get("cells", {})
@@ -211,6 +217,10 @@ async def model_generation_agent(
                     valuation_metrics["current_price"] = current_price
                 if upside_vs_market is not None:
                     valuation_metrics["upside_vs_market"] = upside_vs_market
+                if market_implied_terminal_fcf is not None:
+                    valuation_metrics["market_implied_terminal_fcf"] = market_implied_terminal_fcf
+                if market_implied_vs_model is not None:
+                    valuation_metrics["market_implied_fcf_vs_model"] = market_implied_vs_model
                 # Consensus remains outside intrinsic value, but its coverage
                 # and target are needed by the publication boundary.  A large
                 # mega-cap DCF gap that independent evidence does not support
@@ -276,11 +286,16 @@ async def model_generation_agent(
                         state.log_action("model_generation_agent", f"⚠️ {spread_note}")
 
                     raw = state.financial_data.raw_data or {}
+                    from src.financial_freshness import financial_statement_freshness
+                    # Recompute from source periods for every run. A cached
+                    # "current" flag must not keep aging statements current.
+                    financial_freshness = financial_statement_freshness(raw)
+                    valuation_metrics["financial_freshness"] = financial_freshness
                     company = raw.get("company_data") or {}
                     market = company.get("market_data") or {}
                     basic = company.get("basic_info") or {}
                     market_cap = market.get("market_cap")
-                    currency = basic.get("currency")
+                    currency = basic.get("listing_currency") or basic.get("currency")
                     is_mega_cap = bool(
                         isinstance(market_cap, (int, float))
                         and not isinstance(market_cap, bool)
@@ -305,6 +320,16 @@ async def model_generation_agent(
                         state.log_action(
                             "model_generation_agent",
                             f"⚠️ Point estimate and rating withheld: {withheld_reason}",
+                        )
+                    if financial_freshness.get("status") in {"stale", "unavailable"}:
+                        freshness_reason = financial_freshness.get("reason") or (
+                            "The financial statements needed for the valuation are unavailable."
+                        )
+                        valuation_metrics["point_estimate_withheld"] = True
+                        valuation_metrics["publication_withheld_reason"] = freshness_reason
+                        state.log_action(
+                            "model_generation_agent",
+                            f"⚠️ Point estimate and rating withheld: {freshness_reason}",
                         )
                 except Exception as _disp_err:
                     # Never let a diagnostic break model generation.

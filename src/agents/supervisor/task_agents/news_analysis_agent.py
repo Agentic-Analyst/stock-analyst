@@ -24,11 +24,16 @@ from src.article_scraper import ArticleScraper
 from src.article_filter import ArticleFilter
 from src.article_screener import ArticleScreener
 from src.config import MIN_CONFIDENCE
-from src.config import MAX_ARTICLES
+from src.config import (
+    NEWS_CANDIDATE_LIMIT,
+    NEWS_MAX_AGE_DAYS,
+    NEWS_MIN_FRESH_ARTICLES,
+)
+from src.news_freshness import filter_fresh_articles
 from vynn_core import find_recent
 
 
-def _check_database_for_articles(ticker: str) -> int:
+def _database_freshness(ticker: str) -> dict:
     """
     Check if database has sufficient recent articles for the ticker.
     
@@ -40,12 +45,29 @@ def _check_database_for_articles(ticker: str) -> int:
         Number of articles found in database
     """
     try:
-        recent_articles = find_recent(limit=MAX_ARTICLES, collection_name=ticker)
-        article_count = len(recent_articles) if recent_articles else 0
-        return article_count
-    except Exception as e:
-        # If database check fails, return 0 to trigger fallback
-        return 0
+        candidates = find_recent(
+            limit=NEWS_CANDIDATE_LIMIT,
+            collection_name=ticker,
+        )
+        _, freshness = filter_fresh_articles(
+            candidates or [],
+            max_age_days=NEWS_MAX_AGE_DAYS,
+            minimum_articles=NEWS_MIN_FRESH_ARTICLES,
+        )
+        return freshness
+    except Exception as exc:
+        # If database check fails, return unavailable to trigger scraping.
+        return {
+            "status": "unavailable",
+            "fresh_articles": 0,
+            "minimum_articles": NEWS_MIN_FRESH_ARTICLES,
+            "error": str(exc),
+        }
+
+
+def _check_database_for_articles(ticker: str) -> int:
+    """Backward-compatible count of genuinely fresh database articles."""
+    return int(_database_freshness(ticker).get("fresh_articles") or 0)
 
 
 async def news_analysis_agent(
@@ -88,12 +110,16 @@ async def news_analysis_agent(
         )
         
         # Check if we have sufficient articles in database
-        min_articles_threshold = 15  # Configurable threshold
-        db_article_count = _check_database_for_articles(state.ticker)
+        min_articles_threshold = NEWS_MIN_FRESH_ARTICLES
+        db_freshness = _database_freshness(state.ticker)
+        db_article_count = int(db_freshness.get("fresh_articles") or 0)
         
         state.log_action(
             "news_analysis_agent",
-            f"📊 Database check: Found {db_article_count} articles for {state.ticker}"
+            f"📊 Database check: Found {db_article_count} source-dated articles "
+            f"from the last {NEWS_MAX_AGE_DAYS} days for {state.ticker}; "
+            f"excluded {db_freshness.get('stale_articles_excluded', 0)} stale and "
+            f"{db_freshness.get('unknown_date_articles_excluded', 0)} undated"
         )
         
         # Determine if scraping is needed
@@ -187,6 +213,7 @@ async def news_analysis_agent(
         
         # Load articles from database
         articles_data = screener.load_articles_from_db(limit=50)
+        freshness = screener.last_freshness
         state.log_action("news_analysis_agent", f"Analyzing {len(articles_data)} articles...")
 
         # Extract insights using LLM — PARALLEL fan-out. This agent is already
@@ -220,7 +247,8 @@ async def news_analysis_agent(
             high_conf_risks,
             high_conf_mitigations,
             analysis_summary,
-            data_file
+            data_file,
+            freshness=freshness,
         )
         
         state.log_action("news_analysis_agent", f"Structured data saved to: {data_file}")
@@ -235,7 +263,7 @@ async def news_analysis_agent(
         # Update FinancialState with news analysis results
         state.news_analysis = NewsAnalysis(
             ticker=state.ticker,
-            articles_count=len(catalysts) + len(risks) + len(mitigations),
+            articles_count=int(getattr(analysis_summary, "articles_analyzed", 0) or 0),
             catalysts=catalysts_dicts,
             risks=risks_dicts,
             mitigations=mitigations_dicts,
@@ -249,6 +277,7 @@ async def news_analysis_agent(
                 else getattr(analysis_summary, "overall_sentiment", None) or "neutral"
             ),
             key_themes=[c.type for c in high_conf_catalysts[:5]] if high_conf_catalysts else [],
+            freshness=freshness,
             screening_data_path=str(data_file),
             llm_cost=state.total_llm_cost
         )

@@ -6,7 +6,9 @@ Write the News & Market Analysis section for {company_name}.
 - Confidence Score: {confidence_score}
 - Key Themes: {key_themes}
 
-**IMPORTANT**: Use these EXACT tables in your response. DO NOT modify the data or recreate tables:
+**IMPORTANT**: The application emits these exact code-generated tables above
+your commentary. Read them as data, but do not reproduce, alter, or restate
+their rows:
 
 ### Catalysts Identified ({num_catalysts})
 
@@ -27,4 +29,6 @@ Write 2-3 paragraphs of analysis discussing:
 3. How the risks could impact financials
 4. Whether the mitigations are adequate
 
-Use the EXACT tables above. Add your analysis paragraphs before and after the tables.
+Write prose only, without headings or tables. Do not invent event dates,
+financial effects, or broader market conclusions absent from the supplied
+rows. A low article count is limited evidence, not a representative survey.

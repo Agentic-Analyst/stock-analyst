@@ -20,7 +20,13 @@ from collections import defaultdict, Counter
 import yaml
 
 # Import centralized configuration
-from config import MIN_CONFIDENCE
+from config import (
+    MIN_CONFIDENCE,
+    NEWS_CANDIDATE_LIMIT,
+    NEWS_MAX_AGE_DAYS,
+    NEWS_MIN_FRESH_ARTICLES,
+)
+from news_freshness import filter_fresh_articles
 import tiktoken
 from llms.config import get_llm
 from vynn_core import find_recent, get_article_by_url
@@ -47,6 +53,7 @@ class ArticleReference:
     """Represents a reference to a source article."""
     title: str
     url: str
+    publish_date: Optional[str] = None
 
 @dataclass
 class Catalyst:
@@ -138,6 +145,7 @@ class ArticleScreener:
         # Cost tracking for LLM usage
         self.total_llm_cost = 0.0
         self.llm_call_count = 0
+        self.last_freshness: Dict[str, object] = {}
         
         # Token management for handling long articles
         self.encoding = tiktoken.encoding_for_model("gpt-4o-mini")
@@ -230,6 +238,7 @@ class ArticleScreener:
             # Parse response into structured insights (shared by sync + async paths)
             analysis_data = self._parse_llm_json_response(response, "batch_analysis")
             catalysts, risks, mitigations = self._parse_batch_analysis_data(analysis_data)
+            self._attach_publication_dates(catalysts, risks, mitigations, articles)
 
             # Display batch results
             self._log("info", f"✅ Batch {batch_num} complete: {len(catalysts)}🚀 {len(risks)}⚠️ {len(mitigations)}🛡️")
@@ -383,6 +392,29 @@ class ArticleScreener:
                 mitigations.append(mitigation)
 
         return catalysts, risks, mitigations
+
+    @staticmethod
+    def _attach_publication_dates(
+        catalysts: List[Catalyst], risks: List[Risk], mitigations: List[Mitigation],
+        articles: List[Dict],
+    ) -> None:
+        """Join model-returned citations back to source metadata deterministically."""
+        by_url = {}
+        by_title = {}
+        for article in articles:
+            published = article.get("_publication_datetime") or article.get("publish_date")
+            url = str(article.get("source_url") or article.get("url") or "").strip()
+            title = str(article.get("title") or "").strip().casefold()
+            if url:
+                by_url[url] = published
+            if title:
+                by_title[title] = published
+        for insight in [*catalysts, *risks, *mitigations]:
+            for reference in insight.source_articles:
+                reference.publish_date = (
+                    by_url.get((reference.url or "").strip())
+                    or by_title.get((reference.title or "").strip().casefold())
+                )
 
     def _is_rate_limit_error(self, error_message: str) -> bool:
         """True if an error string looks like a rate-limit / token-limit failure."""
@@ -658,7 +690,10 @@ class ArticleScreener:
             self._log("info", f"📂 Loading articles from MongoDB for {self.ticker} limit: {limit}")
             
             # Get recent articles from database using vynn_core
-            recent_articles = find_recent(limit=limit * 2, collection_name=self.ticker)
+            recent_articles = find_recent(
+                limit=max(limit * 2, NEWS_CANDIDATE_LIMIT),
+                collection_name=self.ticker,
+            )
 
             self._log("info", f"✅ Found {len(recent_articles)} recent articles in database")
 
@@ -672,6 +707,10 @@ class ArticleScreener:
                     "title": article.get('title', 'Untitled'),
                     "source_url": article.get('url') or article.get('source_url', ''),
                     "publish_date": article.get('publish_date', ''),
+                    "published_at": article.get('published_at'),
+                    "scraped_at": article.get('scraped_at'),
+                    "createdAt": article.get('createdAt'),
+                    "created_at": article.get('created_at'),
                     "text": article.get('content', ''),
                     "word_count": article.get('word_count', 0),
                     "serpapi_snippet": article.get('serpapi_snippet', ''),
@@ -680,9 +719,21 @@ class ArticleScreener:
                 }
                 filtered_articles.append(screener_article)
             
-            # Limit to requested number
-            result = filtered_articles[:limit]
-            self._log("info", f"✅ Loaded {len(result)} articles from MongoDB (filtered from {len(recent_articles)} total)")
+            # Only a source publication date can establish recency.  Ingestion
+            # time is not a substitute: old articles are frequently backfilled.
+            result, freshness = filter_fresh_articles(
+                filtered_articles,
+                max_age_days=NEWS_MAX_AGE_DAYS,
+                minimum_articles=NEWS_MIN_FRESH_ARTICLES,
+                limit=limit,
+            )
+            self.last_freshness = freshness
+            self._log(
+                "info",
+                f"✅ Loaded {len(result)} fresh articles from MongoDB "
+                f"({freshness['stale_articles_excluded']} stale and "
+                f"{freshness['unknown_date_articles_excluded']} undated excluded)",
+            )
             
             return result
             
@@ -692,6 +743,12 @@ class ArticleScreener:
             self._log("error", f"Full traceback: {traceback.format_exc()}")
             # Fallback to local file loading
             self._log("info", "⚠️  Falling back to local file loading")
+            self.last_freshness = {
+                "status": "unavailable",
+                "fresh_articles": 0,
+                "error": str(e),
+            }
+            return []
 
     def analyze_all_articles(self, articles: List[Dict], batch_size: int = 10) -> Tuple[List[Catalyst], List[Risk], List[Mitigation], AnalysisSummary]:
         """
@@ -866,6 +923,7 @@ class ArticleScreener:
 
             analysis_data = self._parse_llm_json_response(response, "batch_analysis")
             catalysts, risks, mitigations = self._parse_batch_analysis_data(analysis_data)
+            self._attach_publication_dates(catalysts, risks, mitigations, articles)
 
             self._log("info", f"{indent}✅ Batch {batch_num} complete: {len(catalysts)}🚀 {len(risks)}⚠️ {len(mitigations)}🛡️")
             self._log("info", f"{indent}💰 Batch cost: ${cost:.4f} USD | Running total: ${self.total_llm_cost:.4f} USD")
@@ -966,7 +1024,7 @@ class ArticleScreener:
     def _calculate_overall_confidence(self, catalysts: List[Catalyst], risks: List[Risk], mitigations: List[Mitigation]) -> float:
         """Calculate overall confidence score based on all insights."""
         if not any([catalysts, risks, mitigations]):
-            return 0.5
+            return 0.0
         
         all_confidences = []
         all_confidences.extend(c.confidence for c in catalysts)
@@ -976,13 +1034,16 @@ class ArticleScreener:
         return sum(all_confidences) / len(all_confidences) if all_confidences else 0.5
 
     def save_structured_data(self, catalysts: List[Catalyst], risks: List[Risk], 
-                           mitigations: List[Mitigation], analysis_summary: AnalysisSummary, output_file: pathlib.Path):
+                           mitigations: List[Mitigation], analysis_summary: AnalysisSummary,
+                           output_file: pathlib.Path,
+                           freshness: Optional[Dict[str, object]] = None):
         """Save structured data as JSON for further analysis."""
         data = {
             "timestamp": datetime.now().isoformat(),
             "ticker": self.ticker,
             "analysis_method": "batch_llm",
             "analysis_summary": asdict(analysis_summary),
+            "freshness": freshness if freshness is not None else self.last_freshness,
             "catalysts": [asdict(c) for c in catalysts],
             "risks": [asdict(r) for r in risks],
             "mitigations": [asdict(m) for m in mitigations],
@@ -996,5 +1057,3 @@ class ArticleScreener:
         
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-
-

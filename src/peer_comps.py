@@ -23,6 +23,7 @@ EV_EBITDA_KEYS = (
 PRICE_SALES_KEYS = (
     "priceToSalesTTM", "psTTM", "price/salesTTM",
 )
+MARKET_CAP_KEYS = ("marketCapitalization", "marketCapitalizationM")
 
 
 def _positive(value: Any) -> Optional[float]:
@@ -40,21 +41,35 @@ def _first(metric: Dict[str, Any], keys) -> Optional[float]:
     return None
 
 
+def _mode() -> str:
+    raw = (os.getenv("PEER_COMPS_ENABLED") or "auto").strip().lower()
+    if raw in ("0", "false", "no", "off", "disabled"):
+        return "disabled"
+    if raw in ("1", "true", "yes", "on", "enabled"):
+        return "enabled"
+    return "auto"
+
+
 def enabled() -> bool:
-    return (os.getenv("PEER_COMPS_ENABLED", "false") or "").strip().lower() in (
-        "1", "true", "yes")
+    """Enable automatically when provider credentials are present."""
+    mode = _mode()
+    if mode == "disabled":
+        return False
+    return bool((os.getenv("FINNHUB_API_KEY") or "").strip())
 
 
 def configuration_status() -> Dict[str, Any]:
     """Non-secret feature status suitable for logs and health diagnostics."""
     has_key = bool((os.getenv("FINNHUB_API_KEY") or "").strip())
+    mode = _mode()
     is_enabled = enabled()
     blockers = []
-    if not is_enabled:
-        blockers.append("PEER_COMPS_ENABLED is not true")
+    if mode == "disabled":
+        blockers.append("PEER_COMPS_ENABLED explicitly disables peer comps")
     if not has_key:
         blockers.append("FINNHUB_API_KEY is not configured")
     return {
+        "mode": mode,
         "enabled": is_enabled,
         "provider": "finnhub",
         "provider_key_configured": has_key,
@@ -102,7 +117,8 @@ class FinnhubPeerClient:
 
 
 def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = None,
-                       max_peers: Optional[int] = None) -> Dict[str, Any]:
+                       max_peers: Optional[int] = None,
+                       subject_market_cap: Optional[float] = None) -> Dict[str, Any]:
     """Median trading multiples for same-subindustry peers; empty if unavailable."""
     if client is None:
         if not enabled():
@@ -135,6 +151,19 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
 
     observations = []
     failed_symbols = []
+    size_excluded_symbols = []
+    try:
+        subject_market_cap_m = (
+            float(subject_market_cap) / 1_000_000.0
+            if subject_market_cap and float(subject_market_cap) > 0 else None
+        )
+    except (TypeError, ValueError):
+        subject_market_cap_m = None
+    try:
+        minimum_size_ratio = float(os.getenv("PEER_COMPS_MIN_SIZE_RATIO", "0.05") or 0.05)
+    except ValueError:
+        minimum_size_ratio = 0.05
+    minimum_size_ratio = max(0.01, min(1.0, minimum_size_ratio))
     # One worker already makes several vendor requests and multiple workers can
     # coexist. Avoid a per-worker burst that multiplies into account-wide 429s.
     for symbol in symbols:
@@ -145,6 +174,12 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
             continue
         ev_ebitda = _first(metric, EV_EBITDA_KEYS)
         price_sales = _first(metric, PRICE_SALES_KEYS)
+        market_cap_m = _first(metric, MARKET_CAP_KEYS)
+        if subject_market_cap_m is not None:
+            ratio = market_cap_m / subject_market_cap_m if market_cap_m else None
+            if ratio is None or ratio < minimum_size_ratio or ratio > 1.0 / minimum_size_ratio:
+                size_excluded_symbols.append(symbol)
+                continue
         if ev_ebitda is not None and not 2.0 <= ev_ebitda <= 80.0:
             ev_ebitda = None
         if price_sales is not None and not 0.1 <= price_sales <= 50.0:
@@ -154,6 +189,7 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
                 "symbol": symbol,
                 "ev_ebitda_ttm": ev_ebitda,
                 "price_sales_ttm": price_sales,
+                "market_cap_usd_millions": market_cap_m,
             })
     observations.sort(key=lambda row: row["symbol"])
     ev_values = [row["ev_ebitda_ttm"] for row in observations
@@ -175,5 +211,12 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
         "ev_ebitda_peer_count": len(ev_values),
         "price_sales_peer_count": len(ps_values),
         "failed_symbols": failed_symbols,
-        "methodology": "same-subindustry median of bounded trailing multiples",
+        "size_excluded_symbols": size_excluded_symbols,
+        "minimum_subject_size_ratio": minimum_size_ratio if subject_market_cap_m else None,
+        "methodology": (
+            "same-subindustry median of bounded trailing multiples; peers must be "
+            f"within {minimum_size_ratio:.0%}x-{1/minimum_size_ratio:.0f}x of subject market cap"
+            if subject_market_cap_m else
+            "same-subindustry median of bounded trailing multiples"
+        ),
     }

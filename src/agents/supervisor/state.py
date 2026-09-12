@@ -69,6 +69,7 @@ class NewsAnalysis:
     mitigations: List[Dict[str, Any]] = field(default_factory=list)
     overall_sentiment: str = "neutral"  # bullish, neutral, bearish
     key_themes: List[str] = field(default_factory=list)
+    freshness: Dict[str, Any] = field(default_factory=dict)
     screening_data_path: Optional[str] = None  # Path to screening_data.json
     llm_cost: float = 0.0
     error: Optional[str] = None
