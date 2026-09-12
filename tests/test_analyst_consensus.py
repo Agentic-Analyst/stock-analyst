@@ -123,7 +123,11 @@ def test_benzinga_consensus_is_normalized_with_unique_analyst_count():
         }),
     })
 
-    out = BenzingaConsensusClient("secret", session=session).fetch(
+    out = BenzingaConsensusClient(
+        "secret", session=session,
+        clock=lambda: analyst_consensus.datetime(
+            2026, 9, 11, tzinfo=analyst_consensus.timezone.utc),
+    ).fetch(
         "aapl", currency="USD")
 
     assert out["price_target"] == {
@@ -142,6 +146,8 @@ def test_benzinga_consensus_is_normalized_with_unique_analyst_count():
     params = session.calls[0][1]["params"]
     assert params["token"] == "secret"
     assert params["parameters[tickers]"] == "AAPL"
+    assert params["parameters[date_from]"] == "2025-09-11"
+    assert params["parameters[date_to]"] == "2026-09-11"
     assert "secret" not in session.calls[0][0]
 
 
@@ -239,6 +245,7 @@ def test_explicit_tipranks_secondary_is_evidence_not_the_primary_target(monkeypa
     })
     monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "auto")
     monkeypatch.setenv("ANALYST_CONSENSUS_SECONDARY", "tipranks")
+    monkeypatch.setenv("TIPRANKS_DURABLE_OUTPUTS_LICENSED", "true")
 
     out = collect_consensus(
         "AAPL", YAHOO, currency="USD",
@@ -248,6 +255,19 @@ def test_explicit_tipranks_secondary_is_evidence_not_the_primary_target(monkeypa
     assert out["providers"] == ["benzinga", "yahoo_finance", "tipranks"]
     assert out["source_snapshots"]["tipranks"]["price_target"]["mean"] == 235.0
     assert out["source_comparison"]["recommendation"]["directional_agreement"] is False
+
+
+def test_tipranks_is_not_fetched_for_durable_outputs_without_contract_flag(monkeypatch):
+    tipranks = StaticClient({"providers": ["tipranks"]})
+    monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "tipranks")
+    monkeypatch.delenv("TIPRANKS_DURABLE_OUTPUTS_LICENSED", raising=False)
+    monkeypatch.delenv("BENZINGA_API_KEY", raising=False)
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+
+    out = collect_consensus("AAPL", YAHOO, currency="USD", tipranks_client=tipranks)
+
+    assert tipranks.calls == []
+    assert out["providers"] == ["yahoo_finance"]
 
 
 def test_denied_price_target_keeps_recommendations_and_yahoo_target(monkeypatch):
@@ -382,6 +402,7 @@ def test_report_attributes_tipranks_secondary(monkeypatch):
     })
     monkeypatch.setenv("ANALYST_CONSENSUS_PROVIDER", "auto")
     monkeypatch.setenv("ANALYST_CONSENSUS_SECONDARY", "tipranks")
+    monkeypatch.setenv("TIPRANKS_DURABLE_OUTPUTS_LICENSED", "true")
     consensus = collect_consensus(
         "AAPL", YAHOO, currency="USD",
         benzinga_client=benzinga, tipranks_client=tipranks)

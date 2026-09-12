@@ -164,11 +164,13 @@ async def model_generation_agent(
                         elif "Value per Share (Exit Multiple DCF)" in label and col == 2:
                             exit_multiple_price = cell_value
                         elif "Value per Share (Market Comps)" in label and col == 2:
-                            # The blend's third leg. Computed in the workbook but
-                            # never surfaced, so nothing downstream could see how
-                            # far the three methods actually disagreed.
+                            # The present-valued market methodology used beside
+                            # the single DCF view in the headline blend.
                             comps_price = cell_value
-                        elif "Average of Methods (Per-Share)" in label and col == 2:
+                        elif ("Blended Fair Value (Per-Share)" in label or
+                              "Average of Methods (Per-Share)" in label) and col == 2:
+                            # Accept the old label when reading historical
+                            # workbooks, while new runs use the accurate name.
                             average_price = cell_value
                         elif "Upside vs Market" in label and col == 2:
                             upside_vs_market = cell_value

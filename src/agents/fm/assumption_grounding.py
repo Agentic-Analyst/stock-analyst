@@ -35,6 +35,8 @@ workbook's provenance stays auditable.
 
 from __future__ import annotations
 
+import math
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 _ERP = 0.055                # mature-market equity risk premium; in the range
@@ -603,6 +605,35 @@ def ground_assumptions(
         if gms:
             a["gross_margins"] = gms
 
+    # Near-term revenue is an observable consensus input, not something the
+    # language model should replace with a generic mature-company curve. The
+    # Yahoo estimate table maps 0y/+1y to the first two unreported fiscal
+    # years. Require real breadth and leave FY3-FY5 as explicit model
+    # assumptions so consensus does not silently become the whole DCF.
+    revenue_estimates = ((json_data or {}).get("analyst_data", {}) or {}).get(
+        "revenue_estimates", {}) or {}
+    growth_path = a.get("revenue_growth_rates")
+    if isinstance(growth_path, list) and len(growth_path) >= 2:
+        grounded_growth = [float(value) for value in growth_path]
+        used = []
+        try:
+            minimum_analysts = max(3, int(os.getenv("ANALYST_CONSENSUS_MIN_ANALYSTS", "3") or 3))
+        except ValueError:
+            minimum_analysts = 3
+        for offset, period in enumerate(("0y", "+1y")):
+            estimate = revenue_estimates.get(period) or {}
+            growth = estimate.get("growth")
+            count = estimate.get("numberOfAnalysts")
+            if (isinstance(growth, (int, float)) and not isinstance(growth, bool)
+                    and math.isfinite(float(growth)) and -0.50 <= float(growth) <= 1.00
+                    and isinstance(count, (int, float)) and count >= minimum_analysts):
+                grounded_growth[offset] = float(growth)
+                used.append(f"FY{offset + 1} {float(growth) * 100:.1f}% ({int(count)} analysts)")
+        if used:
+            a["revenue_growth_rates"] = grounded_growth
+            a["revenue_growth_source"] = "yahoo_analyst_consensus_near_term"
+            notes.append("Revenue growth anchored to consensus: " + ", ".join(used))
+
     # 4. Exit multiple — company-specific, never one-size-fits-all.
     cur = vm.get("enterprise_to_ebitda")
     if cur and cur > 0:
@@ -649,9 +680,10 @@ def ground_assumptions(
     a["exit_multiple"] = exit_m
 
     # 5. Market-comps leg parameters (the second methodology in the headline
-    # blend). Prefer a same-subindustry median backed by at least three actual
-    # peers. Fall back to the legacy self-multiple proxy when the licensed
-    # provider is disabled/unavailable; provenance makes the distinction clear.
+    # blend). Require a same-subindustry median backed by at least three actual
+    # peers. A company's own current multiple is not a comparable-company
+    # method: applying it to its own forecast merely echoes today's market
+    # pricing, so an unavailable provider leaves this leg absent.
     peer_comps = (((json_data or {}).get("industry_data") or {}).get("peer_comps") or {})
     peer_ev = peer_comps.get("median_ev_ebitda")
     peer_ps = peer_comps.get("median_price_sales")
@@ -664,24 +696,27 @@ def ground_assumptions(
     if ev_from_peers:
         a["comps_ev_ebitda"] = _clamp(float(peer_ev), 4.0, 30.0)
     else:
-        a["comps_ev_ebitda"] = (
-            _clamp(0.9 * float(ev_eb), 6.0, 25.0) if ev_eb and ev_eb > 0 else 0.0
-        )
+        a["comps_ev_ebitda"] = 0.0
     if ps_from_peers:
         a["comps_ps"] = _clamp(float(peer_ps), 0.5, 40.0)
     else:
-        a["comps_ps"] = _clamp(0.9 * float(ps), 0.5, 40.0) if ps and ps > 0 else 0.0
+        a["comps_ps"] = 0.0
     real_peers = ev_from_peers or ps_from_peers
-    a["comps_ev_source"] = "finnhub_peer_median" if ev_from_peers else "self_multiple_proxy"
-    a["comps_ps_source"] = "finnhub_peer_median" if ps_from_peers else "self_multiple_proxy"
+    a["comps_ev_source"] = "finnhub_peer_median" if ev_from_peers else "unavailable"
+    a["comps_ps_source"] = "finnhub_peer_median" if ps_from_peers else "unavailable"
     a["comps_source"] = (
         a["comps_ev_source"] if a["comps_ev_source"] == a["comps_ps_source"]
-        else "mixed_peer_and_self_proxy"
+        else "partial_finnhub_peer_median"
     )
     a["comps_peer_count"] = max(
         peer_ev_count if ev_from_peers else 0,
         peer_ps_count if ps_from_peers else 0,
     )
+    a["comps_horizon_years"] = 2
+    # EV/EBITDA produces enterprise value and is discounted at WACC. P/S
+    # produces equity value and must use the cost of equity instead.
+    a["comps_enterprise_discount_rate"] = a.get("wacc")
+    a["comps_equity_discount_rate"] = a.get("cost_of_equity")
     fg = company_data.get("forward_guidance", {}) or {}
     tgt = fg.get("target_mean_price")
     a["analyst_target_mean"] = float(tgt) if tgt and tgt > 0 else 0.0

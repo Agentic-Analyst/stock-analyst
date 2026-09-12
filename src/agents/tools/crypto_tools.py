@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from .base import Tool, tool_ok, tool_error
@@ -157,6 +157,46 @@ def _market_structure(info: Any) -> Dict[str, Optional[float]]:
     }
 
 
+def _rolling_24h(frame: Any) -> Dict[str, Any]:
+    """Rolling 24-hour return from intraday observations, never daily-close proxy."""
+    empty = {"return": None, "price": None, "as_of": None, "basis": "intraday_close"}
+    if frame is None or getattr(frame, "empty", True) or "Close" not in frame:
+        return empty
+    points = []
+    for index, raw in frame["Close"].items():
+        value = _number(raw)
+        try:
+            when = index.to_pydatetime() if hasattr(index, "to_pydatetime") else index
+            if not isinstance(when, datetime):
+                when = datetime.fromisoformat(str(index))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            else:
+                when = when.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if value is not None and value > 0:
+            points.append((when, value))
+    points.sort(key=lambda pair: pair[0])
+    if len(points) < 2:
+        return empty
+    latest_at, latest = points[-1]
+    cutoff = latest_at - timedelta(hours=24)
+    before = [point for point in points[:-1] if point[0] <= cutoff]
+    if not before:
+        return {**empty, "price": latest, "as_of": latest_at.isoformat()}
+    base_at, base = before[-1]
+    # Avoid calling a much older observation "24h" after a data outage.
+    if cutoff - base_at > timedelta(hours=3):
+        return {**empty, "price": latest, "as_of": latest_at.isoformat()}
+    return {
+        "return": latest / base - 1.0,
+        "price": latest,
+        "as_of": latest_at.isoformat(),
+        "basis": "rolling_24h_intraday_close",
+    }
+
+
 class GetCryptoTool(Tool):
     name = "get_crypto"
     description = (
@@ -210,10 +250,13 @@ class GetCryptoTool(Tool):
             if df is None or df.empty:
                 return None
             performance = _performance(df)
+            intraday = fetch_history(symbol, "2d", interval="1h", attempts=2,
+                                     auto_adjust=False, actions=False)
+            rolling_24h = _rolling_24h(intraday)
             close = df["Close"].dropna()
             if close.empty:
                 return None
-            last = _number(close.iloc[-1])
+            last = _number(rolling_24h.get("price")) or _number(close.iloc[-1])
             if last is None or last <= 0:
                 return None
 
@@ -236,7 +279,11 @@ class GetCryptoTool(Tool):
                 "currency": currency,
                 "price": round(last, price_digits),
                 # Backward-compatible headline fields used by findings and old prompts.
-                "change_24h_pct": percentage("one_day"),
+                "change_24h_pct": (
+                    round(rolling_24h["return"] * 100, 2)
+                    if isinstance(rolling_24h.get("return"), (int, float)) else None
+                ),
+                "change_previous_daily_close_pct": percentage("one_day"),
                 "change_7d_pct": percentage("seven_days"),
                 "change_30d_pct": percentage("thirty_days"),
                 "change_ytd_pct": percentage("ytd"),
@@ -249,7 +296,8 @@ class GetCryptoTool(Tool):
                 ),
                 "market_structure": market,
                 "performance": performance,
-                "as_of": performance.get("as_of"),
+                "as_of": rolling_24h.get("as_of") or performance.get("as_of"),
+                "rolling_24h": rolling_24h,
             }
             if currency == "USD":
                 payload.update({
@@ -266,6 +314,7 @@ class GetCryptoTool(Tool):
             asset_class="crypto",
             methodology={
                 "returns": "cumulative_fractions_from_daily_close",
+                "change_24h": "rolling_24h_intraday_close",
                 "annualized_volatility": "daily_returns_sqrt_365",
                 "intrinsic_value": None,
                 "on_chain_data": False,

@@ -19,6 +19,42 @@ import pandas as pd
 import numpy as np
 
 import yfinance as yf
+from analysis_manifest import build_analysis_manifest
+
+
+def _frame_records(frame: Any, *, key_field: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    """Turn a small Yahoo analyst table into stable, JSON-safe records."""
+    if isinstance(frame, dict):
+        record: Dict[str, Any] = {}
+        for key, raw in frame.items():
+            value = raw.item() if isinstance(raw, np.generic) else raw
+            if hasattr(value, "isoformat") and not isinstance(value, str):
+                value = value.isoformat()
+            if isinstance(value, (str, int, float, bool)) and not (
+                    isinstance(value, float) and not np.isfinite(value)):
+                record[str(key)] = value
+        return {"calendar": record} if record else {}
+    if frame is None or getattr(frame, "empty", True):
+        return {}
+    output: Dict[str, Dict[str, Any]] = {}
+    for index, row in frame.iterrows():
+        record: Dict[str, Any] = {}
+        for column, raw in row.items():
+            try:
+                if pd.isna(raw):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            value = raw.item() if isinstance(raw, np.generic) else raw
+            if hasattr(value, "isoformat") and not isinstance(value, str):
+                value = value.isoformat()
+            if isinstance(value, (str, int, float, bool)) and not (
+                    isinstance(value, float) and not np.isfinite(value)):
+                record[str(column)] = value
+        key = str(record.get(key_field) if key_field and record.get(key_field) is not None
+                  else index)
+        output[key] = record
+    return output
 
 
 def _fx_rate(from_ccy, to_ccy):
@@ -798,40 +834,44 @@ class FinancialScraper:
         self._log("info", f"Scraping analyst estimates for {self.ticker}")
         
         try:
-            # Get analyst estimates
-            recommendations = self.yf_ticker.recommendations
             analyst_data = {
                 "recommendations": {},
                 "earnings_estimates": {},
-                "revenue_estimates": {}
+                "revenue_estimates": {},
+                "growth_estimates": {},
+                "captured_at": datetime.utcnow().isoformat(),
             }
-            
-            if recommendations is not None and not recommendations.empty:
-                # Process latest recommendations
-                latest_recs = recommendations.tail(10)  # Last 10 recommendations
-                for date, row in latest_recs.iterrows():
-                    # Handle different date formats
-                    if hasattr(date, 'strftime'):
-                        date_key = date.strftime('%Y-%m-%d')
-                    else:
-                        date_key = str(date)
-                    
-                    analyst_data["recommendations"][date_key] = {
-                        "firm": row.get('Firm', ''),
-                        "to_grade": row.get('To Grade', ''),
-                        "from_grade": row.get('From Grade', ''),
-                        "action": row.get('Action', '')
-                    }
-            
-            # Try to get earnings estimates
+
+            # yfinance now exposes period summaries (0q, +1q, 0y, +1y), not
+            # the old firm/grade history this code attempted to parse. Keep
+            # each table separate so estimates, observations, and provenance
+            # remain auditable in the saved modeling input.
+            for output_key, attribute, key_field in (
+                ("recommendations", "recommendations", "period"),
+                ("earnings_estimates", "earnings_estimate", None),
+                ("revenue_estimates", "revenue_estimate", None),
+                ("growth_estimates", "growth_estimates", None),
+            ):
+                try:
+                    analyst_data[output_key] = _frame_records(
+                        getattr(self.yf_ticker, attribute), key_field=key_field)
+                except Exception:
+                    # Yahoo tables fail independently. One missing estimate
+                    # surface must not discard the others.
+                    analyst_data[output_key] = {}
+
             try:
                 calendar = self.yf_ticker.calendar
-                if calendar is not None and not calendar.empty:
-                    analyst_data["earnings_calendar"] = calendar.to_dict()
-            except:
+                analyst_data["earnings_calendar"] = _frame_records(calendar)
+            except Exception:
                 pass
-            
-            self._log("info", f"✅ Analyst data: {len(analyst_data['recommendations'])} recommendations extracted")
+
+            self._log(
+                "info",
+                f"✅ Analyst data: {len(analyst_data['recommendations'])} recommendation "
+                f"periods, {len(analyst_data['revenue_estimates'])} revenue estimate "
+                f"periods extracted",
+            )
             return analyst_data
             
         except Exception as e:
@@ -861,6 +901,7 @@ class FinancialScraper:
             "ticker": self.ticker,
             "scraped_at": datetime.utcnow().isoformat(),
             "analysis_model_version": os.getenv("ANALYSIS_MODEL_VERSION") or "unversioned",
+            "analysis_manifest": build_analysis_manifest(),
             "data_type": "annual" if annual else "quarterly",
             "data_purpose": "financial_modeling",
             

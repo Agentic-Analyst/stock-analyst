@@ -288,15 +288,15 @@ class TestEveryLegInTheAverage:
         from src.report_agent import generate_section_valuation
         data = _valuation_data(comps=73.41)
         text, _ = generate_section_valuation(data, lambda m, temperature=0.5: ("commentary", 0.0))
-        assert "| Market Comps Intrinsic Value | $73.41 |" in text
-        assert "Average Intrinsic Value (3 methods)" in text
+        assert "| Present-Valued Market Comps | $73.41 |" in text
+        assert "Blended Fair Value (50% DCF view / 50% present-valued market comps)" in text
 
     def test_no_comps_no_phantom_row(self):
         from src.report_agent import generate_section_valuation
         data = _valuation_data(comps=None)
         text, _ = generate_section_valuation(data, lambda m, temperature=0.5: ("commentary", 0.0))
         assert "Market Comps" not in text
-        assert "| **Average Intrinsic Value** |" in text
+        assert "| **DCF Fair Value** |" in text
 
 
 class TestReportGridRunsTheHeadlineModel:

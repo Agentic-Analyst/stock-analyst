@@ -269,7 +269,7 @@ class SummaryTabBuilder:
         ws.cell(row=25, column=1, value="")
         
         # Row 26: Average of Methods
-        ws.cell(row=26, column=1, value="Average of Methods (Per-Share)")
+        ws.cell(row=26, column=1, value="Blended Fair Value (Per-Share)")
         ws.cell(row=26, column=1).font = Font(bold=True, size=12)
         # Blended fair value: the DCF VIEW and the market view, 50/50.
         #
@@ -348,19 +348,21 @@ class SummaryTabBuilder:
         38: FCF Yield on EV - Perpetual = IFERROR(B35/B17, "")
         39: FCF Yield on EV - Exit Multiple = IFERROR(B35/B20, "")
         """
-        # Row 30: Market-comps leg — the company's own (de-rated) forward
-        # multiple applied to FY2 projections. EV/EBITDA when FY2 EBITDA is
-        # positive; P/S fallback for pre-EBITDA names; 0 when unavailable.
-        ws.cell(row=30, column=1, value="Value per Share (Market Comps)")
+        # Row 30: Two-year forward market-comps target discounted to the same
+        # present valuation date as the DCF. EV/EBITDA produces enterprise
+        # value and is discounted at WACC, so only the discounted operating
+        # value receives today's net-debt adjustment. P/S produces equity
+        # value directly and is discounted at cost of equity (DCF tab B6).
+        ws.cell(row=30, column=1, value="Present Value per Share (Market Comps)")
         ws.cell(row=30, column=1).font = Font(bold=True, size=11)
         ps_term = (
-            f'{self.comps_ps:.2f}*Projections!$C$3/$B$8'
+            f"({self.comps_ps:.2f}*Projections!$C$3)/(1+'Valuation (DCF)'!$B$6)^2/$B$8"
             if self.comps_ps > 0 else '0'
         )
         if self.comps_ev_ebitda > 0:
             comps_formula = (
                 f'=IF(Projections!$C$21>0,'
-                f'({self.comps_ev_ebitda:.2f}*Projections!$C$21'
+                f'(({self.comps_ev_ebitda:.2f}*Projections!$C$21)/(1+$B$4)^2'
                 f'+$B$14-$B$15+$B$16)/$B$8,'
                 f'{ps_term})'
             )
@@ -376,7 +378,9 @@ class SummaryTabBuilder:
         ws.cell(row=30, column=2).font = Font(bold=True, size=11)
         ws.cell(row=30, column=7,
                 value=(f"EV/EBITDA {self.comps_ev_ebitda:.1f}x / "
-                       f"P/S {self.comps_ps:.1f}x on FY2; {self.comps_source}; "
+                       f"P/S {self.comps_ps:.1f}x on FY2, discounted 2y "
+                       f"at WACC / cost of equity respectively; "
+                       f"{self.comps_source}; "
                        f"{self.comps_peer_count} peers (0 = n/a)"))
         ws.cell(row=30, column=7).font = Font(italic=True, size=9)
 

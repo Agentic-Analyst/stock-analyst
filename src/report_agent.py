@@ -1032,8 +1032,8 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     summary_table += "|--------|-------|\n"
     summary_table += f"| DCF Perpetual Intrinsic Value | {format_number(valuation['dcf_perpetual']['intrinsic_value_per_share'], 2)} |\n"
     summary_table += f"| DCF Exit Multiple Intrinsic Value | {format_number(valuation['dcf_exit']['intrinsic_value_per_share'], 2)} |\n"
-    # The workbook's average blends a third, market-comps leg. It was omitted
-    # here, so the two rows above visibly failed to average to the row below.
+    # The workbook's headline blends one DCF view with a present-valued
+    # market-comps view. Keep that second methodology visible here.
     bank = valuation.get('bank')
     if bank:
         # A balance-sheet financial: the FCF DCF is not meaningful for a bank,
@@ -1044,16 +1044,15 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         summary_table += "| FCF DCF | _not applied — balance-sheet financial_ |\n"
     comps = valuation['summary'].get('comps_intrinsic')
     if isinstance(comps, (int, float)) and comps > 0 and not bank:
-        summary_table += f"| Market Comps Intrinsic Value | {format_number(comps, 2)} |\n"
+        summary_table += f"| Present-Valued Market Comps | {format_number(comps, 2)} |\n"
     analyst_target = valuation['summary'].get('analyst_target')
     if isinstance(analyst_target, (int, float)) and analyst_target > 0:
         summary_table += (
             f"| Analyst Consensus Target (cross-check only) | "
             f"{format_number(analyst_target, 2)} |\n")
-    # The workbook averages only the legs that came out POSITIVE — a negative
-    # per-share value is a method that does not fit the company, not a low
-    # estimate. Say how many actually entered, so "3 methods" is never printed
-    # over an average of two (PC Jeweller: perpetual -2.03, dropped).
+    # The workbook first collapses the two DCF terminal approaches into one
+    # methodology, then weights that DCF view and present-valued market comps
+    # 50/50. Do not describe this as a flat average of three independent methods.
     legs = [valuation['dcf_perpetual']['intrinsic_value_per_share'],
             valuation['dcf_exit']['intrinsic_value_per_share'], comps]
     n_in = sum(1 for v in legs if isinstance(v, (int, float)) and v > 0)
@@ -1062,12 +1061,12 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     point_withheld = bool(reliability.get('point_estimate_withheld'))
     if bank:
         label = "**Intrinsic Value (justified P/B x ROE)**"
+    elif isinstance(comps, (int, float)) and comps > 0:
+        label = "**Blended Fair Value (50% DCF view / 50% present-valued market comps)**"
     elif n_in < n_all:
-        label = f"**Average Intrinsic Value ({n_in} of {n_all} methods — negative results excluded)**"
-    elif n_in > 2:
-        label = f"**Average Intrinsic Value ({n_in} methods)**"
+        label = "**DCF Fair Value (valid terminal approaches only)**"
     else:
-        label = "**Average Intrinsic Value**"
+        label = "**DCF Fair Value**"
     if point_withheld:
         ratio = reliability.get('dispersion_ratio')
         ratio_text = f" ({ratio:.1f}x dispersion)" if isinstance(ratio, (int, float)) else ""

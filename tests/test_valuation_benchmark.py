@@ -31,13 +31,14 @@ def thesis(ticker="AAPL", *, recorded=100.0, perpetual=80.0, exit_multiple=100.0
 
 
 def market(ticker="AAPL", *, quote_type="EQUITY", price=100.0,
-           analyst_target=120.0, analyst_count=20):
+           analyst_target=120.0, analyst_count=20, sector="Technology"):
     return {
         "symbol": ticker,
         "quote_type": quote_type,
         "price_at_refresh": price,
         "analyst_target_mean": analyst_target,
         "analyst_count": analyst_count,
+        "sector": sector,
     }
 
 
@@ -94,7 +95,9 @@ def test_non_equities_and_unclassified_rows_do_not_enter_current_cross_check():
 
 def test_readiness_requires_a_fresh_versioned_and_well_covered_cohort():
     docs = [thesis(f"T{i}") for i in range(20)]
-    markets = [market(f"T{i}") for i in range(20)]
+    sector_names = ["Technology", "Financials", "Healthcare", "Industrials", "Energy"]
+    markets = [market(f"T{i}", sector=sector_names[i % len(sector_names)])
+               for i in range(20)]
     ready = benchmark(docs, markets)
     assert ready["readiness"]["cross_sectional_calibration_ready"] is True
     assert ready["readiness"]["forecast_backtest_ready"] is False
@@ -119,3 +122,11 @@ def test_twelve_month_readiness_is_about_observation_age_not_model_optimism():
     )
     assert result["data_quality"]["age_eligible_for_12m_backtest"] == 20
     assert result["readiness"]["forecast_backtest_ready"] is True
+
+
+def test_cross_sectional_readiness_rejects_a_sector_concentrated_sample():
+    docs = [thesis(f"T{i}") for i in range(20)]
+    result = benchmark(docs, [market(f"T{i}", sector="Technology") for i in range(20)])
+    blockers = result["readiness"]["cross_sectional_blockers"]
+    assert "fewer_than_5_equity_sectors" in blockers
+    assert "single_sector_exceeds_40_percent" in blockers

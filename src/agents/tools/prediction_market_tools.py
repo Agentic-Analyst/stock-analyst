@@ -142,11 +142,6 @@ class GetPredictionMarketsTool(Tool):
             try:
                 mode = "search" if topic else "trending"
                 candidates = _search(topic) if topic else _trending()
-                # A miss on a vague search still deserves a useful answer:
-                # fall back to what the crowd is actually trading right now.
-                if not candidates and topic:
-                    candidates = _trending()
-                    mode = "trending_fallback"
             except requests.RequestException as e:
                 return {"_error": f"Polymarket unavailable (network error: {e})."}
 
@@ -166,11 +161,7 @@ class GetPredictionMarketsTool(Tool):
                 note="No open prediction markets found right now. Answer from news/macro instead.",
             )
         note = "Implied probabilities are the crowd's priced odds (higher volume = deeper/more reliable), not certainties. Weave the relevant ones into your answer."
-        if mode == "trending_fallback":
-            note = (f"No market matched '{topic}' specifically, so these are the "
-                    "BIGGEST open markets by 24h volume instead (sports excluded). "
-                    "Present them as what the crowd is trading right now. " + note)
-        elif mode == "trending":
+        if mode == "trending":
             note = ("These are the biggest open markets by 24h volume right now "
                     "(sports excluded). " + note)
         return tool_ok(

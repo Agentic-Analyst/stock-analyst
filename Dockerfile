@@ -1,10 +1,14 @@
 # stock-analyst/Dockerfile
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7 AS runtime
+
+ARG VYNN_SOURCE_REVISION=unversioned
+LABEL org.opencontainers.image.revision=$VYNN_SOURCE_REVISION
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV DATA_PATH=/data
+ENV VYNN_SOURCE_REVISION=$VYNN_SOURCE_REVISION
 
 # Install system dependencies for newspaper3k and other packages
 RUN apt-get update && apt-get install -y \
@@ -22,8 +26,8 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy and install Python dependencies first (for better Docker caching)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
 
 # Copy source code
 COPY src/ src/
@@ -36,5 +40,12 @@ RUN mkdir -p /data
 # Use a shared volume for outputs
 VOLUME ["/data"]
 
+FROM runtime AS test
+COPY requirements-test.lock ./
+RUN python -m pip install --no-cache-dir -r requirements-test.lock
+COPY tests/ tests/
+CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
+
+FROM runtime AS production
 # Set the entry point
 ENTRYPOINT ["python", "main.py"]

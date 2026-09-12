@@ -198,6 +198,7 @@ def benchmark(documents: Sequence[Dict[str, Any]], universe_documents: Sequence[
     versions: Counter[str] = Counter()
     equity_versions: Counter[str] = Counter()
     domains: Counter[str] = Counter()
+    sectors: Counter[str] = Counter()
     completed: List[datetime] = []
     age_eligible_12m = 0
     with_comps = 0
@@ -213,6 +214,7 @@ def benchmark(documents: Sequence[Dict[str, Any]], universe_documents: Sequence[
         signatures[formula_signature(doc)] += 1
         if domain == "equity":
             equity_versions[_model_version(doc)] += 1
+            sectors[str(market.get("sector") or "UNKNOWN").strip() or "UNKNOWN"] += 1
             rating = ((doc.get("verdict") or {}).get("rating")
                       if isinstance(doc.get("verdict"), dict) else None)
             ratings[str(rating or "MISSING").strip().upper()] += 1
@@ -272,6 +274,11 @@ def benchmark(documents: Sequence[Dict[str, Any]], universe_documents: Sequence[
         reasons.append("comps_coverage_below_60_percent")
     if analyst_count < 15:
         reasons.append("fewer_than_15_analyst_comparisons")
+    represented_sectors = [sector for sector in sectors if sector != "UNKNOWN"]
+    if equity_count >= 20 and len(represented_sectors) < 5:
+        reasons.append("fewer_than_5_equity_sectors")
+    if equity_count and max(sectors.values(), default=0) / equity_count > 0.40:
+        reasons.append("single_sector_exceeds_40_percent")
 
     return {
         "corpus": {
@@ -289,6 +296,7 @@ def benchmark(documents: Sequence[Dict[str, Any]], universe_documents: Sequence[
         },
         "data_quality": {
             "domains": dict(sorted(domains.items())),
+            "equity_sectors": dict(sorted(sectors.items())),
             "formula_signatures": dict(sorted(signatures.items())),
             "equities_with_positive_comps": with_comps,
             "equities_with_two_positive_dcf_legs": with_two_dcf,
@@ -373,7 +381,8 @@ def _load_mongo() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         })
         universe = list(database.ticker_universe.find(
             {"symbol": {"$in": tickers}},
-            {"_id": 0, "symbol": 1, "quote_type": 1, "price_at_refresh": 1,
+            {"_id": 0, "symbol": 1, "quote_type": 1, "sector": 1,
+             "price_at_refresh": 1,
              "fundamentals_at": 1, "analyst_target_mean": 1, "analyst_count": 1},
         ))
     finally:

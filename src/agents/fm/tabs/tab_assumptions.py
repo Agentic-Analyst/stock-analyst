@@ -505,6 +505,10 @@ def infer_assumptions_with_llm(json_data: Dict[str, Any]) -> Dict[str, Any]:
     # Extract historical metrics from JSON
     fs = json_data.get('financial_statements', {})
     company_data = json_data.get('company_data', {})
+    analyst_data = json_data.get('analyst_data', {}) or {}
+    historical_growth = (((json_data.get('modeling_metrics', {}) or {})
+                          .get('historical_growth_rates', {}) or {})
+                         .get('revenue_growth', {}) or {})
     
     # Get latest year
     years = sorted([y for y in fs.get('income_statement', {}).keys() if y != 'date'])
@@ -551,6 +555,12 @@ def infer_assumptions_with_llm(json_data: Dict[str, Any]) -> Dict[str, Any]:
     ticker = company_data.get('basic_info', {}).get('symbol', 'UNKNOWN')
     company_name = company_data.get('basic_info', {}).get('long_name', 'Unknown Company')
     sector = company_data.get('basic_info', {}).get('sector', 'Unknown')
+
+    def estimate_text(table_name: str, period: str, field: str, *, percent=False) -> str:
+        value = ((analyst_data.get(table_name, {}) or {}).get(period, {}) or {}).get(field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return "unavailable"
+        return f"{value * 100:.1f}%" if percent else f"{value:,.2f}"
     
     # Fill prompt
     prompt = prompt_template.format(
@@ -565,7 +575,24 @@ def infer_assumptions_with_llm(json_data: Dict[str, Any]) -> Dict[str, Any]:
         dso_fy0=f"{dso_fy0:.1f}",
         dio_fy0=f"{dio_fy0:.1f}",
         dpo_fy0=f"{dpo_fy0:.1f}",
-        tax_rate_fy0=f"{tax_rate_fy0:.1f}"
+        tax_rate_fy0=f"{tax_rate_fy0:.1f}",
+        revenue_cagr_3y=(
+            f"{historical_growth['cagr_3y'] * 100:.1f}%"
+            if isinstance(historical_growth.get('cagr_3y'), (int, float))
+            else "unavailable"
+        ),
+        revenue_growth_fy1_consensus=estimate_text(
+            'revenue_estimates', '0y', 'growth', percent=True),
+        revenue_growth_fy2_consensus=estimate_text(
+            'revenue_estimates', '+1y', 'growth', percent=True),
+        revenue_analysts_fy1=estimate_text(
+            'revenue_estimates', '0y', 'numberOfAnalysts'),
+        revenue_analysts_fy2=estimate_text(
+            'revenue_estimates', '+1y', 'numberOfAnalysts'),
+        eps_growth_fy1_consensus=estimate_text(
+            'earnings_estimates', '0y', 'growth', percent=True),
+        eps_growth_fy2_consensus=estimate_text(
+            'earnings_estimates', '+1y', 'growth', percent=True),
     )
     
     # Call LLM using proper provider

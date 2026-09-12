@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import os
 import statistics
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -52,14 +52,27 @@ class FinnhubPeerClient:
         self.timeout = timeout
 
     def _get(self, path: str, **params) -> Any:
-        response = self.session.get(
-            f"{FINNHUB_BASE_URL}{path}",
-            params=params,
-            headers={"X-Finnhub-Token": self.api_key},
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        return response.json()
+        for attempt in range(3):
+            response = self.session.get(
+                f"{FINNHUB_BASE_URL}{path}",
+                params=params,
+                headers={"X-Finnhub-Token": self.api_key},
+                timeout=self.timeout,
+            )
+            status = getattr(response, "status_code", 200)
+            if status != 429 and status < 500:
+                response.raise_for_status()
+                return response.json()
+            if attempt < 2:
+                retry_after = getattr(response, "headers", {}).get("Retry-After", "")
+                try:
+                    delay = min(max(float(retry_after), 0.25), 2.0)
+                except (TypeError, ValueError):
+                    delay = 0.25 * (2 ** attempt)
+                time.sleep(delay)
+                continue
+            response.raise_for_status()
+        return {}  # pragma: no cover
 
     def peers(self, ticker: str) -> List[str]:
         value = self._get("/stock/peers", symbol=ticker, grouping="subIndustry")
@@ -103,24 +116,27 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
             break
 
     observations = []
-    # Calls are independent and the provider imposes a request-rate limit, not
-    # a one-at-a-time requirement. Four workers bounds latency and concurrency.
-    with ThreadPoolExecutor(max_workers=min(4, len(symbols) or 1)) as pool:
-        futures = {pool.submit(client.metrics, symbol): symbol for symbol in symbols}
-        for future in as_completed(futures):
-            symbol = futures[future]
-            try:
-                metric = future.result()
-            except Exception:
-                continue
-            ev_ebitda = _first(metric, EV_EBITDA_KEYS)
-            price_sales = _first(metric, PRICE_SALES_KEYS)
-            if ev_ebitda is not None or price_sales is not None:
-                observations.append({
-                    "symbol": symbol,
-                    "ev_ebitda_ttm": ev_ebitda,
-                    "price_sales_ttm": price_sales,
-                })
+    failed_symbols = []
+    # One worker already makes several vendor requests and multiple workers can
+    # coexist. Avoid a per-worker burst that multiplies into account-wide 429s.
+    for symbol in symbols:
+        try:
+            metric = client.metrics(symbol)
+        except Exception:
+            failed_symbols.append(symbol)
+            continue
+        ev_ebitda = _first(metric, EV_EBITDA_KEYS)
+        price_sales = _first(metric, PRICE_SALES_KEYS)
+        if ev_ebitda is not None and not 2.0 <= ev_ebitda <= 80.0:
+            ev_ebitda = None
+        if price_sales is not None and not 0.1 <= price_sales <= 50.0:
+            price_sales = None
+        if ev_ebitda is not None or price_sales is not None:
+            observations.append({
+                "symbol": symbol,
+                "ev_ebitda_ttm": ev_ebitda,
+                "price_sales_ttm": price_sales,
+            })
     observations.sort(key=lambda row: row["symbol"])
     ev_values = [row["ev_ebitda_ttm"] for row in observations
                  if row["ev_ebitda_ttm"] is not None]
@@ -140,4 +156,6 @@ def collect_peer_comps(ticker: str, *, client: Optional[FinnhubPeerClient] = Non
         if len(ps_values) >= 3 else None,
         "ev_ebitda_peer_count": len(ev_values),
         "price_sales_peer_count": len(ps_values),
+        "failed_symbols": failed_symbols,
+        "methodology": "same-subindustry median of bounded trailing multiples",
     }

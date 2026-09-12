@@ -47,7 +47,9 @@ class Funds:
 
 class Ticker:
     info = {"quoteType": "ETF", "longName": "Vanguard S&P 500 ETF",
-            "currency": "USD"}
+            "currency": "USD", "regularMarketPrice": 505.0, "navPrice": 500.0,
+            "totalAssets": 1.2e12, "yield": 0.012,
+            "fundInceptionDate": 1285804800}
     funds_data = Funds()
 
 
@@ -66,6 +68,9 @@ def test_get_fund_returns_portfolio_data_and_never_a_company_valuation(monkeypat
         "symbol": "AAPL", "name": "Apple Inc.", "weight": 0.071,
     }
     assert result["performance"]["returns"]["one_year"] is not None
+    assert result["market_snapshot"]["premium_discount_to_nav"] == pytest.approx(0.01)
+    assert result["market_snapshot"]["total_assets"] == 1.2e12
+    assert result["holdings_provenance"]["as_of"] is None
     assert result["methodology"]["benchmark"] is None
     assert "no issuer DCF" in result["note"]
 

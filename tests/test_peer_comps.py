@@ -75,3 +75,54 @@ def test_grounding_prefers_real_peer_median_over_self_multiple(monkeypatch):
     assert grounded["comps_source"] == "finnhub_peer_median"
     assert grounded["comps_peer_count"] == 5
     assert any("up to 5 peers" in note for note in notes)
+
+
+def test_grounding_omits_comps_when_real_peers_are_unavailable(monkeypatch):
+    from src.agents.fm.assumption_grounding import ground_assumptions
+
+    monkeypatch.setenv("RISK_FREE_USD", "0.04")
+    data = {"company_data": {
+        "basic_info": {"currency": "USD", "country": "United States"},
+        "capital_structure": {"beta": 1.0, "total_debt": 0},
+        "market_data": {"market_cap": 1e9},
+        "valuation_metrics": {"enterprise_to_ebitda": 30.0, "price_to_sales": 10.0},
+    }}
+    grounded, _ = ground_assumptions(
+        {"wacc": 0.09, "terminal_growth_rate": 0.025}, data)
+
+    assert grounded["comps_ev_ebitda"] == grounded["comps_ps"] == 0.0
+    assert grounded["comps_source"] == "unavailable"
+
+
+def test_partial_peer_coverage_has_no_self_proxy_label(monkeypatch):
+    from src.agents.fm.assumption_grounding import ground_assumptions
+
+    monkeypatch.setenv("RISK_FREE_USD", "0.04")
+    data = {
+        "company_data": {
+            "basic_info": {"currency": "USD", "country": "United States"},
+            "capital_structure": {"beta": 1.0, "total_debt": 0},
+            "market_data": {"market_cap": 1e9},
+            "valuation_metrics": {},
+        },
+        "industry_data": {"peer_comps": {
+            "median_ev_ebitda": 14.0,
+            "ev_ebitda_peer_count": 4,
+            "price_sales_peer_count": 0,
+        }},
+    }
+
+    grounded, _ = ground_assumptions(
+        {"wacc": 0.09, "terminal_growth_rate": 0.025}, data)
+
+    assert grounded["comps_ev_source"] == "finnhub_peer_median"
+    assert grounded["comps_ps_source"] == "unavailable"
+    assert grounded["comps_source"] == "partial_finnhub_peer_median"
+
+
+def test_market_comps_are_discounted_to_the_dcf_valuation_date():
+    source = (Path(__file__).resolve().parents[1] /
+              "src/agents/fm/tabs/tab_summary.py").read_text()
+    assert "(1+$B$4)^2" in source
+    assert "'Valuation (DCF)'!$B$6)^2" in source
+    assert "Present Value per Share (Market Comps)" in source

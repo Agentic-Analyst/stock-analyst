@@ -17,6 +17,13 @@ You are a financial analyst inferring DCF model assumptions for a company.
 - DIO: {dio_fy0} days
 - DPO: {dpo_fy0} days
 - Effective Tax Rate: {tax_rate_fy0}%
+- Historical Revenue CAGR (3-year): {revenue_cagr_3y}
+
+## Forward Analyst Estimates (operating assumptions only)
+- FY1 Revenue Growth Consensus: {revenue_growth_fy1_consensus} ({revenue_analysts_fy1} analysts)
+- FY2 Revenue Growth Consensus: {revenue_growth_fy2_consensus} ({revenue_analysts_fy2} analysts)
+- FY1 EPS Growth Consensus: {eps_growth_fy1_consensus}
+- FY2 EPS Growth Consensus: {eps_growth_fy2_consensus}
 
 ## Task
 Infer the following assumptions for FY1-FY5 (5 years forward). Return ONLY a JSON object with numeric values (no explanations).
@@ -36,6 +43,10 @@ Required fields:
 - WACC typically 7-12% for mature companies, higher for growth/risky companies
 - Terminal growth rate typically 2-3% (GDP growth rate)
 - Revenue growth should gradually decline toward terminal rate
+- When revenue consensus has at least 3 analysts, use FY1 and FY2 as the
+  near-term revenue anchors; fade later years toward a sustainable rate
+- EPS estimates are a margin/earnings reasonableness check, not revenue growth
+- Do not infer operating assumptions from price targets or recommendations
 - Margins should reflect industry trends and company maturity
 - Working capital days should remain stable or improve slightly
 - Consider sector benchmarks and company stage (growth vs mature)

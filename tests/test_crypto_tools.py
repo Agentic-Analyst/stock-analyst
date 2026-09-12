@@ -10,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 pd = pytest.importorskip("pandas")
 
-from agents.tools.crypto_tools import GetCryptoTool, _market_structure, _performance
+from agents.tools.crypto_tools import (
+    GetCryptoTool, _market_structure, _performance, _rolling_24h,
+)
 
 
 def history(days=400):
@@ -87,6 +89,17 @@ def test_impossible_supply_relationships_are_not_claimed_as_facts():
     assert market["total_supply"] is None
     assert market["max_supply"] is None
     assert market["circulating_to_max_supply"] is None
+
+
+def test_24h_change_uses_intraday_rolling_window_not_daily_close_label():
+    index = [datetime(2026, 9, 10) + timedelta(hours=i) for i in range(30)]
+    frame = pd.DataFrame({"Close": [100.0] * 6 + [120.0] * 24}, index=index)
+
+    result = _rolling_24h(frame)
+
+    assert result["basis"] == "rolling_24h_intraday_close"
+    assert result["return"] == pytest.approx(0.2)
+    assert result["price"] == 120.0
 
 
 def test_unknown_crypto_is_rejected_before_a_market_snapshot(monkeypatch):

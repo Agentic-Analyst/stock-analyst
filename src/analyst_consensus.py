@@ -16,7 +16,7 @@ import json
 import math
 import os
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Dict, Optional
 
@@ -350,15 +350,25 @@ class FinnhubConsensusClient:
 class BenzingaConsensusClient:
     """Aggregate analyst ratings from Benzinga's licensed REST endpoint."""
 
-    def __init__(self, api_key: str, *, session=requests, timeout: float = 10.0):
+    def __init__(self, api_key: str, *, session=requests, timeout: float = 10.0,
+                 clock=None):
         self.api_key = (api_key or "").strip()
         self.session = session
         self.timeout = timeout
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def fetch(self, ticker: str, *, currency: Optional[str] = None) -> Dict[str, Any]:
         ticker = (ticker or "").strip().upper()
         if not ticker or not self.api_key:
             return {}
+        now = self.clock()
+        try:
+            lookback_days = int(os.getenv("BENZINGA_CONSENSUS_LOOKBACK_DAYS", "365") or "365")
+        except ValueError:
+            lookback_days = 365
+        lookback_days = min(max(lookback_days, 30), 730)
+        date_to = now.date().isoformat()
+        date_from = (now - timedelta(days=lookback_days)).date().isoformat()
         try:
             response = self.session.get(
                 BENZINGA_CONSENSUS_URL,
@@ -368,6 +378,8 @@ class BenzingaConsensusClient:
                     "aggregate_type": "number",
                     "simplify": "false",
                     "pagesize": 1,
+                    "parameters[date_from]": date_from,
+                    "parameters[date_to]": date_to,
                 },
                 headers={"accept": "application/json"},
                 timeout=self.timeout,
@@ -424,8 +436,10 @@ class BenzingaConsensusClient:
         if not price_target and not recommendation:
             return {}
         return {
-            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "captured_at": now.isoformat(),
             "providers": ["benzinga"],
+            "window": {"date_from": date_from, "date_to": date_to,
+                       "lookback_days": lookback_days},
             "price_target": price_target,
             "recommendation": recommendation,
         }
@@ -633,6 +647,14 @@ def collect_consensus(ticker: str, yahoo_guidance: Optional[Dict[str, Any]], *,
                       tipranks_client: Optional[TipRanksConsensusClient] = None) -> Dict[str, Any]:
     """Collect licensed consensus with explicit, non-blended provenance."""
     provider = (os.getenv("ANALYST_CONSENSUS_PROVIDER", "auto") or "auto").strip().lower()
+    tipranks_contract = (
+        os.getenv("TIPRANKS_DURABLE_OUTPUTS_LICENSED", "false") or ""
+    ).strip().lower() in ("1", "true", "yes")
+    if provider == "tipranks" and not tipranks_contract:
+        # Ordinary MCP terms allow transient operational caching, while this
+        # pipeline persists inputs and reports. Require an explicit amended
+        # license before TipRanks data can enter durable artifacts.
+        provider = "auto"
     if provider == "none":
         return {}
     fallback = yahoo_snapshot(yahoo_guidance, currency=currency)
@@ -678,7 +700,9 @@ def collect_consensus(ticker: str, yahoo_guidance: Optional[Dict[str, Any]], *,
                     if tipranks_client is not None else {})
         if tipranks:
             evidence_only.append(tipranks)
-    elif (os.getenv("ANALYST_CONSENSUS_SECONDARY", "none") or "none").strip().lower() == "tipranks":
+    elif (tipranks_contract and
+          (os.getenv("ANALYST_CONSENSUS_SECONDARY", "none") or "none").strip().lower()
+          == "tipranks"):
         if tipranks_client is None:
             key = (os.getenv("TIPRANKS_API_KEY") or "").strip()
             tipranks_client = TipRanksConsensusClient(key) if key else None

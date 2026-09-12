@@ -987,6 +987,7 @@ Examples:
             
     try:
         # Initialize LLM model
+        os.environ["ANALYSIS_LLM_MODEL"] = args.llm
         init_llm(args.llm)
 
         # Initialize comprehensive pipeline (skip for chat)

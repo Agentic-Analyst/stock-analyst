@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
-from datetime import date, timedelta
+from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 
 from .base import Tool, tool_error, tool_ok
@@ -53,6 +53,25 @@ def _weighted(values: Any) -> Dict[str, float]:
         return {}
     return {str(key): number for key, value in values.items()
             if (number := _number(value)) is not None and number >= 0}
+
+
+def _fund_market_snapshot(info: Dict[str, Any]) -> Dict[str, Any]:
+    market_price = _number(info.get("regularMarketPrice") or info.get("currentPrice"))
+    nav = _number(info.get("navPrice"))
+    inception = _number(info.get("fundInceptionDate"))
+    return {
+        "market_price": market_price,
+        "nav": nav,
+        "premium_discount_to_nav": (
+            market_price / nav - 1.0 if market_price is not None and nav and nav > 0 else None
+        ),
+        "total_assets": _number(info.get("totalAssets")),
+        "yield": _number(info.get("yield") or info.get("dividendYield")),
+        "inception_date": (
+            datetime.fromtimestamp(inception, tz=timezone.utc).date().isoformat()
+            if inception is not None and inception > 0 else None
+        ),
+    }
 
 
 def _top_holdings(frame: Any) -> list[dict]:
@@ -190,6 +209,11 @@ class GetFundTool(Tool):
                     },
                     "asset_classes": _weighted(fund.asset_classes),
                     "top_holdings": _top_holdings(fund.top_holdings),
+                    "holdings_provenance": {
+                        "source": "yahoo_finance",
+                        "as_of": None,
+                        "note": "The upstream response does not expose a holdings as-of date.",
+                    },
                     "sector_weightings": _weighted(fund.sector_weightings),
                     "bond_ratings": _weighted(fund.bond_ratings),
                     "equity_characteristics": {
@@ -221,6 +245,7 @@ class GetFundTool(Tool):
                 "name": info.get("longName") or info.get("shortName"),
                 "currency": info.get("currency"),
                 "quote_type": quote_type,
+                "market_snapshot": _fund_market_snapshot(info),
                 **detail,
             }
 
@@ -238,6 +263,7 @@ class GetFundTool(Tool):
                 "ratios_weights_and_returns": "fractions",
                 "performance_basis": "adjusted_close",
                 "benchmark": None,
+                "nav_premium_discount": "market_price_divided_by_nav_minus_one",
             },
             note=("Fund portfolio analytics; no issuer DCF applies. Holdings are the top "
                   "positions reported by the source. No benchmark, tracking error, or "

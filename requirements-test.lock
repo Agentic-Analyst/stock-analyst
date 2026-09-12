@@ -1,0 +1,5 @@
+# Test-only packages. The production stage does not install this file.
+iniconfig==2.3.0
+pluggy==1.6.0
+Pygments==2.20.0
+pytest==9.0.3
