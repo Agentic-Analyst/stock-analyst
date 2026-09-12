@@ -567,15 +567,23 @@ class RecommendationEngineV3:
             )
 
         if not fixed_numbers.get("rating_available", True) and fixed_numbers.get("price_available"):
+            reliability = (fixed_numbers.get("inputs") or {}).get("valuation_reliability") or {}
+            withheld_reason = reliability.get("withheld_reason") or (
+                "The valuation evidence is not sufficient for a defensible point call."
+            )
             prompt += (
                 "\n\n---\n"
                 "## OVERRIDE — VALUATION POINT ESTIMATE WITHHELD\n"
-                "The valuation methods do not converge. The deterministic rating is "
+                f"Reason: {withheld_reason}\n"
+                "The deterministic rating is "
                 "NOT RATED and every price-target field is null. Do not invent, infer, "
                 "or recommend a buy/sell rating, point fair value, upside percentage, "
-                "entry point, or price target. Explain the disagreement between methods, "
+                "entry point, or price target. Explain the limitation in the valuation evidence, "
                 "use only the supported valuation range in valuation_reliability, and "
-                "focus actions on what evidence or assumptions would resolve it.\n"
+                "focus actions on what evidence or assumptions would resolve it. "
+                "Bull/base/bear scenarios may describe operating conditions, but must "
+                "not use the valuation-range endpoints as scenario price targets: those "
+                "endpoints are outputs from different methods, not probabilistic cases.\n"
             )
 
         return prompt

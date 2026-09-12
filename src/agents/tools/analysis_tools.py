@@ -435,6 +435,11 @@ def valuation_dispersion(legs: dict):
         # produce a low estimate, it FAILED.
         if f > 0:
             usable[name] = f
+        elif f == 0 and "comp" in str(name).lower():
+            # Workbook convention: zero market comps means the optional
+            # provider/method was unavailable, not that it valued the equity
+            # at zero.  Do not misclassify that absence as a failed method.
+            continue
         else:
             broken.append(name)
 
@@ -455,6 +460,33 @@ def valuation_dispersion(legs: dict):
 
     lo, hi = min(usable.values()), max(usable.values())
     ratio = hi / lo
+
+    # The two DCF terminal-value variants are sensitivity cases inside ONE
+    # methodology, not two independent valuation opinions.  When they agree
+    # tightly but no market-comps leg exists, calling the result ``tight``
+    # overstates the evidence: all of it still rests on the same forecast,
+    # WACC and terminal economics.  Keep genuinely divergent DCF cases in the
+    # normal moderate/wide/unreliable bands below, but identify a converged
+    # DCF-only result as single-method so publication controls can require an
+    # independent cross-check for exceptional claims.
+    names = {str(name).lower().replace("_", " ") for name in usable}
+    has_dcf_pair = (
+        any("perpetual" in name for name in names)
+        and any("exit" in name for name in names)
+    )
+    has_market_comps = any("comp" in name for name in names)
+    if has_dcf_pair and not has_market_comps and ratio < 1.3:
+        spread_txt = ", ".join(
+            f"{k.replace('_', ' ')} {v:,.2f}"
+            for k, v in sorted(usable.items(), key=lambda kv: kv[1])
+        )
+        return ratio, "single-method", (
+            "DCF-ONLY VALUATION: the perpetuity and exit-multiple cases agree, "
+            "but they share the same cash-flow forecast, discount rate and "
+            f"terminal economics ({spread_txt}). No independent market-comps "
+            "method was available. Present these as a DCF scenario range, not "
+            "as independently triangulated fair value."
+        )
 
     # No currency symbol here: this text reaches EUR and INR listings too.
     spread_txt = ", ".join(f"{k.replace('_', ' ')} {v:,.2f}" for k, v in sorted(usable.items(), key=lambda kv: kv[1]))
@@ -482,6 +514,79 @@ def valuation_dispersion(legs: dict):
         "why (typically terminal-value assumptions the cash-flow profile "
         "cannot support). Analyse via growth, unit economics and market "
         "multiples instead.")
+
+
+def valuation_publication_boundary(*, band, legs, fair_value, current_price,
+                                   is_mega_cap=False, analyst_target=None,
+                                   analyst_count=0):
+    """Decide whether a precise fair value/rating is safe to publish.
+
+    This does not alter a model or pull its answer toward the market.  It
+    separates an auditable scenario output from a publishable investment call.
+    Large claims about heavily covered mega-caps need independent support; two
+    terminal-value variants of the same DCF do not provide it.
+
+    Returns ``(withheld, reason)``.
+    """
+    positive = {
+        str(name): float(value)
+        for name, value in (legs or {}).items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+        and value > 0
+    }
+    if band == "unreliable" and len(positive) >= 2:
+        return True, (
+            "The valuation methods disagree by more than 2.5x, so no "
+            "defensible point estimate exists."
+        )
+
+    try:
+        price = float(current_price)
+        value = float(fair_value)
+    except (TypeError, ValueError):
+        return False, None
+    if not is_mega_cap or price <= 0 or value <= 0:
+        return False, None
+
+    model_gap = value / price - 1.0
+    if abs(model_gap) < 0.30:
+        return False, None
+
+    names = {name.lower().replace("_", " ") for name in positive}
+    has_market_comps = any("comp" in name for name in names)
+    if not has_market_comps:
+        return True, (
+            f"The DCF-only estimate is {model_gap:+.0%} from the market for a "
+            "mega-cap, but no independent market-comps valuation was available. "
+            "Publish the DCF cases as a scenario range and withhold a directional "
+            "rating until the exceptional gap is independently corroborated."
+        )
+
+    try:
+        target = float(analyst_target)
+        count = int(analyst_count or 0)
+    except (TypeError, ValueError):
+        target, count = 0.0, 0
+    if target <= 0 or count < 5:
+        return False, None
+
+    analyst_gap = target / price - 1.0
+    # A >=30% model claim is not corroborated when well-covered consensus is
+    # neutral or points the other way.  Consensus remains a cross-check only:
+    # it is not averaged into intrinsic value and cannot manufacture a rating.
+    not_corroborated = (
+        (model_gap <= -0.30 and analyst_gap > -0.08)
+        or (model_gap >= 0.30 and analyst_gap < 0.08)
+    )
+    if not_corroborated:
+        return True, (
+            f"The model is {model_gap:+.0%} from the market for a mega-cap, while "
+            f"the {count}-analyst consensus cross-check is {analyst_gap:+.0%}. "
+            "Because the independent evidence does not corroborate the model's "
+            "exceptional gap, publish the valuation methods as a range and "
+            "withhold a directional rating."
+        )
+    return False, None
 
 
 class _CtxTool(Tool):
@@ -629,9 +734,20 @@ class BuildModelTool(_CtxTool):
             }.items() if isinstance(v, (int, float))
         }
         positive_legs = [v for v in legs_pub.values() if v > 0]
-        withheld = False
-        if method != "justified_pb_roe" and band == "unreliable" and len(positive_legs) >= 2:
-            withheld = True
+        withheld = bool(
+            method != "justified_pb_roe"
+            and (
+                (isinstance(vm, dict) and vm.get("point_estimate_withheld"))
+                or (band == "unreliable" and len(positive_legs) >= 2)
+            )
+        )
+        withheld_reason = (
+            vm.get("publication_withheld_reason") if isinstance(vm, dict) else None
+        ) or (
+            "The valuation methods disagree by more than 2.5x. No single fair "
+            "value is defensible, so the range is reported instead."
+        )
+        if withheld and positive_legs:
             fair_value_out, upside_out = None, None
             low, high = min(positive_legs), max(positive_legs)
         else:
@@ -659,10 +775,7 @@ class BuildModelTool(_CtxTool):
             **({"fair_value_range_low": round(low, 2),
                 "fair_value_range_high": round(high, 2),
                 "fair_value_withheld": True,
-                "fair_value_withheld_reason":
-                    "The valuation methods disagree by more than 2.5x. No single "
-                    "fair value is defensible, so the range is reported instead. "
-                    "Quote the range, never a midpoint."}
+                "fair_value_withheld_reason": withheld_reason}
                if withheld else {}),
             # Publish the legs and the confidence band so the answer can show a
             # football field instead of a false point estimate.
@@ -866,18 +979,27 @@ class WriteReportTool(_CtxTool):
             }.items() if isinstance(value, (int, float))
         }
         positive_legs = [value for value in legs_pub.values() if value > 0]
-        withheld = method != "justified_pb_roe" and band == "unreliable" and len(positive_legs) >= 2
-        if withheld:
+        withheld = bool(
+            method != "justified_pb_roe"
+            and (
+                (isinstance(vm, dict) and vm.get("point_estimate_withheld"))
+                or (band == "unreliable" and len(positive_legs) >= 2)
+            )
+        )
+        withheld_reason = (
+            vm.get("publication_withheld_reason") if isinstance(vm, dict) else None
+        ) or (
+            "The valuation methods disagree by more than 2.5x. The report "
+            "publishes the supported range and no directional rating or target."
+        )
+        if withheld and positive_legs:
             fair_value = None
             upside = None
             range_fields = {
                 "fair_value_withheld": True,
                 "fair_value_range_low": round(min(positive_legs), 2),
                 "fair_value_range_high": round(max(positive_legs), 2),
-                "fair_value_withheld_reason": (
-                    "The valuation methods disagree by more than 2.5x. The report "
-                    "publishes the supported range and no directional rating or target."
-                ),
+                "fair_value_withheld_reason": withheld_reason,
             }
         else:
             range_fields = {}
@@ -901,7 +1023,10 @@ class WriteReportTool(_CtxTool):
             **({"valuation_confidence": band} if band else {}),
             **({"data_quality_warning": warning} if warning else {}),
             note=("Full report generated (downloadable). Summarize its findings for "
-                  "the user. If `rating` is present, state THAT rating — it is the "
+                  "the user. When `fair_value_withheld` is true, state the supplied "
+                  "`fair_value_withheld_reason`; do not substitute dispersion as the "
+                  "reason and do not turn range endpoints into scenario targets. "
+                  "If `rating` is present, state THAT rating — it is the "
                   "one printed in the report the user can open, and it is computed "
                   "from the model rather than judged. Do not substitute your own "
                   "call. Note that `upside_vs_market` is measured against the DCF "

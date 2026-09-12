@@ -570,7 +570,7 @@ class TestBankValuationReachesTheReport:
                               'summary': {'average_intrinsic': 0.0, 'upside': -1.0, 'comps_intrinsic': 180.0}}}
 
     def test_the_report_adopts_the_bank_number(self):
-        from src.report_agent import apply_valuation_override
+        from src.report_agent import apply_valuation_override, generate_section_valuation
         d = apply_valuation_override(self._data(), {'valuation_method': 'justified_pb_roe', 'fair_value': 159.34})
         assert d['valuation']['bank']['fair_value'] == 159.34
         assert d['valuation']['summary']['average_intrinsic'] == 159.34
@@ -692,6 +692,34 @@ class TestUnreliableValuationReachesTheReport:
         # Kept internally for audit; downstream decides what may be published.
         assert result['valuation']['summary']['average_intrinsic'] == 87.11
 
+    def test_dcf_only_megacap_publication_boundary_reaches_the_report(self):
+        from src.report_agent import apply_valuation_override, generate_section_valuation
+        reason = (
+            "The DCF-only estimate is -50% from the market for a mega-cap, but "
+            "no independent market-comps valuation was available."
+        )
+        override = {
+            'valuation_method': 'dcf',
+            'fair_value': 167.67,
+            'perpetual_price': 151.66,
+            'exit_multiple_price': 183.68,
+            'comps_price': 0.0,
+            'dispersion_band': 'single-method',
+            'dispersion_ratio': 1.21,
+            'point_estimate_withheld': True,
+            'publication_withheld_reason': reason,
+        }
+        result = apply_valuation_override(_valuation_data(comps=None), override)
+        reliability = result['valuation']['reliability']
+        assert reliability['point_estimate_withheld'] is True
+        assert reliability['withheld_reason'] == reason
+        assert reliability['range_low'] == 151.66
+        assert reliability['range_high'] == 183.68
+        text, _ = generate_section_valuation(
+            result, lambda messages, temperature=0.5: ("commentary", 0.0))
+        assert "Withheld — DCF-only result lacks independent corroboration" in text
+        assert "valuation methods do not converge" not in text
+
     def test_valuation_section_withholds_midpoint_and_upside(self):
         from src.report_agent import apply_valuation_override, generate_section_valuation
         data = apply_valuation_override(_valuation_data(comps=744.86), self.OVERRIDE)
@@ -713,6 +741,7 @@ class TestUnreliableValuationReachesTheReport:
             lambda messages, temperature=0.6: (seen.append(messages[0]['content']) or "thesis", 0.0),
         )
         assert "point estimate withheld" in seen[0]
+        assert "do not convert the valuation-range endpoints" in seen[0]
         assert "$87.11" not in seen[0]
 
     def test_code_assembly_keeps_the_marker_when_a_narrative_section_fails(self):

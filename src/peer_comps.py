@@ -45,6 +45,24 @@ def enabled() -> bool:
         "1", "true", "yes")
 
 
+def configuration_status() -> Dict[str, Any]:
+    """Non-secret feature status suitable for logs and health diagnostics."""
+    has_key = bool((os.getenv("FINNHUB_API_KEY") or "").strip())
+    is_enabled = enabled()
+    blockers = []
+    if not is_enabled:
+        blockers.append("PEER_COMPS_ENABLED is not true")
+    if not has_key:
+        blockers.append("FINNHUB_API_KEY is not configured")
+    return {
+        "enabled": is_enabled,
+        "provider": "finnhub",
+        "provider_key_configured": has_key,
+        "ready": is_enabled and has_key,
+        "blockers": blockers,
+    }
+
+
 class FinnhubPeerClient:
     def __init__(self, api_key: str, *, session=requests, timeout: float = 10.0):
         self.api_key = (api_key or "").strip()

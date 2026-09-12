@@ -38,6 +38,7 @@ _end = _text.index("\nclass ", _start)
 _ns: dict = {}
 exec(compile(_text[_start:_end], _SRC, "exec"), _ns)
 valuation_dispersion = _ns["valuation_dispersion"]
+valuation_publication_boundary = _ns["valuation_publication_boundary"]
 
 
 def band(**legs):
@@ -93,6 +94,16 @@ class TestBandBoundaries:
         r, _, _ = valuation_dispersion({"a": 50.0, "b": 200.0})
         assert r == pytest.approx(4.0)
 
+    def test_tight_dcf_pair_without_comps_is_one_method_not_triangulation(self):
+        ratio, result, warning = valuation_dispersion({
+            "perpetual DCF": 151.66,
+            "exit multiple DCF": 183.68,
+            "market comps": 0.0,
+        })
+        assert ratio == pytest.approx(183.68 / 151.66)
+        assert result == "single-method"
+        assert "no independent market-comps" in warning.lower()
+
 
 class TestGuardsAgainstFalseAlarms:
     def test_single_leg_is_not_a_spread(self):
@@ -139,3 +150,57 @@ class TestNoteContent:
         n = note(perpetual=-7.23, exit_multiple=83.33)
         assert "not a low estimate" in n.lower()
         assert "perpetual" in n.lower()
+
+
+class TestPublicationBoundary:
+    AAPL_LEGS = {
+        "perpetual_dcf": 151.66,
+        "exit_multiple_dcf": 183.68,
+        "market_comps": 0.0,
+    }
+
+    def test_dcf_only_megacap_gap_cannot_become_a_precise_sell(self):
+        withheld, reason = valuation_publication_boundary(
+            band="single-method",
+            legs=self.AAPL_LEGS,
+            fair_value=167.67,
+            current_price=332.27,
+            is_mega_cap=True,
+            analyst_target=324.40,
+            analyst_count=39,
+        )
+        assert withheld is True
+        assert "no independent market-comps" in reason.lower()
+
+    def test_same_dcf_output_can_be_published_for_a_non_megacap(self):
+        assert valuation_publication_boundary(
+            band="single-method",
+            legs=self.AAPL_LEGS,
+            fair_value=167.67,
+            current_price=332.27,
+            is_mega_cap=False,
+        ) == (False, None)
+
+    def test_independent_comps_do_not_override_conflicting_broad_consensus(self):
+        withheld, reason = valuation_publication_boundary(
+            band="moderate",
+            legs={**self.AAPL_LEGS, "market_comps": 234.93},
+            fair_value=201.10,
+            current_price=332.27,
+            is_mega_cap=True,
+            analyst_target=324.40,
+            analyst_count=39,
+        )
+        assert withheld is True
+        assert "39-analyst consensus" in reason
+
+    def test_supportive_consensus_allows_an_exceptional_model_call(self):
+        assert valuation_publication_boundary(
+            band="moderate",
+            legs={**self.AAPL_LEGS, "market_comps": 234.93},
+            fair_value=201.10,
+            current_price=332.27,
+            is_mega_cap=True,
+            analyst_target=220.0,
+            analyst_count=20,
+        ) == (False, None)

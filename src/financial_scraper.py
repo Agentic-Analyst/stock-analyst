@@ -1000,10 +1000,23 @@ class FinancialScraper:
         # "comps" leg reused this company's own current multiple, so it was a
         # market-price echo rather than an independent methodology.
         try:
-            from peer_comps import collect_peer_comps
-            peer_comps = collect_peer_comps(self.ticker)
-            if peer_comps:
-                modeling_data["industry_data"]["peer_comps"] = peer_comps
+            from peer_comps import collect_peer_comps, configuration_status
+            peer_status = configuration_status()
+            modeling_data["industry_data"]["peer_comps_status"] = peer_status
+            if not peer_status["ready"]:
+                self._log(
+                    "warning",
+                    "Peer comps skipped: " + "; ".join(peer_status["blockers"]),
+                )
+            else:
+                peer_comps = collect_peer_comps(self.ticker)
+                if peer_comps:
+                    modeling_data["industry_data"]["peer_comps"] = peer_comps
+                else:
+                    self._log(
+                        "warning",
+                        "Peer comps provider returned fewer than three usable observations",
+                    )
         except Exception as error:
             self._log("warning", f"Peer comps unavailable: {type(error).__name__}")
         time.sleep(0.5)
