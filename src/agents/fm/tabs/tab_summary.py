@@ -10,6 +10,7 @@ This module creates the Summary tab following investment banking standards:
 - Blended valuation & market comparison (average, upside, premium)
 - Sanity metrics (terminal year revenue, EBITDA, FCF, multiples, yields)
 - Quality assurance flags (WACC > g, DFs ≤ 1, shares > 0, MYD toggle wired)
+- Market-implied terminal cash flow (reverse DCF; diagnostic only)
 
 All formulas reference the correct cells from existing tabs:
 - Valuation (DCF): B12 (WACC), B23 (g), B27 (EV), B30 (Cash), B31 (Debt), 
@@ -37,7 +38,11 @@ class SummaryTabBuilder:
     """
     
     def __init__(self, comps_ev_ebitda: float = 0.0, comps_ps: float = 0.0,
-                 analyst_target: float = 0.0):
+                 comps_source: str = None, comps_peer_count: int = 0,
+                 analyst_target: float = 0.0, analyst_target_low: float = 0.0,
+                 analyst_target_high: float = 0.0, analyst_count: int = 0,
+                 analyst_source: str = None, analyst_as_of: str = None,
+                 analyst_rating: str = None):
         """
         Initialize the Summary builder.
 
@@ -47,7 +52,15 @@ class SummaryTabBuilder:
         """
         self.comps_ev_ebitda = float(comps_ev_ebitda or 0.0)
         self.comps_ps = float(comps_ps or 0.0)
+        self.comps_source = comps_source or "unavailable"
+        self.comps_peer_count = int(comps_peer_count or 0)
         self.analyst_target = float(analyst_target or 0.0)
+        self.analyst_target_low = float(analyst_target_low or 0.0)
+        self.analyst_target_high = float(analyst_target_high or 0.0)
+        self.analyst_count = int(analyst_count or 0)
+        self.analyst_source = analyst_source or "source unavailable"
+        self.analyst_as_of = analyst_as_of or "date unavailable"
+        self.analyst_rating = (analyst_rating or "not available").replace("_", " ")
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -74,6 +87,7 @@ class SummaryTabBuilder:
         self._setup_blended_valuation(ws)
         self._setup_sanity_metrics(ws)
         self._setup_qa_flags(ws)
+        self._setup_market_implied_expectations(ws)
         
         # Format the sheet
         self._format_sheet(ws)
@@ -243,7 +257,8 @@ class SummaryTabBuilder:
         Set up Blended Valuation & Market Comparison section (rows 26-29).
         
         Rows:
-        26: Average of Methods = AVERAGE(B18, B22)
+        26: Blended fair value = mean(DCF view, market comps), where the
+            DCF view is itself the mean of the two positive DCF legs.
         27: Upside vs Market = IFERROR(B26/B9-1, "")
         28: Premium (Exit vs Perpetual) = IFERROR(B22/B18-1, "")
         29: Market Enterprise Value = B10 - B14 + B15 - B16
@@ -254,20 +269,40 @@ class SummaryTabBuilder:
         ws.cell(row=25, column=1, value="")
         
         # Row 26: Average of Methods
-        ws.cell(row=26, column=1, value="Average of Methods (Per-Share)")
+        ws.cell(row=26, column=1, value="Blended Fair Value (Per-Share)")
         ws.cell(row=26, column=1).font = Font(bold=True, size=12)
-        # Blended fair value over the VALID legs (10Y DCF, exit multiple,
-        # market comps): a leg only enters the blend when positive, so a
-        # broken/unfit method cannot drag the headline below zero. When no
-        # leg is valid, fall back to the plain DCF average — the negative
-        # number then trips the UNRELIABLE valuation rail downstream.
+        # Blended fair value: the DCF VIEW and the market view, 50/50.
+        #
+        # This used to be a flat average over the three valid legs — the two
+        # DCF legs and market comps counting one vote each. The two DCF legs
+        # are not independent: they share the WACC, the projected free cash
+        # flow and the terminal logic, and differ only in how the terminal
+        # value is taken. On AAPL they came out $111.85 and $116.93, 4.5%
+        # apart. Counting them separately therefore gave one discounted-cash-
+        # flow opinion TWO THIRDS of the headline number and the only
+        # market-anchored leg one third, so whenever the DCF disagreed with
+        # the market the DCF won by construction. Over 49 stored theses the
+        # median name landed 15.7% below market and 69% were negative.
+        #
+        # Collapsing the DCF legs into a single view first, then blending that
+        # against comps, gives each METHODOLOGY one vote instead of giving one
+        # methodology two. It is not an attempt to talk the number up: where
+        # both approaches agree the result is unchanged, and it is the
+        # disagreement — which is information — that is no longer resolved 2:1
+        # in advance.
+        #
+        # A leg still only enters when positive, so a broken method cannot
+        # drag the headline below zero, and when nothing is valid it falls
+        # back to the plain DCF average whose negative value trips the
+        # UNRELIABLE valuation rail downstream.
+        _dcf_n = '(($B$18>0)+($B$22>0))'
+        _dcf_avg = f'((MAX($B$18,0)+MAX($B$22,0))/{_dcf_n})'
         ws.cell(
             row=26, column=2,
             value=(
-                '=IF((($B$18>0)+($B$22>0)+($B$30>0))=0,'
-                'AVERAGE($B$18,$B$22),'
-                '(MAX($B$18,0)+MAX($B$22,0)+MAX($B$30,0))'
-                '/(($B$18>0)+($B$22>0)+($B$30>0)))'
+                f'=IF({_dcf_n}=0,'
+                'IF($B$30>0,$B$30,AVERAGE($B$18,$B$22)),'
+                f'IF($B$30>0,({_dcf_avg}+$B$30)/2,{_dcf_avg}))'
             ),
         )
         ws.cell(row=26, column=2).number_format = '$0.00'
@@ -313,19 +348,21 @@ class SummaryTabBuilder:
         38: FCF Yield on EV - Perpetual = IFERROR(B35/B17, "")
         39: FCF Yield on EV - Exit Multiple = IFERROR(B35/B20, "")
         """
-        # Row 30: Market-comps leg — the company's own (de-rated) forward
-        # multiple applied to FY2 projections. EV/EBITDA when FY2 EBITDA is
-        # positive; P/S fallback for pre-EBITDA names; 0 when unavailable.
-        ws.cell(row=30, column=1, value="Value per Share (Market Comps)")
+        # Row 30: Two-year forward market-comps target discounted to the same
+        # present valuation date as the DCF. EV/EBITDA produces enterprise
+        # value and is discounted at WACC, so only the discounted operating
+        # value receives today's net-debt adjustment. P/S produces equity
+        # value directly and is discounted at cost of equity (DCF tab B6).
+        ws.cell(row=30, column=1, value="Present Value per Share (Market Comps)")
         ws.cell(row=30, column=1).font = Font(bold=True, size=11)
         ps_term = (
-            f'{self.comps_ps:.2f}*Projections!$C$3/$B$8'
+            f"({self.comps_ps:.2f}*Projections!$C$3)/(1+'Valuation (DCF)'!$B$6)^2/$B$8"
             if self.comps_ps > 0 else '0'
         )
         if self.comps_ev_ebitda > 0:
             comps_formula = (
                 f'=IF(Projections!$C$21>0,'
-                f'({self.comps_ev_ebitda:.2f}*Projections!$C$21'
+                f'(({self.comps_ev_ebitda:.2f}*Projections!$C$21)/(1+$B$4)^2'
                 f'+$B$14-$B$15+$B$16)/$B$8,'
                 f'{ps_term})'
             )
@@ -340,13 +377,29 @@ class SummaryTabBuilder:
         ws.cell(row=30, column=2).number_format = '$0.00'
         ws.cell(row=30, column=2).font = Font(bold=True, size=11)
         ws.cell(row=30, column=7,
-                value=f"EV/EBITDA {self.comps_ev_ebitda:.1f}x / P/S {self.comps_ps:.1f}x on FY2 (0 = n/a)")
+                value=(f"EV/EBITDA {self.comps_ev_ebitda:.1f}x / "
+                       f"P/S {self.comps_ps:.1f}x on FY2, discounted 2y "
+                       f"at WACC / cost of equity respectively; "
+                       f"{self.comps_source}; "
+                       f"{self.comps_peer_count} peers (0 = n/a)"))
         ws.cell(row=30, column=7).font = Font(italic=True, size=9)
 
         # Row 31: analyst consensus, reference only (never in the blend)
         ws.cell(row=31, column=1, value="Analyst Consensus Target (reference)")
         ws.cell(row=31, column=2, value=self.analyst_target if self.analyst_target > 0 else 0)
         ws.cell(row=31, column=2).number_format = '$0.00'
+        if self.analyst_target > 0:
+            target_range = (
+                f"; range {self.analyst_target_low:.2f}-{self.analyst_target_high:.2f}"
+                if self.analyst_target_low > 0 and self.analyst_target_high > 0 else ""
+            )
+            ws.cell(
+                row=31, column=7,
+                value=(f"{self.analyst_source}; {self.analyst_count} analysts; "
+                       f"{self.analyst_rating}; as of {self.analyst_as_of}{target_range}; "
+                       "cross-check only, excluded from intrinsic value"),
+            )
+            ws.cell(row=31, column=7).font = Font(italic=True, size=9)
         ws.cell(row=32, column=1, value="")
         
         # Row 33: Revenue (FY5)
@@ -414,12 +467,12 @@ class SummaryTabBuilder:
         
         # Row 43: Check DF ≤ 1 (Perpetual)
         ws.cell(row=43, column=1, value="Check: DF ≤ 1 (Perpetual)")
-        ws.cell(row=43, column=2, value="=MAX('Valuation (DCF)'!$B$17:'Valuation (DCF)'!$F$17)<=1")
+        ws.cell(row=43, column=2, value="=MAX('Valuation (DCF)'!$B$17:$F$17)<=1")
         ws.cell(row=43, column=2).alignment = Alignment(horizontal="center")
         
         # Row 44: Check DF ≤ 1 (Exit Multiple)
         ws.cell(row=44, column=1, value="Check: DF ≤ 1 (Exit Multiple)")
-        ws.cell(row=44, column=2, value="=MAX('Valuation (Exit Multiple)'!$B$8:'Valuation (Exit Multiple)'!$F$8)<=1")
+        ws.cell(row=44, column=2, value="=MAX('Valuation (Exit Multiple)'!$B$8:$F$8)<=1")
         ws.cell(row=44, column=2).alignment = Alignment(horizontal="center")
         
         # Row 45: Check Shares > 0 & Price > 0
@@ -431,6 +484,63 @@ class SummaryTabBuilder:
         ws.cell(row=46, column=1, value="Check: Mid-Year toggle wired")
         ws.cell(row=46, column=2, value="=OR('Sensitivity'!$B$2=\"No\",'Sensitivity'!$B$2=\"Yes\")")
         ws.cell(row=46, column=2).alignment = Alignment(horizontal="center")
+
+    def _setup_market_implied_expectations(self, ws: Worksheet) -> None:
+        """Show what terminal cash flow the current market EV implies.
+
+        This is deliberately a diagnostic, not another valuation leg.  It
+        algebraically reverses the perpetual-growth DCF while holding the
+        model's explicit cash flows, terminal assumptions and discounting fixed:
+
+            implied terminal FCF
+              = (market EV - PV explicit FCF)
+                * model terminal FCF / PV(model terminal value)
+
+        Keeping it outside rows 13-31 prevents the market price from feeding
+        back into intrinsic value.  Referencing the model's actual terminal
+        value PV also preserves its five-year fallback for non-positive-FCF
+        cases rather than assuming every valuation used a ten-year horizon.
+        """
+        ws.cell(row=50, column=1, value="MARKET-IMPLIED EXPECTATIONS (REVERSE DCF)")
+        ws.cell(row=50, column=1).font = Font(bold=True, size=11, underline="single")
+
+        ws.cell(row=51, column=1, value="Market Enterprise Value")
+        ws.cell(row=51, column=2, value="=$B$29")
+        ws.cell(row=51, column=2).number_format = '[$$-409]#,##0.0,,," B"'
+
+        ws.cell(row=52, column=1, value="PV of Explicit FCF (FY1-FY10)")
+        ws.cell(row=52, column=2, value="='Valuation (DCF)'!$B$19")
+        ws.cell(row=52, column=2).number_format = '[$$-409]#,##0.0,,," B"'
+
+        ws.cell(row=53, column=1, value="Market-Implied Terminal FCF (Post-Horizon)")
+        ws.cell(
+            row=53,
+            column=2,
+            value=(
+                '=IFERROR(($B$51-$B$52)*'
+                "'Valuation (DCF)'!$B$24/'Valuation (DCF)'!$B$26,\"\")"
+            ),
+        )
+        ws.cell(row=53, column=2).number_format = '[$$-409]#,##0.0,,," B"'
+        ws.cell(row=53, column=2).font = Font(bold=True)
+
+        ws.cell(row=54, column=1, value="Model Terminal FCF (Post-Horizon)")
+        ws.cell(row=54, column=2, value="='Valuation (DCF)'!$B$24")
+        ws.cell(row=54, column=2).number_format = '[$$-409]#,##0.0,,," B"'
+
+        ws.cell(row=55, column=1, value="Market-Implied FCF vs Model")
+        ws.cell(row=55, column=2, value='=IFERROR($B$53/$B$54-1,"")')
+        ws.cell(row=55, column=2).number_format = '0.0%'
+
+        ws.cell(
+            row=56,
+            column=1,
+            value=(
+                "Diagnostic only: holds the explicit cash flows, terminal assumptions and discounting fixed; "
+                "it is not a price target and is excluded from fair value."
+            ),
+        )
+        ws.cell(row=56, column=1).font = Font(italic=True, size=9, color="808080")
     
     def _format_sheet(self, ws: Worksheet) -> None:
         """Apply general formatting to the sheet."""

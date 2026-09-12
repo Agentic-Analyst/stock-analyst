@@ -20,7 +20,7 @@ import it without cycles.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 # CAPM parameters: ~10y risk-free plus a standard equity risk premium. The
 # cost of equity is clamped to a sane band so a broken beta can't produce a
@@ -140,3 +140,44 @@ def compute_bank_fair_value(
         }
     except Exception:
         return None
+
+
+def build_bank_valuation_override(
+    financial_data: Dict[str, Any],
+    terminal_growth: Optional[float] = None,
+    capm: Optional[dict] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build the report override for a provider-confirmed balance-sheet financial.
+
+    The worker has two model-generation routes. The chat route carries its
+    valuation in ``FinancialState``; the default comprehensive route reads the
+    modeling JSON directly. Keeping classification and payload construction
+    here prevents those routes from publishing different answers.
+    """
+    if not isinstance(financial_data, dict):
+        return None
+    company_data = financial_data.get("company_data") or {}
+    basic_info = company_data.get("basic_info") or {}
+    financial_profile = (
+        (((financial_data.get("modeling_metrics") or {}).get("financial_ratios") or {})
+         .get("financial_profile") or {})
+    )
+    interest_share = financial_profile.get("interest_income_to_revenue")
+    if not is_financial_sector(
+        basic_info.get("sector"), basic_info.get("industry"), interest_share
+    ):
+        return None
+
+    bank = compute_bank_fair_value(
+        company_data, terminal_growth=terminal_growth, capm=capm
+    )
+    if not bank:
+        return None
+    current_price = (company_data.get("market_data") or {}).get("current_price")
+    return {
+        "valuation_method": "justified_pb_roe",
+        "fair_value": bank["fair_value"],
+        "current_price": current_price,
+        "upside_vs_market": bank.get("upside_vs_market"),
+        "bank_inputs": bank["inputs"],
+    }

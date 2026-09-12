@@ -77,6 +77,12 @@ def _pct(v, already_pct: bool = False) -> Optional[str]:
     return f"{n:+.1f}%"
 
 
+def _ratio_pct(v) -> Optional[str]:
+    """Unsigned two-decimal percent for small ratios such as fund fees."""
+    n = _num(v)
+    return f"{n * 100:.2f}%" if n is not None else None
+
+
 def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
     """
     Map one tool result to displayable findings.
@@ -111,10 +117,28 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
             add("price", result.get("ticker") or "Price", px, chg)
 
     elif tool == "get_crypto":
-        px = _money(result.get("price"), ccy)
+        # GetCryptoTool returns "price_usd" (crypto_tools.py), not "price". This
+        # read the wrong key, so _money() got None and the chip never rendered:
+        # every crypto run silently lost its price finding. "price" is kept as a
+        # fallback in case the tool's shape changes back.
+        px = _money(result.get("price_usd") if result.get("price_usd") is not None
+                    else result.get("price"), ccy)
         chg = _pct(result.get("change_24h_pct"), already_pct=True)
         if px:
             add("price", result.get("symbol") or result.get("asset") or "Price", px, chg)
+
+    elif tool == "get_fund":
+        operations = result.get("operations")
+        expense = operations.get("expense_ratio") if isinstance(operations, dict) else None
+        if isinstance(expense, dict):
+            category_fee = _ratio_pct(expense.get("category"))
+            add("metric", "Expense ratio", _ratio_pct(expense.get("fund")),
+                f"category {category_fee}" if category_fee else None)
+        performance = result.get("performance")
+        returns = performance.get("returns") if isinstance(performance, dict) else None
+        if isinstance(returns, dict):
+            add("metric", "1-year return", _pct(returns.get("one_year")),
+                "adjusted close")
 
     elif tool == "get_financials":
         add("company", result.get("company_name") or "Company",
@@ -134,10 +158,19 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
         n = _num(result.get("articles_analyzed"))
         if n:
             add("news", "Articles screened", f"{int(n)}")
-        cats = result.get("catalysts")
-        risks = result.get("risks")
+        # AnalyzeNewsTool returns "top_catalysts"/"top_risks" (analysis_tools.py:652).
+        # These read the un-prefixed names, so the branch never fired and the
+        # "Signals found" chip never appeared on any run.
+        cats = result.get("top_catalysts")
+        if cats is None:
+            cats = result.get("catalysts")
+        risks = result.get("top_risks")
+        if risks is None:
+            risks = result.get("risks")
         if isinstance(cats, list) and isinstance(risks, list) and (cats or risks):
-            add("news", "Signals found", f"{len(cats)} catalysts · {len(risks)} risks")
+            nc, nr = len(cats), len(risks)
+            add("news", "Signals found",
+                f"{nc} catalyst{'' if nc == 1 else 's'} · {nr} risk{'' if nr == 1 else 's'}")
 
     elif tool == "get_technicals":
         rsi = _num(result.get("rsi_14"))

@@ -232,6 +232,85 @@ class TestUnpricedListing:
         assert "402.32" not in out
 
 
+class TestUnreliableValuation:
+    def _withheld(self):
+        fixed = dict(
+            FIXED_NUMBERS,
+            rating="NOT RATED",
+            rating_available=False,
+            rating_confidence=None,
+            rating_withheld_reason="Valuation methods do not converge.",
+            expected_return_pct_12m=None,
+            targets={period: {"price": None, "range_low": None, "range_high": None}
+                     for period in ("m3", "m6", "m12")},
+        )
+        fixed["inputs"] = dict(
+            FIXED_NUMBERS["inputs"],
+            valuation_reliability={
+                "band": "unreliable",
+                "dispersion_ratio": 4.0,
+                "range_low": 188.30,
+                "range_high": 744.86,
+                "point_estimate_withheld": True,
+            },
+        )
+        return fixed
+
+    def test_formatter_publishes_range_but_no_directional_numbers(self, engine):
+        out = engine._format_final_output(LLM_RESPONSE, self._withheld(), {})
+        assert "### Investment Rating: NOT RATED" in out
+        assert "**Valuation Confidence**: Unreliable" in out
+        assert "**Point Estimate**: Withheld" in out
+        assert "**Supported Valuation Range**: €188.30 – €744.86" in out
+        assert "€188.30–€744.86" in out
+        assert "12-Month Price Target" not in out
+        assert "Expected Return" not in out
+        assert "Recommended Action" not in out
+        assert "Valuation Reliability" in out
+        assert "-12.4%" not in out
+
+    def test_minimal_fallback_also_withholds_directional_numbers(self, engine):
+        fixed = self._withheld()
+        fixed.pop("inputs")
+        out = engine._format_final_output(LLM_RESPONSE, fixed, {})
+        assert "### Investment Rating: NOT RATED" in out
+        assert "No point rating or price target" in out
+        assert "12-Month Price Target" not in out
+
+    def test_prompt_forbids_the_explainer_from_recreating_a_target(self, engine):
+        prompt = engine._build_explainer_prompt(
+            self._withheld(), {"evidence": []}, {}, {}, citations_enabled=False)
+        assert "VALUATION POINT ESTIMATE WITHHELD" in prompt
+        assert "Do not invent" in prompt
+
+    def test_full_engine_carries_reliability_into_the_calculator(self, engine):
+        company = {
+            'ticker': 'CAT', 'current_price': 821.31, 'week_52_low': 300,
+            'week_52_high': 850, 'currency': 'USD',
+        }
+        valuation = {
+            'dcf_perpetual': {'intrinsic_value_per_share': 188.30},
+            'dcf_exit': {'intrinsic_value_per_share': 231.65},
+            'summary': {'average_intrinsic': 477.42},
+            'reliability': {
+                'band': 'unreliable', 'dispersion_ratio': 3.956,
+                'point_estimate_withheld': True,
+                'range_low': 188.30, 'range_high': 744.86,
+            },
+        }
+        screening = {
+            'analysis_summary': {'overall_sentiment': 'neutral', 'articles_analyzed': 0},
+            'catalysts': [], 'risks': [],
+        }
+        text, _, _ = engine.generate_recommendation(
+            company, valuation, screening,
+            lambda messages, temperature=0.6: (LLM_RESPONSE, 0.0),
+        )
+        assert "### Investment Rating: NOT RATED" in text
+        assert "**Point Estimate**: Withheld" in text
+        assert "12-Month Price Target" not in text
+
+
 class TestChatMatchesTheReport:
     """
     write_report published a fair value and an upside but not the RATING, so the

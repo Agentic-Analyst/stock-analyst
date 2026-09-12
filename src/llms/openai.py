@@ -15,6 +15,7 @@ def calculate_cost(response, model_name):
     # Prices per 1K tokens.
     prices = {
         "gpt-4o-mini": {"prompt": 0.000150, "completion": 0.000600},
+        "gpt-4o-mini-2024-07-18": {"prompt": 0.000150, "completion": 0.000600},
         "gpt-4o": {"prompt": 0.005, "completion": 0.015},
         "gpt-4": {"prompt": 0.03, "completion": 0.06},
         "gpt-3.5-turbo": {"prompt": 0.0005, "completion": 0.0015},
@@ -100,10 +101,10 @@ def _call_openai_model(model_name: str, messages: List[Dict], temperature: float
 
 def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, float]:
     """Call OpenAI GPT-4o-mini. Returns (text, cost)."""
-    return _call_openai_model("gpt-4o-mini", messages, temperature)
+    snapshot = os.getenv("OPENAI_GPT_4O_MINI_SNAPSHOT", "gpt-4o-mini-2024-07-18")
+    return _call_openai_model(snapshot, messages, temperature)
 
 
 def gpt_5_4_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, float]:
     """Call OpenAI gpt-5.4-mini. Returns (text, cost)."""
     return _call_openai_model("gpt-5.4-mini", messages, temperature)
-

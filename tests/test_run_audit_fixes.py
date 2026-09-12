@@ -288,15 +288,15 @@ class TestEveryLegInTheAverage:
         from src.report_agent import generate_section_valuation
         data = _valuation_data(comps=73.41)
         text, _ = generate_section_valuation(data, lambda m, temperature=0.5: ("commentary", 0.0))
-        assert "| Market Comps Intrinsic Value | $73.41 |" in text
-        assert "Average Intrinsic Value (3 methods)" in text
+        assert "| Present-Valued Market Comps | $73.41 |" in text
+        assert "Blended Fair Value (50% DCF view / 50% present-valued market comps)" in text
 
     def test_no_comps_no_phantom_row(self):
         from src.report_agent import generate_section_valuation
         data = _valuation_data(comps=None)
         text, _ = generate_section_valuation(data, lambda m, temperature=0.5: ("commentary", 0.0))
         assert "Market Comps" not in text
-        assert "| **Average Intrinsic Value** |" in text
+        assert "| **DCF Fair Value** |" in text
 
 
 class TestReportGridRunsTheHeadlineModel:
@@ -579,6 +579,67 @@ class TestBankValuationReachesTheReport:
         assert d['valuation']['dcf_perpetual']['intrinsic_value_per_share'] == 159.34
         assert d['valuation']['dcf_exit']['intrinsic_value_per_share'] == 159.34
 
+    def test_discarded_dcf_dispersion_cannot_withhold_the_bank_method(self):
+        from src.report_agent import apply_valuation_override
+        d = apply_valuation_override(self._data(), {
+            'valuation_method': 'justified_pb_roe', 'fair_value': 159.34,
+            'dispersion_band': 'unreliable', 'dispersion_ratio': 8.0,
+            'valuation_warning': 'discarded DCF methods disagree',
+        })
+        assert d['valuation']['summary']['average_intrinsic'] == 159.34
+        assert 'reliability' not in d['valuation']
+
+    def test_modeling_json_builds_the_same_override_for_the_comprehensive_path(self):
+        from src.agents.fm.bank_valuation import build_bank_valuation_override
+
+        financial_data = {
+            'company_data': {
+                'basic_info': {
+                    'sector': 'Financial Services',
+                    'industry': 'Banks - Diversified',
+                },
+                'valuation_metrics': {'book_value': 133.007},
+                'growth_profitability': {'return_on_equity': 0.17789},
+                'market_data': {'current_price': 353.56},
+                'capital_structure': {'beta': 1.11},
+            },
+            'modeling_metrics': {'financial_ratios': {'financial_profile': {
+                'interest_income_to_revenue': 1.06,
+            }}},
+        }
+        capm = {
+            'risk_free_rate': 0.0471,
+            'equity_risk_premium_total': 0.0443,
+            'beta': 1.11,
+        }
+        override = build_bank_valuation_override(financial_data, 0.025, capm)
+
+        assert override['valuation_method'] == 'justified_pb_roe'
+        assert override['fair_value'] > 0
+        assert override['current_price'] == 353.56
+        assert override['bank_inputs']['cost_of_equity_source'].endswith('(CAPM build)')
+
+    def test_low_interest_share_does_not_misclassify_a_payment_processor(self):
+        from src.agents.fm.bank_valuation import build_bank_valuation_override
+
+        financial_data = {
+            'company_data': {
+                'basic_info': {
+                    'sector': 'Financial Services',
+                    'industry': 'Credit Services',
+                },
+                'valuation_metrics': {'book_value': 20.0},
+                'growth_profitability': {'return_on_equity': 0.20},
+                'market_data': {'current_price': 80.0},
+                'capital_structure': {'beta': 1.0},
+            },
+            'modeling_metrics': {'financial_ratios': {'financial_profile': {
+                'interest_income_to_revenue': 0.02,
+            }}},
+        }
+
+        assert build_bank_valuation_override(financial_data) is None
+
     def test_non_bank_data_is_untouched(self):
         from src.report_agent import apply_valuation_override
         d = self._data()
@@ -606,6 +667,62 @@ class TestBankValuationReachesTheReport:
         assert 'fair_value = vm.get("dcf_fair_value")' not in source
         assert "dcf_fair_value_cross_check" in source
         assert "_dcf > 0" in source
+
+
+class TestUnreliableValuationReachesTheReport:
+    OVERRIDE = {
+        'valuation_method': 'dcf',
+        'fair_value': 477.42,
+        'perpetual_price': 188.30,
+        'exit_multiple_price': 231.65,
+        'comps_price': 744.86,
+        'dispersion_band': 'unreliable',
+        'dispersion_ratio': 3.956,
+        'valuation_warning': 'UNRELIABLE VALUATION — METHODS CONTRADICT.',
+    }
+
+    def test_override_carries_the_dispersion_boundary(self):
+        from src.report_agent import apply_valuation_override
+        data = _valuation_data(comps=744.86)
+        result = apply_valuation_override(data, self.OVERRIDE)
+        reliability = result['valuation']['reliability']
+        assert reliability['point_estimate_withheld'] is True
+        assert reliability['range_low'] == 188.30
+        assert reliability['range_high'] == 744.86
+        # Kept internally for audit; downstream decides what may be published.
+        assert result['valuation']['summary']['average_intrinsic'] == 87.11
+
+    def test_valuation_section_withholds_midpoint_and_upside(self):
+        from src.report_agent import apply_valuation_override, generate_section_valuation
+        data = apply_valuation_override(_valuation_data(comps=744.86), self.OVERRIDE)
+        text, _ = generate_section_valuation(
+            data, lambda messages, temperature=0.5: ("commentary", 0.0))
+        assert "Point Estimate** | **Withheld" in text
+        assert "Supported Valuation Range** | **$188.30 – $744.86" in text
+        assert "not meaningful without a defensible point estimate" in text
+        assert "UNRELIABLE VALUATION" in text
+        assert "**$87.11**" not in text
+
+    def test_thesis_prompt_never_receives_the_hidden_midpoint(self):
+        from src.report_agent import apply_valuation_override, generate_section_investment_thesis
+        seen = []
+        data = apply_valuation_override(_valuation_data(comps=744.86), self.OVERRIDE)
+        data['news'] = {'summary': {'overall_sentiment': 'neutral'}, 'catalysts': [], 'risks': []}
+        generate_section_investment_thesis(
+            data,
+            lambda messages, temperature=0.6: (seen.append(messages[0]['content']) or "thesis", 0.0),
+        )
+        assert "point estimate withheld" in seen[0]
+        assert "$87.11" not in seen[0]
+
+    def test_code_assembly_keeps_the_marker_when_a_narrative_section_fails(self):
+        from src.report_agent import apply_valuation_override, valuation_publication_status
+        data = apply_valuation_override(_valuation_data(comps=744.86), self.OVERRIDE)
+        status = valuation_publication_status(data)
+        assert "**Valuation Confidence**: Unreliable" in status
+        assert "**Point Estimate**: Withheld" in status
+        assert "**Supported Valuation Range**: $188.30 – $744.86" in status
+        assert "No directional rating" in status
 
 
 class TestDepositaryReceiptGuard:

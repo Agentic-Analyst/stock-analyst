@@ -1,0 +1,80 @@
+name: CI
+
+# This repository had NO automated gate. 745 tests existed and nothing ran
+# them: a broken valuation, a dead import or a fabricated number could reach
+# the production image with no check between the commit and `docker push`.
+# The worker computes the numbers users are shown, so it is the last place
+# that should ship unverified.
+
+on:
+  push:
+    branches: [main, 'vynn/**', 'codex/**']
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.11 to match the Dockerfile's runtime stage. The lockfile pins
+      # annotated-types==0.8.0, which requires >=3.10, so an older interpreter
+      # fails at install rather than at test time.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install runtime and test dependencies
+        # Both lockfiles, exactly as the Dockerfile's test stage does. The
+        # suite is offline by design — tests/conftest.py pins the reference
+        # data fetchers (FRED, ECB, Japan MOF, Yahoo, NYU) to local fixtures —
+        # so no API key or network access is needed here.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+          pip install -r requirements-test.lock
+
+      - name: Tests
+        run: python -m pytest tests/ -q -p no:cacheprovider
+
+      # A syntax error in any of these takes the worker down on its next run,
+      # and a worker that cannot start looks to the user like an analysis that
+      # never finishes. compileall does not follow imports, so each module is
+      # named explicitly.
+      - name: Compile-check the analysis modules
+        run: |
+          python -m compileall -q main.py src/
+
+      # The rule this codebase is built on: no number shown to a user may be
+      # invented. These patterns are how it was violated before — a verdict
+      # derived from a ticker's characters, a random walk standing in for a
+      # price history, a hardcoded quote map.
+      - name: Guard against fabricated financial data
+        run: |
+          set -euo pipefail
+          # Retry backoff jitter is allowlisted by the CALL IT FEEDS, not by
+          # filename: `asyncio.sleep(base + random.uniform(0, base))` chooses a
+          # wait, never a number shown to a user. Anything else random in src/
+          # fails this step, including a second use in those same files.
+          HITS=$(grep -rnE 'random\.(random|uniform|randint|choice)|charCodeAt\(|mockPrices|generatePriceHistory' src \
+                   --include='*.py' 2>/dev/null \
+                 | grep -vE ':[[:space:]]*#' \
+                 | grep -viE 'random_state|seed' \
+                 | grep -vE 'asyncio\.sleep\([^)]*random\.uniform' || true)
+          if [ -n "$HITS" ]; then
+            echo ""
+            echo "ERROR: a value shown to a user may be derived from randomness:"
+            echo "$HITS"
+            echo ""
+            echo "Financial values must come from real data. If this use is"
+            echo "genuinely not user-facing, add it to the allowlist in this step."
+            exit 1
+          fi
+          echo "OK — no fabricated-data patterns in src/."

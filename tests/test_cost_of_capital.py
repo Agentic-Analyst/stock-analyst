@@ -35,6 +35,7 @@ from src.agents.fm.assumption_grounding import (
     risk_free_details,
     risk_free_rate,
 )
+from src.agents.fm import assumption_grounding as _ag
 from src.agents.fm.sovereign_rates import _SNAPSHOT
 
 # LVMH as scraped, the run that exposed this.
@@ -168,8 +169,15 @@ class TestRiskFreeBuild:
     def test_mature_erp_can_be_overridden(self, monkeypatch):
         monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.05")
         assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(0.05)
+        # An out-of-band override is ignored. The fallback used to be the 5.5%
+        # house constant; it is now Damodaran's published implied premium,
+        # which is the point of the change — so assert the fallback IS the
+        # engine's resolved figure rather than re-pinning a literal.
         monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.5")
-        assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(0.055)
+        monkeypatch.delenv("EQUITY_RISK_PREMIUM", raising=False)
+        _fallback = _ag._mature_erp()
+        monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.5")
+        assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(_fallback)
 
     def test_the_build_is_published_for_the_workbook_and_report(self):
         c = capm_components(INDIAN_MIDCAP)
@@ -660,7 +668,7 @@ class TestReviewFindings:
         assert loose["verdict"] != "growth_not_sustainable"
         assert tight["verdict"] == "growth_not_sustainable" and "2.3%" in tight["note"]
 
-    def test_grounding_caps_the_exit_multiple_with_the_currency_cap(self):
+    def test_grounding_defers_the_exit_cap_until_projected_conversion_exists(self):
         from src.agents.fm.assumption_grounding import ground_assumptions
         a, notes = ground_assumptions(
             {"wacc": 0.09, "terminal_growth_rate": 0.025, "exit_multiple": 20.0},
@@ -672,8 +680,30 @@ class TestReviewFindings:
                                       "income_statement": {"2025": {"EBITDA": 1000.0}}}},
         )
         assert a["sustainable_growth_cap"] == pytest.approx(a["capm"]["risk_free_rate"])
-        assert a["exit_multiple"] < 8.0
-        assert any("perpetual growth over 2.3%" in n for n in notes)
+        assert a["exit_multiple"] == pytest.approx(22.0)
+        assert any("deferred to projected FY5 cash conversion" in n for n in notes)
+
+    def test_historical_cash_conversion_cannot_rewrite_the_exit_input(self):
+        from src.agents.fm.assumption_grounding import ground_assumptions
+
+        base = {
+            "company_data": {
+                "basic_info": {"currency": "USD", "country": "United States"},
+                "capital_structure": {"beta": 1.0, "total_debt": 0},
+                "market_data": {"market_cap": 1e12},
+                "valuation_metrics": {"enterprise_to_ebitda": 18.0},
+            },
+            "financial_statements": {
+                "income_statement": {"2025": {"EBITDA": 1000.0}},
+                "cash_flow": {"2025": {"Free Cash Flow": 100.0}},
+            },
+        }
+        low, _ = ground_assumptions(
+            {"wacc": 0.09, "terminal_growth_rate": 0.025}, base)
+        base["financial_statements"]["cash_flow"]["2025"]["Free Cash Flow"] = 800.0
+        high, _ = ground_assumptions(
+            {"wacc": 0.09, "terminal_growth_rate": 0.025}, base)
+        assert low["exit_multiple"] == high["exit_multiple"] == pytest.approx(14.4)
 
     def test_the_report_grid_never_shows_negative_growth(self):
         from src.report_agent import build_sensitivity_grid

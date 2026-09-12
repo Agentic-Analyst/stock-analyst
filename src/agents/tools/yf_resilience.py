@@ -21,13 +21,18 @@ _BASE_DELAY = 1.2  # seconds; 1.2 -> 2.4 between retries
 
 
 def fetch_history(symbol: str, period: str, interval: Optional[str] = None,
-                  attempts: int = _ATTEMPTS):
+                  attempts: int = _ATTEMPTS, auto_adjust: Optional[bool] = None,
+                  actions: Optional[bool] = None):
     """yf.Ticker(symbol).history with retry/backoff. Returns a DataFrame or None."""
     import yfinance as yf
 
     kwargs = {"period": period}
     if interval:
         kwargs["interval"] = interval
+    if auto_adjust is not None:
+        kwargs["auto_adjust"] = auto_adjust
+    if actions is not None:
+        kwargs["actions"] = actions
     last_df = None
     for i in range(attempts):
         try:

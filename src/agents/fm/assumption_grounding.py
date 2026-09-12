@@ -25,8 +25,9 @@ This module grounds those parameters from observable data AFTER inference:
                   glide between. Hypergrowth/loss-making names keep the LLM's
                   convergence path untouched — that path IS the story there.
   * Exit multiple— 0.8x the company's CURRENT EV/EBITDA (a 20% de-rating
-                  over five years), clamped to [8x, 30x]; 15x fallback when
-                  current EV/EBITDA is unavailable or negative.
+                  over five years), clamped to [8x, 22x]; 15x fallback when
+                  current EV/EBITDA is unavailable or negative. The workbook
+                  can reduce it further from projected FY5 cash conversion.
 
 Every override is returned as a human-readable note and logged, so the
 workbook's provenance stays auditable.
@@ -34,6 +35,8 @@ workbook's provenance stays auditable.
 
 from __future__ import annotations
 
+import math
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 _ERP = 0.055                # mature-market equity risk premium; in the range
@@ -72,6 +75,33 @@ _ESTABLISHED_OM = 0.05      # margin anchoring applies above this trailing OM
 
 
 def _mature_erp() -> float:
+    """
+    The mature-market equity risk premium.
+
+    ORDER MATTERS, and it used to be wrong. This returned the _ERP house
+    assumption of 5.5% while `load_table()` — already called a few lines from
+    the only use site — carried Damodaran's PUBLISHED implied premium of about
+    4.2%. The published figure was read solely to print in the provenance
+    note, so every workbook said, in effect, "we used 5.5%; Damodaran says
+    4.2%" and then valued the company off the higher number.
+
+    That was not a small conservatism. It runs through the model twice: the
+    inflated WACC discounts the perpetuity leg directly, AND it lowers the
+    exit-multiple ceiling in `defensible_multiple`, because that ceiling is a
+    function of WACC. Both DCF legs move together off this one input, which is
+    why they agreed with each other and disagreed with the market. Measured
+    over 49 stored theses, the median name came out 15.7% BELOW market and 69%
+    were negative — a valuation engine that rated two thirds of large-cap
+    America a sell.
+
+    A published, dated, citable number is also the whole premise of the
+    product. Preferring a house assumption over the source we already fetch is
+    the one thing this page cannot afford to do.
+
+    So: an explicit env override still wins (it is how a desk states a view),
+    then Damodaran's published figure, then the embedded constant as a floor
+    for when the fetch and the snapshot are both unavailable.
+    """
     import os
     raw = os.getenv("EQUITY_RISK_PREMIUM")
     if raw:
@@ -81,6 +111,19 @@ def _mature_erp() -> float:
                 return value
         except ValueError:
             pass
+    try:
+        # Imported here, not at module scope: country_risk reaches the network
+        # on first use and this module is imported during model build.
+        from .country_risk import load_table
+        published = (load_table() or {}).get("mature_erp")
+    except Exception:
+        # A failed fetch must never break model generation; fall through to
+        # the embedded snapshot value below.
+        published = None
+    # The band is a sanity gate, not a preference: a parse failure that yields
+    # 0.4 or 0.0004 must not silently become the discount rate.
+    if isinstance(published, (int, float)) and 0.03 <= float(published) <= 0.09:
+        return float(published)
     return _ERP
 
 
@@ -157,7 +200,8 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
-def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
+def capm_components(company_data: Dict[str, Any],
+                    json_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     The full CAPM build, not just the answer.
 
@@ -246,7 +290,7 @@ def capm_components(company_data: Dict[str, Any]) -> Dict[str, Any]:
     erp_total = erp + crp
     erp_published = (load_table() or {}).get("mature_erp")
 
-    tax = _effective_tax_rate(company_data)
+    tax = _effective_tax_rate(company_data, json_data)
     ke = rf + beta * erp_total
     # Corporate debt is priced off the government bond in the same currency,
     # not off the default-free rate: an Indian issuer borrows above the G-Sec,
@@ -376,11 +420,60 @@ def _current_shares(md: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-def _effective_tax_rate(company_data: Dict[str, Any]) -> float:
+def _tax_rate_from_statements(json_data: Dict[str, Any]) -> Optional[float]:
+    """
+    The issuer's own effective tax rate, from its latest income statement.
+
+    Mirrors the workbook's Assumptions!B20 formula, including the edge case its
+    comment records: Tax Provision / Pretax Income goes NEGATIVE in a
+    tax-credit year (PC Jeweller booked a -9.7M provision on 7.1B of pretax
+    income), which would discount debt at an after-tax cost ABOVE its pre-tax
+    cost. Yahoo's "Tax Rate For Calcs" is preferred when present; the ratio is
+    the fallback; both are clamped to (0, 50%].
+    """
+    statements = (json_data or {}).get("financial_statements", {}) or {}
+    income = statements.get("income_statement", {}) or {}
+    periods = sorted((p for p in income if isinstance(p, str)), reverse=True)
+    for period in periods:
+        row = income.get(period) or {}
+        if not isinstance(row, dict):
+            continue
+
+        calcs = row.get("Tax Rate For Calcs")
+        try:
+            rate = float(calcs) if calcs is not None else None
+        except (TypeError, ValueError):
+            rate = None
+        if rate is not None and 0.0 < rate <= 0.5:
+            return rate
+
+        try:
+            provision = float(row.get("Tax Provision"))
+            pretax = float(row.get("Pretax Income"))
+        except (TypeError, ValueError):
+            continue
+        if pretax > 0:
+            ratio = provision / pretax
+            if 0.0 < ratio <= 0.5:
+                return ratio
+    return None
+
+
+def _effective_tax_rate(company_data: Dict[str, Any],
+                        json_data: Optional[Dict[str, Any]] = None) -> float:
     """
     The rate that shields interest. Falls back to a mature-market average
     rather than the US statutory 21%, which is wrong for most of the world and
     was previously applied to every company regardless of domicile.
+
+    THE BUG this fixes: the only source consulted was
+    company_data["growth_profitability"], which the scraper NEVER populates
+    with a tax rate — checked across all 43 real runs on disk, zero contain
+    `effective_tax_rate` or `tax_rate`. So every company on earth was given the
+    same hardcoded default while the report presented WACC as derived from that
+    issuer's own figures. NVDA's real rate is 17.88%, not 25%: ~19bp of WACC,
+    small in itself but a fabricated input on a page whose whole claim is that
+    every input is real and sourced.
     """
     gp = company_data.get("growth_profitability", {}) or {}
     for key in ("effective_tax_rate", "tax_rate"):
@@ -392,6 +485,10 @@ def _effective_tax_rate(company_data: Dict[str, Any]) -> float:
                 continue
             if 0.0 < rate < 0.6:
                 return rate
+
+    from_statements = _tax_rate_from_statements(json_data or {})
+    if from_statements is not None:
+        return from_statements
     return _TAX_DEFAULT
 
 
@@ -413,41 +510,6 @@ def _anchor_path(path: List[float], trailing: float,
     return new, True
 
 
-def _terminal_cash_conversion(json_data: Dict[str, Any]) -> Optional[float]:
-    """
-    FCF / EBITDA from the most recent reported year.
-
-    This is the `r` the terminal-value identity needs. It is a proxy — the true
-    figure is the TERMINAL year's conversion, which does not exist until the
-    projection is built — but a mature company's conversion is stable enough
-    that using the latest actual is far better than leaving the exit multiple
-    unchecked entirely.
-
-    Returns None when either line is missing or non-positive; the caller must
-    then leave the multiple alone rather than cap it on a guess.
-    """
-    try:
-        fs = (json_data or {}).get("financial_statements", {}) or {}
-        cf = fs.get("cash_flow", {}) or {}
-        inc = fs.get("income_statement", {}) or {}
-        if not cf or not inc:
-            return None
-        year = sorted(cf.keys(), reverse=True)[0]
-        fcf = (cf.get(year) or {}).get("Free Cash Flow")
-        ebitda = (inc.get(year) or {}).get("EBITDA") or (inc.get(year) or {}).get("Normalized EBITDA")
-        if ebitda is None:
-            ebitda = (cf.get(year) or {}).get("EBITDA")
-        fcf, ebitda = float(fcf), float(ebitda)
-        if ebitda <= 0 or fcf <= 0:
-            return None
-        r = fcf / ebitda
-        # Outside this band the inputs are almost certainly mislabelled rather
-        # than describing a real business.
-        return r if 0.05 <= r <= 1.5 else None
-    except (TypeError, ValueError, IndexError, KeyError):
-        return None
-
-
 def ground_assumptions(
     assumptions: Dict[str, Any],
     json_data: Dict[str, Any],
@@ -464,7 +526,7 @@ def ground_assumptions(
 
     # 1. WACC — always deterministic (the LLM's guess is discarded).
     llm_wacc = a.get("wacc")
-    capm = capm_components(company_data)
+    capm = capm_components(company_data, json_data)
     wacc, wacc_note = compute_capm_wacc(company_data, components=capm)
     a["wacc"] = wacc
     # Publish the derivation, not just the answer. The workbook writes these into
@@ -543,6 +605,35 @@ def ground_assumptions(
         if gms:
             a["gross_margins"] = gms
 
+    # Near-term revenue is an observable consensus input, not something the
+    # language model should replace with a generic mature-company curve. The
+    # Yahoo estimate table maps 0y/+1y to the first two unreported fiscal
+    # years. Require real breadth and leave FY3-FY5 as explicit model
+    # assumptions so consensus does not silently become the whole DCF.
+    revenue_estimates = ((json_data or {}).get("analyst_data", {}) or {}).get(
+        "revenue_estimates", {}) or {}
+    growth_path = a.get("revenue_growth_rates")
+    if isinstance(growth_path, list) and len(growth_path) >= 2:
+        grounded_growth = [float(value) for value in growth_path]
+        used = []
+        try:
+            minimum_analysts = max(3, int(os.getenv("ANALYST_CONSENSUS_MIN_ANALYSTS", "3") or 3))
+        except ValueError:
+            minimum_analysts = 3
+        for offset, period in enumerate(("0y", "+1y")):
+            estimate = revenue_estimates.get(period) or {}
+            growth = estimate.get("growth")
+            count = estimate.get("numberOfAnalysts")
+            if (isinstance(growth, (int, float)) and not isinstance(growth, bool)
+                    and math.isfinite(float(growth)) and -0.50 <= float(growth) <= 1.00
+                    and isinstance(count, (int, float)) and count >= minimum_analysts):
+                grounded_growth[offset] = float(growth)
+                used.append(f"FY{offset + 1} {float(growth) * 100:.1f}% ({int(count)} analysts)")
+        if used:
+            a["revenue_growth_rates"] = grounded_growth
+            a["revenue_growth_source"] = "yahoo_analyst_consensus_near_term"
+            notes.append("Revenue growth anchored to consensus: " + ", ".join(used))
+
     # 4. Exit multiple — company-specific, never one-size-fits-all.
     cur = vm.get("enterprise_to_ebitda")
     if cur and cur > 0:
@@ -557,7 +648,7 @@ def ground_assumptions(
             f"Exit multiple {exit_m:.1f}x fallback (current EV/EBITDA "
             f"unavailable/negative)"
         )
-    # CAP THE MULTIPLE AT WHAT SUSTAINABLE GROWTH CAN JUSTIFY.
+    # Record the growth ceiling the WORKBOOK will use to cap the multiple.
     #
     # Everything above sources the exit multiple from what the company trades
     # at TODAY, which embeds today's growth expectations. It is then applied to
@@ -571,55 +662,87 @@ def ground_assumptions(
     # gap between the two DCF legs — the thing the dispersion rail could only
     # report after the fact.
     #
-    # Inverting the terminal-value identity gives the highest multiple a
-    # defensible perpetual growth rate supports; anything above it is a claim
-    # that the company outgrows the economy forever. Capping here makes the
-    # model internally consistent BY CONSTRUCTION instead of contradicting
-    # itself and being flagged afterwards.
-    r_conv = _terminal_cash_conversion(json_data)
-    if r_conv is not None:
-        try:
-            from src.agents.fm.terminal_value import defensible_multiple, sustainable_growth_cap
-            # The same cap the perpetuity leg lives under: nominal GDP, or the
-            # currency's risk-free rate when that is lower (yen, franc, yuan).
-            # Capping one leg and not the other is how they diverge.
-            g_cap = sustainable_growth_cap(capm.get("risk_free_rate"))
-            ceiling = defensible_multiple(r_conv, a["wacc"], g_cap)
-            if ceiling and ceiling > 0 and exit_m > ceiling:
-                notes.append(
-                    f"Exit multiple {exit_m:.1f}x -> {ceiling:.1f}x (capped: above "
-                    f"{ceiling:.1f}x the multiple implies perpetual growth over "
-                    f"{g_cap*100:.1f}%, i.e. faster than the economy "
-                    f"forever; cash conversion {r_conv:.2f}, WACC {a['wacc']*100:.2f}%)"
-                )
-                exit_m = ceiling
-            elif ceiling is None:
-                notes.append(f"Exit-multiple cap not applicable: WACC {a['wacc']*100:.2f}% is at or "
-                             f"below the {g_cap*100:.2f}% growth cap")
-            a["sustainable_growth_cap"] = g_cap
-        except Exception as _cap_err:
-            # A grounding refinement must never break model generation.
-            notes.append(f"Exit-multiple cap skipped ({_cap_err})")
+    # The previous implementation applied the identity here with the latest
+    # HISTORICAL FCF / EBITDA ratio. That is not terminal cash conversion. It
+    # silently treated current growth investment as permanent: MSFT's 32%
+    # historical conversion cut a 15.3x input to 6.4x even though the completed
+    # projection normalized to 61%. The exit tab already has both projected
+    # FY5 FCF and EBITDA, so that is the first point where a defensible cap can
+    # be calculated. Keep the observable input intact until then.
+    from src.agents.fm.terminal_value import sustainable_growth_cap
+    g_cap = sustainable_growth_cap(capm.get("risk_free_rate"))
+    a["sustainable_growth_cap"] = g_cap
+    notes.append(
+        f"Exit-multiple sustainability cap deferred to projected FY5 cash "
+        f"conversion (perpetual growth ceiling {g_cap*100:.2f}%)"
+    )
 
     a["exit_multiple"] = exit_m
 
-    # 5. Market-comps leg parameters (the third method on the football
-    #    field): the company's own forward-looking multiples, mildly
-    #    de-rated, applied to FY2 projections. P/S covers pre-EBITDA names.
+    # 5. Market-comps leg parameters (the second methodology in the headline
+    # blend). Require a same-subindustry median backed by at least three actual
+    # peers. A company's own current multiple is not a comparable-company
+    # method: applying it to its own forecast merely echoes today's market
+    # pricing, so an unavailable provider leaves this leg absent.
+    peer_comps = (((json_data or {}).get("industry_data") or {}).get("peer_comps") or {})
+    peer_ev = peer_comps.get("median_ev_ebitda")
+    peer_ps = peer_comps.get("median_price_sales")
+    peer_ev_count = int(peer_comps.get("ev_ebitda_peer_count") or 0)
+    peer_ps_count = int(peer_comps.get("price_sales_peer_count") or 0)
     ev_eb = vm.get("enterprise_to_ebitda")
-    a["comps_ev_ebitda"] = (
-        _clamp(0.9 * float(ev_eb), 6.0, 25.0) if ev_eb and ev_eb > 0 else 0.0
-    )
     ps = vm.get("price_to_sales")
-    a["comps_ps"] = _clamp(0.9 * float(ps), 0.5, 40.0) if ps and ps > 0 else 0.0
+    ev_from_peers = bool(peer_ev and peer_ev > 0 and peer_ev_count >= 3)
+    ps_from_peers = bool(peer_ps and peer_ps > 0 and peer_ps_count >= 3)
+    if ev_from_peers:
+        a["comps_ev_ebitda"] = _clamp(float(peer_ev), 4.0, 30.0)
+    else:
+        a["comps_ev_ebitda"] = 0.0
+    if ps_from_peers:
+        a["comps_ps"] = _clamp(float(peer_ps), 0.5, 40.0)
+    else:
+        a["comps_ps"] = 0.0
+    real_peers = ev_from_peers or ps_from_peers
+    a["comps_ev_source"] = "finnhub_peer_median" if ev_from_peers else "unavailable"
+    a["comps_ps_source"] = "finnhub_peer_median" if ps_from_peers else "unavailable"
+    a["comps_source"] = (
+        a["comps_ev_source"] if a["comps_ev_source"] == a["comps_ps_source"]
+        else "partial_finnhub_peer_median"
+    )
+    a["comps_peer_count"] = max(
+        peer_ev_count if ev_from_peers else 0,
+        peer_ps_count if ps_from_peers else 0,
+    )
+    a["comps_horizon_years"] = 2
+    # EV/EBITDA produces enterprise value and is discounted at WACC. P/S
+    # produces equity value and must use the cost of equity instead.
+    a["comps_enterprise_discount_rate"] = a.get("wacc")
+    # cost_of_equity lives inside the capm block published at a["capm"], never
+    # on `a` itself — unlike wacc on the line above, which IS a top-level key
+    # (set at :531 beside a["capm"] at :535). Reading it off `a` made this
+    # unconditionally None. Nothing consumes the key yet, so no valuation was
+    # wrong; it was a trap set for the first reader who trusted the name.
+    a["comps_equity_discount_rate"] = a.get("capm", {}).get("cost_of_equity")
     fg = company_data.get("forward_guidance", {}) or {}
     tgt = fg.get("target_mean_price")
     a["analyst_target_mean"] = float(tgt) if tgt and tgt > 0 else 0.0
+    consensus = company_data.get("analyst_consensus", {}) or {}
+    target_meta = consensus.get("price_target", {}) or {}
+    recommendation_meta = consensus.get("recommendation", {}) or {}
+    a["analyst_target_low"] = float(target_meta.get("low") or 0.0)
+    a["analyst_target_high"] = float(target_meta.get("high") or 0.0)
+    a["analyst_count"] = int(target_meta.get("analyst_count") or 0)
+    a["analyst_consensus_source"] = target_meta.get("source")
+    a["analyst_consensus_as_of"] = target_meta.get("as_of") or consensus.get("captured_at")
+    a["analyst_consensus_rating"] = recommendation_meta.get("label")
     if a["comps_ev_ebitda"] or a["comps_ps"]:
         notes.append(
-            f"Comps leg: EV/EBITDA {a['comps_ev_ebitda']:.1f}x / "
+            f"Comps leg (EV/EBITDA {a['comps_ev_source']}; "
+            f"P/S {a['comps_ps_source']}"
+            + (f"; up to {a['comps_peer_count']} peers" if real_peers else "")
+            + f"): EV/EBITDA {a['comps_ev_ebitda']:.1f}x / "
             f"P/S {a['comps_ps']:.1f}x on FY2 projections"
-            + (f"; analyst mean target ${a['analyst_target_mean']:.2f}"
+            + (f"; analyst mean target {a['analyst_target_mean']:.2f} "
+               f"({a['analyst_count']} analysts, {a['analyst_consensus_source'] or 'source unavailable'})"
                if a["analyst_target_mean"] else "")
         )
 

@@ -237,13 +237,22 @@ class FinancialModelBuilder:
         self.projections_builder = ProjectionsTabBuilder()
         self.perpetual_growth_dcf_builder = ValuationPerpetualGrowthDCFBuilder()
         self.exit_multiple_dcf_builder = ValuationExitMultipleDCFBuilder(
-            exit_multiple=self.llm_assumptions.get('exit_multiple', 20.0)
+            exit_multiple=self.llm_assumptions.get('exit_multiple', 20.0),
+            growth_cap=self.llm_assumptions.get('sustainable_growth_cap', 0.04),
         )
         self.sensitivity_builder = SensitivityTabBuilder()
         self.summary_builder = SummaryTabBuilder(
             comps_ev_ebitda=self.llm_assumptions.get('comps_ev_ebitda', 0.0),
             comps_ps=self.llm_assumptions.get('comps_ps', 0.0),
+            comps_source=self.llm_assumptions.get('comps_source'),
+            comps_peer_count=self.llm_assumptions.get('comps_peer_count', 0),
             analyst_target=self.llm_assumptions.get('analyst_target_mean', 0.0),
+            analyst_target_low=self.llm_assumptions.get('analyst_target_low', 0.0),
+            analyst_target_high=self.llm_assumptions.get('analyst_target_high', 0.0),
+            analyst_count=self.llm_assumptions.get('analyst_count', 0),
+            analyst_source=self.llm_assumptions.get('analyst_consensus_source'),
+            analyst_as_of=self.llm_assumptions.get('analyst_consensus_as_of'),
+            analyst_rating=self.llm_assumptions.get('analyst_consensus_rating'),
         )
         
         # Build tabs in sequence

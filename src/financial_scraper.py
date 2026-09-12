@@ -19,6 +19,42 @@ import pandas as pd
 import numpy as np
 
 import yfinance as yf
+from analysis_manifest import build_analysis_manifest
+
+
+def _frame_records(frame: Any, *, key_field: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    """Turn a small Yahoo analyst table into stable, JSON-safe records."""
+    if isinstance(frame, dict):
+        record: Dict[str, Any] = {}
+        for key, raw in frame.items():
+            value = raw.item() if isinstance(raw, np.generic) else raw
+            if hasattr(value, "isoformat") and not isinstance(value, str):
+                value = value.isoformat()
+            if isinstance(value, (str, int, float, bool)) and not (
+                    isinstance(value, float) and not np.isfinite(value)):
+                record[str(key)] = value
+        return {"calendar": record} if record else {}
+    if frame is None or getattr(frame, "empty", True):
+        return {}
+    output: Dict[str, Dict[str, Any]] = {}
+    for index, row in frame.iterrows():
+        record: Dict[str, Any] = {}
+        for column, raw in row.items():
+            try:
+                if pd.isna(raw):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            value = raw.item() if isinstance(raw, np.generic) else raw
+            if hasattr(value, "isoformat") and not isinstance(value, str):
+                value = value.isoformat()
+            if isinstance(value, (str, int, float, bool)) and not (
+                    isinstance(value, float) and not np.isfinite(value)):
+                record[str(column)] = value
+        key = str(record.get(key_field) if key_field and record.get(key_field) is not None
+                  else index)
+        output[key] = record
+    return output
 
 
 def _fx_rate(from_ccy, to_ccy):
@@ -88,6 +124,59 @@ def _price_in_major_units(price, currency):
         return float(price) / 100.0
     except (TypeError, ValueError):
         return price
+
+
+def _analyst_target_in_financial_currency(target, info):
+    """A provider quote target in the same units/currency as model fair value."""
+    return _price_in_financial_currency(
+        _price_in_major_units(target, info.get("currency")), info)
+
+
+def _convert_consensus_prices(consensus, company_data):
+    """Normalize every provider target to the model's financial currency."""
+    if not isinstance(consensus, dict) or not consensus:
+        return consensus or {}
+    basic = company_data.get("basic_info", {}) or {}
+    market = company_data.get("market_data", {}) or {}
+    listing = basic.get("listing_currency")
+    financial = basic.get("currency")
+    rate = market.get("fx_listing_to_financial")
+
+    targets = []
+    root_target = consensus.get("price_target")
+    if isinstance(root_target, dict):
+        targets.append(root_target)
+    snapshots = consensus.get("source_snapshots") or {}
+    if isinstance(snapshots, dict):
+        for snapshot in snapshots.values():
+            target = (snapshot or {}).get("price_target")
+            if isinstance(target, dict):
+                targets.append(target)
+
+    seen = set()
+    for target in targets:
+        if id(target) in seen:
+            continue
+        seen.add(id(target))
+        source_currency = target.get("currency") or listing
+        # Yahoo targets were normalized when `forward_guidance` was built.
+        # Other provider targets are listing-currency quotes. Currency equality
+        # also makes this idempotent if normalization is called more than once.
+        should_convert = (
+            target.get("source") != "yahoo_finance"
+            and listing and financial and listing != financial
+            and source_currency == listing
+            and isinstance(rate, (int, float))
+        )
+        if should_convert:
+            for key in ("mean", "median", "high", "low"):
+                value = target.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    target[key] = float(value) * float(rate)
+        target["currency"] = financial or source_currency or listing
+
+    from analyst_consensus import refresh_source_comparison
+    return refresh_source_comparison(consensus)
 
 
 class FinancialScraper:
@@ -541,11 +630,20 @@ class FinancialScraper:
                         info.get("currency"),
                     ),
                     "fx_listing_to_financial": _fx_listing_to_financial(info),
-                    "previous_close": _price_in_major_units(info.get("previousClose"), info.get("currency")),
+                    "previous_close": _analyst_target_in_financial_currency(
+                        info.get("previousClose"), info),
+                    "previous_close_listing": _price_in_major_units(
+                        info.get("previousClose"), info.get("currency")),
                     "market_cap": info.get("marketCap"),
                     "enterprise_value": info.get("enterpriseValue"),
-                    "52_week_high": _price_in_major_units(info.get("fiftyTwoWeekHigh"), info.get("currency")),
-                    "52_week_low": _price_in_major_units(info.get("fiftyTwoWeekLow"), info.get("currency")),
+                    "52_week_high": _analyst_target_in_financial_currency(
+                        info.get("fiftyTwoWeekHigh"), info),
+                    "52_week_low": _analyst_target_in_financial_currency(
+                        info.get("fiftyTwoWeekLow"), info),
+                    "52_week_high_listing": _price_in_major_units(
+                        info.get("fiftyTwoWeekHigh"), info.get("currency")),
+                    "52_week_low_listing": _price_in_major_units(
+                        info.get("fiftyTwoWeekLow"), info.get("currency")),
                     "dividend_yield": info.get("dividendYield"),
                     "ex_dividend_date": info.get("exDividendDate"),
                     "dividend_rate": info.get("dividendRate"),
@@ -615,10 +713,14 @@ class FinancialScraper:
                 
                 # 7. Management Guidance & Analyst Estimates
                 "forward_guidance": {
-                    "target_high_price": info.get("targetHighPrice"),
-                    "target_low_price": info.get("targetLowPrice"),
-                    "target_mean_price": info.get("targetMeanPrice"),
-                    "target_median_price": info.get("targetMedianPrice"),
+                    "target_high_price": _analyst_target_in_financial_currency(
+                        info.get("targetHighPrice"), info),
+                    "target_low_price": _analyst_target_in_financial_currency(
+                        info.get("targetLowPrice"), info),
+                    "target_mean_price": _analyst_target_in_financial_currency(
+                        info.get("targetMeanPrice"), info),
+                    "target_median_price": _analyst_target_in_financial_currency(
+                        info.get("targetMedianPrice"), info),
                     "recommendation_mean": info.get("recommendationMean"),
                     "recommendation_key": info.get("recommendationKey"),
                     "number_of_analyst_opinions": info.get("numberOfAnalystOpinions"),
@@ -732,40 +834,44 @@ class FinancialScraper:
         self._log("info", f"Scraping analyst estimates for {self.ticker}")
         
         try:
-            # Get analyst estimates
-            recommendations = self.yf_ticker.recommendations
             analyst_data = {
                 "recommendations": {},
                 "earnings_estimates": {},
-                "revenue_estimates": {}
+                "revenue_estimates": {},
+                "growth_estimates": {},
+                "captured_at": datetime.utcnow().isoformat(),
             }
-            
-            if recommendations is not None and not recommendations.empty:
-                # Process latest recommendations
-                latest_recs = recommendations.tail(10)  # Last 10 recommendations
-                for date, row in latest_recs.iterrows():
-                    # Handle different date formats
-                    if hasattr(date, 'strftime'):
-                        date_key = date.strftime('%Y-%m-%d')
-                    else:
-                        date_key = str(date)
-                    
-                    analyst_data["recommendations"][date_key] = {
-                        "firm": row.get('Firm', ''),
-                        "to_grade": row.get('To Grade', ''),
-                        "from_grade": row.get('From Grade', ''),
-                        "action": row.get('Action', '')
-                    }
-            
-            # Try to get earnings estimates
+
+            # yfinance now exposes period summaries (0q, +1q, 0y, +1y), not
+            # the old firm/grade history this code attempted to parse. Keep
+            # each table separate so estimates, observations, and provenance
+            # remain auditable in the saved modeling input.
+            for output_key, attribute, key_field in (
+                ("recommendations", "recommendations", "period"),
+                ("earnings_estimates", "earnings_estimate", None),
+                ("revenue_estimates", "revenue_estimate", None),
+                ("growth_estimates", "growth_estimates", None),
+            ):
+                try:
+                    analyst_data[output_key] = _frame_records(
+                        getattr(self.yf_ticker, attribute), key_field=key_field)
+                except Exception:
+                    # Yahoo tables fail independently. One missing estimate
+                    # surface must not discard the others.
+                    analyst_data[output_key] = {}
+
             try:
                 calendar = self.yf_ticker.calendar
-                if calendar is not None and not calendar.empty:
-                    analyst_data["earnings_calendar"] = calendar.to_dict()
-            except:
+                analyst_data["earnings_calendar"] = _frame_records(calendar)
+            except Exception:
                 pass
-            
-            self._log("info", f"✅ Analyst data: {len(analyst_data['recommendations'])} recommendations extracted")
+
+            self._log(
+                "info",
+                f"✅ Analyst data: {len(analyst_data['recommendations'])} recommendation "
+                f"periods, {len(analyst_data['revenue_estimates'])} revenue estimate "
+                f"periods extracted",
+            )
             return analyst_data
             
         except Exception as e:
@@ -794,6 +900,8 @@ class FinancialScraper:
         modeling_data = {
             "ticker": self.ticker,
             "scraped_at": datetime.utcnow().isoformat(),
+            "analysis_model_version": os.getenv("ANALYSIS_MODEL_VERSION") or "unversioned",
+            "analysis_manifest": build_analysis_manifest(),
             "data_type": "annual" if annual else "quarterly",
             "data_purpose": "financial_modeling",
             
@@ -853,6 +961,51 @@ class FinancialScraper:
         # 4. Scrape analyst data
         self._log("info", "Collecting analyst estimates...")
         modeling_data["analyst_data"] = self.scrape_analyst_estimates()
+        try:
+            from analyst_consensus import collect_consensus
+            company_data = modeling_data.get("company_data", {}) or {}
+            guidance = company_data.get("forward_guidance", {}) or {}
+            currency = (company_data.get("basic_info", {}) or {}).get("currency")
+            quote_currency = (company_data.get("basic_info", {}) or {}).get("listing_currency")
+            consensus = collect_consensus(
+                self.ticker, guidance, currency=currency,
+                quote_currency=quote_currency)
+            consensus = _convert_consensus_prices(consensus, company_data)
+            if consensus:
+                modeling_data["analyst_data"]["consensus"] = consensus
+                company_data["analyst_consensus"] = consensus
+                # Keep legacy consumers working while attaching source/date in
+                # `analyst_consensus` for every new consumer.
+                target = consensus.get("price_target", {}) or {}
+                recommendation = consensus.get("recommendation", {}) or {}
+                for source_key, legacy_key in (
+                    ("mean", "target_mean_price"),
+                    ("median", "target_median_price"),
+                    ("high", "target_high_price"),
+                    ("low", "target_low_price"),
+                ):
+                    if target.get(source_key):
+                        guidance[legacy_key] = target[source_key]
+                if target.get("analyst_count"):
+                    guidance["number_of_analyst_opinions"] = target["analyst_count"]
+                if recommendation.get("label"):
+                    guidance["recommendation_key"] = recommendation["label"]
+                company_data["forward_guidance"] = guidance
+        except Exception as error:
+            # External consensus is an optional cross-check. Financial
+            # statements and the model remain available if a provider is down.
+            self._log("warning", f"Analyst consensus unavailable: {type(error).__name__}")
+
+        # 4b. A real comparable-company set, when explicitly enabled. The old
+        # "comps" leg reused this company's own current multiple, so it was a
+        # market-price echo rather than an independent methodology.
+        try:
+            from peer_comps import collect_peer_comps
+            peer_comps = collect_peer_comps(self.ticker)
+            if peer_comps:
+                modeling_data["industry_data"]["peer_comps"] = peer_comps
+        except Exception as error:
+            self._log("warning", f"Peer comps unavailable: {type(error).__name__}")
         time.sleep(0.5)
         
         # 5. Calculate advanced metrics for modeling
@@ -1263,5 +1416,3 @@ class FinancialScraper:
                 "quarterly": (self.financials_dir / "financials_quarterly_modeling_latest.json").exists()
             }
         }
-
-

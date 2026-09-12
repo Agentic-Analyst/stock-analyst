@@ -297,7 +297,49 @@ def _report_headline(content: Optional[str]) -> dict:
     return out
 
 
-def _valuation_warning(fair_value, upside, market_cap=None, method=None):
+from src.currency import currency_symbol  # noqa: E402
+
+# What "mega-cap" means, in USD. Roughly the top ~40 companies on earth.
+_MEGACAP_USD = 200e9
+
+# Units of local currency per USD, for the handful of markets this product
+# actually reaches. Deliberately a STATIC table and not a live FX call: this is
+# a sanity rail, so a network hiccup must never change whether a valuation is
+# flagged, and an order-of-magnitude figure is all a "is this a mega-cap?"
+# question needs. Rates need only be right to ~20% for the threshold to sort
+# companies correctly.
+_USD_PER_UNIT = {
+    "USD": 1.0, "EUR": 1.08, "GBP": 1.27, "CHF": 1.12, "CAD": 0.73,
+    "AUD": 0.66, "JPY": 0.0067, "CNY": 0.14, "HKD": 0.128, "TWD": 0.031,
+    "KRW": 0.00072, "INR": 0.0113, "SGD": 0.74, "SEK": 0.093, "NOK": 0.091,
+    "DKK": 0.145, "BRL": 0.18, "MXN": 0.050, "ZAR": 0.054, "ILS": 0.27,
+    "THB": 0.028, "IDR": 0.000062, "MYR": 0.22, "PHP": 0.017, "VND": 0.000040,
+    "TRY": 0.029, "PLN": 0.25, "SAR": 0.267, "AED": 0.272,
+}
+
+
+def _megacap_threshold(currency):
+    """
+    The mega-cap threshold expressed in `currency`.
+
+    THE BUG this fixes: the rail compared a market cap in the LISTING's own
+    currency against a bare 200e9, which is only USD. A 200bn KRW company is
+    worth about $144M — a micro-cap — yet it cleared a threshold meant for the
+    forty largest companies on earth and had its valuation suppressed as
+    "a ~$200B mega-cap". Every yen, won, rupee and rupiah listing was affected.
+    An unknown currency keeps the USD threshold, which fails toward flagging
+    rather than toward silently suppressing.
+    """
+    code = (currency or "").strip().upper()
+    if code == "GBP" or code == "GBX":       # pence handled upstream; treat as GBP
+        code = "GBP"
+    per_unit = _USD_PER_UNIT.get(code)
+    if not per_unit:
+        return _MEGACAP_USD
+    return _MEGACAP_USD / per_unit
+
+
+def _valuation_warning(fair_value, upside, market_cap=None, method=None, currency=None):
     """
     Sanity rail on valuation output. An FCF-projection DCF on a deeply
     FCF-negative or freshly listed company produces mathematically valid
@@ -307,7 +349,9 @@ def _valuation_warning(fair_value, upside, market_cap=None, method=None):
     shipped -55% vs price to a real user). Flag both so the agent leads with
     the caveat instead of the number.
 
-    `upside` is a FRACTION (e.g. -0.55 for -55%).
+    `upside` is a FRACTION (e.g. -0.55 for -55%). `market_cap` is in the
+    LISTING's currency, so the mega-cap threshold is converted into that
+    currency before the comparison — see _megacap_threshold.
     """
     if method == "justified_pb_roe":
         return ("METHOD NOTE: fair value comes from a bank-appropriate "
@@ -332,9 +376,11 @@ def _valuation_warning(fair_value, upside, market_cap=None, method=None):
                 "method. Do NOT present this number as the company's worth. Say the DCF "
                 "is not meaningful for this profile and analyze via growth, unit "
                 "economics, and market pricing instead.")
-    if mcap is not None and mcap >= 200e9 and up_pct is not None and abs(up_pct) > 40:
+    threshold = _megacap_threshold(currency)
+    if mcap is not None and mcap >= threshold and up_pct is not None and abs(up_pct) > 40:
+        sym = currency_symbol(currency) if currency else "$"
         return (f"SUSPECT VALUATION: the DCF implies {up_pct:+.0f}% vs the market "
-                f"price for a ~${mcap/1e9:.0f}B mega-cap. Markets rarely misprice "
+                f"price for a ~{sym}{mcap/1e9:.0f}B mega-cap. Markets rarely misprice "
                 "companies this large by 40%+; the far more likely culprit is the "
                 "DCF's assumptions (WACC, terminal growth, FCF normalization). "
                 "Cross-check against market multiples (trailing/forward P/E, "
@@ -516,7 +562,12 @@ class BuildModelTool(_CtxTool):
         method = vm.get("valuation_method") if isinstance(vm, dict) else None
         km = state.financial_data.key_metrics if state.financial_data else {}
         mcap = (km.get("market_data", {}) or {}).get("market_cap") if isinstance(km, dict) else None
-        warning = _valuation_warning(fair_value, upside, market_cap=mcap, method=method)
+        # The market cap is in the LISTING's currency, so the mega-cap rail
+        # needs to know which one before comparing it to a threshold.
+        mcap_ccy = ((km.get("basic_info", {}) or {}).get("currency")
+                    if isinstance(km, dict) else None)
+        warning = _valuation_warning(fair_value, upside, market_cap=mcap,
+                                     method=method, currency=mcap_ccy)
 
         # How far apart are the methods? A blend is only meaningful when its
         # legs roughly agree; averaging contradictory methods produces a number
@@ -579,7 +630,7 @@ class BuildModelTool(_CtxTool):
         }
         positive_legs = [v for v in legs_pub.values() if v > 0]
         withheld = False
-        if band == "unreliable" and len(positive_legs) >= 2:
+        if method != "justified_pb_roe" and band == "unreliable" and len(positive_legs) >= 2:
             withheld = True
             fair_value_out, upside_out = None, None
             low, high = min(positive_legs), max(positive_legs)
@@ -784,7 +835,12 @@ class WriteReportTool(_CtxTool):
                 dcf_cross_check = _dcf
         km = state.financial_data.key_metrics if state.financial_data else {}
         mcap = (km.get("market_data", {}) or {}).get("market_cap") if isinstance(km, dict) else None
-        warning = _valuation_warning(fair_value, upside, market_cap=mcap, method=method)
+        # The market cap is in the LISTING's currency, so the mega-cap rail
+        # needs to know which one before comparing it to a threshold.
+        mcap_ccy = ((km.get("basic_info", {}) or {}).get("currency")
+                    if isinstance(km, dict) else None)
+        warning = _valuation_warning(fair_value, upside, market_cap=mcap,
+                                     method=method, currency=mcap_ccy)
 
         # The dispersion check runs in model_generation_agent and lands here as
         # `valuation_warning`. Surfacing it matters most on THIS path: the
@@ -798,6 +854,34 @@ class WriteReportTool(_CtxTool):
         # Dispersion leads: it explains the headline rather than the reverse.
         warning = " ".join(p for p in (spread_note, warning) if p) or None
 
+        # Match the report's publication boundary. The workbook retains the
+        # arithmetic midpoint for audit, but when the methods disagree by more
+        # than 2.5x neither the report nor the chat response may elevate it to a
+        # fair value. Publish the football-field range instead.
+        legs_pub = {
+            key: value for key, value in {
+                "perpetual_dcf": vm.get("perpetual_price") if isinstance(vm, dict) else None,
+                "exit_multiple_dcf": vm.get("exit_multiple_price") if isinstance(vm, dict) else None,
+                "market_comps": vm.get("comps_price") if isinstance(vm, dict) else None,
+            }.items() if isinstance(value, (int, float))
+        }
+        positive_legs = [value for value in legs_pub.values() if value > 0]
+        withheld = method != "justified_pb_roe" and band == "unreliable" and len(positive_legs) >= 2
+        if withheld:
+            fair_value = None
+            upside = None
+            range_fields = {
+                "fair_value_withheld": True,
+                "fair_value_range_low": round(min(positive_legs), 2),
+                "fair_value_range_high": round(max(positive_legs), 2),
+                "fair_value_withheld_reason": (
+                    "The valuation methods disagree by more than 2.5x. The report "
+                    "publishes the supported range and no directional rating or target."
+                ),
+            }
+        else:
+            range_fields = {}
+
         return tool_ok(
             ticker=ticker,
             report_path=state.report.report_path,
@@ -806,6 +890,8 @@ class WriteReportTool(_CtxTool):
             **_listing_price_note(state),
             fair_value=fair_value,
             upside_vs_market=upside,
+            **range_fields,
+            **({"valuation_legs": legs_pub} if legs_pub else {}),
             overall_sentiment=na.overall_sentiment if na else None,
             # The rating the report published, so the answer cannot contradict
             # the document the user downloads.
@@ -916,6 +1002,13 @@ class CompareTickersTool(_CtxTool):
                 info = yf.Ticker(tkr).info or {}
             except Exception as e:
                 return {"ticker": tkr, "error": f"lookup failed: {e}"}
+            quote_type = str(info.get("quoteType") or "").strip().upper()
+            if quote_type and quote_type != "EQUITY":
+                return {
+                    "ticker": tkr,
+                    "error": (f"{quote_type} is not an operating company; use the "
+                              "asset-specific research tool"),
+                }
             if not info.get("regularMarketPrice") and not info.get("currentPrice"):
                 return {"ticker": tkr, "error": "no data (unknown ticker?)"}
 
