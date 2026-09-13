@@ -52,6 +52,10 @@ class ValuationPerpetualGrowthDCFBuilder:
         """
         self.projection_years = projection_years
         self.modeling_basis = modeling_basis or {}
+        self.horizon_prefix = (
+            "NTM" if (self.modeling_basis.get("forecast_basis") or {}).get(
+                "basis") == "rolling_twelve_months" else "FY"
+        )
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -183,7 +187,12 @@ class ValuationPerpetualGrowthDCFBuilder:
         ws.cell(row=13, column=1, value="")
         
         # Section header
-        ws.cell(row=14, column=1, value="B. FCF DISCOUNTING (FY1-FY10 — EXPLICIT FY1-5, STAGE-2 FADE FY6-10)")
+        prefix = self.horizon_prefix
+        ws.cell(
+            row=14, column=1,
+            value=(f"B. FCF DISCOUNTING ({prefix}1-{prefix}10 — "
+                   f"EXPLICIT {prefix}1-5, STAGE-2 FADE {prefix}6-10)"),
+        )
         ws.cell(row=14, column=1).font = Font(bold=True, size=11, underline="single")
         
         # Row 15: Year headers (B-F columns for FY1-FY5)
@@ -235,7 +244,10 @@ class ValuationPerpetualGrowthDCFBuilder:
         # revenue-growth rate (capped 20%) down to terminal g by FY10. Only
         # applied when FY5 FCF is positive — negative-FCF names contribute 0
         # here and are handled by the terminal fallback + warning rails.
-        gs_expr = 'MIN(MAX(LLM_Inferred!$F$4,Assumptions!$B$30),0.2)'
+        # Do not floor a declining company's FY5 growth at positive terminal
+        # growth.  That made every secular decliner snap back to growth in FY6.
+        # Fade the actual bounded FY5 trajectory toward terminal growth instead.
+        gs_expr = 'MIN(MAX(Model_Inputs!$F$4,-0.2),0.2)'
         for j in range(1, 6):  # FY6..FY10 -> columns G..K
             col = 6 + j
             col_letter = chr(64 + col)
@@ -269,7 +281,10 @@ class ValuationPerpetualGrowthDCFBuilder:
             ws.cell(row=18, column=col).number_format = ExcelFormats.CURRENCY
 
         # Row 19: Sum of PV of FCFs (all ten years)
-        ws.cell(row=19, column=1, value="Sum of PV of FCFs (FY1-FY10)")
+        ws.cell(
+            row=19, column=1,
+            value=f"Sum of PV of FCFs ({self.horizon_prefix}1-{self.horizon_prefix}10)",
+        )
         ws.cell(row=19, column=1).font = Font(bold=True)
         ws.cell(row=19, column=2, value='=SUM(B18:K18)')
         ws.cell(row=19, column=2).number_format = ExcelFormats.CURRENCY
@@ -318,7 +333,11 @@ class ValuationPerpetualGrowthDCFBuilder:
         ws.cell(row=25, column=1, value="Terminal Value (Un-discounted)")
         ws.cell(row=25, column=2, value='=B24/($B$12-$B$23)')
         ws.cell(row=25, column=2).number_format = ExcelFormats.CURRENCY
-        ws.cell(row=25, column=7, value="Two-stage: explicit fade FY6-10, Gordon thereafter")
+        ws.cell(
+            row=25, column=7,
+            value=(f"Two-stage: explicit fade {self.horizon_prefix}6-10, "
+                   "Gordon thereafter"),
+        )
         ws.cell(row=25, column=7).font = Font(italic=True, size=9)
 
         # Row 26: PV of Terminal Value — discounted over the horizon that was
@@ -393,7 +412,11 @@ class ValuationPerpetualGrowthDCFBuilder:
         
         # Row 32: Investments / Non-operating Assets
         ws.cell(row=32, column=1, value="Add: Investments / Non-operating Assets")
-        current_investments = self.modeling_basis.get("short_term_investments")
+        current_investments = self.modeling_basis.get("non_operating_investments")
+        if not isinstance(current_investments, (int, float)) or isinstance(
+            current_investments, bool
+        ):
+            current_investments = self.modeling_basis.get("short_term_investments")
         ws.cell(
             row=32, column=2,
             value=(float(current_investments) if isinstance(current_investments, (int, float))
@@ -403,7 +426,13 @@ class ValuationPerpetualGrowthDCFBuilder:
         if isinstance(current_investments, (int, float)) and not isinstance(current_investments, bool):
             ws.cell(
                 row=32, column=7,
-                value=f"Current quarterly balance sheet through {self.modeling_basis.get('period_end')}",
+                value=(
+                    f"Current quarterly balance sheet through {self.modeling_basis.get('period_end')}"
+                    + (
+                        f"; {self.modeling_basis.get('non_operating_investments_source')}"
+                        if self.modeling_basis.get('non_operating_investments_source') else ""
+                    )
+                ),
             ).font = Font(italic=True, size=9)
         
         # Row 33: Equity Value
@@ -467,13 +496,17 @@ class ValuationPerpetualGrowthDCFBuilder:
         ws.cell(row=39, column=1).font = Font(bold=True, size=11, underline="single")
         
         # Row 40: Implied EV/EBITDA
-        ws.cell(row=40, column=1, value="Implied EV/EBITDA (FY5)")
-        ws.cell(row=40, column=2, value='=B27/Projections!F21')  # EV / EBITDA_FY5 (row 21 in Projections)
+        ws.cell(row=40, column=1,
+                value=f"Present EV / {self.horizon_prefix}5 EBITDA (diagnostic)")
+        ws.cell(row=40, column=2,
+                value='=IFERROR(B27/Projections!F21,"")')
         ws.cell(row=40, column=2).number_format = '0.0x'
         
         # Row 41: Implied P/NOPAT (correctly labeled - using NOPAT not Net Income)
-        ws.cell(row=41, column=1, value="Implied P/NOPAT (FY5)")
-        ws.cell(row=41, column=2, value='=B33/Projections!F11')  # Equity Value / NOPAT_FY5
+        ws.cell(row=41, column=1,
+                value=f"Present Equity / {self.horizon_prefix}5 NOPAT (diagnostic)")
+        ws.cell(row=41, column=2,
+                value='=IFERROR(B33/Projections!F11,"")')
         ws.cell(row=41, column=2).number_format = '0.0x'
         
         # Note: If Net Income is added to Projections, change row 41 to:
@@ -481,8 +514,10 @@ class ValuationPerpetualGrowthDCFBuilder:
         # ws.cell(row=41, column=2, value='=B33/Projections!F[NetIncomeRow]')
         
         # Row 42: FCF Yield
-        ws.cell(row=42, column=1, value="FCF Yield (EV Basis, FY5)")
-        ws.cell(row=42, column=2, value='=Projections!F19/B27')  # FCF_FY5 / EV
+        ws.cell(row=42, column=1,
+                value=f"{self.horizon_prefix}5 FCF / Present EV (diagnostic)")
+        ws.cell(row=42, column=2,
+                value='=IFERROR(Projections!F19/B27,"")')
         ws.cell(row=42, column=2).number_format = '0.00%'
     
     def _setup_output_summary(self, ws: Worksheet) -> None:

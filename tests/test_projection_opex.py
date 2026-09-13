@@ -21,6 +21,7 @@ def _evaluate_projection(*, historical_rd, historical_sga, operating_margin=0.05
     historical["F32"] = 0.0
     historical["F33"] = 0.0
     historical["F34"] = 0.0
+    historical["F38"] = 50.0
 
     assumptions = workbook.create_sheet("Assumptions")
     assumptions["B2"] = 2025
@@ -32,7 +33,7 @@ def _evaluate_projection(*, historical_rd, historical_sga, operating_margin=0.05
         assumptions[f"{column}14"] = 0.0
         assumptions[f"{column}15"] = 0.0
 
-    inferred = workbook.create_sheet("LLM_Inferred")
+    inferred = workbook.create_sheet("Model_Inputs")
     for column in "BCDEF":
         inferred[f"{column}7"] = operating_margin
 
@@ -59,3 +60,16 @@ def test_disclosed_expenses_keep_their_historical_split_and_target_margin():
     assert cells["(7, 2)"] == pytest.approx(6.6)
     assert cells["(8, 2)"] == pytest.approx(15.4)
     assert cells["(9, 2)"] / cells["(3, 2)"] == pytest.approx(0.05)
+
+
+def test_ppe_rollforward_starts_from_net_ppe_not_historical_free_cash_flow():
+    cells = _evaluate_projection(historical_rd=3.0, historical_sga=7.0)
+
+    assert cells["(43, 2)"] == pytest.approx(50.0)
+
+
+def test_reinvestment_rate_uses_net_capex_and_working_capital_with_correct_signs():
+    cells = _evaluate_projection(historical_rd=3.0, historical_sga=7.0)
+
+    # Revenue 110; gross capex 3.3; D&A 2.2; delta NWC 0; NOPAT 4.4.
+    assert cells["(50, 2)"] == pytest.approx((3.3 - 2.2) / 4.4)

@@ -9,7 +9,7 @@ Tabs:
     0. Raw - Flat database of (Key, Year, Value) tuples
     1. Keys_Map - Helper lookup table with SUMIFS formulas
     2. Assumptions - Modeling drivers and parameters
-    3. LLM_Inferred - Hidden tab with LLM-inferred assumptions
+    3. Model_Inputs - Visible audit tab with grounded numerical inputs
     4. Historical - Last 5 years of actual financials
     5. Projections - 5-year forward projections
     6. Valuation (DCF) - Perpetual Growth DCF valuation

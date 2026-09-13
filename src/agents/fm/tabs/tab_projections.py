@@ -14,6 +14,7 @@ Professional-grade financial model following investment banking standards:
 """
 
 from typing import Any, Dict, Optional
+from datetime import datetime
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -100,7 +101,13 @@ class ProjectionsTabBuilder:
         - F2: =E2+1 (FY5)
         """
         # Row 1: Main header
-        ws.cell(row=1, column=1, value="PROJECTIONS (FY1-FY5)")
+        forecast_basis = self.modeling_basis.get("forecast_basis") or {}
+        horizon_range = (
+            "NTM1-NTM5"
+            if forecast_basis.get("basis") == "rolling_twelve_months"
+            else "FY1-FY5"
+        )
+        ws.cell(row=1, column=1, value=f"PROJECTIONS ({horizon_range})")
         ws.cell(row=1, column=1).font = Font(bold=True, size=14)
         
         # Row 2: Year headers
@@ -112,8 +119,23 @@ class ProjectionsTabBuilder:
             fill_type="solid"
         )
         
-        # B2: FY1 = Assumptions!B2 + 1
-        ws.cell(row=2, column=2, value='=Assumptions!$B$2+1')
+        # A current TTM model projects rolling twelve-month periods from the
+        # latest quarter. Its first endpoint is therefore one year after that
+        # quarter, not one year after the older annual-history endpoint.
+        forecast_basis = self.modeling_basis.get("forecast_basis") or {}
+        period_end = forecast_basis.get("period_end")
+        try:
+            first_projection_year = datetime.fromisoformat(
+                str(period_end)[:10]
+            ).year + 1
+        except (TypeError, ValueError):
+            first_projection_year = None
+        ws.cell(
+            row=2,
+            column=2,
+            value=(first_projection_year if first_projection_year is not None
+                   else '=Assumptions!$B$2+1'),
+        )
         ws.cell(row=2, column=2).number_format = '0'
         ws.cell(row=2, column=2).font = Font(bold=True, size=11)
         ws.cell(row=2, column=2).fill = PatternFill(
@@ -157,8 +179,19 @@ class ProjectionsTabBuilder:
         ws.cell(row=3, column=1, value="Revenue")
         ws.cell(row=3, column=1).font = Font(bold=True)
         
-        # B3: FY1 Revenue = Historical F3 * (1 + Assumptions C7)
-        ws.cell(row=3, column=2, value='=Historical!$F$3*(1+Assumptions!C7)')
+        # A current TTM bridge supplies the rolling FY0/NTM base. Falling back
+        # to the latest annual revenue preserves legacy behavior when a complete
+        # four-quarter bridge is unavailable.
+        revenue_base = self.modeling_basis.get("revenue")
+        if (
+            isinstance(revenue_base, (int, float))
+            and not isinstance(revenue_base, bool)
+            and revenue_base > 0
+        ):
+            revenue_formula = f'={float(revenue_base):.12f}*(1+Assumptions!C7)'
+        else:
+            revenue_formula = '=Historical!$F$3*(1+Assumptions!C7)'
+        ws.cell(row=3, column=2, value=revenue_formula)
         ws.cell(row=3, column=2).number_format = ExcelFormats.CURRENCY
         
         # C3-F3: FY2-FY5 Revenue = Prior Year * (1 + Growth Rate)
@@ -217,7 +250,7 @@ class ProjectionsTabBuilder:
         # Rows 7-8: R&D and SG&A.
         #
         # Total opex is DERIVED from the LLM's operating-margin path
-        # (LLM_Inferred row 7): opex_total = Gross Profit - Revenue x OpMargin,
+        # (Model_Inputs row 7): opex_total = Gross Profit - Revenue x OpMargin,
         # split between R&D and SG&A in their historical proportion. The old
         # base-year scaling (Historical FY0 ratio x revenue) froze the most
         # investment-heavy year in company history into all five projection
@@ -240,10 +273,10 @@ class ProjectionsTabBuilder:
         for i in range(self.projection_years):
             col = 2 + i
             col_letter = chr(64 + col)  # B, C, D, E, F
-            llm_col = chr(66 + i)       # LLM_Inferred FY1..FY5 = B..F
+            llm_col = chr(66 + i)       # Model_Inputs FY1..FY5 = B..F
 
             formula = (
-                f'=IFERROR(MAX(0,{col_letter}5-{col_letter}3*LLM_Inferred!{llm_col}7)'
+                f'=IFERROR(MAX(0,{col_letter}5-{col_letter}3*Model_Inputs!{llm_col}7)'
                 f'*Historical!$F$6/(Historical!$F$6+Historical!$F$7),0)'
             )
             ws.cell(row=7, column=col, value=formula)
@@ -257,7 +290,7 @@ class ProjectionsTabBuilder:
             llm_col = chr(66 + i)
 
             formula = (
-                f'=MAX(0,{col_letter}5-{col_letter}3*LLM_Inferred!{llm_col}7)'
+                f'=MAX(0,{col_letter}5-{col_letter}3*Model_Inputs!{llm_col}7)'
                 f'-{col_letter}7'
             )
             ws.cell(row=8, column=col, value=formula)
@@ -428,8 +461,21 @@ class ProjectionsTabBuilder:
         ws.cell(row=18, column=1, value="ΔNWC")
         ws.cell(row=18, column=1).font = Font(bold=True)
         
-        # B18: FY1 ΔNWC = Current NWC - Historical NWC (AR + Inv - AP from Historical F32, F33, F34)
-        ws.cell(row=18, column=2, value='=B17-(Historical!$F$32+Historical!$F$33-Historical!$F$34)')
+        # B18: FY1 ΔNWC = projected NWC minus the latest comparable NWC.
+        # A current point-in-time base is admitted only after the grounding
+        # layer verifies that all three provider field definitions match their
+        # annual counterparts. Otherwise retain the internally consistent
+        # annual FY0 formula.
+        working_capital = self.modeling_basis.get("working_capital") or {}
+        current_nwc = working_capital.get("net_working_capital")
+        if (
+            isinstance(current_nwc, (int, float))
+            and not isinstance(current_nwc, bool)
+        ):
+            nwc_formula = f'=B17-({float(current_nwc):.12f})'
+        else:
+            nwc_formula = '=B17-(Historical!$F$32+Historical!$F$33-Historical!$F$34)'
+        ws.cell(row=18, column=2, value=nwc_formula)
         ws.cell(row=18, column=2).number_format = ExcelFormats.CURRENCY
         
         # C18-F18: FY2-FY5 ΔNWC = Current NWC - Prior Year NWC
@@ -683,10 +729,10 @@ class ProjectionsTabBuilder:
         
         # Beginning Net PP&E
         ws.cell(row=current_row, column=1, value="Beginning Net PP&E")
-        # B column: from Historical F25 (Net PP&E row in Historical tab).
+        # B column: from Historical F38 (Net PP&E row in Historical tab).
         # ABS: the source row can carry a cash-flow sign convention; net PP&E
         # on a balance sheet is positive.
-        ws.cell(row=current_row, column=2, value='=ABS(Historical!$F$25)')
+        ws.cell(row=current_row, column=2, value='=ABS(Historical!$F$38)')
         ws.cell(row=current_row, column=2).number_format = ExcelFormats.CURRENCY
         # C-F columns: prior year's Ending PP&E
         for i in range(1, self.projection_years):
@@ -754,7 +800,15 @@ class ProjectionsTabBuilder:
         for i in range(self.projection_years):
             col = 2 + i
             col_letter = chr(64 + col)
-            formula = f'=IFERROR(({col_letter}13+{col_letter}18)/{col_letter}11,"")'  # (Capex + ΔNWC) / NOPAT
+            # Net reinvestment = gross capex - D&A + delta NWC.  Capex is
+            # stored with a cash-flow (negative) sign in row 13, while D&A is
+            # positive in row 12.  The former formula added negative capex and
+            # called the result reinvestment, producing impossible -68% to
+            # -141% rates for an ordinary capital-intensive company like WMT.
+            formula = (
+                f'=IFERROR((-{col_letter}13-{col_letter}12+'
+                f'{col_letter}18)/{col_letter}11,"")'
+            )
             ws.cell(row=current_row, column=col, value=formula)
             ws.cell(row=current_row, column=col).number_format = '0.00%'
         current_row += 1

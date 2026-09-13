@@ -12,7 +12,8 @@ from src.valuation_benchmark import (
 
 def thesis(ticker="AAPL", *, recorded=100.0, perpetual=80.0, exit_multiple=100.0,
            comps=140.0, price=100.0, completed="2026-01-01T00:00:00Z",
-           version=1, model_version="model-v2", rating="HOLD", capm=True):
+           version=1, model_version="model-v2", rating="HOLD", capm=True,
+           analyst_target=120.0, analyst_count=20, analyst_as_of="2026-01-01"):
     return {
         "ticker": ticker,
         "version": version,
@@ -27,6 +28,15 @@ def thesis(ticker="AAPL", *, recorded=100.0, perpetual=80.0, exit_multiple=100.0
             "current_price": price,
         },
         "verdict": {"rating": rating},
+        "research_context": {"analyst_consensus": {
+            "captured_at": completed,
+            "price_target": {
+                "mean": analyst_target,
+                "analyst_count": analyst_count,
+                "source": "test_provider",
+                "as_of": analyst_as_of,
+            },
+        }},
     }
 
 
@@ -39,6 +49,16 @@ def market(ticker="AAPL", *, quote_type="EQUITY", price=100.0,
         "analyst_target_mean": analyst_target,
         "analyst_count": analyst_count,
         "sector": sector,
+    }
+
+
+def outcome(ticker="AAPL", *, adjusted_close=130.0,
+            as_of="2027-01-01T00:00:00Z"):
+    return {
+        "ticker": ticker,
+        "adjusted_close": adjusted_close,
+        "as_of": as_of,
+        "source": "frozen_test_fixture",
     }
 
 
@@ -72,16 +92,19 @@ def test_latest_cohort_is_selected_within_a_model_version():
 
 def test_benchmark_reports_bias_and_analyst_disagreement_without_blending_consensus():
     result = benchmark(
-        [thesis(recorded=80, perpetual=70, exit_multiple=90, comps=120, rating="SELL")],
+        [thesis(recorded=80, perpetual=70, exit_multiple=90, comps=120,
+                rating="SELL", analyst_target=125)],
         [market(analyst_target=125)],
         now=datetime(2026, 9, 10, tzinfo=timezone.utc),
     )
     assert result["recorded_at_run"]["fair_value_gap"]["median"] == -0.2
     assert result["method_equal_replay_at_run"]["fair_value_gap"]["median"] == 0.0
-    cross = result["current_analyst_cross_check"]
-    assert cross["model_gap"]["median"] == 0.0
+    cross = result["point_in_time_analyst_cross_check"]
+    assert cross["model_gap"]["median"] == -0.2
     assert cross["analyst_gap"]["median"] == 0.25
-    assert cross["model_minus_analyst_gap"]["median"] == -0.25
+    assert cross["model_minus_analyst_gap"]["median"] == -0.45
+    assert cross["sources"] == {"test_provider": 1}
+    assert result["legacy_current_universe_cross_check"]["model_gap"]["median"] == 0.0
     assert result["recorded_at_run"]["ratings"] == {"SELL": 1}
 
 
@@ -89,8 +112,17 @@ def test_non_equities_and_unclassified_rows_do_not_enter_current_cross_check():
     docs = [thesis("VOO"), thesis("UNKNOWN")]
     result = benchmark(docs, [market("VOO", quote_type="ETF")])
     assert result["data_quality"]["domains"] == {"non_equity": 1, "unclassified": 1}
-    assert result["current_analyst_cross_check"]["model_gap"]["n"] == 0
+    assert result["point_in_time_analyst_cross_check"]["model_gap"]["n"] == 0
     assert result["recorded_at_run"]["fair_value_gap"]["n"] == 0
+
+
+def test_missing_run_snapshot_is_not_backfilled_with_todays_analyst_target():
+    doc = thesis()
+    doc.pop("research_context")
+    result = benchmark([doc], [market(analyst_target=999.0)])
+    assert result["point_in_time_analyst_cross_check"]["analyst_gap"]["n"] == 0
+    assert result["legacy_current_universe_cross_check"]["analyst_gap"]["n"] == 1
+    assert result["data_quality"]["analyst_comparable"] == 0
 
 
 def test_readiness_requires_a_fresh_versioned_and_well_covered_cohort():
@@ -114,14 +146,74 @@ def test_readiness_requires_a_fresh_versioned_and_well_covered_cohort():
     assert "cohort_mixes_model_versions" in mixed["readiness"]["cross_sectional_blockers"]
 
 
-def test_twelve_month_readiness_is_about_observation_age_not_model_optimism():
+def test_twelve_month_readiness_requires_actual_outcomes_not_age_alone():
     docs = [thesis(f"T{i}", completed="2024-01-01T00:00:00Z") for i in range(20)]
     result = benchmark(
         docs, [market(f"T{i}") for i in range(20)],
         now=datetime(2026, 1, 2, tzinfo=timezone.utc),
     )
     assert result["data_quality"]["age_eligible_for_12m_backtest"] == 20
+    assert result["data_quality"]["matched_12m_outcomes"] == 0
+    assert result["readiness"]["forecast_backtest_ready"] is False
+
+
+def test_twelve_month_backtest_scores_saved_model_and_analyst_forecasts():
+    docs = [
+        thesis(
+            f"T{i}", completed="2026-01-01T00:00:00Z",
+            perpetual=110.0, exit_multiple=130.0,
+            analyst_target=110.0,
+        )
+        for i in range(20)
+    ]
+    sectors = ["Technology", "Financials", "Healthcare", "Industrials", "Energy"]
+    markets = [market(f"T{i}", sector=sectors[i % len(sectors)]) for i in range(20)]
+    outcomes = [
+        outcome(f"T{i}", adjusted_close=130.0, as_of="2027-01-01T00:00:00Z")
+        for i in range(20)
+    ]
+
+    result = benchmark(
+        docs, markets, outcomes,
+        now=datetime(2027, 2, 1, tzinfo=timezone.utc),
+    )
+
+    backtest = result["twelve_month_outcome_backtest"]
+    assert backtest["matched_predictions"] == 20
+    assert backtest["model"]["n"] == 20
+    assert backtest["model"]["mean_return_error"] == pytest.approx(-0.10)
+    assert backtest["model"]["mean_absolute_price_error"] == pytest.approx(10 / 130)
+    assert backtest["model"]["direction_accuracy"] == 1.0
+    assert backtest["analyst_consensus"]["mean_return_error"] == pytest.approx(-0.20)
     assert result["readiness"]["forecast_backtest_ready"] is True
+
+
+def test_outcome_outside_bounded_horizon_is_not_silently_used():
+    doc = thesis(completed="2026-01-01T00:00:00Z")
+    result = benchmark(
+        [doc], [market()],
+        [outcome(as_of="2027-03-15T00:00:00Z")],
+        now=datetime(2027, 4, 1, tzinfo=timezone.utc),
+    )
+
+    assert result["data_quality"]["age_eligible_for_12m_backtest"] == 1
+    assert result["data_quality"]["matched_12m_outcomes"] == 0
+    assert result["twelve_month_outcome_backtest"]["model"]["n"] == 0
+
+
+def test_raw_close_outcome_is_disclosed_as_price_return_only():
+    raw_outcome = {
+        "ticker": "AAPL", "price": 125.0,
+        "as_of": "2027-01-01T00:00:00Z", "source": "fixture",
+    }
+    result = benchmark(
+        [thesis(completed="2026-01-01T00:00:00Z")], [market()],
+        [raw_outcome], now=datetime(2027, 2, 1, tzinfo=timezone.utc),
+    )
+
+    assert result["data_quality"]["outcome_return_kinds"] == {
+        "price_return_only": 1,
+    }
 
 
 def test_cross_sectional_readiness_rejects_a_sector_concentrated_sample():

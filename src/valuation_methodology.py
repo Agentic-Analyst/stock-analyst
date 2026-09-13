@@ -10,15 +10,93 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Iterable, Optional
 
-from src.agents.fm.bank_valuation import build_bank_valuation_override
+from src.agents.fm.bank_valuation import (
+    build_bank_valuation_override,
+    is_balance_sheet_financial,
+)
 
 
 _FUND_TYPES = {"ETF", "MUTUALFUND", "MONEYMARKET"}
 _CRYPTO_TYPES = {"CRYPTOCURRENCY", "CRYPTO"}
+_REIT_INDUSTRY_HINTS = (
+    "reit", "real estate investment trust",
+)
+_COMMODITY_CYCLE_INDUSTRY_HINTS = (
+    "oil & gas integrated", "oil & gas e&p", "oil & gas refining",
+    "oil & gas drilling", "uranium", "gold", "copper", "silver",
+    "other industrial metals", "steel", "aluminum", "coking coal",
+    "thermal coal",
+)
 _CONGLOMERATE_HINTS = (
     "conglomerate", "diversified industrial", "diversified holdings",
     "multi-sector holdings",
 )
+_CAPTIVE_FINANCE_SEGMENT_HINTS = (
+    "financial products segment",
+    "financial services segment",
+    "credit segment",
+)
+
+
+def normalize_peer_comps_policy(peer_comps: Any) -> Dict[str, Any]:
+    """Return one publication policy for current and legacy peer artifacts.
+
+    Older saved runs predate the explicit confidence fields, but already mark
+    Yahoo's broad fallback through ``grouping`` or ``peer_universe_source``.
+    Missing new fields must not let cached broad peers regain a valuation vote.
+    """
+    peers = peer_comps if isinstance(peer_comps, dict) else {}
+    broad_sector = bool(
+        peers.get("grouping") == "sector_leaders"
+        or peers.get("peer_universe_source") == "yahoo_sector_leaders"
+        or peers.get("role") == "broad_sector_cross_check"
+    )
+    explicit_status = peers.get("status")
+    usable = bool(peers and (explicit_status is None or explicit_status == "ready"))
+    confidence = peers.get("confidence") or ("low" if broad_sector else "moderate")
+    role = peers.get("role") or (
+        "broad_sector_cross_check" if broad_sector
+        else "comparable_company_valuation"
+    )
+    # A valuation vote is opt-in, never inferred. Saved artifacts from before
+    # size screening carried a Finnhub ``subIndustry`` label but no confidence,
+    # role, status, or explicit inclusion decision; replaying those artifacts
+    # made AAPL's much smaller storage/hardware vendors look like validated
+    # independent evidence. Keep legacy figures visible as context, but only a
+    # current collector result with the complete policy contract can enter the
+    # headline value.
+    industrial_policy_complete = bool(
+        explicit_status == "ready"
+        and peers.get("included_in_blended_value") is True
+        and peers.get("confidence") in {"moderate", "high"}
+        and peers.get("role") == "comparable_company_valuation"
+        and peers.get("selected_method") in {"ev_ebitda", "price_sales"}
+        and peers.get("size_screen_applied") is True
+        and peers.get("fundamental_screen_applied") is True
+        and isinstance(peers.get("selected_peer_count"), int)
+        and peers.get("selected_peer_count") >= 3
+    )
+    bank_policy_complete = bool(
+        explicit_status == "ready"
+        and peers.get("included_in_blended_value") is True
+        and peers.get("confidence") in {"moderate", "high"}
+        and peers.get("role") == "bank_comparable_company_valuation"
+        and peers.get("selected_method") == "price_to_book"
+        and peers.get("size_screen_applied") is True
+        and peers.get("fundamental_screen_applied") is True
+        and isinstance(peers.get("selected_peer_count"), int)
+        and peers.get("selected_peer_count") >= 3
+    )
+    policy_complete = industrial_policy_complete or bank_policy_complete
+    included = bool(usable and policy_complete and not broad_sector)
+    return {
+        "confidence": confidence,
+        "role": role,
+        "included_in_blended_value": included,
+        "broad_sector": broad_sector,
+        "usable": usable,
+        "policy_complete": policy_complete,
+    }
 
 
 def _number(value: Any) -> Optional[float]:
@@ -142,7 +220,7 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
     """Select the primary method and determine point-publication suitability."""
     company = (financial_data or {}).get("company_data") or {}
     basic = company.get("basic_info") or {}
-    quote_type = str(basic.get("quote_type") or basic.get("quoteType") or "EQUITY").upper()
+    quote_type = str(basic.get("quote_type") or basic.get("quoteType") or "UNKNOWN").upper()
     industry = str(basic.get("industry") or "")
     sector = str(basic.get("sector") or "")
     profile = _cash_profile(financial_data or {})
@@ -168,9 +246,95 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
             "cash_flow_profile": profile,
             "sotp": segments,
         }
+    if quote_type != "EQUITY":
+        return {
+            "primary_method": "unsupported_asset_type",
+            "quality": "unsuitable",
+            "publication_allowed": False,
+            "reason": (
+                f"A corporate free-cash-flow DCF is not valid for quote type "
+                f"{quote_type}; route this instrument to a verified "
+                "asset-specific service before publishing a valuation."
+            ),
+            "specialized_service": "unsupported_asset",
+            "cash_flow_profile": profile,
+            "sotp": segments,
+        }
 
-    bank = build_bank_valuation_override(financial_data or {})
-    if bank:
+    # Public REITs report operating cash flow, but corporate FCFF is not the
+    # right equity-value anchor because property depreciation, recurring
+    # maintenance capital, asset sales, and required distributions make FFO,
+    # AFFO and NAV/cap-rate evidence materially different. Yahoo normally
+    # labels these securities as EQUITY, so quote type alone cannot protect
+    # the model. Until the dedicated REIT inputs exist, retain any corporate
+    # DCF only as an audit scenario and withhold the point call.
+    industry_key = industry.casefold()
+    if any(hint in industry_key for hint in _REIT_INDUSTRY_HINTS):
+        return {
+            "primary_method": "reit_affo_nav",
+            "quality": "unsuitable",
+            "publication_allowed": False,
+            "reason": (
+                "A corporate free-cash-flow DCF is not a sufficient primary method "
+                "for a REIT; use normalized FFO/AFFO, property-level NAV and cap "
+                "rates, recurring maintenance capital, leverage, and distribution "
+                "coverage."
+            ),
+            "specialized_service": "reit",
+            "cash_flow_profile": profile,
+            "sotp": segments,
+        }
+
+    if "insurance" in industry_key and "broker" not in industry_key:
+        return {
+            "primary_method": "insurance_book_value_embedded_value",
+            "quality": "unsuitable",
+            "publication_allowed": False,
+            "reason": (
+                "A generic corporate free-cash-flow DCF is not a sufficient primary "
+                "method for an insurer. The analysis requires normalized book-value "
+                "growth and ROE, reserve adequacy, underwriting profitability, float "
+                "and investment-income economics, capital requirements, and—where "
+                "applicable—a sum-of-the-parts valuation."
+            ),
+            "specialized_service": "insurance",
+            "cash_flow_profile": profile,
+            "sotp": segments,
+        }
+
+    if any(hint in industry_key for hint in _COMMODITY_CYCLE_INDUSTRY_HINTS):
+        return {
+            "primary_method": "cyclically_normalized_dcf",
+            "quality": "limited",
+            "publication_allowed": False,
+            "reason": (
+                "A current-run-rate corporate DCF is not sufficient for this "
+                "commodity-cycle business. A point call requires a normalized "
+                "commodity price deck, mid-cycle volumes and margins, reserve or "
+                "resource life, sustaining capital, and balance-sheet stress cases."
+            ),
+            "specialized_service": "commodity_cycle",
+            "cash_flow_profile": profile,
+            "sotp": segments,
+        }
+
+    bank_applicable = is_balance_sheet_financial(financial_data or {})
+    bank = build_bank_valuation_override(financial_data or {}) if bank_applicable else None
+    if bank_applicable:
+        if not bank:
+            return {
+                "primary_method": "justified_pb_roe",
+                "quality": "unsuitable",
+                "publication_allowed": False,
+                "reason": (
+                    "This balance-sheet financial requires a justified P/B and normalized-ROE "
+                    "valuation, but positive common book value per share and a supportable ROE "
+                    "are not both available. Corporate free-cash-flow DCF is suppressed."
+                ),
+                "specialized_service": "bank_valuation_input_gap",
+                "cash_flow_profile": profile,
+                "sotp": segments,
+            }
         return {
             "primary_method": "justified_pb_roe",
             "quality": "appropriate",
@@ -181,6 +345,37 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
         }
 
     reasons = []
+    business_summary = str(
+        basic.get("business_summary") or basic.get("long_business_summary") or ""
+    ).casefold()
+    has_captive_finance_segment = any(
+        hint in business_summary for hint in _CAPTIVE_FINANCE_SEGMENT_HINTS
+    ) and any(token in business_summary for token in ("financ", "lease", "credit"))
+    if has_captive_finance_segment:
+        # Consolidated receivables, debt and cash flow combine an operating
+        # manufacturer with a leveraged lender.  Treating the finance book as
+        # ordinary working capital can create a large false reinvestment charge
+        # (CAT is the canonical case).  Keep the consolidated DCF as a scenario,
+        # but require an operating/finance split before publication.
+        reasons.append(
+            "a disclosed captive-finance segment is consolidated with the operating "
+            "business; a point call requires segment earnings and cash flow, finance "
+            "receivables, matched funding debt, credit losses, and a reconciled "
+            "operating-company plus finance-book sum-of-the-parts valuation"
+        )
+    listing_currency = str(basic.get("listing_currency") or "").upper()
+    financial_currency = str(basic.get("currency") or "").upper()
+    fx_rate = _number((company.get("market_data") or {}).get(
+        "fx_listing_to_financial"
+    ))
+    if (
+        listing_currency and financial_currency
+        and listing_currency != financial_currency
+        and (fx_rate is None or fx_rate <= 0)
+    ):
+        reasons.append(
+            "listing-to-reporting currency conversion is unavailable"
+        )
     if profile["revenue"] is None or profile["revenue"] <= 0:
         reasons.append("positive current revenue is unavailable")
     if profile["operating_cash_flow"] is None:
@@ -194,12 +389,34 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
     ) and profile["positive_fcf_periods"] < 2:
         reasons.append("free cash flow is not yet established across the current period or history")
 
-    publication_allowed = not reasons
-    primary = "dcf_plus_market_comps" if publication_allowed else "scenario_only"
-    if segments.get("status") == "ready":
-        primary = "dcf_with_sotp_inputs_available"
+    peer_comps = (((financial_data or {}).get("industry_data") or {}).get("peer_comps") or {})
+    comps_policy = normalize_peer_comps_policy(peer_comps)
+    primary = "dcf_only"
+    if has_captive_finance_segment:
+        primary = "scenario_only_pending_operating_finance_sotp"
+    elif segments.get("status") == "ready":
+        # Input readiness is not the same as a completed SOTP.  Until segment
+        # values, corporate costs, net debt and cross-holdings are actually
+        # calculated and reconciled, a consolidated DCF cannot become the
+        # point answer merely because raw segment rows exist.
+        primary = "scenario_only_pending_sotp"
+        reasons.append(
+            "verified segment inputs exist, but a reconciled sum-of-the-parts "
+            "valuation has not been completed"
+        )
     elif segments.get("status") == "data_required":
+        primary = "scenario_only_pending_sotp"
         reasons.append(segments["reason"])
+    publication_allowed = not reasons
+    if publication_allowed:
+        if comps_policy["included_in_blended_value"]:
+            primary = "dcf_plus_market_comps"
+        elif comps_policy["usable"] and comps_policy["broad_sector"]:
+            primary = "dcf_with_broad_market_cross_check"
+        else:
+            primary = "dcf_only"
+    elif not primary.startswith("scenario_only_pending"):
+        primary = "scenario_only"
 
     return {
         "primary_method": primary,
