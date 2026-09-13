@@ -16,6 +16,19 @@ def _positive_env_int(name: str, default: int, minimum: int = 1) -> int:
     except (TypeError, ValueError):
         return max(minimum, default)
 
+
+def _bounded_env_float(
+    name: str, default: float, *, minimum: float, maximum: float,
+) -> float:
+    """Read a finite bounded timeout/ratio knob with a safe fallback."""
+    try:
+        value = float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    if value != value or value in (float("inf"), float("-inf")):
+        value = default
+    return min(maximum, max(minimum, value))
+
 # Article scraping and filtering defaults
 class ArticleConfig:
     """Configuration for article scraping and filtering operations."""
@@ -37,6 +50,13 @@ class ArticleConfig:
     NEWS_CANDIDATE_LIMIT = max(
         MAX_ARTICLES, _positive_env_int("NEWS_CANDIDATE_LIMIT", 250)
     )
+    # A provider call should not hold an interactive research run for the
+    # client's historical 60+ second default.  Fifteen seconds still covered
+    # the successful first query in the launch dry run; operators may tune it
+    # only within a deliberately narrow reliability/latency band.
+    SERPAPI_SEARCH_TIMEOUT_SECONDS = _bounded_env_float(
+        "SERPAPI_SEARCH_TIMEOUT_SECONDS", 15.0, minimum=5.0, maximum=30.0,
+    )
 
 
 # Backward compatibility - expose at module level for easy imports
@@ -46,3 +66,4 @@ MIN_CONFIDENCE = ArticleConfig.MIN_CONFIDENCE
 NEWS_MAX_AGE_DAYS = ArticleConfig.NEWS_MAX_AGE_DAYS
 NEWS_MIN_FRESH_ARTICLES = ArticleConfig.NEWS_MIN_FRESH_ARTICLES
 NEWS_CANDIDATE_LIMIT = ArticleConfig.NEWS_CANDIDATE_LIMIT
+SERPAPI_SEARCH_TIMEOUT_SECONDS = ArticleConfig.SERPAPI_SEARCH_TIMEOUT_SECONDS

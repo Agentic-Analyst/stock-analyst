@@ -179,8 +179,14 @@ to support a calibration claim. The replay cannot apply a newer ERP or newer
 assumptions to an old workbook; those require fresh runs bearing one immutable
 `ANALYSIS_MODEL_VERSION`. Consensus is a cross-check, never an input to
 intrinsic value. A true 12-month accuracy backtest additionally requires a
-point-in-time cohort old enough to have outcomes; the readiness output keeps
-that separate from cross-sectional calibration.
+point-in-time cohort **and supplied historical outcomes**; age alone never
+marks the backtest ready. A sanitized JSON input can include an `outcomes`
+array beside `theses` and `universe`. Each outcome carries `ticker`, `as_of`,
+`source`, and preferably `adjusted_close` (`price` is accepted but disclosed
+as price-return-only). The benchmark selects only observations 330–400 days
+after the saved run and reports model-versus-consensus return error, relative
+price error, and direction accuracy. Mongo mode intentionally does not
+backfill outcomes from today's universe quote.
 
 ### Instruction integrity
 
@@ -203,8 +209,8 @@ Live formulas throughout — the Assumptions tab pulls from grounded projection 
 |---|---|
 | Raw | Imported financials — income statement, balance sheet, cash flow (677–738 rows depending on company) |
 | Keys_Map | Cell-reference mapping for cross-tab formula wiring |
-| Assumptions | FY0 actuals + FY1–FY5 projected assumptions sourced from LLM_Inferred |
-| LLM_Inferred | Raw LLM assumptions: WACC, revenue growth rates, gross/EBITDA/operating margins, DSO/DIO/DPO |
+| Assumptions | FY0 actuals + FY1–FY5 projected assumptions sourced from Model_Inputs |
+| Model_Inputs | Auditable grounded inputs: CAPM WACC, revenue growth, observed/normalized margins, and working-capital days |
 | Historical | Derived metrics across 4 fiscal years: revenue, margins, growth rates, working-capital ratios |
 | Projections | 5-year forward projections — revenue, COGS, gross profit, EBIT, NOPAT, D&A, CapEx, NWC, FCF, EBITDA |
 | Valuation (DCF) | Perpetual growth method: WACC build-up (Rf, ERP, beta, Ke, Kd), FCF discounting, terminal value, equity bridge |
@@ -364,7 +370,7 @@ Because the agent decides scope, most conversational questions — a price check
 
 - Python 3.11
 - API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `SERPAPI_API_KEY`
-- Optional: `MONGO_URI` + `MONGO_DB` (article cache + session memory), `FRED_API_KEY` (free; enables `get_macro`), `CHAT_MODEL` (defaults to `gpt-5.4-mini`), and licensed analyst consensus through `BENZINGA_API_KEY` or `FINNHUB_API_KEY`. TipRanks must remain off for durable worker artifacts under ordinary MCP terms; set `TIPRANKS_DURABLE_OUTPUTS_LICENSED=true` only after receiving explicit storage and redistribution rights. Peer comps default to `PEER_COMPS_ENABLED=auto` and activate when `FINNHUB_API_KEY` is present; set the flag to `false` to disable them explicitly.
+- Optional: `MONGO_URI` + `MONGO_DB` (article cache + session memory), `FRED_API_KEY` (free; enables `get_macro`), `CHAT_MODEL` (defaults to `gpt-5.4-mini`), and licensed analyst consensus through `BENZINGA_API_KEY` or `FINNHUB_API_KEY`. When Benzinga is configured, the Analyst Insights endpoint may contribute a bounded set of dated firm/action/rating/target observations (`BENZINGA_ANALYST_INSIGHTS_ENABLED=true`, latest eight by default). Licensed narrative prose is deliberately not read or stored. Structured observations benchmark coverage, recency, dispersion, and contradictions; they never become model instructions or an intrinsic-value leg. TipRanks must remain off for durable worker artifacts under ordinary MCP terms; set `TIPRANKS_DURABLE_OUTPUTS_LICENSED=true` only after receiving explicit storage and redistribution rights. Peer comps are opt-in (`PEER_COMPS_ENABLED=true`) because the same Finnhub key is also used for analyst evidence and must not silently add latency or a weaker valuation leg. Keep them off until the target universe has passed peer-identity and comparability review.
 
 ### Installation
 

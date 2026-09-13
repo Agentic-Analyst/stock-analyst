@@ -10,24 +10,20 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV DATA_PATH=/data
 ENV VYNN_SOURCE_REVISION=$VYNN_SOURCE_REVISION
 
-# Install system dependencies for newspaper3k and other packages
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    git \
-    libxml2-dev \
-    libxslt-dev \
-    libjpeg-dev \
-    zlib1g-dev \
-    libpng-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 # Set working directory
 WORKDIR /app
 
 # Copy and install Python dependencies first (for better Docker caching)
 COPY requirements.txt requirements.lock ./
-RUN pip install --no-cache-dir -r requirements.lock
+# Compile/install dependencies, then remove the toolchain from the runtime
+# filesystem.  Runtime code consumes the installed manylinux wheels and must
+# not retain Git or compilers merely because they were needed at build time.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc g++ git libxml2-dev libxslt1-dev libjpeg-dev zlib1g-dev libpng-dev \
+    && python -m pip install --no-cache-dir -r requirements.lock \
+    && apt-get purge -y --auto-remove \
+        gcc g++ git libxml2-dev libxslt1-dev libjpeg-dev zlib1g-dev libpng-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy source code
 COPY src/ src/
