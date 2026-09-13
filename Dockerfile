@@ -1,14 +1,10 @@
 # stock-analyst/Dockerfile
 FROM python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7 AS runtime
 
-ARG VYNN_SOURCE_REVISION=unversioned
-LABEL org.opencontainers.image.revision=$VYNN_SOURCE_REVISION
-
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV DATA_PATH=/data
-ENV VYNN_SOURCE_REVISION=$VYNN_SOURCE_REVISION
 
 # Set working directory
 WORKDIR /app
@@ -39,9 +35,13 @@ VOLUME ["/data"]
 FROM runtime AS test
 COPY requirements-test.lock ./
 RUN python -m pip install --no-cache-dir -r requirements-test.lock
+COPY Dockerfile ./Dockerfile
 COPY tests/ tests/
 CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
 
 FROM runtime AS production
+ARG VYNN_SOURCE_REVISION=unversioned
+LABEL org.opencontainers.image.revision=$VYNN_SOURCE_REVISION
+ENV VYNN_SOURCE_REVISION=$VYNN_SOURCE_REVISION
 # Set the entry point
 ENTRYPOINT ["python", "main.py"]

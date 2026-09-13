@@ -30,7 +30,6 @@ Thumbs.db
 .gitignore
 
 # Exclude Docker files themselves
-Dockerfile
 DockerFile
 .dockerignore
 
