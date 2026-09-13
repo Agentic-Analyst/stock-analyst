@@ -228,7 +228,6 @@ class CompanyDailyReportGenerator:
             import traceback
             self._log("error", traceback.format_exc())
             return []
-            return []
     
     def _scrape_and_filter_fallback(self) -> bool:
         """Fallback method to scrape and filter articles when database is empty.
@@ -297,7 +296,8 @@ class CompanyDailyReportGenerator:
                 self.article_filter = ArticleFilter(
                     ticker=self.ticker,
                     base_path=self.logger.data_dir,  # Correct parameter name
-                    query=query
+                    query=query,
+                    company_name=company_name,
                 )
                 # Set logger separately
                 self.article_filter.set_logger(self.logger)
@@ -973,4 +973,3 @@ class CompanyDailyReportGenerator:
         self._log("info", f"✅ Daily report generation complete. Total cost: ${self.total_llm_cost:.4f}")
         
         return report
-

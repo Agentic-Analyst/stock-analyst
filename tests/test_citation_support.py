@@ -70,6 +70,25 @@ def test_claim_number_must_appear_in_the_cited_evidence():
     assert report["citation_support_issues"]
 
 
+def test_model_generated_evidence_title_and_reasoning_cannot_self_validate():
+    pack = _pack("Apple announced a routine dividend payment.")
+    pack["evidence"][0]["title"] = "Apple faces a Department of Justice antitrust trial"
+    pack["evidence"][0]["reasoning"] = (
+        "Apple faces a Department of Justice antitrust trial"
+    )
+
+    _, report = RecommendationValidator().validate_and_correct(
+        json.dumps(_response(
+            "Apple faces a Department of Justice antitrust trial [E1]."
+        )),
+        FIXED,
+        pack,
+    )
+
+    assert report["valid"] is False
+    assert report["citation_support_issues"]
+
+
 def test_degraded_delivery_removes_unsupported_but_keeps_supported_citation():
     validator = RecommendationValidator()
     data = _response(

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import statistics
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from threading import Lock
@@ -24,6 +25,8 @@ import requests
 
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 BENZINGA_CONSENSUS_URL = "https://api.benzinga.com/api/v1/consensus-ratings"
+BENZINGA_RATINGS_URL = "https://api.benzinga.com/api/v2.1/calendar/ratings"
+BENZINGA_ANALYST_INSIGHTS_URL = "https://api.benzinga.com/api/v1/analyst/insights"
 TIPRANKS_MCP_URL = "https://mcp.tipranks.com/mcp/"
 TIPRANKS_PROTOCOL_VERSION = "2025-03-26"
 
@@ -36,9 +39,12 @@ _tipranks_calls = 0
 
 
 def _positive(value: Any) -> Optional[float]:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
     return number if math.isfinite(number) and number > 0 else None
 
 
@@ -112,7 +118,18 @@ def _snapshot(payload: Dict[str, Any]) -> tuple[Optional[str], Dict[str, Any]]:
         "captured_at": payload.get("captured_at"),
         "price_target": deepcopy(payload.get("price_target") or {}),
         "recommendation": deepcopy(payload.get("recommendation") or {}),
+        # Only structured observation metadata may cross the provider
+        # boundary.  Licensed narrative prose from the Analyst Insights
+        # endpoint is deliberately never copied into a financial artifact.
+        "analyst_observations": deepcopy(
+            payload.get("analyst_observations") or {}
+        ),
     }
+    # Provider query scope is part of the provenance.  Dropping it made a
+    # reconstructed six-month Benzinga observation set look indistinguishable
+    # from a provider-maintained point-in-time consensus snapshot.
+    if payload.get("window"):
+        record["window"] = deepcopy(payload["window"])
     if payload.get("partial_errors"):
         record["partial_errors"] = list(payload["partial_errors"])
     return source, record
@@ -262,6 +279,7 @@ def yahoo_snapshot(guidance: Optional[Dict[str, Any]], *,
             "high": high,
             "low": low,
             "analyst_count": count,
+            "coverage_unit": "provider_reported_analyst_opinions",
             "currency": currency,
             "as_of": None,
             "source": "yahoo_finance",
@@ -269,7 +287,13 @@ def yahoo_snapshot(guidance: Optional[Dict[str, Any]], *,
         "recommendation": {
             "label": guidance.get("recommendation_key"),
             "mean": guidance.get("recommendation_mean"),
-            "analyst_count": count,
+            # numberOfAnalystOpinions belongs to Yahoo's price-target fields;
+            # it is not the population behind recommendationKey. Reusing it
+            # here made one opaque aggregate label look like a 39-person
+            # rating distribution and gave it an unjustified veto in the
+            # publication boundary.
+            "analyst_count": 0,
+            "coverage_count_available": False,
             "period": None,
             "source": "yahoo_finance",
         },
@@ -319,6 +343,7 @@ class FinnhubConsensusClient:
             "high": _positive(target.get("targetHigh")),
             "low": _positive(target.get("targetLow")),
             "analyst_count": _count(target.get("numberAnalysts")),
+            "coverage_unit": "provider_reported_analysts",
             "currency": currency,
             "as_of": target.get("lastUpdated"),
             "source": "finnhub",
@@ -333,6 +358,8 @@ class FinnhubConsensusClient:
         )
         recommendation = _recommendation(
             latest, period=latest.get("period"), source="finnhub") if latest else {}
+        if recommendation:
+            recommendation["coverage_unit"] = "provider_rating_observations"
 
         if not price_target and not recommendation:
             return {}
@@ -357,6 +384,309 @@ class BenzingaConsensusClient:
         self.timeout = timeout
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
+    @staticmethod
+    def _dated_row_time(row: Dict[str, Any]) -> Optional[datetime]:
+        raw = str(row.get("date") or "").strip()
+        if not raw:
+            return None
+        time_text = str(row.get("time") or "00:00:00").strip() or "00:00:00"
+        try:
+            parsed = datetime.fromisoformat(f"{raw}T{time_text}")
+        except ValueError:
+            return None
+        return parsed.replace(tzinfo=timezone.utc)
+
+    def _fetch_dated(self, ticker: str, *, currency: Optional[str],
+                     date_from: str, date_to: str) -> Dict[str, Any]:
+        """Build a current consensus from dated, latest-per-analyst records."""
+        response = self.session.get(
+            BENZINGA_RATINGS_URL,
+            params={
+                "token": self.api_key,
+                "parameters[tickers]": ticker,
+                "parameters[date_from]": date_from,
+                "parameters[date_to]": date_to,
+                "pagesize": 1000,
+                "fields": (
+                    "id,date,time,ticker,currency,rating_current,pt_current,"
+                    "analyst,analyst_id,analyst_name,firm_id,updated"
+                ),
+            },
+            headers={"accept": "application/json"},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = payload.get("ratings") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return {}
+
+        start = datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc)
+        end = (
+            datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc)
+            + timedelta(days=1)
+        )
+        latest: Dict[
+            tuple[str, str], tuple[tuple[float, float, str], datetime, Dict[str, Any]]
+        ] = {}
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("ticker") or ticker).strip().upper() != ticker:
+                continue
+            observed = self._dated_row_time(raw)
+            if observed is None or not start <= observed < end:
+                continue
+            analyst = str(
+                raw.get("analyst_id") or raw.get("analyst_name")
+                or raw.get("analyst") or ""
+            ).strip().casefold()
+            firm = str(raw.get("firm_id") or raw.get("analyst") or "").strip().casefold()
+            # Preserve distinct records when provider identity is missing;
+            # never collapse all anonymous rows into one synthetic analyst.
+            if not analyst and not firm:
+                analyst = str(raw.get("id") or "").strip().casefold()
+            if not analyst:
+                continue
+            key = (analyst, firm)
+            try:
+                updated = float(raw.get("updated") or 0)
+            except (TypeError, ValueError):
+                updated = 0.0
+            if not math.isfinite(updated):
+                updated = 0.0
+            order = (
+                observed.timestamp(), updated,
+                str(raw.get("id") or ""),
+            )
+            previous = latest.get(key)
+            if previous is None or order > previous[0]:
+                latest[key] = (order, observed, raw)
+
+        observations = sorted(
+            ((observed, row) for _, observed, row in latest.values()),
+            key=lambda item: item[0],
+        )
+        if not observations:
+            return {}
+        expected_currency = str(currency or "").strip().upper()
+        targets: list[tuple[datetime, float, str]] = []
+        counts = {key: 0 for key in (
+            "strong_buy", "buy", "hold", "sell", "strong_sell"
+        )}
+        rating_dates: list[datetime] = []
+        for observed, row in observations:
+            row_currency = str(row.get("currency") or "").strip().upper()
+            value = _positive(row.get("pt_current"))
+            if value is not None and row_currency and (
+                not expected_currency or row_currency == expected_currency
+            ):
+                targets.append((observed, value, row_currency))
+            label = _normalized_label(row.get("rating_current"))
+            if label:
+                counts[label] += 1
+                rating_dates.append(observed)
+
+        target_currency = expected_currency or (
+            targets[0][2] if targets and len({row[2] for row in targets}) == 1 else ""
+        )
+        target_values = [row[1] for row in targets]
+        price_target = ({
+            "mean": statistics.fmean(target_values),
+            "median": statistics.median(target_values),
+            "high": max(target_values),
+            "low": min(target_values),
+            "analyst_count": len(target_values),
+            "coverage_unit": "latest_analyst_firm_target_observations",
+            "currency": target_currency or None,
+            "as_of": max(row[0] for row in targets).date().isoformat(),
+            "oldest_observation_as_of": min(row[0] for row in targets).date().isoformat(),
+            "source": "benzinga",
+            "source_endpoint": "dated_ratings",
+        } if target_values and target_currency else {})
+        recommendation = _recommendation(
+            counts,
+            period=max(rating_dates).date().isoformat() if rating_dates else None,
+            source="benzinga",
+        ) if rating_dates else {}
+        if recommendation:
+            recommendation["unique_analyst_count"] = recommendation["total"]
+            recommendation["coverage_unit"] = (
+                "latest_analyst_firm_rating_observations"
+            )
+            recommendation["oldest_observation_as_of"] = min(
+                rating_dates
+            ).date().isoformat()
+            recommendation["source_endpoint"] = "dated_ratings"
+        if not price_target and not recommendation:
+            return {}
+        return {
+            "captured_at": self.clock().isoformat(),
+            "providers": ["benzinga"],
+            "window": {
+                "date_from": date_from,
+                "date_to": date_to,
+                "records_received": len(rows),
+                "unique_analyst_firm_records": len(observations),
+                "source_endpoint": "dated_ratings",
+            },
+            "price_target": price_target,
+            "recommendation": recommendation,
+        }
+
+    def _fetch_insights(self, ticker: str, *, currency: Optional[str],
+                        date_from: str, date_to: str) -> Dict[str, Any]:
+        """Collect structured, dated analyst observations from the endpoint.
+
+        The response also contains licensed narrative summaries.  This method
+        intentionally never reads that field.  Only firm/date/action/rating/
+        target metadata may enter a durable artifact or downstream model
+        context.  The structured observations remain useful for coverage,
+        dispersion, recency, and contradiction checks without copying provider
+        prose or pretending metadata reveals the analyst's reasoning.
+        """
+        enabled = str(os.getenv(
+            "BENZINGA_ANALYST_INSIGHTS_ENABLED", "true"
+        ) or "").strip().lower() in {"1", "true", "yes"}
+        if not enabled:
+            return {}
+        try:
+            configured_limit = int(os.getenv(
+                "BENZINGA_ANALYST_INSIGHTS_MAX_RECORDS", "8"
+            ) or "8")
+        except ValueError:
+            configured_limit = 8
+        limit = min(max(configured_limit, 1), 25)
+        response = self.session.get(
+            BENZINGA_ANALYST_INSIGHTS_URL,
+            params={
+                "token": self.api_key,
+                "symbols": ticker,
+                "date_from": date_from,
+                "date_to": date_to,
+                # Fetch enough rows to deduplicate provider updates before the
+                # much smaller artifact/prompt limit is applied.
+                "pageSize": 100,
+                "sort": "date:desc",
+            },
+            headers={"accept": "application/json"},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = payload.get("analyst-insights") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return {}
+        start = datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc)
+        end = datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc) + timedelta(days=1)
+        latest: Dict[str, tuple[tuple[float, float, str], Dict[str, Any]]] = {}
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            security = raw.get("security") if isinstance(raw.get("security"), dict) else {}
+            if str(security.get("symbol") or "").strip().upper() != ticker:
+                continue
+            raw_date = str(raw.get("date") or "").strip()
+            try:
+                observed = datetime.fromisoformat(raw_date).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if not start <= observed < end:
+                continue
+            identity = str(raw.get("analyst_id") or "").strip().casefold()
+            if not identity:
+                identity = "|".join((
+                    str(raw.get("firm_id") or raw.get("firm") or "").strip().casefold(),
+                    str(raw.get("rating_id") or raw.get("id") or "").strip().casefold(),
+                ))
+            if not identity.strip("|"):
+                continue
+            try:
+                updated = float(raw.get("updated") or 0)
+            except (TypeError, ValueError):
+                updated = 0.0
+            if not math.isfinite(updated):
+                updated = 0.0
+            order = (observed.timestamp(), updated, str(raw.get("id") or ""))
+            normalized = {
+                "date": observed.date().isoformat(),
+                "firm": str(raw.get("firm") or "").strip()[:120] or None,
+                "action": str(raw.get("action") or "").strip()[:60] or None,
+                "rating": _normalized_label(raw.get("rating"))
+                or str(raw.get("rating") or "").strip()[:60] or None,
+                "price_target": _positive(raw.get("pt")),
+                "source": "benzinga",
+                "source_endpoint": "analyst_insights",
+            }
+            if normalized["rating"] is None and normalized["price_target"] is None:
+                continue
+            previous = latest.get(identity)
+            if previous is None or order > previous[0]:
+                latest[identity] = (order, normalized)
+        all_observations = [row for _, row in sorted(
+            latest.values(), key=lambda item: item[0], reverse=True
+        )]
+        observations = all_observations[:limit]
+        if not observations:
+            return {}
+        dates = [row["date"] for row in observations]
+        target_rows = [
+            row for row in all_observations
+            if _positive(row.get("price_target")) is not None
+        ]
+        target_values = [float(row["price_target"]) for row in target_rows]
+        target_dates = [row["date"] for row in target_rows]
+        price_target_observations = ({
+            "mean": statistics.fmean(target_values),
+            "median": statistics.median(target_values),
+            "high": max(target_values),
+            "low": min(target_values),
+            "analyst_count": len(target_values),
+            "coverage_unit": "latest_analyst_insight_target_observations",
+            "currency": currency,
+            "as_of": max(target_dates),
+            "oldest_observation_as_of": min(target_dates),
+            "source": "benzinga",
+            "source_endpoint": "analyst_insights",
+        } if target_values and currency else {})
+        rating_counts = {key: 0 for key in (
+            "strong_buy", "buy", "hold", "sell", "strong_sell"
+        )}
+        rating_dates = []
+        for row in all_observations:
+            label = _normalized_label(row.get("rating"))
+            if label:
+                rating_counts[label] += 1
+                rating_dates.append(row["date"])
+        recommendation_observations = (
+            _recommendation(
+                rating_counts, period=max(rating_dates), source="benzinga",
+            ) if rating_dates else {}
+        )
+        if recommendation_observations:
+            recommendation_observations.update({
+                "unique_analyst_count": recommendation_observations["total"],
+                "coverage_unit": "latest_analyst_insight_rating_observations",
+                "oldest_observation_as_of": min(rating_dates),
+                "source_endpoint": "analyst_insights",
+            })
+        return {
+            "source": "benzinga",
+            "source_endpoint": "analyst_insights",
+            "observation_count": len(observations),
+            "as_of": max(dates),
+            "oldest_observation_as_of": min(dates),
+            "records_received": len(rows),
+            "unique_analyst_records": len(all_observations),
+            "observations": observations,
+            **({"price_target_observations": price_target_observations}
+               if price_target_observations else {}),
+            **({"recommendation_observations": recommendation_observations}
+               if recommendation_observations else {}),
+            "included_in_intrinsic_value": False,
+            "content_policy": "structured_metadata_only_no_licensed_prose",
+        }
+
     def fetch(self, ticker: str, *, currency: Optional[str] = None) -> Dict[str, Any]:
         ticker = (ticker or "").strip().upper()
         if not ticker or not self.api_key:
@@ -368,7 +698,43 @@ class BenzingaConsensusClient:
             lookback_days = 365
         lookback_days = min(max(lookback_days, 30), 730)
         date_to = now.date().isoformat()
+        # A dated consensus can participate in publication only inside the
+        # same maximum-age rail used downstream. The wider legacy aggregate
+        # window remains available solely as an undated fallback.
+        try:
+            benchmark_days = int(
+                os.getenv("ANALYST_BENCHMARK_MAX_AGE_DAYS", "180") or "180"
+            )
+        except ValueError:
+            benchmark_days = 180
+        benchmark_days = min(max(benchmark_days, 30), 730)
+        dated_from = (
+            now - timedelta(days=min(lookback_days, benchmark_days))
+        ).date().isoformat()
         date_from = (now - timedelta(days=lookback_days)).date().isoformat()
+        partial_errors = []
+        insights = {}
+        try:
+            insights = self._fetch_insights(
+                ticker, currency=currency, date_from=dated_from, date_to=date_to
+            )
+        except Exception as error:
+            # The credential is a query parameter; record only the error class.
+            partial_errors.append(f"analyst_insights:{type(error).__name__}")
+        try:
+            dated = self._fetch_dated(
+                ticker, currency=currency, date_from=dated_from, date_to=date_to
+            )
+            if dated:
+                if insights:
+                    dated["analyst_observations"] = insights
+                if partial_errors:
+                    dated["partial_errors"] = partial_errors
+                return dated
+        except Exception as error:
+            # Endpoint entitlement varies by plan. Never include the exception
+            # string because the credential is in the request query.
+            partial_errors.append(f"dated_ratings:{type(error).__name__}")
         try:
             response = self.session.get(
                 BENZINGA_CONSENSUS_URL,
@@ -377,7 +743,6 @@ class BenzingaConsensusClient:
                     "parameters[tickers]": ticker,
                     "aggregate_type": "number",
                     "simplify": "false",
-                    "pagesize": 1,
                     "parameters[date_from]": date_from,
                     "parameters[date_to]": date_to,
                 },
@@ -406,8 +771,15 @@ class BenzingaConsensusClient:
             "high": _positive(payload.get("high_price_target")),
             "low": _positive(payload.get("low_price_target")),
             "analyst_count": analyst_count,
+            "coverage_unit": "provider_unique_analysts",
             "currency": currency,
-            "as_of": payload.get("updated_at"),
+            # Benzinga documents updated_at as the time the aggregate was
+            # calculated, not the issue date of the underlying analyst
+            # observations. A fresh recalculation of a 365-day window is not
+            # evidence that every target is fresh enough to corroborate a
+            # precise valuation, so keep provider as-of unknown.
+            "as_of": None,
+            "aggregate_calculated_at": payload.get("updated_at"),
             "source": "benzinga",
         }
         if not any(price_target.get(key) for key in ("mean", "high", "low", "analyst_count")):
@@ -416,7 +788,9 @@ class BenzingaConsensusClient:
         distribution = payload.get("aggregate_ratings")
         recommendation = _recommendation(
             distribution if isinstance(distribution, dict) else {},
-            period=payload.get("updated_at"), source="benzinga",
+            # As above, aggregate calculation time is not an underlying
+            # recommendation observation date.
+            period=None, source="benzinga",
         )
         provider_label = _normalized_label(payload.get("consensus_rating"))
         if recommendation and provider_label:
@@ -425,24 +799,48 @@ class BenzingaConsensusClient:
             recommendation = {
                 "label": provider_label,
                 "analyst_count": analyst_count,
-                "period": payload.get("updated_at"),
+                "period": None,
                 "source": "benzinga",
             }
         if recommendation:
             recommendation["provider_score"] = _positive(payload.get("consensus_rating_val"))
             recommendation["unique_analyst_count"] = analyst_count
+            recommendation["coverage_unit"] = "provider_unique_analysts"
             recommendation["total_rating_count"] = _count(payload.get("total_analyst_count"))
+            recommendation["aggregate_calculated_at"] = payload.get("updated_at")
 
-        if not price_target and not recommendation:
+        # The aggregate endpoint has broader coverage but no observation date.
+        # When the separately licensed insights endpoint supplies at least five
+        # latest-per-analyst dated records, use that bounded observation sample
+        # as the current benchmark. Keep it explicitly labelled as a sample;
+        # never describe it as the provider's full consensus population.
+        insight_target = insights.get("price_target_observations") or {}
+        if _count(insight_target.get("analyst_count")) >= _minimum_analysts():
+            if price_target:
+                insights["undated_aggregate_price_target"] = deepcopy(price_target)
+            price_target = deepcopy(insight_target)
+        insight_recommendation = insights.get("recommendation_observations") or {}
+        if _section_coverage(
+            {"recommendation": insight_recommendation}, "recommendation"
+        ) >= _minimum_analysts():
+            if recommendation:
+                insights["undated_aggregate_recommendation"] = deepcopy(recommendation)
+            recommendation = deepcopy(insight_recommendation)
+
+        if not price_target and not recommendation and not insights:
             return {}
-        return {
+        result = {
             "captured_at": now.isoformat(),
             "providers": ["benzinga"],
             "window": {"date_from": date_from, "date_to": date_to,
                        "lookback_days": lookback_days},
             "price_target": price_target,
             "recommendation": recommendation,
+            **({"analyst_observations": insights} if insights else {}),
         }
+        if partial_errors:
+            result["partial_errors"] = partial_errors
+        return result
 
 
 def _tipranks_call_allowed() -> bool:
@@ -609,10 +1007,37 @@ def _merge_many(*payloads: Dict[str, Any],
         for payload in all_payloads
         for provider in list(payload.get("providers") or [])
     ))
-    for payload in usable[1:]:
-        for section in ("price_target", "recommendation"):
-            if not out.get(section):
-                out[section] = deepcopy(payload.get(section) or {})
+    # Select each normalized section on its own coverage. A provider can have
+    # a well-covered recommendation distribution but only one price target (or
+    # vice versa). Using the maximum coverage across both sections made that
+    # provider primary for everything and could hide a 30-analyst Yahoo target
+    # behind a one-analyst licensed snapshot. Prefer the first adequately
+    # covered section in provider-priority order; retain the first available
+    # section only when no source meets the configured floor. Every provider's
+    # raw snapshot remains below for audit and cross-source contradiction rails.
+    for section in ("price_target", "recommendation"):
+        available = [
+            payload for payload in usable
+            if isinstance(payload.get(section), dict) and payload.get(section)
+        ]
+        qualified = [
+            payload for payload in available
+            if _section_coverage(payload, section) >= _minimum_analysts()
+        ]
+        selected = qualified or available
+        out[section] = deepcopy(selected[0].get(section) or {}) if selected else {}
+    # Structured analyst-record metadata does not borrow target/rating
+    # coverage and never becomes the active consensus, but it must survive
+    # when another provider wins a numerical section. Licensed prose is never
+    # collected or copied here.
+    observation_sections = [
+        payload.get("analyst_observations")
+        for payload in all_payloads
+        if isinstance(payload.get("analyst_observations"), dict)
+        and payload.get("analyst_observations")
+    ]
+    if observation_sections:
+        out["analyst_observations"] = deepcopy(observation_sections[0])
     return _with_source_evidence(out, *all_payloads)
 
 
@@ -631,12 +1056,33 @@ def _coverage_count(payload: Dict[str, Any]) -> int:
     )
 
 
+def _section_coverage(payload: Dict[str, Any], section: str) -> int:
+    """Coverage owned by one normalized section, never borrowed from another."""
+    row = payload.get(section) or {}
+    if not isinstance(row, dict):
+        return 0
+    if section == "price_target":
+        return _count(row.get("analyst_count"))
+    if section == "recommendation":
+        return max(
+            _count(row.get("unique_analyst_count")),
+            _count(row.get("analyst_count")),
+            _count(row.get("total")),
+            _count(row.get("total_rating_count")),
+        )
+    return 0
+
+
 def _minimum_analysts() -> int:
     try:
-        configured = int(os.getenv("ANALYST_CONSENSUS_MIN_ANALYSTS", "3") or "3")
+        configured = int(os.getenv("ANALYST_CONSENSUS_MIN_ANALYSTS", "5") or "5")
     except ValueError:
-        configured = 3
-    return min(max(configured, 1), 20)
+        configured = 5
+    # Publication policy treats fewer than five analysts as thin evidence.
+    # Letting an environment setting lower the collection floor to one or
+    # three silently promoted evidence that the final gate would reject and
+    # made provider selection/reporting inconsistent with policy.
+    return min(max(configured, 5), 20)
 
 
 def collect_consensus(ticker: str, yahoo_guidance: Optional[Dict[str, Any]], *,
@@ -662,16 +1108,31 @@ def collect_consensus(ticker: str, yahoo_guidance: Optional[Dict[str, Any]], *,
         return _merge({}, fallback)
 
     listing_currency = quote_currency or currency
+    benzinga_configured = bool(
+        benzinga_client is not None or (os.getenv("BENZINGA_API_KEY") or "").strip()
+    )
+    finnhub_configured = bool(
+        client is not None or (os.getenv("FINNHUB_API_KEY") or "").strip()
+    )
+    tipranks_configured = bool(
+        tipranks_client is not None or (os.getenv("TIPRANKS_API_KEY") or "").strip()
+    )
     primary: Dict[str, Any] = {}
     supporting: list[Dict[str, Any]] = []
     evidence_only: list[Dict[str, Any]] = []
+    benzinga_payload: Dict[str, Any] = {}
+    finnhub_payload: Dict[str, Any] = {}
+    tipranks_payload: Dict[str, Any] = {}
+    attempted = {"benzinga": False, "finnhub": False, "tipranks": False}
 
     if provider in ("auto", "benzinga"):
         if benzinga_client is None:
             key = (os.getenv("BENZINGA_API_KEY") or "").strip()
             benzinga_client = BenzingaConsensusClient(key) if key else None
         if benzinga_client is not None:
-            primary = benzinga_client.fetch(ticker, currency=listing_currency)
+            attempted["benzinga"] = True
+            benzinga_payload = benzinga_client.fetch(ticker, currency=listing_currency)
+            primary = benzinga_payload
             if primary and _coverage_count(primary) < _minimum_analysts():
                 evidence_only.append(primary)
                 primary = {}
@@ -679,14 +1140,19 @@ def collect_consensus(ticker: str, yahoo_guidance: Optional[Dict[str, Any]], *,
     # Finnhub remains the automatic licensed fallback when Benzinga is absent,
     # unavailable, or returns only one of the two normalized sections.
     needs_finnhub = provider == "finnhub" or (
-        provider == "auto" and (not primary or not primary.get("price_target")
-                                or not primary.get("recommendation")))
+        provider == "auto" and (
+            not primary
+            or _section_coverage(primary, "price_target") < _minimum_analysts()
+            or _section_coverage(primary, "recommendation") < _minimum_analysts()
+        )
+    )
     if needs_finnhub:
         if client is None:
             key = (os.getenv("FINNHUB_API_KEY") or "").strip()
             client = FinnhubConsensusClient(key) if key else None
         if client is not None:
-            finnhub = client.fetch(ticker, currency=listing_currency)
+            attempted["finnhub"] = True
+            finnhub = finnhub_payload = client.fetch(ticker, currency=listing_currency)
             if not primary:
                 primary = finnhub
             elif finnhub:
@@ -698,6 +1164,8 @@ def collect_consensus(ticker: str, yahoo_guidance: Optional[Dict[str, Any]], *,
             tipranks_client = TipRanksConsensusClient(key) if key else None
         tipranks = (tipranks_client.fetch(ticker, currency=listing_currency)
                     if tipranks_client is not None else {})
+        attempted["tipranks"] = tipranks_client is not None
+        tipranks_payload = tipranks
         if tipranks:
             evidence_only.append(tipranks)
     elif (tipranks_contract and
@@ -707,9 +1175,58 @@ def collect_consensus(ticker: str, yahoo_guidance: Optional[Dict[str, Any]], *,
             key = (os.getenv("TIPRANKS_API_KEY") or "").strip()
             tipranks_client = TipRanksConsensusClient(key) if key else None
         if tipranks_client is not None:
+            attempted["tipranks"] = True
             secondary = tipranks_client.fetch(ticker, currency=listing_currency)
+            tipranks_payload = secondary
             if secondary:
                 evidence_only.append(secondary)
 
-    return _merge_many(primary, *supporting, fallback,
-                       evidence_only=tuple(evidence_only))
+    result = _merge_many(primary, *supporting, fallback,
+                         evidence_only=tuple(evidence_only))
+    if result:
+        minimum = _minimum_analysts()
+
+        def status(payload: Dict[str, Any], was_attempted: bool, *, configured: bool) -> Dict[str, Any]:
+            coverage = _coverage_count(payload)
+            target_coverage = _section_coverage(payload, "price_target")
+            recommendation_coverage = _section_coverage(payload, "recommendation")
+            observations = payload.get("analyst_observations") or {}
+            return {
+                "configured": configured,
+                "attempted": was_attempted,
+                "usable": bool(payload),
+                "coverage_count": coverage,
+                "meets_minimum_coverage": coverage >= minimum,
+                "eligible_primary": bool(payload) and coverage >= minimum,
+                "price_target_coverage_count": target_coverage,
+                "price_target_eligible": bool(payload.get("price_target"))
+                and target_coverage >= minimum,
+                "recommendation_coverage_count": recommendation_coverage,
+                "recommendation_eligible": bool(payload.get("recommendation"))
+                and recommendation_coverage >= minimum,
+                "analyst_observations_usable": bool(observations),
+                "analyst_observation_count": _count(
+                    observations.get("observation_count")
+                ),
+                "query_window": deepcopy(payload.get("window") or {}),
+                "partial_errors": list(payload.get("partial_errors") or []),
+            }
+
+        result["provider_status"] = {
+            "yahoo_finance": status(fallback, True, configured=True),
+            "benzinga": status(
+                benzinga_payload, attempted["benzinga"],
+                configured=benzinga_configured,
+            ),
+            "finnhub": status(
+                finnhub_payload, attempted["finnhub"], configured=finnhub_configured,
+            ),
+            "tipranks": {
+                **status(
+                    tipranks_payload, attempted["tipranks"],
+                    configured=tipranks_configured,
+                ),
+                "durable_output_license_confirmed": tipranks_contract,
+            },
+        }
+    return result

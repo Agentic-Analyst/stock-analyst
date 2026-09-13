@@ -8,11 +8,16 @@ that could materially affect the company’s stock price, its catalysts, or its 
 
 Use these rating guidelines:
 
-- **10:** Very likely directly about the company, its financials, operations, products, or major events (earnings, guidance, regulation, management, M&A, etc.)
+- **10:** Direct, financially material company evidence: earnings, guidance, revenue, margins, demand/shipments, regulation, management, M&A, or a product event with credible business impact
 - **8–9:** Strongly related — mentions the company, sector peers, or key market factors (supply chain, demand trends, macro changes) that could impact valuation
 - **6–7:** Possibly relevant — may reference the company’s ecosystem, competitors, or market environment, but not confirmed
 - **4–5:** Weakly related — generic finance or market commentary that only loosely connects to the query
 - **1–3:** Clearly unrelated — not about the company, its industry, or any factor affecting its stock
+
+Merely mentioning a company or product is not enough for a high score. Consumer buying guides, deal roundups,
+availability trackers, how-to articles, product-spec pages, and retail liveblogs should score **1–3** unless the
+snippet contains substantive evidence about demand, sales, shipments, revenue, margins, guidance, or another
+credible financial impact. Do not infer financial significance from retail inventory wording alone.
 
 Assume that some text is truncated; use your judgment from the title and snippet.
 

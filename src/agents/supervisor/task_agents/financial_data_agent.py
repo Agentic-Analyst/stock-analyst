@@ -17,6 +17,7 @@ from datetime import datetime
 
 from src.agents.supervisor.state import FinancialState, FinancialData, PipelineStage, PipelineConfig
 from src.financial_scraper import FinancialScraper
+from src.currency import currency_symbol
 
 
 async def financial_data_agent(
@@ -104,7 +105,10 @@ async def financial_data_agent(
         if basic_info.get("employees"):
             company_context += f" • {basic_info['employees']:,} employees"
         if market_data.get("current_price"):
-            company_context += f" • Current: ${market_data['current_price']:.2f}"
+            company_context += (
+                f" • Current: {currency_symbol(basic_info.get('currency'))}"
+                f"{market_data['current_price']:.2f}"
+            )
         
         stats = {
             "Years of data": data_completeness.get("income_statement_periods", 0),

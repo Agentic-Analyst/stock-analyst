@@ -13,6 +13,7 @@ This agent:
 7. Marks pipeline stage as NEWS_ANALYSIS_COMPLETED
 """
 
+import os
 from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
@@ -30,10 +31,39 @@ from src.config import (
     NEWS_MIN_FRESH_ARTICLES,
 )
 from src.news_freshness import filter_fresh_articles
+from src.article_relevance import filter_subject_articles
 from vynn_core import find_recent
 
 
-def _database_freshness(ticker: str) -> dict:
+def _article_identity(article: dict) -> tuple[str, str]:
+    """Stable best-effort identity for merging persisted and current rows."""
+    source_url = str(article.get("source_url") or article.get("url") or "").strip().casefold()
+    title = " ".join(str(article.get("title") or "").casefold().split())
+    # URLs are the strongest identifier even when provider titles differ.
+    # Fall back to title only when no URL survived extraction.
+    return (source_url, "") if source_url else ("", title)
+
+
+def _merge_screening_articles(*groups: list[dict], limit: int = 50) -> list[dict]:
+    """Merge article sources without throwing away the richer current copy."""
+    merged: dict[tuple[str, str], dict] = {}
+    anonymous = 0
+    for group in groups:
+        for article in group or []:
+            row = dict(article)
+            key = _article_identity(row)
+            if not any(key):
+                anonymous += 1
+                key = (f"__anonymous_{anonymous}", "")
+            existing = merged.get(key)
+            if existing is None or len(str(row.get("text") or "")) > len(
+                str(existing.get("text") or "")
+            ):
+                merged[key] = row
+    return list(merged.values())[:max(0, int(limit))]
+
+
+def _database_freshness(ticker: str, company_name: Optional[str] = None) -> dict:
     """
     Check if database has sufficient recent articles for the ticker.
     
@@ -44,16 +74,32 @@ def _database_freshness(ticker: str) -> dict:
     Returns:
         Number of articles found in database
     """
+    # Mongo persistence is optional in local, dry-run, and degraded production
+    # paths.  Calling vynn_core with blank values first emits a low-level
+    # "Empty host" error before the current-run fallback succeeds.  Make the
+    # absence explicit and silent here; current-run articles are still merged
+    # and screened below.
+    if not all(str(os.getenv(key) or "").strip() for key in ("MONGO_URI", "MONGO_DB")):
+        return {
+            "status": "unavailable",
+            "fresh_articles": 0,
+            "minimum_articles": NEWS_MIN_FRESH_ARTICLES,
+            "reason": "mongodb_not_configured",
+        }
     try:
         candidates = find_recent(
             limit=NEWS_CANDIDATE_LIMIT,
             collection_name=ticker,
         )
+        candidates, irrelevant_count = filter_subject_articles(
+            candidates or [], ticker, company_name
+        )
         _, freshness = filter_fresh_articles(
-            candidates or [],
+            candidates,
             max_age_days=NEWS_MAX_AGE_DAYS,
             minimum_articles=NEWS_MIN_FRESH_ARTICLES,
         )
+        freshness["irrelevant_articles_excluded"] = irrelevant_count
         return freshness
     except Exception as exc:
         # If database check fails, return unavailable to trigger scraping.
@@ -111,7 +157,7 @@ async def news_analysis_agent(
         
         # Check if we have sufficient articles in database
         min_articles_threshold = NEWS_MIN_FRESH_ARTICLES
-        db_freshness = _database_freshness(state.ticker)
+        db_freshness = _database_freshness(state.ticker, state.company_name)
         db_article_count = int(db_freshness.get("fresh_articles") or 0)
         
         state.log_action(
@@ -124,6 +170,7 @@ async def news_analysis_agent(
         
         # Determine if scraping is needed
         needs_scraping = db_article_count < min_articles_threshold
+        current_screening_articles = []
         
         if needs_scraping:
             state.log_action(
@@ -178,7 +225,10 @@ async def news_analysis_agent(
             # Generate search query
             filter_query = f"{state.company_name} financial outlook earnings growth investment analysis"
             
-            article_filter = ArticleFilter(state.ticker, filter_query, analysis_path)
+            article_filter = ArticleFilter(
+                state.ticker, filter_query, analysis_path,
+                company_name=state.company_name,
+            )
             if effective_logger:
                 article_filter.set_logger(effective_logger)
             
@@ -186,6 +236,7 @@ async def news_analysis_agent(
             filtering_results = await article_filter.filter_articles_async()  # Uses config internally
             
             filtered_articles = filtering_results.get("filtered_articles", [])
+            current_screening_articles = filtering_results.get("screening_articles", [])
             filter_llm_cost = filtering_results.get("llm_cost", 0.0)
             
             state.log_action(
@@ -207,13 +258,39 @@ async def news_analysis_agent(
             f"[3/3] Screening articles for investment insights..."
         )
         
-        screener = ArticleScreener(state.ticker, analysis_path)
+        screener = ArticleScreener(
+            state.ticker, analysis_path, company_name=state.company_name
+        )
         if effective_logger:
             screener.set_logger(effective_logger)
         
-        # Load articles from database
-        articles_data = screener.load_articles_from_db(limit=50)
-        freshness = screener.last_freshness
+        # MongoDB is shared persistence, not a single point of failure. Merge
+        # persisted evidence with the articles admitted during this run, then
+        # reapply both deterministic gates to the combined set.
+        database_articles = screener.load_articles_from_db(limit=50)
+        article_candidates = _merge_screening_articles(
+            database_articles,
+            current_screening_articles,
+            limit=NEWS_CANDIDATE_LIMIT,
+        )
+        article_candidates, irrelevant_count = filter_subject_articles(
+            article_candidates, state.ticker, state.company_name
+        )
+        articles_data, freshness = filter_fresh_articles(
+            article_candidates,
+            max_age_days=NEWS_MAX_AGE_DAYS,
+            minimum_articles=NEWS_MIN_FRESH_ARTICLES,
+            limit=50,
+        )
+        freshness["irrelevant_articles_excluded"] = irrelevant_count
+        freshness["persistence_status"] = (
+            "available"
+            if screener.last_freshness.get("status") != "unavailable"
+            else "unavailable_current_run_retained"
+            if current_screening_articles
+            else "unavailable"
+        )
+        screener.last_freshness = freshness
         state.log_action("news_analysis_agent", f"Analyzing {len(articles_data)} articles...")
 
         # Extract insights using LLM — PARALLEL fan-out. This agent is already

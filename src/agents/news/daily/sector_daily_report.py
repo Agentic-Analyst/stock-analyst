@@ -137,9 +137,12 @@ class SectorDailyReportGenerator:
         """
         self.sector = sector
         self.sector_collection = sector.upper().replace(" ", "_")  # e.g., "TECHNOLOGY"
-        self.output_dir = output_dir
+        self.output_dir = output_dir or project_root / "reports" / "daily" / "sectors"
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.logger = logger
+        self.logger = logger or StockAnalystLogger(
+            ticker=self.sector_collection,
+            base_path=project_root / "data" / self.sector_collection,
+        )
         
         # LLM setup
         self.llm = get_llm()
@@ -289,7 +292,8 @@ class SectorDailyReportGenerator:
                     article_filter = ArticleFilter(
                         ticker=ticker,
                         base_path=temp_analysis_path,
-                        query=sector_query
+                        query=sector_query,
+                        company_name=company_name,
                     )
                     article_filter.set_logger(self.logger)
                     
@@ -321,54 +325,27 @@ class SectorDailyReportGenerator:
             return False
     
     def _get_sector_companies(self) -> List[Dict[str, str]]:
-        """Get list of major companies for a given sector using LLM.
+        """Get a bounded, reviewed set of representative sector companies.
         
-        Uses LLM to dynamically identify top companies in the sector based on:
-        - Market capitalization (large-cap leaders)
-        - Sector purity (primary business in the sector)
-        - Institutional relevance
-        - Liquidity and trading volume
-        
-        Returns:
-            List of dictionaries with 'ticker' and 'name' keys
+        This fallback decides which companies will be scraped and persisted to
+        a sector collection.  It must not come from an LLM: a plausible but
+        misclassified ticker silently contaminates every later sector report.
+        Unknown sectors fail closed instead of generating an unreviewed list.
         """
-        try:
-            self._log("info", f"🤖 Using LLM to identify major companies in {self.sector} sector...")
-            
-            # Load prompt
-            system_prompt = load_prompt("sector_companies_identification")
-            
-            user_prompt = f"""Identify the top 7 major publicly traded companies in the {self.sector} sector.
-
-Sector: {self.sector}
-
-Return ONLY a JSON array with no markdown formatting:"""
-            
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-            
-            # Call LLM
-            response, cost = self.llm(messages)
-            self.total_llm_cost += cost
-            self._log("info", f"💰 LLM cost for company identification: ${cost:.4f}")
-            
-            # Parse response
-            companies = self._parse_sector_companies_response(response)
-            
-            if not companies:
-                self._log("warning", f"LLM returned no companies for {self.sector}, using fallback")
-                return self._get_fallback_sector_companies()
-            
-            self._log("info", f"✅ LLM identified {len(companies)} companies: {[c['ticker'] for c in companies]}")
-            return companies
-            
-        except Exception as e:
-            self._log("error", f"Error getting sector companies via LLM: {e}")
-            self._log("error", traceback.format_exc())
-            self._log("warning", "Falling back to hardcoded sector mapping")
-            return self._get_fallback_sector_companies()
+        companies = self._get_fallback_sector_companies()
+        if companies:
+            self._log(
+                "info",
+                f"Using reviewed {self.sector} representatives: "
+                f"{[row['ticker'] for row in companies]}",
+            )
+        else:
+            self._log(
+                "warning",
+                f"No reviewed constituent set exists for sector {self.sector}; "
+                "fallback scraping is disabled",
+            )
+        return companies
     
     def _parse_sector_companies_response(self, response: str) -> List[Dict[str, str]]:
         """Parse LLM response to extract company list.
@@ -423,11 +400,10 @@ Return ONLY a JSON array with no markdown formatting:"""
             'TECHNOLOGY': [
                 {'ticker': 'AAPL', 'name': 'Apple Inc.'},
                 {'ticker': 'MSFT', 'name': 'Microsoft Corporation'},
-                {'ticker': 'GOOGL', 'name': 'Alphabet Inc.'},
                 {'ticker': 'NVDA', 'name': 'NVIDIA Corporation'},
-                {'ticker': 'META', 'name': 'Meta Platforms Inc.'},
-                {'ticker': 'AMZN', 'name': 'Amazon.com Inc.'},
-                {'ticker': 'TSLA', 'name': 'Tesla Inc.'},
+                {'ticker': 'AVGO', 'name': 'Broadcom Inc.'},
+                {'ticker': 'ORCL', 'name': 'Oracle Corporation'},
+                {'ticker': 'CRM', 'name': 'Salesforce Inc.'},
             ],
             'HEALTHCARE': [
                 {'ticker': 'UNH', 'name': 'UnitedHealth Group'},
@@ -497,7 +473,7 @@ Return ONLY a JSON array with no markdown formatting:"""
             ],
         }
         
-        return sector_mapping.get(self.sector_collection, [])
+        return [dict(row) for row in sector_mapping.get(self.sector_collection, [])]
     
     def fetch_price_action_data(self, articles: List[Dict]) -> Dict[str, Any]:
         """
@@ -835,5 +811,3 @@ Top Laggard: {top_laggard_str}
         self._log("info", f"📄 Report saved to: {report_path}")
         
         return report_path
-
-

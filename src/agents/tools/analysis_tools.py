@@ -17,6 +17,7 @@ print the ``Identified ticker:`` line api-runner scrapes.
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Optional
@@ -288,13 +289,287 @@ def _report_headline(content: Optional[str]) -> dict:
     rating = re.search(r"^#{2,3}\s*Investment Rating:\s*(.+?)\s*$", content, re.M)
     if rating:
         out["rating"] = rating.group(1).strip()
-    target = re.search(r"\*\*12-Month Price Target\*\*:\s*(\S+)", content)
+    target = re.search(
+        r"\*\*12-Month Price Target\*\*:\s*"
+        r"((?:[A-Z]{3}\s+)?(?:[$€£¥₹]\s*)?[\d,]+(?:\.\d+)?)",
+        content,
+    )
     if target:
         out["price_target_12m"] = target.group(1).strip()
-    expected = re.search(r"\*\*Expected Return\*\*:\s*([+-]?[\d.]+)%", content)
+    expected = re.search(
+        r"\*\*(?:Expected Return|Implied Return if Intrinsic Value Converges)\*\*:\s*"
+        r"([+-]?[\d.]+)%",
+        content,
+    )
     if expected:
         out["price_target_expected_return_pct"] = float(expected.group(1))
     return out
+
+
+def _bounded_report_headline(
+    content: Optional[str], *, point_estimate_withheld: bool
+) -> dict:
+    """Return only headline claims permitted by the machine publication gate.
+
+    Old or partially-written markdown can contain a directional rating/target
+    even when the durable model manifest later says publication was withheld.
+    Markdown is evidence for what was rendered, never authority to override the
+    machine decision.  Fail closed so neither ``write_report`` nor
+    ``read_report`` hands an unsafe headline back to the conversational model.
+    """
+    headline = _report_headline(content)
+    if point_estimate_withheld:
+        return {"rating": "NOT RATED"}
+    return headline
+
+
+def _bounded_news_payload(
+    analysis,
+    *,
+    sentiment_key: str,
+    freshness_key: str,
+) -> dict:
+    """Expose directional news sentiment only from a fresh admitted source set."""
+    freshness = getattr(analysis, "freshness", {}) if analysis else {}
+    freshness = freshness if isinstance(freshness, dict) else {}
+    payload = {freshness_key: freshness or {"status": "unavailable"}}
+    if freshness.get("status") == "fresh":
+        sentiment = getattr(analysis, "overall_sentiment", None)
+        if sentiment:
+            payload[sentiment_key] = sentiment
+    return payload
+
+
+def _rehydrate_report_guard_state(base: Path, ticker: str, content: str):
+    """Restore the machine publication boundary for a report follow-up.
+
+    ``read_report`` often runs in a fresh process.  The markdown is still on
+    disk, but the in-memory FinancialState that protected the original answer
+    is gone.  Returning the report body without restoring that state let a
+    follow-up prose model resurrect the workbook's audit-only midpoint or a
+    sentiment computed from stale coverage.  Rebuild only the small state the
+    deterministic final-answer guard consumes.  Missing/legacy metadata fails
+    closed instead of implicitly granting publication permission.
+    """
+    import json
+    from types import SimpleNamespace
+
+    financial_path = base / "financials" / "financials_annual_modeling_latest.json"
+    computed_path = base / "models" / f"{ticker}_financial_model_computed_values.json"
+    screening_path = base / "screened" / "screening_data.json"
+
+    financial_data = {}
+    try:
+        loaded = json.loads(financial_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            financial_data = loaded
+    except Exception:
+        financial_data = {}
+
+    publication = {}
+    computed = {}
+    try:
+        loaded = json.loads(computed_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            computed = loaded
+            publication = ((computed.get("_vynn") or {}).get(
+                "valuation_publication") or {})
+    except Exception:
+        computed = {}
+        publication = {}
+
+    method = publication.get("valuation_method")
+    ready = publication.get("status") == "ready"
+    withheld = bool(publication.get("point_estimate_withheld")) if ready else True
+    canonical = publication.get("canonical_fair_value") if ready else None
+    if not withheld and not (
+        isinstance(canonical, (int, float)) and not isinstance(canonical, bool)
+        and math.isfinite(float(canonical)) and float(canonical) > 0
+    ):
+        withheld = True
+
+    reason = publication.get("withheld_reason") if ready else None
+    if withheld and not reason:
+        reason = (
+            "The saved report does not contain a complete machine-readable "
+            "publication decision, so its valuation can be reviewed for audit "
+            "but no point fair value or directional rating can be republished."
+        )
+
+    method_values = publication.get("method_values_for_audit") or {}
+    method_inputs = publication.get("valuation_method_inputs") or {}
+    metrics = {
+        "valuation_method": method or "dcf",
+        "point_estimate_withheld": withheld,
+        "publication_withheld_reason": reason,
+        "valuation_confidence": publication.get("valuation_confidence"),
+        "comps_included_in_blended_value": bool(
+            publication.get("comps_included_in_blended_value")
+        ),
+    }
+    if method == "justified_pb_roe":
+        metrics.update({
+            "bank_intrinsic_fair_value": method_inputs.get("intrinsic_fair_value"),
+            "bank_forward_consensus_fair_value": method_inputs.get(
+                "forward_consensus_fair_value"
+            ),
+            "bank_peer_fair_value": method_inputs.get("peer_fair_value"),
+        })
+    else:
+        metrics.update({
+            "perpetual_price": method_values.get("perpetual_dcf"),
+            "exit_multiple_price": method_values.get("exit_multiple_dcf"),
+            "comps_price": method_values.get("market_comps"),
+        })
+    if ready:
+        # Retain the audit number only inside guard state so the guard can
+        # recognize and reject it.  It is deliberately omitted from the tool's
+        # public payload below when the point estimate was withheld.
+        metrics.update({
+            "fair_value": publication.get("model_value_for_audit"),
+            "upside_vs_market": publication.get("canonical_upside_vs_market"),
+        })
+
+    if computed:
+        try:
+            from src.report_agent import extract_projections, extract_valuation
+            extracted = extract_valuation(computed)
+            reverse = extracted.get("reverse_dcf") or {}
+            metrics.update({
+                "market_implied_terminal_fcf": reverse.get(
+                    "market_implied_terminal_fcf"),
+                "market_implied_fcf_vs_model": reverse.get(
+                    "market_implied_vs_model"),
+                "model_revenue_forecast": (
+                    (extract_projections(computed) or {}).get("revenue") or []
+                ),
+            })
+            from src.external_expectations import (
+                implied_discount_rate_for_enterprise_value,
+                implied_fcf_path_scale_for_enterprise_value,
+                implied_terminal_growth_for_enterprise_value,
+                implied_terminal_fcf_for_enterprise_value,
+            )
+            target_ev = (((financial_data.get("external_expectations") or {}).get(
+                "valuation_cross_check") or {}).get(
+                    "target_implied_enterprise_value"))
+            target_reverse = implied_terminal_fcf_for_enterprise_value(
+                target_ev,
+                pv_explicit_fcf=(extracted.get("dcf_perpetual") or {}).get(
+                    "pv_fcfs"),
+                pv_terminal_value=(extracted.get("dcf_perpetual") or {}).get(
+                    "terminal_value"),
+                model_terminal_fcf=reverse.get("model_terminal_fcf"),
+            )
+            if target_reverse.get("available"):
+                metrics.update({
+                    "analyst_target_implied_terminal_fcf":
+                        target_reverse["implied_terminal_fcf"],
+                    "analyst_target_implied_fcf_vs_model":
+                        target_reverse["implied_fcf_vs_model"],
+                })
+            dcf_cells = (computed.get("Valuation (DCF)") or {}).get("cells") or {}
+            model_ev = dcf_cells.get("(27, 2)")
+            market_ev = (((computed.get("Summary") or {}).get("cells") or {}).get(
+                "(51, 2)"
+            ))
+            market_scale = implied_fcf_path_scale_for_enterprise_value(
+                market_ev, model_enterprise_value=model_ev
+            )
+            target_scale = implied_fcf_path_scale_for_enterprise_value(
+                target_ev, model_enterprise_value=model_ev
+            )
+            if market_scale.get("available"):
+                metrics["market_implied_fcf_path_vs_model"] = (
+                    market_scale["implied_fcf_path_vs_model"]
+                )
+            if target_scale.get("available"):
+                metrics["analyst_target_implied_fcf_path_vs_model"] = (
+                    target_scale["implied_fcf_path_vs_model"]
+                )
+            explicit_fcf = [
+                dcf_cells.get(f"(16, {column})") for column in range(2, 12)
+            ]
+            dcf_wacc = dcf_cells.get("(12, 2)")
+            dcf_growth = dcf_cells.get("(23, 2)")
+            mid_year_adjustment = (
+                (computed.get("Sensitivity") or {}).get("cells", {}).get(
+                    "(4, 2)", 0.0
+                )
+            )
+            metrics["wacc"] = dcf_wacc
+            metrics["terminal_growth"] = dcf_growth
+            for prefix, benchmark_ev in (
+                ("market", market_ev), ("analyst_target", target_ev),
+            ):
+                implied_rate = implied_discount_rate_for_enterprise_value(
+                    benchmark_ev, explicit_fcf=explicit_fcf,
+                    terminal_growth=dcf_growth, model_wacc=dcf_wacc,
+                    mid_year_adjustment=mid_year_adjustment,
+                )
+                if implied_rate.get("available"):
+                    metrics[f"{prefix}_implied_wacc"] = implied_rate["implied_wacc"]
+                    metrics[f"{prefix}_implied_wacc_vs_model"] = implied_rate[
+                        "implied_wacc_vs_model"
+                    ]
+                implied_growth = implied_terminal_growth_for_enterprise_value(
+                    benchmark_ev, explicit_fcf=explicit_fcf, wacc=dcf_wacc,
+                    model_terminal_growth=dcf_growth,
+                    mid_year_adjustment=mid_year_adjustment,
+                )
+                if implied_growth.get("available"):
+                    metrics[f"{prefix}_implied_terminal_growth"] = implied_growth[
+                        "implied_terminal_growth"
+                    ]
+                    metrics[f"{prefix}_implied_terminal_growth_vs_model"] = (
+                        implied_growth["implied_terminal_growth_vs_model"]
+                    )
+        except Exception:
+            pass
+
+    company = financial_data.get("company_data") or {}
+    basic = company.get("basic_info") or {}
+    market = company.get("market_data") or {}
+    metrics["current_price"] = market.get("current_price")
+    revenue_source = (((computed.get("_vynn") or {}).get("model_inputs") or {}).get(
+        "revenue_growth_source") if computed else None)
+    reinvestment = (
+        ((computed.get("_vynn") or {}).get("reinvestment_sensitivity") or {})
+        if computed else {}
+    )
+    if isinstance(reinvestment, dict):
+        metrics["reinvestment_sensitivity"] = reinvestment
+
+    freshness = {"status": "unavailable"}
+    sentiment = None
+    try:
+        screening = json.loads(screening_path.read_text(encoding="utf-8"))
+        if isinstance(screening, dict):
+            candidate = screening.get("freshness") or {}
+            freshness = candidate if isinstance(candidate, dict) else freshness
+            summary = screening.get("analysis_summary") or {}
+            if isinstance(summary, dict):
+                sentiment = summary.get("overall_sentiment")
+    except Exception:
+        pass
+
+    return SimpleNamespace(
+        financial_data=SimpleNamespace(
+            raw_data=financial_data,
+            key_metrics={"basic_info": basic, "market_data": market},
+        ),
+        financial_model=SimpleNamespace(
+            model_type=("bank_justified_pb_roe" if method == "justified_pb_roe"
+                        else "DCF"),
+            assumptions={"revenue_growth_source": revenue_source},
+            valuation_metrics=metrics,
+        ),
+        news_analysis=SimpleNamespace(
+            freshness=freshness,
+            overall_sentiment=sentiment,
+        ),
+        report=SimpleNamespace(content=content),
+    )
 
 
 from src.currency import currency_symbol  # noqa: E402
@@ -518,7 +793,11 @@ def valuation_dispersion(legs: dict):
 
 def valuation_publication_boundary(*, band, legs, fair_value, current_price,
                                    is_mega_cap=False, analyst_target=None,
-                                   analyst_count=0):
+                                   analyst_count=0, analyst_rating=None,
+                                   analyst_rating_count=0,
+                                   analyst_rating_evidence=None,
+                                   analyst_target_evidence=None,
+                                   reverse_dcf_gap=None):
     """Decide whether a precise fair value/rating is safe to publish.
 
     This does not alter a model or pull its answer toward the market.  It
@@ -532,61 +811,360 @@ def valuation_publication_boundary(*, band, legs, fair_value, current_price,
         str(name): float(value)
         for name, value in (legs or {}).items()
         if isinstance(value, (int, float)) and not isinstance(value, bool)
-        and value > 0
+        and value > 0 and abs(float(value)) != float("inf") and value == value
     }
-    if band == "unreliable" and len(positive) >= 2:
-        return True, (
-            "The valuation methods disagree by more than 2.5x, so no "
-            "defensible point estimate exists."
+    broken = {
+        str(name) for name, value in (legs or {}).items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(float(value)) and value <= 0
+        and not (value == 0 and "comp" in str(name).lower())
+    }
+    blocking_reasons = []
+
+    def add_blocker(message):
+        normalized = " ".join(str(message or "").split())
+        if normalized and normalized not in blocking_reasons:
+            blocking_reasons.append(normalized)
+
+    def blocked_result(*context):
+        parts = list(blocking_reasons)
+        for value in context:
+            normalized = " ".join(str(value or "").split())
+            if normalized and not any(
+                normalized in existing or existing in normalized
+                for existing in parts
+            ):
+                parts.append(normalized)
+        return True, " ".join(parts)
+
+    # Do not return at the first failure.  The model may simultaneously have a
+    # broken leg, an exceptional market gap, and conflicting human-analyst
+    # evidence.  Returning here used to hide the latter two facts in exactly
+    # the cases where a user most needs to see them (for example, a pre-cash-
+    # flow growth company with one failed DCF terminal method).
+    if positive and broken:
+        add_blocker(
+            "At least one valuation method failed with a non-positive value "
+            f"({', '.join(sorted(broken))}). The surviving method may be shown "
+            "for audit, but it is not sufficient for a point estimate, "
+            "directional rating, or price target."
         )
+    if band in {"wide", "unreliable"} and len(positive) >= 2:
+        if band == "unreliable":
+            add_blocker(
+                "The valuation methods disagree by more than 2.5x, so no "
+                "defensible point estimate exists."
+            )
+        else:
+            add_blocker(
+                "The valuation methods span more than 1.8x. That range is useful "
+                "scenario evidence, but it is too wide for a defensible point "
+                "estimate, directional rating, or price target."
+            )
 
     try:
-        price = float(current_price)
         value = float(fair_value)
     except (TypeError, ValueError):
-        return False, None
-    if not is_mega_cap or price <= 0 or value <= 0:
-        return False, None
-
-    model_gap = value / price - 1.0
-    if abs(model_gap) < 0.30:
-        return False, None
-
-    names = {name.lower().replace("_", " ") for name in positive}
-    has_market_comps = any("comp" in name for name in names)
-    if not has_market_comps:
-        return True, (
-            f"The DCF-only estimate is {model_gap:+.0%} from the market for a "
-            "mega-cap, but no independent market-comps valuation was available. "
-            "Publish the DCF cases as a scenario range and withhold a directional "
-            "rating until the exceptional gap is independently corroborated."
+        value = float("nan")
+    if not math.isfinite(value) or value <= 0:
+        add_blocker(
+            "No finite positive intrinsic-value output was produced, so no "
+            "point estimate, directional rating, or price target can be published."
         )
+    try:
+        price = float(current_price)
+    except (TypeError, ValueError):
+        price = float("nan")
+    # An intrinsic estimate can remain available for an unquoted/private
+    # instrument, but no price-relative recommendation can be derived. The
+    # recommendation calculator independently enforces that rating boundary.
+    if not math.isfinite(price) or price <= 0:
+        return blocked_result() if blocking_reasons else (False, None)
+
+    model_gap = value / price - 1.0 if math.isfinite(value) and value > 0 else None
+    # A DCF-only result is two terminal-value variants of one cash-flow model,
+    # not two independent measurements.  For every issuer, a claim this far
+    # from the traded market needs a second valuation lens.  Well-covered
+    # Street evidence becomes material one step earlier when it points the
+    # other way: it is not averaged into intrinsic value, but it can identify
+    # an assumption dispute large enough that publishing a directional target
+    # would overstate what the model has established.
+    # A BUY/SELL starts at a 15% gap in the deterministic recommendation
+    # engine. That is also where a DCF-only result must earn independent
+    # numeric corroboration; otherwise the product can still publish a 29%
+    # mega-cap call while treating the human benchmark as optional.
+    threshold = 0.15
 
     try:
         target = float(analyst_target)
         count = int(analyst_count or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         target, count = 0.0, 0
-    if target <= 0 or count < 5:
-        return False, None
-
-    analyst_gap = target / price - 1.0
-    # A >=30% model claim is not corroborated when well-covered consensus is
-    # neutral or points the other way.  Consensus remains a cross-check only:
-    # it is not averaged into intrinsic value and cannot manufacture a rating.
-    not_corroborated = (
-        (model_gap <= -0.30 and analyst_gap > -0.08)
-        or (model_gap >= 0.30 and analyst_gap < 0.08)
+    count = min(max(count, 0), 100_000)
+    has_street_benchmark = bool(
+        target > 0 and count >= 5
+        and target == target and abs(target) != float("inf")
     )
+    analyst_gap = target / price - 1.0 if has_street_benchmark else None
+    # From a 15% model gap onward, well-covered consensus that is neutral or
+    # points the other way is a material unresolved assumption dispute. The old
+    # code returned above before evaluating consensus for any gap below 30/40%,
+    # so a -28% mega-cap DCF could publish a SELL while 50+ analysts expected
+    # positive return. Consensus remains a cross-check only: it is never
+    # averaged into intrinsic value and cannot manufacture a rating.
+    target_evidence_rows = []
+    if isinstance(analyst_target_evidence, dict):
+        target_evidence_rows.extend(
+            {**row, "source": row.get("source") or source}
+            for source, row in analyst_target_evidence.items()
+            if isinstance(row, dict)
+        )
+    elif isinstance(analyst_target_evidence, list):
+        target_evidence_rows.extend(
+            row for row in analyst_target_evidence if isinstance(row, dict)
+        )
+
+    qualified_targets = []
+    seen_targets = set()
+    for row in target_evidence_rows:
+        try:
+            row_target = float(row.get("mean") or row.get("target"))
+            row_count = min(max(int(row.get("analyst_count") or 0), 0), 100_000)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        source = str(row.get("source") or "provider").strip()[:50]
+        key = (source.casefold(), round(row_target, 8), row_count)
+        qualified_for_contradiction = (
+            row.get("qualified_for_contradiction")
+            if "qualified_for_contradiction" in row else row.get("qualified") is not False
+        )
+        if (qualified_for_contradiction and row_count >= 5 and row_target > 0
+                and math.isfinite(row_target) and key not in seen_targets):
+            seen_targets.add(key)
+            row_gap = row_target / price - 1.0
+            qualified_targets.append({
+                "source": source,
+                "count": row_count,
+                "gap": row_gap,
+                "corroboration_qualified": bool(
+                    row.get("qualified_for_corroboration", True)
+                ),
+                "temporal_status": (
+                    (row.get("temporal_quality") or {}).get("status")
+                ),
+            })
+
+    # The active target remains the compatibility path for old artifacts.
+    # Avoid printing/evaluating it twice when source evidence already carries
+    # the exact same population and value.
+    active_target_present = any(
+        row["count"] == count and abs(row["gap"] - analyst_gap) < 1e-10
+        for row in qualified_targets
+    ) if analyst_gap is not None else False
+    if has_street_benchmark and not active_target_present and not target_evidence_rows:
+        qualified_targets.insert(0, {
+            "source": "active consensus", "count": count, "gap": analyst_gap,
+            # Compatibility path for artifacts that predate source evidence.
+            "corroboration_qualified": True,
+        })
+
+    def target_corroborates_model(target_gap):
+        """Require aligned direction *and* meaningful magnitude.
+
+        A +6% Street target does not corroborate a +49% DCF claim merely
+        because both numbers are positive. For a model conclusion of at least
+        15%, the benchmark must point the same way and support at least half
+        the claimed move (with a 5% absolute floor). It remains an external
+        cross-check and never enters intrinsic value arithmetic.
+        """
+        return bool(
+            model_gap is not None and model_gap * target_gap > 0
+            and abs(target_gap) >= max(0.05, abs(model_gap) * 0.50)
+        )
+
+    has_target_corroboration = bool(
+        model_gap is not None and abs(model_gap) >= 0.15
+        and qualified_targets
+        and any(
+            row.get("corroboration_qualified")
+            and target_corroborates_model(row["gap"])
+            for row in qualified_targets
+        )
+    )
+    has_provider_dated_current_target = any(
+        row.get("corroboration_qualified") for row in qualified_targets
+    )
+    target_not_corroborated = bool(
+        model_gap is not None and abs(model_gap) >= 0.15
+        and qualified_targets
+        and any(not target_corroborates_model(row["gap"])
+                for row in qualified_targets)
+    )
+
+    def rating_direction(label):
+        normalized = str(label or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in {"strong_buy", "buy", "outperform", "overweight"}:
+            return 1
+        if normalized in {"strong_sell", "sell", "underperform", "underweight"}:
+            return -1
+        if normalized in {"hold", "neutral", "market_perform", "equal_weight"}:
+            return 0
+        return None
+
+    evidence_rows = []
+    if isinstance(analyst_rating_evidence, dict):
+        evidence_rows.extend(
+            {**row, "source": row.get("source") or source}
+            for source, row in analyst_rating_evidence.items()
+            if isinstance(row, dict)
+        )
+    elif isinstance(analyst_rating_evidence, list):
+        evidence_rows.extend(row for row in analyst_rating_evidence if isinstance(row, dict))
+
+    def evidence_count(row):
+        try:
+            return min(max(int(
+                row.get("analyst_count") or row.get("total")
+                or row.get("unique_analyst_count") or 0
+            ), 0), 100_000)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    active_count = evidence_count({"analyst_count": analyst_rating_count})
+    active_label = str(analyst_rating or "").strip()
+    active_already_present = any(
+        str(row.get("label") or "").strip().casefold() == active_label.casefold()
+        and evidence_count(row) == active_count
+        for row in evidence_rows
+    )
+    if analyst_rating and not active_already_present and not evidence_rows:
+        evidence_rows.append({
+            "label": analyst_rating,
+            "analyst_count": active_count,
+            "source": "active consensus",
+        })
+
+    qualified_ratings = []
+    seen_ratings = set()
+    for row in evidence_rows:
+        label = str(row.get("label") or "").strip()
+        direction = rating_direction(label)
+        rating_count = evidence_count(row)
+        source = str(row.get("source") or "provider").strip()[:50]
+        key = (source.casefold(), label.casefold(), rating_count)
+        if (row.get("qualified") is not False and direction is not None
+                and rating_count >= 5 and key not in seen_ratings):
+            seen_ratings.add(key)
+            qualified_ratings.append({
+                "direction": direction,
+                "label": label.replace("_", " ").upper()[:40],
+                "count": rating_count,
+                "source": source,
+            })
+
+    model_direction = 1 if model_gap is not None and model_gap > 0 else -1
+    rating_not_corroborated = bool(
+        model_gap is not None and abs(model_gap) >= 0.15 and any(
+            row["direction"] != model_direction for row in qualified_ratings
+        )
+    )
+    not_corroborated = target_not_corroborated or rating_not_corroborated
+
+    benchmark_parts = []
+    for row in qualified_targets[:3]:
+        prefix = "the" if row["source"] == "active consensus" else row["source"]
+        temporal_note = (
+            " (provider date unavailable; caution only)"
+            if row.get("temporal_status") == "unknown" else ""
+        )
+        benchmark_parts.append(
+            f"{prefix} {row['count']}-analyst target benchmark is {row['gap']:+.0%}"
+            + temporal_note
+        )
+    for row in qualified_ratings[:3]:
+        benchmark_parts.append(
+            f"{row['source']} rates it {row['label']} ({row['count']} ratings)"
+        )
+    benchmark_note = (
+        " External benchmarks: " + "; ".join(benchmark_parts) + "."
+        if benchmark_parts else
+        " A sufficiently covered external analyst benchmark was unavailable."
+    )
+    try:
+        reverse_gap = float(reverse_dcf_gap)
+    except (TypeError, ValueError, OverflowError):
+        reverse_gap = float("nan")
+    reverse_note = (
+        " Terminal-only reverse DCF cross-check: with explicit-period cash flows "
+        "held fixed, reproducing the current market price requires terminal free "
+        f"cash flow {reverse_gap:+.0%} versus the model."
+        if math.isfinite(reverse_gap) else ""
+    )
+
+    def finish(market_blocker=None):
+        if market_blocker:
+            add_blocker(market_blocker)
+        if not blocking_reasons:
+            return False, None
+        # Once publication is blocked, make the independent market evidence
+        # part of the explanation rather than a buried appendix.  It remains a
+        # benchmark only and never enters intrinsic-value arithmetic.
+        evidence_note = benchmark_note + reverse_note
+        return blocked_result(evidence_note)
+
+    names = {name.lower().replace("_", " ") for name in positive}
+    has_market_comps = any("comp" in name for name in names)
+    if model_gap is None:
+        return finish()
+    if abs(model_gap) < threshold:
+        if not_corroborated:
+            return finish(
+                f"The intrinsic-value estimate is {model_gap:+.0%} from the market, "
+                "while well-covered external analyst evidence points materially "
+                "away from that directional conclusion."
+                + " The external benchmark is not substituted for intrinsic value; "
+                "publish the model cases, reconcile the assumption disagreement, "
+                "and withhold the point rating in the meantime."
+            )
+        return finish()
+    if not has_market_comps:
+        # A large DCF-only call needs numeric external corroboration. A BUY or
+        # SELL label supports direction, not the magnitude of a precise price
+        # target. Qualified analyst targets can serve as the independent
+        # benchmark the product deliberately collected, but only when their
+        # direction and material magnitude agree and no other qualified source
+        # contradicts the claim.
+        if not has_target_corroboration or not_corroborated:
+            target_explanation = (
+                "no provider-dated current analyst target qualified to "
+                "corroborate the direction and material magnitude of that gap"
+                if qualified_targets and not has_provider_dated_current_target
+                else (
+                    "the available well-covered analyst-target evidence does not "
+                    "corroborate both the direction and material magnitude of that gap"
+                )
+            )
+            return finish(
+                f"The DCF-only estimate is {model_gap:+.0%} from the market"
+                + (" for a mega-cap" if is_mega_cap else "")
+                + ", but no independent market-comps valuation qualified and "
+                + target_explanation + "."
+                + " The external benchmark is not substituted for intrinsic value."
+                + " Publish the DCF cases as scenarios and withhold the point "
+                "estimate and directional rating until the assumption gap is reconciled."
+            )
+        return finish()
+
     if not_corroborated:
-        return True, (
-            f"The model is {model_gap:+.0%} from the market for a mega-cap, while "
-            f"the {count}-analyst consensus cross-check is {analyst_gap:+.0%}. "
-            "Because the independent evidence does not corroborate the model's "
-            "exceptional gap, publish the valuation methods as a range and "
+        return finish(
+            f"The model is {model_gap:+.0%} from the market for "
+            f"{'a mega-cap' if is_mega_cap else 'the company'}. "
+            "Well-covered independent evidence does not corroborate the model's "
+            "exceptional gap."
+            + " Publish the valuation methods as a range and "
             "withhold a directional rating."
         )
-    return False, None
+    return finish()
 
 
 class _CtxTool(Tool):
@@ -680,12 +1258,20 @@ class BuildModelTool(_CtxTool):
         # that looks precise and is not. Skipped for banks, where the DCF legs
         # are deliberately suppressed in favour of justified P/B x ROE.
         ratio, band, spread_note = (None, None, None)
+        comps_in_blend = bool(
+            isinstance(vm, dict)
+            and vm.get("comps_included_in_blended_value", True)
+        )
         if method != "justified_pb_roe" and isinstance(vm, dict):
             ratio, band, spread_note = valuation_dispersion({
                 "perpetual DCF": vm.get("perpetual_price"),
                 "exit multiple DCF": vm.get("exit_multiple_price"),
-                "market comps": vm.get("comps_price"),
+                "market comps": vm.get("comps_price") if comps_in_blend else None,
             })
+        elif method == "justified_pb_roe" and isinstance(vm, dict):
+            ratio = vm.get("dispersion_ratio")
+            band = vm.get("dispersion_band")
+            spread_note = vm.get("valuation_warning")
         # WHY the legs disagree, when they do. Terminal value is assumed twice:
         # once implicitly by the perpetuity formula, once explicitly as an exit
         # multiple. When those two disagree the model is internally
@@ -727,20 +1313,30 @@ class BuildModelTool(_CtxTool):
         # replaced by the RANGE they actually support. Nothing is hidden — the
         # legs are published individually right below — but there is no longer a
         # single misleadingly precise figure to lift out of context.
-        legs_pub = {
-            k: v for k, v in {
+        if method == "justified_pb_roe" and isinstance(vm, dict):
+            raw_legs = {
+                "justified_pb_roe": vm.get("bank_intrinsic_fair_value"),
+                "forward_consensus_roe_scenario": vm.get(
+                    "bank_forward_consensus_fair_value"
+                ),
+                "roe_adjusted_peer_pb": vm.get("bank_peer_fair_value"),
+            }
+        else:
+            raw_legs = {
                 "perpetual_dcf": (vm.get("perpetual_price") if isinstance(vm, dict) else None),
                 "exit_multiple_dcf": (vm.get("exit_multiple_price") if isinstance(vm, dict) else None),
-                "market_comps": (vm.get("comps_price") if isinstance(vm, dict) else None),
-            }.items() if isinstance(v, (int, float))
+                "market_comps": (
+                    vm.get("comps_price") if isinstance(vm, dict) and comps_in_blend else None
+                ),
+            }
+        legs_pub = {
+            k: v for k, v in raw_legs.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
         }
         positive_legs = [v for v in legs_pub.values() if v > 0]
         withheld = bool(
-            method != "justified_pb_roe"
-            and (
-                (isinstance(vm, dict) and vm.get("point_estimate_withheld"))
-                or (band == "unreliable" and len(positive_legs) >= 2)
-            )
+            (isinstance(vm, dict) and vm.get("point_estimate_withheld"))
+            or (band in {"wide", "unreliable"} and len(positive_legs) >= 2)
         )
         withheld_reason = (
             vm.get("publication_withheld_reason") if isinstance(vm, dict) else None
@@ -748,12 +1344,28 @@ class BuildModelTool(_CtxTool):
             "The valuation methods disagree by more than 2.5x. No single fair "
             "value is defensible, so the range is reported instead."
         )
-        if withheld and positive_legs:
+        withheld_payload = {}
+        if withheld:
             fair_value_out, upside_out = None, None
-            low, high = min(positive_legs), max(positive_legs)
+            withheld_payload = {
+                "fair_value_withheld": True,
+                "fair_value_withheld_reason": withheld_reason,
+            }
+            if positive_legs:
+                from src.summary_evidence import supported_valuation_span
+                support = supported_valuation_span(positive_legs)
+                withheld_payload["valuation_support_shape"] = support["shape"]
+                if support["shape"] == "single_estimate":
+                    withheld_payload["supported_valuation_estimate"] = round(
+                        support["low"], 2
+                    )
+                else:
+                    withheld_payload.update({
+                        "fair_value_range_low": round(support["low"], 2),
+                        "fair_value_range_high": round(support["high"], 2),
+                    })
         else:
             fair_value_out, upside_out = fair_value, upside
-            low = high = None
 
         if method == "justified_pb_roe":
             note = ("Financial-sector company: fair value computed via justified "
@@ -762,6 +1374,47 @@ class BuildModelTool(_CtxTool):
                     "with this method note.")
         else:
             note = "DCF model built and saved (downloadable)."
+
+        raw_financials = state.financial_data.raw_data if state.financial_data else {}
+        raw_financials = raw_financials if isinstance(raw_financials, dict) else {}
+        external_expectations = raw_financials.get("external_expectations") or {}
+        peer_cross_check = ((raw_financials.get("industry_data") or {}).get("peer_comps") or {})
+        reverse_dcf = {
+            key: vm.get(key) for key in (
+                "market_implied_terminal_fcf",
+                "market_implied_fcf_vs_model",
+                "market_implied_fcf_path_vs_model",
+                "analyst_target_implied_terminal_fcf",
+                "analyst_target_implied_fcf_vs_model",
+                "analyst_target_implied_fcf_path_vs_model",
+                "market_implied_wacc",
+                "market_implied_wacc_vs_model",
+                "analyst_target_implied_wacc",
+                "analyst_target_implied_wacc_vs_model",
+                "market_implied_terminal_growth",
+                "market_implied_terminal_growth_vs_model",
+                "analyst_target_implied_terminal_growth",
+                "analyst_target_implied_terminal_growth_vs_model",
+            )
+            if isinstance(vm, dict)
+            and isinstance(vm.get(key), (int, float))
+            and not isinstance(vm.get(key), bool)
+            and math.isfinite(float(vm.get(key)))
+        }
+        try:
+            from src.summary_evidence import external_benchmark, render_external_benchmark
+            benchmark_reconciliation = render_external_benchmark(external_benchmark(
+                raw_financials,
+                vm.get("model_revenue_forecast") or (),
+                revenue_growth_source=(
+                    state.financial_model.assumptions.get("revenue_growth_source")
+                    if state.financial_model and isinstance(
+                        state.financial_model.assumptions, dict) else None
+                ),
+                valuation_metrics=vm,
+            ))
+        except Exception:
+            benchmark_reconciliation = None
 
         return tool_ok(
             ticker=ticker,
@@ -773,28 +1426,34 @@ class BuildModelTool(_CtxTool):
             upside_vs_market=upside_out,
             excel_path=state.financial_model.excel_path if state.financial_model else None,
             # What the methods actually support when they refuse to agree.
-            **({"fair_value_range_low": round(low, 2),
-                "fair_value_range_high": round(high, 2),
-                "fair_value_withheld": True,
-                "fair_value_withheld_reason": withheld_reason}
-               if withheld else {}),
+            **withheld_payload,
             # Publish the legs and the confidence band so the answer can show a
             # football field instead of a false point estimate.
             **({"valuation_legs": legs_pub} if legs_pub else {}),
-            **({
-                "market_implied_terminal_fcf": vm.get("market_implied_terminal_fcf"),
-                "market_implied_fcf_vs_model": vm.get("market_implied_fcf_vs_model"),
-            } if isinstance(vm, dict)
-                and isinstance(vm.get("market_implied_terminal_fcf"), (int, float))
-                and isinstance(vm.get("market_implied_fcf_vs_model"), (int, float))
-                else {}),
+            **({"street_expectations": external_expectations}
+               if external_expectations else {}),
+            **({"peer_cross_check": peer_cross_check} if peer_cross_check else {}),
+            **({"reverse_dcf": reverse_dcf} if reverse_dcf else {}),
+            **({"benchmark_reconciliation": benchmark_reconciliation}
+               if benchmark_reconciliation else {}),
+            **({"reinvestment_sensitivity": vm.get("reinvestment_sensitivity")}
+               if isinstance(vm, dict)
+               and isinstance(vm.get("reinvestment_sensitivity"), dict) else {}),
             **({"valuation_spread_ratio": round(ratio, 2)} if ratio else {}),
             **({"valuation_confidence": band} if band else {}),
             **({"valuation_method": method} if method else {}),
             **({"dcf_fair_value": vm.get("dcf_fair_value")}
-               if isinstance(vm, dict) and vm.get("dcf_fair_value") is not None and method else {}),
+               if isinstance(vm, dict) and vm.get("dcf_fair_value") is not None
+               and method and method != "justified_pb_roe" else {}),
             **({"data_quality_warning": warning} if warning else {}),
-            note=note,
+            note=(note + " Treat Street targets/ratings as a decision-relevant external "
+                  "benchmark, not intrinsic value. When benchmark_reconciliation is "
+                  "present, surface its dated coverage, conflict/corroboration result, "
+                  "and whole-path reverse DCF; do not reduce it to a generic caveat. "
+                  "Never call a blended model value a DCF value; DCF means only the "
+                  "perpetual/exit DCF midpoint or range. Reinvestment sensitivity is "
+                  "an audit scenario only: surface it when material, but never count "
+                  "it as an independent valuation vote or forward-capex guidance."),
         )
 
 
@@ -802,9 +1461,11 @@ class AnalyzeNewsTool(_CtxTool):
     name = "analyze_news"
     description = (
         "Analyze recent news for a company and extract investment insights: growth "
-        "catalysts, risks, and overall sentiment. Scrapes and screens news articles "
+        "catalysts, risks, and, only when fresh source-dated coverage is sufficient, "
+        "an overall news sentiment. Scrapes and screens news articles "
         "(runs in parallel). Use for 'what's the latest on X', 'why did X move', "
-        "sentiment, catalysts, or risks. Returns sentiment plus the top catalysts/risks."
+        "sentiment, catalysts, or risks. Always returns freshness metadata; stale or "
+        "limited coverage never returns a directional sentiment."
     )
     parameters = {"type": "object", "properties": _TICKER_PARAM, "required": ["ticker"]}
 
@@ -817,13 +1478,22 @@ class AnalyzeNewsTool(_CtxTool):
             return tool_error(f"Could not analyze news for {ticker}.",
                               ticker=ticker, detail=state.last_error)
         na = state.news_analysis
+        news_payload = _bounded_news_payload(
+            na, sentiment_key="overall_sentiment", freshness_key="freshness"
+        )
+        fresh = news_payload["freshness"].get("status") == "fresh"
         return tool_ok(
             ticker=ticker,
-            overall_sentiment=na.overall_sentiment,
             articles_analyzed=na.articles_count,
             top_catalysts=(na.catalysts or [])[:3],
             top_risks=(na.risks or [])[:3],
-            note="News analyzed. Catalysts and risks extracted.",
+            **news_payload,
+            note=(
+                "Fresh news analyzed; catalysts, risks, and news sentiment extracted."
+                if fresh else
+                "Fresh source-dated coverage is insufficient. Catalysts and risks are "
+                "returned with their evidence, but no directional news sentiment is published."
+            ),
         )
 
 
@@ -949,11 +1619,9 @@ class WriteReportTool(_CtxTool):
         # number. The suppressed DCF is offered as a cross-check only when it
         # actually produced a value — for banks it is 0.00, and an earlier
         # version of this block would have told the user "fair value $0.00".
-        dcf_cross_check = None
-        if isinstance(vm, dict) and method == "justified_pb_roe":
-            _dcf = vm.get("dcf_fair_value")
-            if isinstance(_dcf, (int, float)) and _dcf > 0:
-                dcf_cross_check = _dcf
+        # An industrial FCF DCF is structurally inapplicable to a bank. Keep
+        # it in internal artifacts for audit, but never hand it to the answer
+        # model as an apparent alternative fair value.
         km = state.financial_data.key_metrics if state.financial_data else {}
         mcap = (km.get("market_data", {}) or {}).get("market_cap") if isinstance(km, dict) else None
         # The market cap is in the LISTING's currency, so the mega-cap rail
@@ -980,20 +1648,31 @@ class WriteReportTool(_CtxTool):
         # arithmetic midpoint for audit, but when the methods disagree by more
         # than 2.5x neither the report nor the chat response may elevate it to a
         # fair value. Publish the football-field range instead.
-        legs_pub = {
-            key: value for key, value in {
+        if method == "justified_pb_roe" and isinstance(vm, dict):
+            raw_legs = {
+                "justified_pb_roe": vm.get("bank_intrinsic_fair_value"),
+                "forward_consensus_roe_scenario": vm.get(
+                    "bank_forward_consensus_fair_value"
+                ),
+                "roe_adjusted_peer_pb": vm.get("bank_peer_fair_value"),
+            }
+        else:
+            raw_legs = {
                 "perpetual_dcf": vm.get("perpetual_price") if isinstance(vm, dict) else None,
                 "exit_multiple_dcf": vm.get("exit_multiple_price") if isinstance(vm, dict) else None,
-                "market_comps": vm.get("comps_price") if isinstance(vm, dict) else None,
-            }.items() if isinstance(value, (int, float))
+                "market_comps": (
+                    vm.get("comps_price") if isinstance(vm, dict)
+                    and vm.get("comps_included_in_blended_value", True) else None
+                ),
+            }
+        legs_pub = {
+            key: value for key, value in raw_legs.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
         }
         positive_legs = [value for value in legs_pub.values() if value > 0]
         withheld = bool(
-            method != "justified_pb_roe"
-            and (
-                (isinstance(vm, dict) and vm.get("point_estimate_withheld"))
-                or (band == "unreliable" and len(positive_legs) >= 2)
-            )
+            (isinstance(vm, dict) and vm.get("point_estimate_withheld"))
+            or (band in {"wide", "unreliable"} and len(positive_legs) >= 2)
         )
         withheld_reason = (
             vm.get("publication_withheld_reason") if isinstance(vm, dict) else None
@@ -1001,17 +1680,76 @@ class WriteReportTool(_CtxTool):
             "The valuation methods disagree by more than 2.5x. The report "
             "publishes the supported range and no directional rating or target."
         )
-        if withheld and positive_legs:
+        if withheld:
             fair_value = None
             upside = None
             range_fields = {
                 "fair_value_withheld": True,
-                "fair_value_range_low": round(min(positive_legs), 2),
-                "fair_value_range_high": round(max(positive_legs), 2),
                 "fair_value_withheld_reason": withheld_reason,
             }
+            if positive_legs:
+                from src.summary_evidence import supported_valuation_span
+                support = supported_valuation_span(positive_legs)
+                range_fields["valuation_support_shape"] = support["shape"]
+                if support["shape"] == "single_estimate":
+                    range_fields["supported_valuation_estimate"] = round(
+                        support["low"], 2
+                    )
+                else:
+                    range_fields.update({
+                        "fair_value_range_low": round(support["low"], 2),
+                        "fair_value_range_high": round(support["high"], 2),
+                    })
         else:
             range_fields = {}
+
+        bounded_headline = _bounded_report_headline(
+            state.report.content, point_estimate_withheld=withheld
+        )
+
+        raw_financials = state.financial_data.raw_data if state.financial_data else {}
+        raw_financials = raw_financials if isinstance(raw_financials, dict) else {}
+        external_expectations = raw_financials.get("external_expectations") or {}
+        peer_cross_check = ((raw_financials.get("industry_data") or {}).get("peer_comps") or {})
+        reverse_dcf = {
+            key: vm.get(key) for key in (
+                "market_implied_terminal_fcf",
+                "market_implied_fcf_vs_model",
+                "market_implied_fcf_path_vs_model",
+                "analyst_target_implied_terminal_fcf",
+                "analyst_target_implied_fcf_vs_model",
+                "analyst_target_implied_fcf_path_vs_model",
+                "market_implied_wacc",
+                "market_implied_wacc_vs_model",
+                "analyst_target_implied_wacc",
+                "analyst_target_implied_wacc_vs_model",
+                "market_implied_terminal_growth",
+                "market_implied_terminal_growth_vs_model",
+                "analyst_target_implied_terminal_growth",
+                "analyst_target_implied_terminal_growth_vs_model",
+            )
+            if isinstance(vm, dict)
+            and isinstance(vm.get(key), (int, float))
+            and not isinstance(vm.get(key), bool)
+            and math.isfinite(float(vm.get(key)))
+        }
+        try:
+            from src.summary_evidence import external_benchmark, render_external_benchmark
+            benchmark_reconciliation = render_external_benchmark(external_benchmark(
+                raw_financials,
+                vm.get("model_revenue_forecast") or (),
+                revenue_growth_source=(
+                    state.financial_model.assumptions.get("revenue_growth_source")
+                    if state.financial_model and isinstance(
+                        state.financial_model.assumptions, dict) else None
+                ),
+                valuation_metrics=vm,
+            ))
+        except Exception:
+            benchmark_reconciliation = None
+        news_payload = _bounded_news_payload(
+            na, sentiment_key="news_sentiment", freshness_key="news_freshness"
+        )
 
         return tool_ok(
             ticker=ticker,
@@ -1023,11 +1761,16 @@ class WriteReportTool(_CtxTool):
             upside_vs_market=upside,
             **range_fields,
             **({"valuation_legs": legs_pub} if legs_pub else {}),
-            overall_sentiment=na.overall_sentiment if na else None,
+            **({"street_expectations": external_expectations}
+               if external_expectations else {}),
+            **({"peer_cross_check": peer_cross_check} if peer_cross_check else {}),
+            **({"reverse_dcf": reverse_dcf} if reverse_dcf else {}),
+            **({"benchmark_reconciliation": benchmark_reconciliation}
+               if benchmark_reconciliation else {}),
+            **news_payload,
             # The rating the report published, so the answer cannot contradict
             # the document the user downloads.
-            **_report_headline(state.report.content),
-            **({"dcf_fair_value_cross_check": dcf_cross_check} if dcf_cross_check is not None else {}),
+            **bounded_headline,
             **({"valuation_method": method} if method else {}),
             **({"valuation_confidence": band} if band else {}),
             **({"data_quality_warning": warning} if warning else {}),
@@ -1035,9 +1778,16 @@ class WriteReportTool(_CtxTool):
                   "the user. When `fair_value_withheld` is true, state the supplied "
                   "`fair_value_withheld_reason`; do not substitute dispersion as the "
                   "reason and do not turn range endpoints into scenario targets. "
-                  "When market-implied terminal FCF fields are present, explain the "
-                  "valuation gap with that reverse-DCF evidence instead of merely "
-                  "calling the assumptions suspect. "
+                  "When benchmark_reconciliation is present, surface its dated human-"
+                  "analyst coverage, conflict/corroboration conclusion, and whole-path "
+                  "reverse DCF instead of merely calling the assumptions suspect. "
+                  "Never call `fair_value`, `model_blended_value`, or a blend gap a "
+                  "DCF value: DCF means only the midpoint/range of perpetual_dcf and "
+                  "exit_multiple_dcf. Distinguish `news_sentiment` from Street analyst "
+                  "recommendations. When `news_sentiment` is absent, fresh coverage was "
+                  "insufficient: do not infer a directional sentiment from empty or "
+                  "limited evidence. Summarize the supplied Street expectations and "
+                  "their revenue/EPS benchmark whenever present. "
                   "If `rating` is present, state THAT rating — it is the "
                   "one printed in the report the user can open, and it is computed "
                   "from the model rather than judged. Do not substitute your own "
@@ -1066,38 +1816,88 @@ class ReadReportTool(_CtxTool):
         if not ticker or ticker in ("CHAT", "PENDING", "UNKNOWN", "NONE", "N/A"):
             return tool_error("read_report needs a real ticker.", ticker=ticker)
 
-        def _read() -> Optional[str]:
+        def _read():
             from path_utils import get_latest_analysis_path
             base = get_latest_analysis_path(self.ctx.email, ticker)
             if not base:
                 return None
             candidate = base / f"{ticker}_Professional_Analysis_Report.md"
             if candidate.exists():
-                return candidate.read_text(encoding="utf-8", errors="ignore")
+                return base, candidate.read_text(encoding="utf-8", errors="ignore")
             # Fallback: any *Report*.md in the folder (filename conventions may vary).
             for p in sorted(base.glob("*Report*.md")) + sorted(base.glob("*report*.md")):
                 if p.exists():
-                    return p.read_text(encoding="utf-8", errors="ignore")
+                    return base, p.read_text(encoding="utf-8", errors="ignore")
             return None
 
         try:
-            content = await asyncio.to_thread(_read)
+            loaded = await asyncio.to_thread(_read)
         except Exception as e:
             return tool_error(f"Could not read the report for {ticker}: {e}", ticker=ticker)
-        if not content:
+        if not loaded:
             return tool_error(
                 f"No existing report found for {ticker}. Generate one with write_report first.",
                 ticker=ticker,
             )
+        base, content = loaded
+        state = _rehydrate_report_guard_state(base, ticker, content)
+        self.ctx.state = state
+        self.ctx.ticker = ticker
+        basic = getattr(state.financial_data, "key_metrics", {}).get("basic_info", {})
+        self.ctx.company_name = basic.get("long_name") or basic.get("short_name") or ticker
+
+        metrics = state.financial_model.valuation_metrics
+        supported = []
+        try:
+            from src.summary_evidence import supported_valuation_values
+            supported = supported_valuation_values(metrics)
+        except Exception:
+            supported = []
+        withheld = bool(metrics.get("point_estimate_withheld"))
+        headline = _bounded_report_headline(
+            content, point_estimate_withheld=withheld
+        )
+        publication = {
+            "rating": headline.get("rating"),
+            "point_estimate_withheld": withheld,
+            "valuation_confidence": metrics.get("valuation_confidence"),
+        }
+        if metrics.get("point_estimate_withheld"):
+            publication["withheld_reason"] = metrics.get(
+                "publication_withheld_reason")
+            if supported:
+                from src.summary_evidence import supported_valuation_span
+                support = supported_valuation_span(supported)
+                publication["valuation_support_shape"] = support["shape"]
+                if support["shape"] == "single_estimate":
+                    publication["supported_valuation_estimate"] = support["low"]
+                else:
+                    publication.update({
+                        "supported_range_low": support["low"],
+                        "supported_range_high": support["high"],
+                    })
+        else:
+            publication.update({
+                "fair_value": metrics.get("fair_value"),
+                "upside_vs_market": metrics.get("upside_vs_market"),
+            })
         # Cap the payload so a huge report doesn't blow the context; the model gets
         # plenty to summarize / extract cases from.
         MAX = 24000
         truncated = len(content) > MAX
         return tool_ok(
             ticker=ticker,
+            publication=publication,
+            news_freshness=getattr(state.news_analysis, "freshness", {}) or {
+                "status": "unavailable"
+            },
+            **headline,
             report_markdown=content[:MAX],
             truncated=truncated,
-            note="Existing report loaded. Answer the user's follow-up from THIS content; do not regenerate.",
+            note=("Existing report and its machine publication boundary loaded. "
+                  "Answer the user's follow-up from THIS content; do not regenerate. "
+                  "The `publication` object controls any rating or valuation claim. "
+                  "Audit-only numbers in the markdown never override it."),
         )
 
 

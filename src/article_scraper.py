@@ -32,7 +32,11 @@ from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime
 
 # Import centralized configuration
-from config import MAX_ARTICLES
+from config import (
+    MAX_ARTICLES,
+    NEWS_MIN_FRESH_ARTICLES,
+    SERPAPI_SEARCH_TIMEOUT_SECONDS,
+)
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 from slugify import slugify
@@ -403,7 +407,7 @@ class ArticleScraper:
             # The client's default timeout is 60000 (seconds — effectively
             # none): a hung/erroring SerpAPI held each query ~90s in prod.
             # SerpApiClient.get_response reads this attribute.
-            search.timeout = 20
+            search.timeout = SERPAPI_SEARCH_TIMEOUT_SECONDS
             result = search.get_dict()
             
             if not isinstance(result, dict):
@@ -593,6 +597,26 @@ og_image: "{article_data.get('top_image', '')}"
             self._log("info", f"📰 {category.replace('_', ' ').title()}: '{query}'")
             category_metadata = self._serpapi_news_links(query)
             if category_metadata is None:
+                unique_candidates = len({
+                    metadata.get("url")
+                    for metadata, _category in all_urls
+                    if isinstance(metadata, dict) and metadata.get("url")
+                })
+                if unique_candidates >= NEWS_MIN_FRESH_ARTICLES:
+                    # We already have enough raw evidence to continue. A
+                    # second full-timeout request delayed the AAPL launch
+                    # canary without changing its eight-article candidate
+                    # pack. Downstream filtering still marks coverage limited
+                    # if too few candidates survive; do not hide that quality
+                    # signal by making the interactive job wait for a retry.
+                    serpapi_down = True
+                    self._log(
+                        "warning",
+                        "⚡ SerpAPI unavailable after collecting "
+                        f"{unique_candidates} unique candidates — continuing "
+                        "without retry",
+                    )
+                    break
                 # API failure (not "zero results") — one quick retry, then trip
                 # the circuit breaker: don't burn the remaining category
                 # queries against a dead API (this held runs ~6 min in prod).
@@ -662,8 +686,9 @@ og_image: "{article_data.get('top_image', '')}"
 
         # Scrape each article
         for url, metadata in unique_articles.items():
-            if self.logger:
-                self.logger.scraping_progress(url, "in progress")
+            progress_logger = getattr(self.logger, "scraping_progress", None)
+            if callable(progress_logger):
+                progress_logger(url, "in progress")
             else:
                 self._log("info", f"🌐 Scraping in progress: {url}")
             
@@ -684,25 +709,31 @@ og_image: "{article_data.get('top_image', '')}"
                 'search_category': metadata.get('search_category', '')
             })
             
-            # Save article to local markdown file only (MongoDB save happens in article_filter after filtering)
+            # Save article to local markdown file only (MongoDB save happens in
+            # article_filter after filtering). Logging is deliberately outside
+            # this try block: an adapter that lacks a StockAnalystLogger-only
+            # method must never turn a successful durable write into a reported
+            # scrape failure.
             try:
-                # Save to local markdown file (existing functionality)
                 file_path = self._save_article_markdown(article_data)
                 scraped_files.append(file_path)
                 self.scraped_count += 1
-                
-                if self.logger:
-                    self.logger.file_operation("Article saved", file_path)
-                    self.logger.debug(f"   📊 Sector: {self.company_sector}, Industry: {self.company_industry}")
-                else:
-                    self._log("info", f"📁 Article saved: {file_path}")
-                    self._log("debug", f"   📊 Sector: {self.company_sector}, Industry: {self.company_industry}")
-                
-                time.sleep(1)  # Be polite to servers
-                
             except Exception as e:
                 self._log("error", f"Failed to save article from {url}: {e}")
                 self.failed_count += 1
+                continue
+
+            file_logger = getattr(self.logger, "file_operation", None)
+            if callable(file_logger):
+                file_logger("Article saved", file_path)
+            else:
+                self._log("info", f"📁 Article saved: {file_path}")
+            self._log(
+                "debug",
+                f"   📊 Sector: {self.company_sector}, Industry: {self.company_industry}",
+            )
+
+            time.sleep(1)  # Be polite to servers
         
         results = self._get_scraping_results()
         results["scraped_files"] = scraped_files
@@ -808,4 +839,3 @@ og_image: "{article_data.get('top_image', '')}"
                 "searched_dir": self.searched_dir.exists(),
             }
         }
-

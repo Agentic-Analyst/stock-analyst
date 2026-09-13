@@ -107,6 +107,85 @@ def test_revenue_consensus_anchors_near_term_and_fades_deterministically(monkeyp
     assert any("FY1 17.1% (17 analysts)" in note for note in notes)
 
 
+def test_absolute_street_revenue_overrides_inconsistent_provider_growth(monkeypatch):
+    from src.agents.fm.assumption_grounding import ground_assumptions
+
+    monkeypatch.setenv("RISK_FREE_USD", "0.04")
+    data = _grounding_data()
+    data["financial_statements"] = {
+        "income_statement": {
+            "2025-12-31": {"Total Revenue": 100.0},
+            "2024-12-31": {"Total Revenue": 90.0},
+        },
+    }
+    data["analyst_data"]["revenue_estimates"] = {
+        # Deliberately inconsistent percentages: the absolute forecasts are
+        # the Street case the projected dollars must reproduce.
+        "0y": {"avg": 110.0, "growth": 0.25, "numberOfAnalysts": 17},
+        "+1y": {"avg": 121.0, "growth": 0.30, "numberOfAnalysts": 16},
+    }
+    grounded, notes = ground_assumptions({
+        "wacc": 0.09,
+        "terminal_growth_rate": 0.025,
+        "revenue_growth_rates": [0.04] * 5,
+    }, data)
+
+    assert grounded["revenue_growth_rates"][:2] == pytest.approx([0.10, 0.10])
+    assert grounded["revenue_growth_source"] == (
+        "yahoo_analyst_consensus_absolute_revenue_with_deterministic_fade"
+    )
+    assert 100.0 * (1 + grounded["revenue_growth_rates"][0]) == pytest.approx(110.0)
+    assert 110.0 * (1 + grounded["revenue_growth_rates"][1]) == pytest.approx(121.0)
+    assert any("absolute revenue 110" in note for note in notes)
+
+
+def test_current_ttm_uses_fiscal_progress_blend_instead_of_elapsed_fiscal_cash_flow(
+    monkeypatch,
+):
+    from src.agents.fm.assumption_grounding import ground_assumptions
+
+    monkeypatch.setenv("RISK_FREE_USD", "0.04")
+    data = _grounding_data()
+    data["financial_statements"] = {
+        "income_statement": {
+            "2025-12-31": {"Total Revenue": 100.0},
+            "2024-12-31": {"Total Revenue": 90.0},
+        },
+    }
+    data["ttm_bridge"] = {
+        "status": "current",
+        "latest_period": "2026-06-30",
+        "quarter_periods": [
+            "2026-06-30", "2026-03-31", "2025-12-31", "2025-09-30",
+        ],
+        "income_statement": {"Total Revenue": 110.0},
+        "cash_flow": {},
+        "normalized": {"revenue": 110.0},
+    }
+    data["analyst_data"]["revenue_estimates"] = {
+        "0y": {"avg": 120.0, "numberOfAnalysts": 17},
+        "+1y": {"avg": 132.0, "numberOfAnalysts": 16},
+    }
+
+    grounded, notes = ground_assumptions({
+        "wacc": 0.09,
+        "terminal_growth_rate": 0.025,
+        "revenue_growth_rates": [0.04] * 5,
+    }, data)
+
+    progress = 181 / 365
+    expected_ntm = 120.0 * (1 - progress) + 132.0 * progress
+    assert grounded["forecast_basis"]["basis"] == "rolling_twelve_months"
+    assert grounded["forecast_basis"]["fiscal_year_progress"] == pytest.approx(progress)
+    assert grounded["forecast_basis"]["forecast_revenue"][0] == pytest.approx(expected_ntm)
+    assert 110.0 * (1 + grounded["revenue_growth_rates"][0]) == pytest.approx(expected_ntm)
+    assert grounded["modeling_basis"]["revenue"] == 110.0
+    assert grounded["revenue_growth_source"] == (
+        "yahoo_analyst_consensus_rolling_twelve_months_with_deterministic_fade"
+    )
+    assert any("without counting elapsed fiscal operations" in note for note in notes)
+
+
 def test_different_llm_long_range_guesses_produce_the_same_grounded_curve(monkeypatch):
     from src.agents.fm.assumption_grounding import ground_assumptions
 
@@ -214,6 +293,44 @@ def test_reported_margins_ground_a_mature_company_when_trailing_ratios_are_missi
     assert grounded["gross_margins"][0] == pytest.approx(0.47)
 
 
+def test_gross_margin_is_not_forced_above_ebitda_when_da_is_in_cost_of_revenue(
+    monkeypatch,
+):
+    from src.agents.fm.assumption_grounding import ground_assumptions
+
+    monkeypatch.setenv("RISK_FREE_USD", "0.04")
+    data = _grounding_data()
+    data["company_data"]["growth_profitability"] = {
+        "operating_margins": 0.56,
+        "ebitda_margins": 0.72,
+        "gross_margins": 0.64,
+    }
+    data["financial_statements"] = {
+        "income_statement": {
+            "2025": {"Total Revenue": 1000, "Gross Profit": 640,
+                     "EBITDA": 720, "Operating Income": 560},
+            "2024": {"Total Revenue": 900, "Gross Profit": 567,
+                     "EBITDA": 639, "Operating Income": 495},
+            "2023": {"Total Revenue": 800, "Gross Profit": 496,
+                     "EBITDA": 560, "Operating Income": 432},
+        },
+    }
+
+    grounded, _ = ground_assumptions({
+        "wacc": 0.09,
+        "terminal_growth_rate": 0.025,
+        "revenue_growth_rates": [0.1] * 5,
+        "gross_margins": [0.2] * 5,
+        "ebitda_margins": [0.2] * 5,
+        "operating_margins": [0.2] * 5,
+    }, data)
+
+    assert grounded["operating_margins"][0] == pytest.approx(0.56)
+    assert grounded["gross_margins"][0] == pytest.approx(0.64)
+    assert grounded["ebitda_margins"][0] == pytest.approx(0.72)
+    assert grounded["gross_margins"][0] < grounded["ebitda_margins"][0]
+
+
 def test_thin_or_implausible_consensus_does_not_override_the_model(monkeypatch):
     from src.agents.fm.assumption_grounding import ground_assumptions
 
@@ -231,3 +348,37 @@ def test_thin_or_implausible_consensus_does_not_override_the_model(monkeypatch):
 
     assert grounded["revenue_growth_rates"] == assumptions["revenue_growth_rates"]
     assert "revenue_growth_source" not in grounded
+
+
+def test_well_covered_absolute_hypergrowth_forecasts_anchor_preprofit_case(monkeypatch):
+    from src.agents.fm.assumption_grounding import ground_assumptions
+
+    monkeypatch.setenv("RISK_FREE_USD", "0.04")
+    data = _grounding_data()
+    data["financial_statements"] = {
+        "income_statement": {
+            "2025-12-31": {"Total Revenue": 70.9},
+            "2024-12-31": {"Total Revenue": 4.9},
+        },
+    }
+    data["analyst_data"]["revenue_estimates"] = {
+        "0y": {"avg": 168.8, "growth": 1.38, "numberOfAnalysts": 12},
+        "+1y": {"avg": 650.8, "growth": 2.85, "numberOfAnalysts": 11},
+    }
+
+    grounded, notes = ground_assumptions({
+        "wacc": 0.12,
+        "terminal_growth_rate": 0.025,
+        "revenue_growth_rates": [0.05] * 5,
+    }, data)
+
+    assert 70.9 * (1 + grounded["revenue_growth_rates"][0]) == pytest.approx(168.8)
+    assert 168.8 * (1 + grounded["revenue_growth_rates"][1]) == pytest.approx(650.8)
+    assert grounded["post_consensus_growth_capped"] is True
+    assert grounded["revenue_growth_rates"][2:] == pytest.approx(
+        [0.67825, 0.415, 0.22]
+    )
+    assert grounded["revenue_growth_source"] == (
+        "yahoo_analyst_consensus_absolute_revenue_with_deterministic_fade"
+    )
+    assert any("uncovered tail capped" in note for note in notes)

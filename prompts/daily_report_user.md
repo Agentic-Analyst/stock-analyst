@@ -15,7 +15,7 @@
 ### Mitigations Identified: {num_mitigations}
 {mitigations_summary}
 
-### Overall Sentiment: {sentiment}
+### News Sentiment: {sentiment}
 ### Key Themes: {themes}
 ### Confidence Score: {confidence}
 

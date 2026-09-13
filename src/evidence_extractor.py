@@ -13,6 +13,23 @@ from urllib.parse import urlparse
 
 class EvidenceExtractor:
     """Extracts structured evidence from screening data for LLM citation."""
+
+    @staticmethod
+    def _truncate_text(value: Any, limit: int) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        shortened = text[:limit + 1].rsplit(" ", 1)[0].rstrip(" ,;:-")
+        return (shortened or text[:limit].rstrip()) + "…"
+
+    @staticmethod
+    def _is_citable_url(value: Any) -> bool:
+        """Require a real external source behind every citation identifier."""
+        try:
+            parsed = urlparse(str(value or "").strip())
+        except ValueError:
+            return False
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
     
     def build_evidence_pack(
         self,
@@ -33,23 +50,27 @@ class EvidenceExtractor:
         catalysts = screening_data.get('catalysts', [])
         sorted_catalysts = sorted(
             catalysts,
-            key=lambda x: x.get('confidence', 0),
+            key=self._evidence_priority,
             reverse=True
         )[:max_catalysts]
         
         for cat in sorted_catalysts:
-            # Primary catalyst evidence
-            evidence_id = f"E{evidence_counter}"
-            evidence_counter += 1
-            
             # Extract source information
             source_articles = cat.get('source_articles', [])
             source_title = source_articles[0].get('title', 'Unknown') if source_articles else 'Screening Analysis'
             source_url = source_articles[0].get('url', '') if source_articles else ''
+            source_snippet = source_articles[0].get('snippet', '') if source_articles else ''
+            # A model-produced catalyst without a source URL is context, not
+            # evidence. Giving it an E-number lets later prose cite one model
+            # interpretation as proof of another.
+            if not self._is_citable_url(source_url):
+                continue
+            evidence_id = f"E{evidence_counter}"
+            evidence_counter += 1
             
             # Extract quote if available
             quotes = cat.get('direct_quotes', [])
-            snippet = quotes[0].get('quote', cat.get('description', '')) if quotes else cat.get('description', '')
+            snippet = quotes[0].get('quote', '') if quotes else source_snippet
             
             # The evidence date is the source's publication date, never the
             # day on which our model happened to read it.
@@ -64,37 +85,43 @@ class EvidenceExtractor:
                 "id": evidence_id,
                 "type": f"catalyst_{cat.get('type', 'other')}",
                 "date": date_str,
-                "source": source_title,
+                "source": self._publication_name(source_url),
+                "source_article_title": source_title,
                 "source_quality": source_quality,
-                "title": cat.get('description', '')[:100],  # Truncate long descriptions
+                "title": self._truncate_text(cat.get('description'), 240),
                 "url": source_url,
-                "snippet": snippet[:500],  # Limit snippet length
+                "snippet": self._truncate_text(snippet, 500),
                 "relevance": cat.get('confidence', 0.5),
                 "stance": "positive",
                 "timeline": cat.get('timeline', 'medium-term'),
-                "reasoning": cat.get('reasoning', cat.get('llm_reasoning', ''))
+                # LLM reasoning is interpretation, not source evidence.  It is
+                # intentionally excluded from the citation pack so a later
+                # explainer cannot cite one model-generated sentence as proof
+                # for another.
             })
         
         # Extract risk evidence
         risks = screening_data.get('risks', [])
         sorted_risks = sorted(
             risks,
-            key=lambda x: self._risk_priority(x),
+            key=lambda x: self._risk_priority(x) + self._source_quality_weight(x),
             reverse=True
         )[:max_risks]
         
         for risk in sorted_risks:
-            evidence_id = f"E{evidence_counter}"
-            evidence_counter += 1
-            
             # Extract source information
             source_articles = risk.get('source_articles', [])
             source_title = source_articles[0].get('title', 'Unknown') if source_articles else 'Risk Analysis'
             source_url = source_articles[0].get('url', '') if source_articles else ''
+            source_snippet = source_articles[0].get('snippet', '') if source_articles else ''
+            if not self._is_citable_url(source_url):
+                continue
+            evidence_id = f"E{evidence_counter}"
+            evidence_counter += 1
             
             # Extract quote if available
             quotes = risk.get('direct_quotes', [])
-            snippet = quotes[0].get('quote', risk.get('description', '')) if quotes else risk.get('description', '')
+            snippet = quotes[0].get('quote', '') if quotes else source_snippet
             
             date_str = self._extract_date(
                 source_articles[0].get('publish_date', '') if source_articles else ''
@@ -105,44 +132,23 @@ class EvidenceExtractor:
                 "id": evidence_id,
                 "type": f"risk_{risk.get('type', 'other')}",
                 "date": date_str,
-                "source": source_title,
+                "source": self._publication_name(source_url),
+                "source_article_title": source_title,
                 "source_quality": source_quality,
-                "title": risk.get('description', '')[:100],
+                "title": self._truncate_text(risk.get('description'), 240),
                 "url": source_url,
-                "snippet": snippet[:500],
+                "snippet": self._truncate_text(snippet, 500),
                 "relevance": risk.get('confidence', 0.5),
                 "stance": "negative",
                 "severity": risk.get('severity', 'medium'),
                 "likelihood": risk.get('likelihood', 'possible'),
-                "reasoning": risk.get('reasoning', risk.get('llm_reasoning', ''))
+                # See catalyst evidence above: only the source excerpt is
+                # admissible citation support.
             })
         
-        # Add summary evidence
-        summary = screening_data.get('analysis_summary', {})
-        freshness = screening_data.get('freshness') or {}
-        # A computed market-wide sentiment label is only meaningful when the
-        # configured minimum fresh coverage was met. It must not become a
-        # synthetic citation that launders a handful of headlines into a broad
-        # bullish/bearish market claim.
-        if summary and (not freshness or freshness.get('status') == 'fresh'):
-            evidence_id = f"E{evidence_counter}"
-            evidence_counter += 1
-            
-            date_str = self._extract_date(freshness.get('newest_published_at', ''))
-            
-            evidence_list.append({
-                "id": evidence_id,
-                "type": "market_analysis",
-                "date": date_str,
-                "source": "Comprehensive Market Analysis",
-                "title": f"Overall Sentiment: {summary.get('overall_sentiment', 'neutral').upper()}",
-                "url": "",
-                "snippet": f"Analysis of {summary.get('articles_analyzed', 0)} articles. Key themes: {', '.join(summary.get('key_themes', [])[:3])}. Total catalysts: {summary.get('total_catalysts', 0)}, Total risks: {summary.get('total_risks', 0)}.",
-                "relevance": summary.get('confidence_score', 0.5),
-                "stance": summary.get('overall_sentiment', 'neutral'),
-                "reasoning": f"Comprehensive analysis based on {summary.get('articles_analyzed', 0)} sources"
-            })
-        
+        # Aggregate sentiment remains report metadata. It deliberately has no
+        # citation ID: it is computed from the source evidence above and is not
+        # itself an independent publication that can substantiate a claim.
         return {
             "evidence": evidence_list
         }
@@ -153,7 +159,7 @@ class EvidenceExtractor:
             if timestamp_str:
                 dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
                 return dt.strftime('%Y-%m-%d')
-        except:
+        except (TypeError, ValueError, OverflowError):
             pass
         
         return "date unavailable"
@@ -184,7 +190,7 @@ class EvidenceExtractor:
         # Tier-1 outlets (authoritative financial media)
         tier1_outlets = [
             'wsj.com', 'bloomberg.com', 'reuters.com', 'ft.com',
-            'economist.com', 'apnews.com', 'nytimes.com/business'
+            'economist.com', 'apnews.com', 'nytimes.com'
         ]
         if any(on_domain(outlet) for outlet in tier1_outlets):
             return 'tier-1'
@@ -205,8 +211,29 @@ class EvidenceExtractor:
         if any(on_domain(ind.split('/')[0]) for ind in syndication_indicators):
             return 'syndication'
         
-        # Default to tier-2 if unknown
-        return 'tier-2'
+        return 'unrated'
+
+    @staticmethod
+    def _publication_name(url: str) -> str:
+        try:
+            host = (urlparse(str(url or "")).hostname or "").removeprefix("www.")
+        except ValueError:
+            host = ""
+        return host or "publisher unavailable"
+
+    def _source_quality_weight(self, insight: Dict[str, Any]) -> float:
+        sources = insight.get('source_articles') or []
+        first = sources[0] if sources and isinstance(sources[0], dict) else {}
+        quality = self._assess_source_quality(
+            first.get('url', ''), first.get('title', '')
+        )
+        return {
+            'primary': 0.40, 'tier-1': 0.30, 'tier-2': 0.18,
+            'syndication': 0.05, 'unrated': 0.0,
+        }.get(quality, 0.0)
+
+    def _evidence_priority(self, insight: Dict[str, Any]) -> float:
+        return float(insight.get('confidence') or 0) + self._source_quality_weight(insight)
     
     def _risk_priority(self, risk: Dict[str, Any]) -> float:
         """Calculate risk priority for sorting."""

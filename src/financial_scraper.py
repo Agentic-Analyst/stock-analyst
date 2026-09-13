@@ -12,7 +12,7 @@ for financial modeling and analysis.
 """
 
 from __future__ import annotations
-import os, json, argparse, pathlib, time
+import os, json, argparse, pathlib, time, math
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any, Union
 import pandas as pd
@@ -83,10 +83,107 @@ def _reporting_currency(info):
 
 def _fx_listing_to_financial(info):
     """Rate that converts the listing price into the financial currency, or None."""
+    if "_vynn_fx_listing_to_financial" in info:
+        return info.get("_vynn_fx_listing_to_financial")
     lc, fc = _listing_ccy(info), info.get("financialCurrency")
     if not lc or not fc or lc == fc:
         return None
     return _fx_rate(lc, fc)
+
+
+def _amount_in_financial_currency(amount, info):
+    """Convert a quote-currency balance into the statements' currency."""
+    if amount is None:
+        return None
+    rate = _fx_listing_to_financial(info)
+    if rate is None:
+        return amount
+    try:
+        return float(amount) * float(rate)
+    except (TypeError, ValueError):
+        return amount
+
+
+def _cross_currency_multiple(numerator, denominator, info):
+    """Return a dimensionally consistent market multiple when currencies differ.
+
+    Yahoo's ADR payload can expose enterprise value/market cap in the listing
+    currency while revenue and EBITDA remain in the financial-statement
+    currency.  Its precomputed ratio then divides unlike units (BABA was shown
+    at 2.0x EV/EBITDA instead of roughly 13.5x).  Rebuild the ratio after
+    converting the numerator; same-currency callers get the identical result.
+    """
+    converted = _amount_in_financial_currency(numerator, info)
+    if (
+        isinstance(converted, (int, float)) and not isinstance(converted, bool)
+        and isinstance(denominator, (int, float)) and not isinstance(denominator, bool)
+        and math.isfinite(float(converted)) and math.isfinite(float(denominator))
+        and float(converted) > 0 and float(denominator) > 0
+    ):
+        return float(converted) / float(denominator)
+    return None
+
+
+def _enterprise_value_in_financial_currency(info, market_cap_financial):
+    """Normalize Yahoo enterprise value without assuming its currency.
+
+    Yahoo is inconsistent for ADRs: marketCap follows the listing currency,
+    while enterpriseValue can already be in the reporting currency. TSM's
+    live payload, for example, returned a USD market cap and a TWD enterprise
+    value. Multiplying both by USD/TWD manufactured a 155x EV/EBITDA ratio and
+    disabled the exit-multiple method.
+
+    When the listing and reporting currencies differ, reconstruct EV from the
+    converted market cap plus Yahoo debt less Yahoo cash. Those balance fields
+    follow the issuer's reporting currency in the same ADR payload. If that
+    bridge is incomplete, choose between the raw and converted provider value
+    using the converted market cap only as a dimensional sanity anchor.
+    """
+    raw = info.get("enterpriseValue")
+    listing = _listing_ccy(info)
+    financial = info.get("financialCurrency") or listing
+    cross_currency = bool(listing and financial and listing != financial)
+
+    def positive(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        return number if math.isfinite(number) and number > 0 else None
+
+    raw_value = positive(raw)
+    market_cap = positive(market_cap_financial)
+    debt = positive(info.get("totalDebt"))
+    cash = positive(info.get("totalCash"))
+    if cross_currency and market_cap is not None and debt is not None and cash is not None:
+        reconstructed = market_cap + debt - cash
+        if reconstructed > 0:
+            return reconstructed, "reconstructed_market_cap_plus_debt_minus_cash"
+    if not cross_currency:
+        if raw_value is not None:
+            return raw_value, "provider_same_currency"
+        if market_cap is not None and (debt is not None or cash is not None):
+            reconstructed = market_cap + (debt or 0.0) - (cash or 0.0)
+            if reconstructed > 0:
+                return reconstructed, "reconstructed_market_cap_plus_debt_minus_cash"
+        return None, "unavailable"
+
+    if raw_value is None:
+        return None, "unavailable"
+    rate = _fx_listing_to_financial(info)
+    candidates = [(raw_value, "provider_cross_currency_inferred_already_financial")]
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate > 0:
+        candidates.append((raw_value * float(rate), "provider_cross_currency_converted"))
+    if market_cap is not None:
+        plausible = [
+            candidate for candidate in candidates
+            if 0.05 <= candidate[0] / market_cap <= 20.0
+        ]
+        if plausible:
+            return min(
+                plausible,
+                key=lambda candidate: abs(math.log(candidate[0] / market_cap)),
+            )
+    return candidates[-1]
 
 
 def _price_in_financial_currency(price, info):
@@ -133,7 +230,14 @@ def _analyst_target_in_financial_currency(target, info):
 
 
 def _convert_consensus_prices(consensus, company_data):
-    """Normalize every provider target to the model's financial currency."""
+    """Normalize provider targets without laundering an unknown currency.
+
+    A target is relabelled as the model currency only when it was already in
+    that currency or when a listing-to-financial FX conversion actually ran.
+    Preserving an unexpected/unconvertible source currency lets downstream
+    publication policy reject the comparison instead of treating unlike units
+    as a valid target gap.
+    """
     if not isinstance(consensus, dict) or not consensus:
         return consensus or {}
     basic = company_data.get("basic_info", {}) or {}
@@ -166,17 +270,62 @@ def _convert_consensus_prices(consensus, company_data):
             target.get("source") != "yahoo_finance"
             and listing and financial and listing != financial
             and source_currency == listing
-            and isinstance(rate, (int, float))
+            and isinstance(rate, (int, float)) and not isinstance(rate, bool)
+            and math.isfinite(float(rate)) and float(rate) > 0
         )
         if should_convert:
             for key in ("mean", "median", "high", "low"):
                 value = target.get(key)
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     target[key] = float(value) * float(rate)
-        target["currency"] = financial or source_currency or listing
+            target["currency_normalized_from"] = source_currency
+            target["currency_conversion_rate"] = float(rate)
+            target["currency"] = financial
+        elif source_currency and financial and source_currency == financial:
+            target["currency"] = financial
+        else:
+            # Includes missing FX and an explicit provider currency that is
+            # neither the listing nor financial currency.
+            target["currency"] = source_currency or None
 
     from analyst_consensus import refresh_source_comparison
     return refresh_source_comparison(consensus)
+
+
+def _peer_subject_market_cap_usd(company_data):
+    """Return a finite USD listing market cap suitable for Finnhub sizing."""
+    company_data = company_data if isinstance(company_data, dict) else {}
+    basic = company_data.get("basic_info") or {}
+    market = company_data.get("market_data") or {}
+    listing_currency = basic.get("listing_currency") or basic.get("currency")
+    value = market.get("market_cap")
+    if (
+        str(listing_currency or "").upper() == "USD"
+        and isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(float(value)) and value > 0
+    ):
+        return float(value)
+    return None
+
+
+def _specialized_peer_comps_exclusion(methodology):
+    """Why generic EV/EBITDA/P-S peers cannot serve this selected method."""
+    methodology = methodology if isinstance(methodology, dict) else {}
+    service = methodology.get("specialized_service")
+    if service not in {"reit", "insurance", "commodity_cycle"}:
+        return None
+    return {
+        "status": "not_applicable",
+        "reason": (
+            f"Generic corporate peer multiples are not a valid valuation leg for "
+            f"the {service} methodology."
+        ),
+        "role": "context_only",
+        "confidence": None,
+        "included_in_blended_value": False,
+        "selected_method": None,
+        "selected_peer_count": 0,
+    }
 
 
 class FinancialScraper:
@@ -602,7 +751,50 @@ class FinancialScraper:
         self._log("info", f"Scraping comprehensive company data for {self.ticker}")
         
         try:
-            info = self.yf_ticker.info
+            info = dict(self.yf_ticker.info or {})
+            # Resolve this once.  Besides avoiding repeated FX requests, every
+            # price, target, market-cap and enterprise-value normalization in
+            # one artifact must use the same observed rate.
+            info["_vynn_fx_listing_to_financial"] = _fx_listing_to_financial(info)
+            market_cap_financial = _amount_in_financial_currency(
+                info.get("marketCap"), info)
+            (enterprise_value_financial,
+             enterprise_value_financial_source) = (
+                _enterprise_value_in_financial_currency(
+                    info, market_cap_financial,
+                )
+            )
+            cross_currency = (
+                _listing_ccy(info) and info.get("financialCurrency")
+                and _listing_ccy(info) != info.get("financialCurrency")
+            )
+            price_to_sales = (
+                _cross_currency_multiple(
+                    info.get("marketCap"), info.get("totalRevenue"), info)
+                if cross_currency else info.get("priceToSalesTrailing12Months")
+            )
+            enterprise_to_revenue = (
+                enterprise_value_financial / info.get("totalRevenue")
+                if (
+                    cross_currency
+                    and isinstance(enterprise_value_financial, (int, float))
+                    and isinstance(info.get("totalRevenue"), (int, float))
+                    and info.get("totalRevenue") > 0
+                ) else (
+                    None if cross_currency else info.get("enterpriseToRevenue")
+                )
+            )
+            enterprise_to_ebitda = (
+                enterprise_value_financial / info.get("ebitda")
+                if (
+                    cross_currency
+                    and isinstance(enterprise_value_financial, (int, float))
+                    and isinstance(info.get("ebitda"), (int, float))
+                    and info.get("ebitda") > 0
+                ) else (
+                    None if cross_currency else info.get("enterpriseToEbitda")
+                )
+            )
             
             # 1. Basic Company Information
             company_data = {
@@ -662,12 +854,25 @@ class FinancialScraper:
                         info.get("currency"),
                     ),
                     "fx_listing_to_financial": _fx_listing_to_financial(info),
+                    "current_price_currency": (
+                        _reporting_currency(info)
+                        if (
+                            _listing_ccy(info) == _reporting_currency(info)
+                            or _fx_listing_to_financial(info) is not None
+                        )
+                        else _listing_ccy(info)
+                    ),
                     "previous_close": _analyst_target_in_financial_currency(
                         info.get("previousClose"), info),
                     "previous_close_listing": _price_in_major_units(
                         info.get("previousClose"), info.get("currency")),
                     "market_cap": info.get("marketCap"),
+                    "market_cap_financial": market_cap_financial,
                     "enterprise_value": info.get("enterpriseValue"),
+                    "enterprise_value_financial": enterprise_value_financial,
+                    "enterprise_value_financial_source": (
+                        enterprise_value_financial_source
+                    ),
                     "52_week_high": _analyst_target_in_financial_currency(
                         info.get("fiftyTwoWeekHigh"), info),
                     "52_week_low": _analyst_target_in_financial_currency(
@@ -688,11 +893,10 @@ class FinancialScraper:
                     "pe_ratio_forward": info.get("forwardPE"),
                     "peg_ratio": info.get("pegRatio"),
                     "price_to_book": info.get("priceToBook"),
-                    "price_to_sales": info.get("priceToSalesTrailing12Months"),
-                    "enterprise_to_revenue": info.get("enterpriseToRevenue"),
-                    "enterprise_to_ebitda": info.get("enterpriseToEbitda"),
+                    "price_to_sales": price_to_sales,
+                    "enterprise_to_revenue": enterprise_to_revenue,
+                    "enterprise_to_ebitda": enterprise_to_ebitda,
                     "book_value": info.get("bookValue"),
-                    "price_to_book": info.get("priceToBook")
                 },
                 
                 # 4. Capital Structure & Cost of Capital Data
@@ -968,6 +1172,39 @@ class FinancialScraper:
             # Summary statistics
             "data_summary": {}
         }
+
+        # Classify the instrument before touching corporate statement and
+        # analyst endpoints. Funds and crypto return useful identity/price
+        # metadata, then stop: their specialized services own further research.
+        self._log("info", "Classifying instrument and collecting company metadata...")
+        modeling_data["company_data"] = self.scrape_comprehensive_company_data()
+        quote_type = str(
+            ((modeling_data["company_data"].get("basic_info") or {}).get("quote_type"))
+            or ""
+        ).upper()
+        if quote_type and quote_type != "EQUITY":
+            from src.external_expectations import build_external_expectations
+            from src.valuation_methodology import assess_valuation_methodology
+            reason = (
+                f"Corporate financial collection skipped for {quote_type}; "
+                "the specialized asset service must handle this instrument."
+            )
+            modeling_data["ttm_bridge"] = {
+                "status": "not_applicable", "reason": reason,
+            }
+            modeling_data["financial_freshness"] = {
+                "status": "not_applicable", "basis": None,
+                "latest_period": None, "age_days": None, "reason": reason,
+            }
+            modeling_data["external_expectations"] = build_external_expectations(
+                modeling_data
+            )
+            modeling_data["valuation_methodology"] = assess_valuation_methodology(
+                modeling_data
+            )
+            modeling_data["data_summary"] = self._generate_data_summary(modeling_data)
+            self._log("warning", reason)
+            return modeling_data
         
         # 1. Scrape financial statements
         self._log("info", "Collecting historical financial statements...")
@@ -1007,11 +1244,6 @@ class FinancialScraper:
             modeling_data["ttm_bridge"] = build_ttm_bridge(
                 modeling_data["quarterly_financial_statements"]
             )
-        
-        # 2. Scrape comprehensive company data
-        self._log("info", "Collecting comprehensive company data...")
-        modeling_data["company_data"] = self.scrape_comprehensive_company_data()
-        time.sleep(0.5)
         
         # 3. Scrape historical price data
         self._log("info", "Collecting historical market data...")
@@ -1062,6 +1294,12 @@ class FinancialScraper:
             # statements and the model remain available if a provider is down.
             self._log("warning", f"Analyst consensus unavailable: {type(error).__name__}")
 
+        # Reconcile all point-in-time Street evidence into one deterministic
+        # object. This remains an external benchmark and never becomes a DCF
+        # input or an averaged valuation leg.
+        from src.external_expectations import build_external_expectations
+        modeling_data["external_expectations"] = build_external_expectations(modeling_data)
+
         # 4b. A real comparable-company set, when explicitly enabled. The old
         # "comps" leg reused this company's own current multiple, so it was a
         # market-price echo rather than an independent methodology.
@@ -1069,7 +1307,24 @@ class FinancialScraper:
             from peer_comps import collect_peer_comps, configuration_status
             peer_status = configuration_status()
             modeling_data["industry_data"]["peer_comps_status"] = peer_status
-            if not peer_status["ready"]:
+            from src.valuation_methodology import assess_valuation_methodology
+            interim_methodology = assess_valuation_methodology(modeling_data)
+            specialized_exclusion = _specialized_peer_comps_exclusion(
+                interim_methodology
+            )
+            if specialized_exclusion:
+                # These assets need methodology-specific comparable metrics
+                # (AFFO/NAV/cap rates; insurer book-value/reserve economics;
+                # mid-cycle commodity decks). A generic EV/EBITDA or P/S set
+                # must not be persisted as an included valuation leg merely
+                # because its symbols passed industrial-company screens.
+                modeling_data["industry_data"]["peer_comps"] = specialized_exclusion
+                self._log(
+                    "info",
+                    "Peer comps skipped: "
+                    + modeling_data["industry_data"]["peer_comps"]["reason"],
+                )
+            elif not peer_status["ready"]:
                 self._log(
                     "warning",
                     "Peer comps skipped: " + "; ".join(peer_status["blockers"]),
@@ -1077,24 +1332,59 @@ class FinancialScraper:
             else:
                 basic = company_data.get("basic_info", {}) or {}
                 market = company_data.get("market_data", {}) or {}
+                # Banks share Yahoo's Financial Services taxonomy with payment
+                # processors, so classify from the income statement before
+                # choosing a peer method.  Finnhub's P/S fallback looked
+                # superficially well covered for JPM but is not a valid bank
+                # valuation leg; bank peers need a verified P/B or P/E method.
+                statement_metrics = self._extract_key_metrics(
+                    modeling_data.get("financial_statements", {}) or {}
+                )
+                interest_share = (
+                    (statement_metrics.get("ratios") or {})
+                    .get("interest_income_to_revenue")
+                )
+                from src.agents.fm.bank_valuation import is_financial_sector
+                valuation_method = (
+                    "justified_pb_roe"
+                    if is_financial_sector(
+                        basic.get("sector"), basic.get("industry"), interest_share
+                    ) else None
+                )
                 # Finnhub reports market cap in USD millions.  Apply the size
                 # screen only where the subject value is also USD, avoiding a
                 # silent cross-currency comparison for foreign listings.
-                subject_market_cap = (
-                    market.get("market_cap")
-                    if str(basic.get("currency") or "").upper() == "USD"
-                    else None
-                )
+                # Yahoo market cap follows the listing/quote currency. The
+                # DCF reporting currency can differ (for example a London
+                # listing reporting in USD), so checking `currency` here made
+                # a GBP subject look like USD beside Finnhub's USD-million
+                # peer caps. If the listing is not USD, keep the peer set as
+                # an unscaled cross-check and exclude it from intrinsic value.
+                subject_market_cap = _peer_subject_market_cap_usd(company_data)
                 peer_comps = collect_peer_comps(
                     self.ticker, subject_market_cap=subject_market_cap,
                     sector=basic.get("sector"),
+                    valuation_method=valuation_method,
+                    subject_operating_margin=(
+                        (company_data.get("growth_profitability") or {}).get(
+                            "operating_margins")
+                    ),
+                    subject_revenue_growth=(
+                        (company_data.get("growth_profitability") or {}).get(
+                            "revenue_growth")
+                    ),
+                    subject_return_on_equity=(
+                        (company_data.get("growth_profitability") or {}).get(
+                            "return_on_equity")
+                    ),
                 )
                 if peer_comps:
                     modeling_data["industry_data"]["peer_comps"] = peer_comps
-                else:
+                if not peer_comps or peer_comps.get("status") != "ready":
                     self._log(
                         "warning",
-                        "Peer comps provider returned fewer than three usable observations",
+                        "Peer comps unavailable: "
+                        + str((peer_comps or {}).get("status") or "no_result"),
                     )
         except Exception as error:
             self._log("warning", f"Peer comps unavailable: {type(error).__name__}")
@@ -1103,6 +1393,17 @@ class FinancialScraper:
         # 5. Calculate advanced metrics for modeling
         self._log("info", "Calculating modeling metrics...")
         modeling_data["modeling_metrics"] = self._calculate_modeling_metrics(modeling_data)
+
+        # Collect exogenous CAPM inputs once, alongside the financial snapshot.
+        # Model construction must not silently replace a saved run's Treasury
+        # yield, Damodaran table, or beta window with whatever is live on a
+        # later rebuild date.
+        from src.agents.fm.assumption_grounding import (
+            collect_market_assumption_snapshot,
+        )
+        modeling_data["market_assumption_snapshot"] = (
+            collect_market_assumption_snapshot(modeling_data["company_data"])
+        )
         
         # 6. Generate data summary
         modeling_data["data_summary"] = self._generate_data_summary(modeling_data)

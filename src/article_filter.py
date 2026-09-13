@@ -25,6 +25,7 @@ load_dotenv()
 
 # Import centralized configuration
 from config import MIN_SCORE
+from article_relevance import filter_subject_articles, investment_relevance_score_cap
 
 # Import vynn_core for MongoDB integration
 try:
@@ -35,8 +36,16 @@ except ImportError as e:
     print("Please install vynn_core: pip install git+https://github.com/Agentic-Analyst/vynn-core.git")
     VYNN_CORE_AVAILABLE = False
 
+
+def _mongo_configured() -> bool:
+    return bool(
+        (os.getenv("MONGO_URI") or "").strip()
+        and (os.getenv("MONGO_DB") or "").strip()
+    )
+
 class ArticleFilter:
-    def __init__(self, ticker: str, query: str, base_path: pathlib.Path):
+    def __init__(self, ticker: str, query: str, base_path: pathlib.Path,
+                 company_name: Optional[str] = None):
         """
         Initialize LLM-powered article filter with MongoDB integration.
         
@@ -47,6 +56,7 @@ class ArticleFilter:
         """
         self.ticker = ticker.upper()
         self.query = query
+        self.company_name = company_name
         self.company_dir = base_path
         
         # Logger - will be set by pipeline if available
@@ -66,8 +76,13 @@ class ArticleFilter:
         self.company_industry = None
         
         # MongoDB integration - Initialize database if available
-        self.db_enabled = VYNN_CORE_AVAILABLE
-        self._log(f"🔧 Initializing MongoDB integration (vynn_core available: {VYNN_CORE_AVAILABLE})", "info")
+        self.db_enabled = VYNN_CORE_AVAILABLE and _mongo_configured()
+        self._log(
+            "🔧 MongoDB persistence status: "
+            f"library={'available' if VYNN_CORE_AVAILABLE else 'unavailable'}, "
+            f"configuration={'present' if _mongo_configured() else 'absent'}",
+            "info",
+        )
         
         if self.db_enabled:
             try:
@@ -92,7 +107,15 @@ class ArticleFilter:
                 self._log(f"Full traceback: {traceback.format_exc()}", "error")
                 self.db_enabled = False
         else:
-            self._log("⚠️  MongoDB integration disabled - vynn_core not available", "warning")
+            reason = (
+                "vynn_core is unavailable" if not VYNN_CORE_AVAILABLE
+                else "MONGO_URI/MONGO_DB are not configured"
+            )
+            self._log(
+                f"MongoDB persistence disabled ({reason}); current-run articles "
+                "remain available for screening",
+                "info",
+            )
         
         # Load prompts from files
         self.prompts_dir = pathlib.Path(__file__).parent.parent / "prompts"
@@ -130,10 +153,20 @@ class ArticleFilter:
         # Load and prepare articles
         searched_dir = self.company_dir / "searched"
         articles_data = self._load_articles_metadata(searched_dir)
+        articles_data, irrelevant_count = filter_subject_articles(
+            articles_data, self.ticker, self.company_name
+        )
+        if irrelevant_count:
+            self._log(
+                f"Deterministic subject gate rejected {irrelevant_count} article(s) "
+                f"that did not mention {self.company_name or self.ticker}",
+                "warning",
+            )
         
         if not articles_data:
             self._log("No articles found to filter")
-            return {"filtered_articles": [], "total_processed": 0, "llm_cost": 0.0}
+            return {"filtered_articles": [], "screening_articles": [], "total_processed": 0,
+                    "irrelevant_rejected": irrelevant_count, "llm_cost": 0.0}
         
         self._log(f"Found {len(articles_data)} articles to process")
         
@@ -162,7 +195,8 @@ class ArticleFilter:
             "query": self.query,
             "total_processed": len(articles_data),
             "llm_cost": self.total_llm_cost,
-            "llm_calls": self.llm_call_count
+            "llm_calls": self.llm_call_count,
+            "irrelevant_rejected": irrelevant_count,
         })
         
         # Log filtering summary
@@ -351,9 +385,13 @@ class ArticleFilter:
         scored_articles = []
         for i, res in enumerate(results):
             if isinstance(res, Exception):
-                self._log(f"Scoring batch {i} failed, defaulting to 5.0: {res}", "warning")
+                self._log(
+                    f"Scoring batch {i} failed; rejecting the batch because "
+                    f"relevance was not established: {type(res).__name__}",
+                    "warning",
+                )
                 for article in batches[i]:
-                    article['llm_score'] = 5.0
+                    article['llm_score'] = 0.0
                 scored_articles.extend(batches[i])
             else:
                 scored_articles.extend(res)
@@ -373,11 +411,19 @@ class ArticleFilter:
             self.total_llm_cost += cost
             scores = self._parse_llm_scores(response, len(batch))
             for i, article in enumerate(batch):
-                article['llm_score'] = scores[i] if i < len(scores) else 5.0
+                llm_score = scores[i] if i < len(scores) else 0.0
+                score_cap = investment_relevance_score_cap(article)
+                if score_cap is not None:
+                    llm_score = min(llm_score, score_cap)
+                article['llm_score'] = llm_score
         except Exception as e:
-            self._log(f"LLM scoring failed: {e}", "warning")
+            self._log(
+                "LLM relevance scoring failed; rejecting this batch because "
+                f"relevance was not established ({type(e).__name__})",
+                "warning",
+            )
             for article in batch:
-                article['llm_score'] = 5.0
+                article['llm_score'] = 0.0
         return batch
 
     async def filter_articles_async(self) -> dict:
@@ -391,9 +437,19 @@ class ArticleFilter:
 
         searched_dir = self.company_dir / "searched"
         articles_data = self._load_articles_metadata(searched_dir)
+        articles_data, irrelevant_count = filter_subject_articles(
+            articles_data, self.ticker, self.company_name
+        )
+        if irrelevant_count:
+            self._log(
+                f"Deterministic subject gate rejected {irrelevant_count} article(s) "
+                f"that did not mention {self.company_name or self.ticker}",
+                "warning",
+            )
         if not articles_data:
             self._log("No articles found to filter")
-            return {"filtered_articles": [], "total_processed": 0, "llm_cost": 0.0}
+            return {"filtered_articles": [], "screening_articles": [], "total_processed": 0,
+                    "irrelevant_rejected": irrelevant_count, "llm_cost": 0.0}
 
         self._log(f"Found {len(articles_data)} articles to process")
         scored_articles = await self._score_articles_with_llm_async(articles_data)
@@ -415,6 +471,7 @@ class ArticleFilter:
             "total_processed": len(articles_data),
             "llm_cost": self.total_llm_cost,
             "llm_calls": self.llm_call_count,
+            "irrelevant_rejected": irrelevant_count,
         })
         return result
 
@@ -440,14 +497,23 @@ class ArticleFilter:
             
             # Apply scores to articles
             for i, article in enumerate(batch):
-                llm_score = scores[i] if i < len(scores) else 5.0
+                llm_score = scores[i] if i < len(scores) else 0.0
+                score_cap = investment_relevance_score_cap(article)
+                if score_cap is not None:
+                    llm_score = min(llm_score, score_cap)
                 article['llm_score'] = llm_score
                 
         except Exception as e:
-            self._log(f"LLM scoring failed: {e}", "warning")
-            # Fallback to default scores
+            self._log(
+                "LLM relevance scoring failed; rejecting this batch because "
+                f"relevance was not established ({type(e).__name__})",
+                "warning",
+            )
+            # Relevance is an admission boundary for durable evidence.  A
+            # provider failure is not evidence of relevance and must fail
+            # closed below the selection threshold.
             for article in batch:
-                article['llm_score'] = 5.0
+                article['llm_score'] = 0.0
                 
         return batch
 
@@ -483,10 +549,16 @@ class ArticleFilter:
         matches = re.findall(pattern, response)
         
         # Convert to scores array
-        score_dict = {int(match[0]): float(match[1]) for match in matches}
+        score_dict = {
+            int(match[0]): min(max(float(match[1]), 0.0), 10.0)
+            for match in matches
+        }
         
         for i in range(1, expected_count + 1):
-            scores.append(score_dict.get(i, 5.0))  # Default to 5.0 if not found
+            # Missing/malformed model output has not established relevance.
+            # MIN_SCORE is currently 5, so the old 5.0 default silently
+            # admitted every failed item to MongoDB.
+            scores.append(score_dict.get(i, 0.0))
             
         return scores
 
@@ -502,11 +574,18 @@ class ArticleFilter:
         return qualified_articles
 
     def _finalize_filtering(self, filtered_articles: list) -> dict:
-        """Save filtered articles to MongoDB database (no local file storage needed)."""
+        """Persist filtered articles and retain a screening-ready memory copy.
+
+        MongoDB is useful shared storage, but it is not an admission boundary
+        and must not be a single point of failure for the current run. The
+        caller can screen ``screening_articles`` even when persistence is
+        disabled or temporarily unavailable.
+        """
         
         # Prepare articles for MongoDB storage
         db_articles = []
         final_articles = []
+        screening_articles = []
         
         for i, article in enumerate(filtered_articles, 1):
             score = article['llm_score']
@@ -525,6 +604,23 @@ class ArticleFilter:
                     "llm_score": score,
                     "title": article['title']
                 })
+                screening_articles.append({
+                    "file_path": None,
+                    "file_name": original_name,
+                    "title": article.get("title") or "Untitled",
+                    "source_url": article.get("source_url") or article.get("url") or "",
+                    "publish_date": article.get("publish_date") or "",
+                    "published_at": article.get("published_at"),
+                    "scraped_at": article.get("scraped_at"),
+                    "createdAt": article.get("createdAt"),
+                    "created_at": article.get("created_at"),
+                    "text": article.get("content") or article.get("text") or "",
+                    "word_count": article.get("word_count") or 0,
+                    "serpapi_snippet": article.get("serpapi_snippet") or "",
+                    "serpapi_source": article.get("serpapi_source") or "",
+                    "search_category": article.get("search_category") or "",
+                    "llm_score": score,
+                })
                     
             except Exception as e:
                 self._log(f"Error preparing article {original_name}: {e}", "error")
@@ -533,7 +629,10 @@ class ArticleFilter:
         # Save to MongoDB (primary storage)
         db_result = self._save_to_mongodb(db_articles)
         
-        result = {"filtered_articles": final_articles}
+        result = {
+            "filtered_articles": final_articles,
+            "screening_articles": screening_articles,
+        }
         if db_result:
             result["mongodb_result"] = db_result
         
@@ -645,4 +744,3 @@ class ArticleFilter:
     # Filtered articles with rankings are available in filtered/ directory
     
     # News Feed System Methods
-
