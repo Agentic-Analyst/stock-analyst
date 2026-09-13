@@ -25,6 +25,7 @@ def history(days=400):
 def test_get_crypto_returns_supply_liquidity_and_calendar_day_risk(monkeypatch):
     import yfinance as yf
     from agents.tools import yf_resilience
+    from agents.tools import crypto_research
 
     class Ticker:
         info = {
@@ -35,6 +36,11 @@ def test_get_crypto_returns_supply_liquidity_and_calendar_day_risk(monkeypatch):
 
     monkeypatch.setattr(yf, "Ticker", lambda _symbol: Ticker())
     monkeypatch.setattr(yf_resilience, "fetch_history", lambda *args, **kwargs: history())
+    monkeypatch.setattr(crypto_research, "get_crypto_research", lambda _symbol: {
+        "network_context": {"source": "mempool.space"},
+        "protocol_context": None,
+        "capabilities": {"network_activity": True},
+    })
     result = json.loads(asyncio.run(GetCryptoTool().execute("bitcoin")))
     assert result["status"] == "ok" and result["symbol"] == "BTC-USD"
     assert result["market_structure"]["volume_to_market_cap"] == 0.04
@@ -43,22 +49,73 @@ def test_get_crypto_returns_supply_liquidity_and_calendar_day_risk(monkeypatch):
     assert result["performance"]["annualized_volatility_one_year"] is not None
     assert result["methodology"]["annualized_volatility"] == "daily_returns_sqrt_365"
     assert result["methodology"]["intrinsic_value"] is None
-    assert result["methodology"]["on_chain_data"] is False
+    assert result["methodology"]["on_chain_data"] is True
+    assert result["capabilities"]["on_chain_activity"] is True
+    assert result["capabilities"]["protocol_revenue"] is False
+    assert result["capabilities"]["token_unlocks"] is False
     assert result["price_usd"] == result["price"]
 
 
 def test_non_usd_pair_is_not_mislabeled_as_a_usd_price(monkeypatch):
     import yfinance as yf
     from agents.tools import yf_resilience
+    from agents.tools import crypto_research
 
     class Ticker:
         info = {"currency": "EUR"}
 
     monkeypatch.setattr(yf, "Ticker", lambda _symbol: Ticker())
     monkeypatch.setattr(yf_resilience, "fetch_history", lambda *args, **kwargs: history())
+    monkeypatch.setattr(crypto_research, "get_crypto_research", lambda _symbol: {
+        "network_context": None, "protocol_context": None, "capabilities": {},
+    })
     result = json.loads(asyncio.run(GetCryptoTool().execute("BTC-EUR")))
     assert result["currency"] == "EUR" and "price_usd" not in result
     assert "market_cap_usd" not in result and "volume_24h_usd" not in result
+
+
+def test_yahoo_numeric_disambiguator_is_not_exposed_as_public_identity(monkeypatch):
+    import yfinance as yf
+    from agents.tools import crypto_research, yf_resilience
+
+    class Ticker:
+        info = {"currency": "USD"}
+
+    monkeypatch.setattr(yf, "Ticker", lambda _symbol: Ticker())
+    monkeypatch.setattr(yf_resilience, "fetch_history", lambda *args, **kwargs: history())
+    monkeypatch.setattr(crypto_research, "get_crypto_research", lambda _symbol: {
+        "network_context": None, "protocol_context": None, "capabilities": {},
+    })
+
+    result = json.loads(asyncio.run(GetCryptoTool().execute("UNI")))
+
+    assert result["symbol"] == "UNI-USD"
+    assert result["provider_symbol"] == "UNI7083-USD"
+
+
+def test_defi_ecosystem_context_is_not_advertised_as_generic_on_chain_data(monkeypatch):
+    import yfinance as yf
+    from agents.tools import crypto_research, yf_resilience
+
+    class Ticker:
+        info = {"currency": "USD"}
+
+    monkeypatch.setattr(yf, "Ticker", lambda _symbol: Ticker())
+    monkeypatch.setattr(yf_resilience, "fetch_history", lambda *args, **kwargs: history())
+    monkeypatch.setattr(crypto_research, "get_crypto_research", lambda _symbol: {
+        "network_context": {"source": "defillama"},
+        "protocol_context": None,
+        "capabilities": {
+            "network_activity": False,
+            "defi_ecosystem_activity": True,
+        },
+    })
+
+    result = json.loads(asyncio.run(GetCryptoTool().execute("ETH")))
+
+    assert result["capabilities"]["on_chain_activity"] is False
+    assert result["capabilities"]["defi_ecosystem_activity"] is True
+    assert result["methodology"]["on_chain_data"] is False
 
 
 def test_crypto_risk_and_long_returns_require_the_period_they_claim():

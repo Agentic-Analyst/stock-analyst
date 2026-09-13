@@ -23,6 +23,7 @@ names are always safe; bare symbols are curated.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Dict, Optional
 
@@ -146,6 +147,12 @@ _CRYPTO_CONTEXT_WORDS = {
     "altcoin", "altcoins", "token", "blockchain", "on-chain", "onchain",
 }
 
+_PUBLIC_BASE_BY_YAHOO_BASE = {
+    value: re.sub(r"\d+$", "", value)
+    for value in set(_CRYPTO_NAME_TO_SYMBOL.values())
+}
+_PUBLIC_BASE_BY_YAHOO_BASE["SPX28081"] = "SPX6900"
+
 
 def _clean(text: str) -> str:
     return (text or "").strip().lower()
@@ -212,6 +219,15 @@ def normalize_crypto_symbol(raw: str) -> Optional[str]:
         return f"{base}-USD"
 
     return None
+
+
+def public_crypto_symbol(provider_symbol: str) -> str:
+    """Hide Yahoo/CMC disambiguation suffixes from product-facing output."""
+    symbol = str(provider_symbol or "").strip().upper()
+    if "-" not in symbol:
+        return _PUBLIC_BASE_BY_YAHOO_BASE.get(symbol, symbol)
+    base, quote = symbol.split("-", 1)
+    return f"{_PUBLIC_BASE_BY_YAHOO_BASE.get(base, base)}-{quote}"
 
 
 def is_crypto_symbol(sym: str) -> bool:
