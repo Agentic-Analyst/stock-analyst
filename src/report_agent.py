@@ -17,6 +17,7 @@ Output: Professional analyst report in markdown format
 
 from __future__ import annotations
 import asyncio
+import ast
 import contextvars
 # Used by _strip_echoed_heading. Its absence broke EVERY report for one
 # deploy: the helper referenced `re` at call time and the module never
@@ -27,11 +28,25 @@ import statistics
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+from urllib.parse import quote, urlparse
 import json
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from llms.config import get_llm
 from logger import StockAnalystLogger
 from recommendation_engine import RecommendationEngineV3
+from src.external_expectations import (
+    align_forward_estimates_to_forecast_basis,
+    build_external_expectations,
+    implied_discount_rate_for_enterprise_value,
+    implied_fcf_path_scale_for_enterprise_value,
+    implied_terminal_growth_for_enterprise_value,
+    implied_terminal_fcf_for_enterprise_value,
+    reconcile_model_profitability,
+)
+from src.summary_evidence import compact_publication_reason
 
 
 def historical_volatility_pct(financial_data: Dict[str, Any]) -> Optional[float]:
@@ -228,7 +243,15 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
     growth_profitability = company_data.get('growth_profitability', {})
     forward_guidance = company_data.get('forward_guidance', {})
     analyst_consensus = company_data.get('analyst_consensus', {}) or {}
-    
+    consensus_target = analyst_consensus.get('price_target', {}) or {}
+    consensus_recommendation = analyst_consensus.get('recommendation', {}) or {}
+    external_expectations = (
+        financial_data.get('external_expectations')
+        or build_external_expectations(financial_data)
+    )
+    external_target = external_expectations.get('price_target') or {}
+    external_recommendation = external_expectations.get('recommendations') or {}
+
     return {
         'ticker': financial_data.get('ticker', 'N/A'),
         'company_name': basic_info.get('long_name', 'Unknown Company'),
@@ -280,14 +303,70 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
         'revenue_growth': growth_profitability.get('revenue_growth', 0),
         'earnings_growth': growth_profitability.get('earnings_growth', 0),
         'dividend_yield': market_data.get('dividend_yield', 0),
-        'target_mean_price': forward_guidance.get('target_mean_price', 0),
-        'target_high_price': forward_guidance.get('target_high_price', 0),
-        'target_low_price': forward_guidance.get('target_low_price', 0),
-        'recommendation': forward_guidance.get('recommendation_key', 'N/A'),
-        'num_analysts': forward_guidance.get('number_of_analyst_opinions', 0),
+        # Source-owned normalized consensus is authoritative. The legacy
+        # guidance mirror is only a fallback for old artifacts. This avoids a
+        # licensed Benzinga/Finnhub target appearing in the table while the
+        # publication gate quietly benchmarks against an older Yahoo number.
+        'target_mean_price': (
+            consensus_target.get('mean')
+            if consensus_target.get('mean') is not None
+            else forward_guidance.get('target_mean_price', 0)
+        ),
+        'target_high_price': (
+            consensus_target.get('high')
+            if consensus_target.get('high') is not None
+            else forward_guidance.get('target_high_price', 0)
+        ),
+        'target_low_price': (
+            consensus_target.get('low')
+            if consensus_target.get('low') is not None
+            else forward_guidance.get('target_low_price', 0)
+        ),
+        'recommendation': (
+            consensus_recommendation.get('label')
+            or forward_guidance.get('recommendation_key', 'N/A')
+        ),
+        'num_analysts': (
+            consensus_target.get('analyst_count')
+            if consensus_target.get('analyst_count') is not None
+            else forward_guidance.get('number_of_analyst_opinions', 0)
+        ),
         'analyst_consensus': analyst_consensus,
+        'analyst_target_qualified_for_contradiction': bool(
+            external_target.get('qualified_for_contradiction')
+        ),
+        'analyst_target_qualified_for_corroboration': bool(
+            external_target.get('qualified_for_corroboration')
+        ),
+        'analyst_target_temporal_quality': external_target.get(
+            'temporal_quality') or {},
+        'analyst_rating_qualified': bool(
+            external_recommendation.get('active_qualified')
+        ),
+        'analyst_rating_temporal_quality': (
+            (external_recommendation.get('source_evidence') or {}).get(
+                external_recommendation.get('active_source'), {}
+            ).get('temporal_quality') or {}
+        ),
+        'analyst_observations': external_expectations.get(
+            'analyst_observations') or {},
         'hist_vol_annual_pct': historical_volatility_pct(financial_data),
     }
+
+
+def _analyst_coverage_text(count: Any, unit: Any, *, kind: str) -> str:
+    if not isinstance(count, (int, float)) or isinstance(count, bool) or count <= 0:
+        return "N/A"
+    labels = {
+        "latest_analyst_firm_target_observations": "analyst-firm target observations",
+        "latest_analyst_firm_rating_observations": "analyst-firm rating observations",
+        "provider_unique_analysts": "provider-reported unique analysts",
+        "provider_reported_analyst_opinions": "provider-reported analyst opinions",
+        "provider_reported_analysts": "provider-reported analysts",
+        "provider_rating_observations": "provider rating observations",
+    }
+    fallback = "target observations" if kind == "target" else "rating observations"
+    return f"{int(count)} {labels.get(str(unit or ''), fallback)}"
 
 
 def build_analyst_consensus_table(consensus: Dict[str, Any]) -> str:
@@ -298,8 +377,8 @@ def build_analyst_consensus_table(consensus: Dict[str, Any]) -> str:
         return "_Provider-level analyst consensus snapshots unavailable._"
 
     table = (
-        "| Provider | Mean Target | Target Range | Analysts | Rating | As Of |\n"
-        "|----------|-------------|--------------|----------|--------|-------|\n"
+        "| Provider | Mean Target | Target Range | Target Coverage | Rating | Rating Coverage | Provider As Of | Captured |\n"
+        "|----------|-------------|--------------|-----------------|--------|--------------|----------------|----------|\n"
     )
     rows = 0
     for source, snapshot in snapshots.items():
@@ -324,12 +403,39 @@ def build_analyst_consensus_table(consensus: Dict[str, Any]) -> str:
             if isinstance(low, (int, float)) and isinstance(high, (int, float))
             else "N/A"
         )
-        count = target.get('analyst_count') or recommendation.get('total') or "N/A"
+        target_count = _analyst_coverage_text(
+            target.get('analyst_count'), target.get('coverage_unit'), kind="target"
+        )
+        rating_count = max(
+            (
+                value for value in (
+                    recommendation.get('total'),
+                    recommendation.get('total_rating_count'),
+                    recommendation.get('unique_analyst_count'),
+                    recommendation.get('analyst_count'),
+                )
+                if isinstance(value, (int, float))
+                and not isinstance(value, bool) and value > 0
+            ),
+            default=None,
+        )
+        # Yahoo exposes a recommendation label but not the population behind
+        # recommendationKey. Historical artifacts copied target coverage into
+        # this field, so displaying it as rating coverage would be misleading.
+        if source == 'yahoo_finance':
+            rating_count = None
+        rating_count_text = _analyst_coverage_text(
+            rating_count, recommendation.get('coverage_unit'), kind="rating"
+        )
         rating = str(recommendation.get('label') or "N/A").replace('_', ' ').title()
-        as_of = target.get('as_of') or recommendation.get('period') or snapshot.get('captured_at') or "N/A"
+        as_of = target.get('as_of') or recommendation.get('period') or "N/A"
+        captured = snapshot.get('captured_at') or "N/A"
         provider = ("TipRanks" if source == "tipranks"
                     else str(source).replace('_', ' ').title())
-        table += f"| {provider} | {money(mean)} | {target_range} | {count} | {rating} | {as_of} |\n"
+        table += (
+            f"| {provider} | {money(mean)} | {target_range} | {target_count} | "
+            f"{rating} | {rating_count_text} | {as_of} | {captured} |\n"
+        )
         rows += 1
 
     if not rows:
@@ -339,6 +445,32 @@ def build_analyst_consensus_table(consensus: Dict[str, Any]) -> str:
     target_comparison = comparison.get('price_target') or {}
     recommendation_comparison = comparison.get('recommendation') or {}
     notes = ["Provider snapshots are kept separate and excluded from intrinsic value."]
+    benzinga = snapshots.get("benzinga") or {}
+    benzinga_target = benzinga.get("price_target") or {}
+    benzinga_recommendation = benzinga.get("recommendation") or {}
+    aggregate_calculated = (
+        benzinga_target.get("aggregate_calculated_at")
+        or benzinga_recommendation.get("aggregate_calculated_at")
+    )
+    if aggregate_calculated:
+        notes.append(
+            "Benzinga aggregate calculated "
+            f"{_markdown_cell(aggregate_calculated, 80)}; this is not the "
+            "provider as-of date of every underlying analyst observation."
+        )
+    benzinga_oldest = (
+        benzinga_target.get("oldest_observation_as_of")
+        or benzinga_recommendation.get("oldest_observation_as_of")
+    )
+    benzinga_latest = (
+        benzinga_target.get("as_of") or benzinga_recommendation.get("period")
+    )
+    if benzinga_oldest and benzinga_latest:
+        notes.append(
+            "Benzinga consensus uses latest-per-analyst-firm observations dated "
+            f"{_markdown_cell(benzinga_oldest, 40)} through "
+            f"{_markdown_cell(benzinga_latest, 40)}."
+        )
     if "tipranks" in snapshots:
         notes.append("TipRanks fields: Data by TipRanks.")
     spread = target_comparison.get('mean_target_spread_pct')
@@ -353,16 +485,368 @@ def build_analyst_consensus_table(consensus: Dict[str, Any]) -> str:
     return table + "\n_" + " ".join(notes) + "_"
 
 
+def build_street_reconciliation_table(
+    expectations: Dict[str, Any], projections: Dict[str, Any],
+    valuation: Dict[str, Any], peer_comps: Dict[str, Any],
+    model_inputs: Optional[Dict[str, Any]] = None,
+    assumptions: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Explain model/Street disagreement through explicit assumptions."""
+    expectations = expectations or {}
+    if not expectations:
+        return "_Street expectations reconciliation unavailable for this artifact._"
+    target = expectations.get("price_target") or {}
+    recs = expectations.get("recommendations") or {}
+    currency = expectations.get("currency")
+    symbol = currency_symbol(currency) if currency else _money_symbol()
+    model_inputs = model_inputs if isinstance(model_inputs, dict) else {}
+    assumptions = assumptions if isinstance(assumptions, dict) else {}
+    forecast_basis = model_inputs.get("forecast_basis") or {}
+    years = align_forward_estimates_to_forecast_basis(
+        expectations, forecast_basis
+    )
+    consensus_anchored = bool(
+        model_inputs.get("near_term_revenue_is_consensus_anchored")
+        or str(model_inputs.get("revenue_growth_source") or "").startswith(
+            "yahoo_analyst_consensus")
+    )
+
+    def money(value: Any) -> str:
+        return (f"{symbol}{value:,.2f}" if isinstance(value, (int, float))
+                and not isinstance(value, bool) else "N/A")
+
+    market = expectations.get("market_price_at_run")
+    dcf_values = [
+        (valuation.get("dcf_perpetual") or {}).get("intrinsic_value_per_share"),
+        (valuation.get("dcf_exit") or {}).get("intrinsic_value_per_share"),
+    ]
+    valid_dcf = [float(value) for value in dcf_values
+                 if isinstance(value, (int, float)) and value > 0]
+    dcf_midpoint = sum(valid_dcf) / len(valid_dcf) if valid_dcf else None
+    dcf_gap = (dcf_midpoint / market - 1 if dcf_midpoint is not None
+               and isinstance(market, (int, float)) and market > 0 else None)
+
+    headline = "| Lens | Value | Gap vs Market | Role |\n|---|---:|---:|---|\n"
+    headline += f"| Market price at run | {money(market)} | — | observed price |\n"
+    headline += (
+        f"| Internal DCF midpoint | {money(dcf_midpoint)} | {format_percent(dcf_gap)} | "
+        "intrinsic-value scenario |\n"
+    )
+    comps = (valuation.get("summary") or {}).get("comps_intrinsic")
+    if isinstance(comps, (int, float)) and comps > 0:
+        comps_gap = comps / market - 1 if isinstance(market, (int, float)) and market > 0 else None
+        from src.valuation_methodology import normalize_peer_comps_policy
+        policy = normalize_peer_comps_policy(peer_comps)
+        confidence = policy["confidence"]
+        role = policy["role"]
+        headline += (
+            f"| Peer-multiple cross-check | {money(comps)} | {format_percent(comps_gap)} | "
+            f"{_markdown_cell(role)}; {confidence} confidence; "
+            f"{'included' if policy['included_in_blended_value'] else 'excluded'} from blend |\n"
+        )
+    mean_target = target.get("mean")
+    if isinstance(mean_target, (int, float)) and mean_target > 0:
+        if target.get("qualified_for_corroboration"):
+            target_role = "current external benchmark"
+        elif target.get("qualified_for_contradiction"):
+            target_role = "caution-only external benchmark"
+        else:
+            target_role = "provenance only; no policy vote"
+        headline += (
+            f"| Street mean target | {money(mean_target)} | "
+            f"{format_percent(target.get('return_vs_market'))} | {target_role}; "
+            f"{_analyst_coverage_text(target.get('analyst_count'), target.get('coverage_unit'), kind='target')}; "
+            f"{_markdown_cell(target.get('source'))} |\n"
+        )
+
+    target_cross_check = expectations.get("valuation_cross_check") or {}
+    implied_pe = target_cross_check.get("forward_pe_at_mean_target")
+    implied_ev_sales = target_cross_check.get(
+        "target_implied_ev_to_forward_revenue")
+    implied_period = target_cross_check.get("forward_revenue_period") or "+1y"
+    implied_parts = []
+    if isinstance(implied_pe, (int, float)) and math.isfinite(float(implied_pe)):
+        implied_parts.append(f"{float(implied_pe):.1f}x forward P/E")
+    if (isinstance(implied_ev_sales, (int, float))
+            and math.isfinite(float(implied_ev_sales))):
+        implied_parts.append(
+            f"{float(implied_ev_sales):.1f}x EV/{implied_period} Street revenue")
+
+    target_reverse = implied_terminal_fcf_for_enterprise_value(
+        target_cross_check.get("target_implied_enterprise_value"),
+        pv_explicit_fcf=(valuation.get("dcf_perpetual") or {}).get("pv_fcfs"),
+        pv_terminal_value=(valuation.get("dcf_perpetual") or {}).get(
+            "terminal_value"),
+        model_terminal_fcf=(valuation.get("reverse_dcf") or {}).get(
+            "model_terminal_fcf"),
+    )
+    target_path_scale = implied_fcf_path_scale_for_enterprise_value(
+        target_cross_check.get("target_implied_enterprise_value"),
+        model_enterprise_value=(valuation.get("dcf_perpetual") or {}).get(
+            "enterprise_value"
+        ),
+    )
+    market_path_scale = implied_fcf_path_scale_for_enterprise_value(
+        (valuation.get("reverse_dcf") or {}).get("market_enterprise_value"),
+        model_enterprise_value=(valuation.get("dcf_perpetual") or {}).get(
+            "enterprise_value"
+        ),
+    )
+    explicit_fcf = (valuation.get("dcf_inputs") or {}).get("fcf") or []
+    mid_year_adjustment = (valuation.get("dcf_inputs") or {}).get(
+        "mid_year_adjustment", 0.0
+    )
+    model_wacc = assumptions.get("wacc")
+    model_growth = assumptions.get("terminal_growth")
+    assumption_diagnostics = []
+    for label, benchmark_ev in (
+        ("current market", (valuation.get("reverse_dcf") or {}).get(
+            "market_enterprise_value")),
+        ("external mean target", target_cross_check.get(
+            "target_implied_enterprise_value")),
+    ):
+        implied_rate = implied_discount_rate_for_enterprise_value(
+            benchmark_ev, explicit_fcf=explicit_fcf,
+            terminal_growth=model_growth, model_wacc=model_wacc,
+            mid_year_adjustment=mid_year_adjustment,
+        )
+        implied_growth = implied_terminal_growth_for_enterprise_value(
+            benchmark_ev, explicit_fcf=explicit_fcf, wacc=model_wacc,
+            model_terminal_growth=model_growth,
+            mid_year_adjustment=mid_year_adjustment,
+        )
+        if implied_rate.get("available"):
+            assumption_diagnostics.append(
+                f"{label} WACC {implied_rate['implied_wacc']:.2%}"
+            )
+        if implied_growth.get("available"):
+            assumption_diagnostics.append(
+                f"{label} terminal growth "
+                f"{implied_growth['implied_terminal_growth']:.2%}"
+            )
+
+    profitability = reconcile_model_profitability(
+        expectations, projections, forecast_basis
+    )
+    profitability_rows = profitability.get("rows") or []
+    estimate_table = (
+        "\n| Horizon | Model Revenue | Street Revenue | Model vs Street | Street Revenue Growth | "
+        "Street EPS | Model NOPAT Margin | Street-Implied Net Margin | Margin Gap | Coverage |\n"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|\n"
+    )
+    model_revenue = projections.get("revenue") or []
+    qualified_revenue_gaps = []
+    for index, row in enumerate(years[:2]):
+        model_value = model_revenue[index] if index < len(model_revenue) else None
+        street_value = row.get('revenue')
+        revenue_gap = (
+            model_value / street_value - 1
+            if isinstance(model_value, (int, float)) and not isinstance(model_value, bool)
+            and isinstance(street_value, (int, float)) and not isinstance(street_value, bool)
+            and street_value > 0 else None
+        )
+        if (isinstance(revenue_gap, (int, float))
+                and (row.get('revenue_analyst_count') or 0) >= 5):
+            qualified_revenue_gaps.append(revenue_gap)
+        profit = profitability_rows[index] if index < len(profitability_rows) else {}
+        estimate_table += (
+            f"| {row.get('horizon') or f'FY{index + 1}'} ({row.get('period')}) | "
+            f"{money(model_value)} | {money(street_value)} | {format_percent(revenue_gap)} | "
+            f"{format_percent(row.get('revenue_growth'))} | "
+            f"{money(row.get('eps'))} | "
+            f"{format_percent(profit.get('model_after_tax_operating_margin'))} | "
+            f"{format_percent(row.get('implied_net_margin'))} | "
+            f"{format_percent(profit.get('margin_gap'))} | "
+            f"revenue {row.get('revenue_analyst_count') or 0}; EPS {row.get('eps_analyst_count') or 0} |\n"
+        )
+
+    source_ratings = recs.get("source_evidence") or {}
+    ratings = ", ".join(
+        f"{source}: {str(row.get('label') or 'N/A').replace('_', ' ').title()} "
+        f"({_analyst_coverage_text(row.get('analyst_count'), row.get('coverage_unit'), kind='rating')}; "
+        f"{('current' if (row.get('temporal_quality') or {}).get('status') == 'current' else 'provider date unavailable; caution only') if row.get('qualified') else 'provenance only'})"
+        for source, row in source_ratings.items() if isinstance(row, dict)
+    ) or "unavailable"
+    caveats = expectations.get("warnings") or []
+    note = (
+        f"\n**Street recommendation evidence:** {_markdown_cell(ratings, 500)}. "
+        f"Coverage: {str(expectations.get('coverage') or 'limited').upper()}. "
+        "These observations benchmark the model; they are not averaged into intrinsic value."
+    )
+    if implied_parts:
+        note += (
+            " **Economics implied by the external target:** "
+            + "; ".join(implied_parts)
+            + ". These are benchmark-implied trading multiples, not Vynn valuation inputs."
+        )
+    if target_reverse.get("available"):
+        target_delta = target_reverse["implied_fcf_vs_model"]
+        target_gap = (
+            "approximately in line with the model"
+            if abs(target_delta) < 0.0005 else
+            f"{abs(target_delta):.1%} above the model"
+            if target_delta > 0 else
+            f"{abs(target_delta):.1%} below the model"
+        )
+        target_fcf = target_reverse["implied_terminal_fcf"]
+        target_fcf_text = (
+            f"{symbol}{target_fcf / 1e12:,.2f}T"
+            if target_fcf >= 1e12 else
+            f"{symbol}{target_fcf / 1e9:,.1f}B"
+        )
+        note += (
+            " **Analyst-target reverse DCF:** holding the model's explicit cash "
+            "flows, discounting, and terminal-growth convention fixed, the external "
+            f"mean target requires terminal FCF of {target_fcf_text}, {target_gap}. "
+            "This quantifies the external benchmark's embedded cash-flow expectation; "
+            "it is not blended into intrinsic value."
+        )
+    path_scale_parts = []
+    for label, diagnostic in (
+        ("current market EV", market_path_scale),
+        ("external mean target EV", target_path_scale),
+    ):
+        if not diagnostic.get("available"):
+            continue
+        delta = diagnostic["implied_fcf_path_vs_model"]
+        direction = (
+            "approximately in line with"
+            if abs(delta) < 0.0005 else
+            f"{abs(delta):.1%} above"
+            if delta > 0 else
+            f"{abs(delta):.1%} below"
+        )
+        path_scale_parts.append(f"{label} is {direction} the modeled FCF path")
+    if path_scale_parts:
+        note += (
+            " **Whole-path reverse DCF:** " + "; ".join(path_scale_parts)
+            + ". This scales explicit and terminal free cash flow proportionally "
+              "while holding WACC and terminal growth fixed; it is a diagnostic, "
+              "not a calibrated fair value."
+        )
+    if (market_path_scale.get("available")
+            and market_path_scale["scale"] >= 3.0):
+        note += (
+            f" **Model-scope warning:** current market EV requires "
+            f"{market_path_scale['scale']:.2f}x the modeled FCF path. The DCF "
+            "method outputs therefore value only the modeled operating cash-flow "
+            "path—not a comprehensive company value—until the missing expectations "
+            "are explicitly reconciled. This gap does not validate the market price."
+        )
+    if assumption_diagnostics:
+        baselines = []
+        if isinstance(model_wacc, (int, float)):
+            baselines.append(f"model WACC {model_wacc:.2%}")
+        if isinstance(model_growth, (int, float)):
+            baselines.append(f"model terminal growth {model_growth:.2%}")
+        note += (
+            " **One-assumption reverse DCF:** "
+            + "; ".join(assumption_diagnostics)
+            + (f" versus {', '.join(baselines)}" if baselines else "")
+            + ". Each figure solves one assumption while holding the full modeled "
+              "FCF path and the other terminal assumption fixed; it is diagnostic only."
+        )
+    if qualified_revenue_gaps:
+        largest_gap = max(abs(gap) for gap in qualified_revenue_gaps)
+        if largest_gap <= 0.03:
+            if consensus_anchored:
+                note += (
+                    " **Forecast input provenance:** near-term model revenue is deliberately "
+                    "anchored to well-covered Street estimates "
+                    f"(resulting largest gap {largest_gap:.1%}). This agreement is expected "
+                    "from the model design and is not independent validation."
+                )
+            else:
+                note += (
+                    " **Forecast reconciliation:** near-term model revenue is aligned "
+                    f"with well-covered Street estimates (largest gap {largest_gap:.1%})."
+                )
+            if isinstance(dcf_gap, (int, float)) and abs(dcf_gap) >= 0.30:
+                note += (
+                    " The exceptional valuation gap is therefore not a near-term "
+                    "top-line disagreement; it must be traced to cash conversion, "
+                    "reinvestment, discount-rate, or terminal-value assumptions."
+                )
+        elif largest_gap <= 0.10:
+            note += (
+                " **Forecast reconciliation:** the model is reasonably close to "
+                f"Street revenue, but differs by as much as {largest_gap:.1%}."
+            )
+        else:
+            note += (
+                " **Forecast reconciliation warning:** model revenue differs from "
+                f"well-covered Street estimates by as much as {largest_gap:.1%}; "
+                "that top-line assumption requires explicit justification before publication."
+            )
+    qualified_profit = [row for row in profitability_rows if row.get("qualified")]
+    if qualified_profit:
+        max_margin_gap = max(
+            abs(row["margin_gap"]) for row in qualified_profit
+            if isinstance(row.get("margin_gap"), (int, float))
+        ) if any(isinstance(row.get("margin_gap"), (int, float))
+                 for row in qualified_profit) else None
+        if profitability.get("conflicts"):
+            note += (
+                " **Profitability reconciliation warning:** model after-tax operating "
+                f"margin differs from Street-implied net margin by as much as "
+                f"{max_margin_gap:.1%}. This exceeds the launch rail and blocks a point "
+                "valuation until the earnings/financing bridge is explained."
+            )
+        elif profitability.get("isolated_horizon_anomalies"):
+            horizons = ", ".join(
+                str(row.get("horizon") or "near-term")
+                for row in profitability["isolated_horizon_anomalies"]
+            )
+            note += (
+                " **Profitability reconciliation anomaly:** the margin gap exceeds "
+                f"the diagnostic threshold in {horizons}, but not across both "
+                "well-covered horizons. It remains visible as a possible one-time, "
+                "GAAP/adjusted-EPS, financing, or share-count definition issue; it "
+                "does not independently block publication without persistence."
+            )
+        elif max_margin_gap is not None:
+            note += (
+                " **Profitability reconciliation:** the model's NOPAT margin is within "
+                f"{max_margin_gap:.1%} of the well-covered EPS-implied Street net-margin case."
+            )
+        note += (
+            " NOPAT and net income are not accounting equivalents; this is an "
+            "independent directional earnings cross-check, not a DCF input or a "
+            "substitute for unlevered cash flow."
+        )
+    if caveats:
+        note += " Caveats: " + " ".join(_markdown_cell(item, 300) for item in caveats)
+    return headline + estimate_table + note
+
+
 def extract_historical_financials(financial_data: Dict[str, Any]) -> Dict[str, Any]:
     """Extract 5-year historical financial statements."""
     statements = financial_data.get('financial_statements', {})
     income_statement = statements.get('income_statement', {})
     balance_sheet = statements.get('balance_sheet', {})
     cash_flow = statements.get('cash_flow', {})
-    
-    # Get years (sorted from oldest to newest)
-    years = sorted(income_statement.keys())
-    
+
+    def present(value: Any) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    def usable_period(period: str) -> bool:
+        """Reject provider columns containing only supplemental line items."""
+        inc = income_statement.get(period, {}) or {}
+        bal = balance_sheet.get(period, {}) or {}
+        cashflow = cash_flow.get(period, {}) or {}
+        core = (
+            inc.get('Total Revenue'), inc.get('Operating Revenue'),
+            inc.get('Operating Income'), inc.get('Net Income'),
+            cashflow.get('Operating Cash Flow'), cashflow.get('Free Cash Flow'),
+            bal.get('Total Assets'), bal.get('Stockholders Equity'),
+        )
+        # This preserves pre-revenue companies when losses, assets, and cash
+        # flows establish a real period, while excluding Yahoo's occasional
+        # older lease/interest-only column.
+        return sum(present(value) for value in core) >= 2
+
+    years = [year for year in sorted(income_statement.keys()) if usable_period(year)][-5:]
+
     historical = {
         'years': years,
         'revenue': [],
@@ -400,40 +884,94 @@ def extract_historical_financials(financial_data: Dict[str, Any]) -> Dict[str, A
     return historical
 
 
+def _withheld_valuation_commentary(
+    valuation: Dict[str, Any], company: Dict[str, Any], data: Dict[str, Any],
+) -> str:
+    """Explain a withheld valuation without smuggling in a directional call."""
+    reliability = valuation.get('reliability') or {}
+    bank = valuation.get('bank')
+    lines = [
+        "The publication boundary above is authoritative. It keeps the model-method "
+        "outputs visible for audit without converting them into a directional call.",
+        "The displayed endpoints are model-method outputs for audit and scenario "
+        "comparison; they are not bull/base/bear targets and do not establish "
+        "that the shares are overvalued or undervalued.",
+    ]
+    analyst_lines = _external_analyst_benchmark_lines(company)
+    if analyst_lines:
+        lines.append("**Independent human-analyst benchmark**")
+        lines.extend(analyst_lines)
+    if bank:
+        lines.append(
+            "For this balance-sheet financial, normalized common ROE justified P/B "
+            "and the ROE-adjusted same-industry peer P/B are the applicable methods; "
+            "an industrial free-cash-flow DCF is intentionally not used."
+        )
+    else:
+        expectations = data.get('external_expectations') or {}
+        if expectations.get('forward_estimates'):
+            lines.append(
+                "The model-versus-Street table documents near-term revenue and EPS, "
+                "including whether Street revenue was used as a model anchor. Top-line "
+                "alignment does not independently validate cash "
+                "conversion, reinvestment, discount-rate, or terminal assumptions, "
+                "which must explain any remaining valuation gap."
+            )
+        reverse = valuation.get('reverse_dcf') or {}
+        reverse_gap = reverse.get('market_implied_vs_model')
+        if isinstance(reverse_gap, (int, float)) and not isinstance(reverse_gap, bool):
+            lines.append(
+                "The reverse DCF shows that the current market enterprise value "
+                f"requires terminal free cash flow {format_percent(reverse_gap)} "
+                "versus the model while holding its explicit forecast, WACC, and "
+                "terminal growth fixed. It is an expectations diagnostic, not an "
+                "independent valuation method or price target."
+            )
+    lines.append(
+        "Until the conflicting evidence is reconciled with another suitable, "
+        "independent intrinsic method, the correct conclusion is NOT RATED rather "
+        "than a hidden directional recommendation."
+    )
+    return "\n\n".join(lines)
+
+
 def extract_model_assumptions(computed_values: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract model assumptions from LLM_Inferred tab."""
-    llm_inferred = computed_values.get('LLM_Inferred', {}).get('cells', {})
+    """Extract grounded inputs, with legacy-workbook compatibility."""
+    model_inputs = (
+        computed_values.get('Model_Inputs', {}).get('cells', {})
+        or computed_values.get('LLM_Inferred', {}).get('cells', {})
+    )
     
     return {
-        'wacc': llm_inferred.get('(2, 2)', 0.09),
-        'terminal_growth': llm_inferred.get('(3, 2)', 0.025),
+        'wacc': model_inputs.get('(2, 2)'),
+        'terminal_growth': model_inputs.get('(3, 2)'),
         'revenue_growth_rates': [
-            llm_inferred.get('(4, 2)', 0),
-            llm_inferred.get('(4, 3)', 0),
-            llm_inferred.get('(4, 4)', 0),
-            llm_inferred.get('(4, 5)', 0),
-            llm_inferred.get('(4, 6)', 0),
+            model_inputs.get('(4, 2)', 0),
+            model_inputs.get('(4, 3)', 0),
+            model_inputs.get('(4, 4)', 0),
+            model_inputs.get('(4, 5)', 0),
+            model_inputs.get('(4, 6)', 0),
         ],
         'gross_margins': [
-            llm_inferred.get('(5, 2)', 0),
-            llm_inferred.get('(5, 3)', 0),
-            llm_inferred.get('(5, 4)', 0),
-            llm_inferred.get('(5, 5)', 0),
-            llm_inferred.get('(5, 6)', 0),
+            model_inputs.get('(5, 2)', 0),
+            model_inputs.get('(5, 3)', 0),
+            model_inputs.get('(5, 4)', 0),
+            model_inputs.get('(5, 5)', 0),
+            model_inputs.get('(5, 6)', 0),
         ],
         'ebitda_margins': [
-            llm_inferred.get('(6, 2)', 0),
-            llm_inferred.get('(6, 3)', 0),
-            llm_inferred.get('(6, 4)', 0),
-            llm_inferred.get('(6, 5)', 0),
-            llm_inferred.get('(6, 6)', 0),
+            model_inputs.get('(6, 2)', 0),
+            model_inputs.get('(6, 3)', 0),
+            model_inputs.get('(6, 4)', 0),
+            model_inputs.get('(6, 5)', 0),
+            model_inputs.get('(6, 6)', 0),
         ],
         'operating_margins': [
-            llm_inferred.get('(7, 2)', 0),
-            llm_inferred.get('(7, 3)', 0),
-            llm_inferred.get('(7, 4)', 0),
-            llm_inferred.get('(7, 5)', 0),
-            llm_inferred.get('(7, 6)', 0),
+            model_inputs.get('(7, 2)', 0),
+            model_inputs.get('(7, 3)', 0),
+            model_inputs.get('(7, 4)', 0),
+            model_inputs.get('(7, 5)', 0),
+            model_inputs.get('(7, 6)', 0),
         ],
     }
 
@@ -442,7 +980,7 @@ def extract_cost_of_capital(computed_values: Dict[str, Any]) -> Dict[str, Any]:
     """
     The WACC build the DCF actually used, from the Valuation (DCF) tab.
 
-    The report used to print `LLM_Inferred!(2,2)` — a rate the workbook did not
+    The report used to print the old model-input tab's (2,2) cell — a rate the workbook did not
     discount with. The DCF tab computed its own from the Assumptions cells, so a
     reader was shown one number and sold a valuation built on another. These are
     the cells the DCF formulas reference, so what is printed is what was used.
@@ -457,7 +995,14 @@ def extract_cost_of_capital(computed_values: Dict[str, Any]) -> Dict[str, Any]:
     by_label = {}
     for key, value in cells.items():
         try:
-            row, col = eval(key)
+            try:
+                parsed = ast.literal_eval(key)
+            except (ValueError, SyntaxError):
+                continue
+            if (not isinstance(parsed, tuple) or len(parsed) != 2
+                    or not all(isinstance(value, int) for value in parsed)):
+                continue
+            row, col = parsed
         except Exception:
             continue
         if col != 1 or not isinstance(value, str):
@@ -573,14 +1118,26 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
     """
     if not override:
         return data
+    override = dict(override)
+    if (
+        override.get("valuation_method") == "justified_pb_roe"
+        and not isinstance(override.get("reliability_legs"), dict)
+        and override.get("dispersion_band") in {"wide", "unreliable"}
+    ):
+        # Compatibility callers may still carry dispersion from the discarded
+        # corporate DCF. It cannot describe the selected bank method.
+        override["dispersion_band"] = "single-method"
+        override["dispersion_ratio"] = None
 
     # Dispersion is computed after the workbook is built, so the workbook
     # loader cannot see it on its own. Carry that result into every report
     # consumer before applying any method-specific override. A midpoint made
     # from methods that disagree by >2.5x remains in the workbook for audit,
     # but it is not a publishable fair value.
-    band = (override.get("dispersion_band")
-            if override.get("valuation_method") != "justified_pb_roe" else None)
+    # Bank callers now provide the honest ``single-method`` band. They still
+    # pass only the justified-P/B value as both compatibility legs, so no
+    # discarded industrial-DCF dispersion can leak into this reliability row.
+    band = override.get("dispersion_band")
     if (
         band or override.get("point_estimate_withheld")
         or override.get("financial_freshness")
@@ -589,26 +1146,33 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
         v = data.get("valuation") or {}
         summary = v.get("summary") or {}
         existing_reliability = v.get("reliability") or {}
-        legs = {
-            "perpetual_dcf": override.get("perpetual_price"),
-            "exit_multiple_dcf": override.get("exit_multiple_price"),
-            "market_comps": override.get("comps_price"),
-        }
-        fallbacks = {
-            "perpetual_dcf": (v.get("dcf_perpetual") or {}).get("intrinsic_value_per_share"),
-            "exit_multiple_dcf": (v.get("dcf_exit") or {}).get("intrinsic_value_per_share"),
-            "market_comps": summary.get("comps_intrinsic"),
-        }
-        for name, fallback in fallbacks.items():
-            if not isinstance(legs.get(name), (int, float)):
-                legs[name] = fallback
+        custom_legs = override.get("reliability_legs")
+        if isinstance(custom_legs, dict):
+            legs = dict(custom_legs)
+        else:
+            legs = {
+                "perpetual_dcf": override.get("perpetual_price"),
+                "exit_multiple_dcf": override.get("exit_multiple_price"),
+                "market_comps": override.get("comps_price"),
+            }
+            fallbacks = {
+                "perpetual_dcf": (v.get("dcf_perpetual") or {}).get("intrinsic_value_per_share"),
+                "exit_multiple_dcf": (v.get("dcf_exit") or {}).get("intrinsic_value_per_share"),
+                "market_comps": summary.get("comps_intrinsic"),
+            }
+            for name, fallback in fallbacks.items():
+                if name == "market_comps" and override.get("comps_publishable") is False:
+                    continue
+                if not isinstance(legs.get(name), (int, float)):
+                    legs[name] = fallback
         legs = {
             name: float(value) for name, value in legs.items()
             if isinstance(value, (int, float)) and not isinstance(value, bool)
+            and not (name == "market_comps" and float(value) <= 0)
         }
         positive = [value for value in legs.values() if value > 0]
         withheld = bool(override.get("point_estimate_withheld")) or (
-            band == "unreliable" and len(positive) >= 2
+            band in {"wide", "unreliable"} and len(positive) >= 2
         )
         withheld_reason = override.get("publication_withheld_reason")
         if withheld and not withheld_reason:
@@ -618,10 +1182,12 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
             )
         reliability_warning = override.get("valuation_warning")
         if withheld_reason:
-            publication_warning = f"PUBLICATION BOUNDARY: {withheld_reason}"
-            reliability_warning = " ".join(
-                part for part in (publication_warning, reliability_warning) if part
+            publication_warning = (
+                "PUBLICATION BOUNDARY: point estimate and rating withheld; "
+                "the Valuation Publication Status block contains the full reason."
             )
+            reliability_warning = _join_distinct_messages(
+                publication_warning, reliability_warning)
         reliability = {
             **existing_reliability,
             "band": band,
@@ -633,16 +1199,79 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
             "financial_freshness": override.get("financial_freshness"),
             "method_suitability": override.get("method_suitability"),
         }
-        if positive:
-            reliability["range_low"] = min(positive)
-            reliability["range_high"] = max(positive)
+        supported_legs = [value for value in legs.values() if value > 0]
+        failed_legs = {name: value for name, value in legs.items() if value <= 0}
+        reliability["failed_legs"] = failed_legs
+        if supported_legs:
+            # A supported valuation range contains only economically usable
+            # positive method results. Non-positive arithmetic remains in
+            # ``legs``/``failed_legs`` for audit but must never be presented as
+            # a range endpoint that the model supports.
+            reliability["range_low"] = min(supported_legs)
+            reliability["range_high"] = max(supported_legs)
+        else:
+            reliability["range_low"] = None
+            reliability["range_high"] = None
         v["reliability"] = reliability
+        data["valuation"] = v
+
+    # Reconstruct the canonical headline before downstream recommendation.
+    # Saved pre-policy workbooks may contain a broad-peer blend, while older
+    # formula versions used other averaging behavior. Preserve that workbook
+    # result for audit, but every consumer must see the current-policy value.
+    authoritative_fair_value = override.get("authoritative_fair_value")
+    if (override.get("valuation_method") != "justified_pb_roe"
+            and isinstance(authoritative_fair_value, (int, float))
+            and not isinstance(authoritative_fair_value, bool)
+            and authoritative_fair_value > 0):
+        v = data.get("valuation") or {}
+        summary = v.get("summary") or {}
+        workbook_value = summary.get("average_intrinsic")
+        if workbook_value != authoritative_fair_value:
+            summary.setdefault("workbook_headline_value", workbook_value)
+        if override.get("comps_publishable") is False:
+            summary.setdefault("market_comps_cross_check", summary.get("comps_intrinsic"))
+            summary["comps_included_in_blended_value"] = False
+        else:
+            summary["comps_included_in_blended_value"] = True
+        summary["average_intrinsic"] = float(authoritative_fair_value)
+        price = (data.get("company_overview") or {}).get("current_price")
+        summary["upside"] = (
+            float(authoritative_fair_value) / price - 1 if price else None
+        )
+        v["summary"] = summary
         data["valuation"] = v
 
     if override.get("valuation_method") != "justified_pb_roe":
         return data
     fair_value = override.get("fair_value")
     if not isinstance(fair_value, (int, float)) or fair_value <= 0:
+        # A legacy workbook may contain an industrial DCF for an issuer that
+        # current policy correctly classifies as a bank. Preserve those values
+        # only as an explicit audit record; they must not remain in headline
+        # fields consumed by recommendations, reports, or chat.
+        v = data.get("valuation") or {}
+        summary = v.get("summary") or {}
+        v["inapplicable_industrial_dcf"] = {
+            "perpetual_value_per_share": (v.get("dcf_perpetual") or {}).get(
+                "intrinsic_value_per_share"
+            ),
+            "exit_value_per_share": (v.get("dcf_exit") or {}).get(
+                "intrinsic_value_per_share"
+            ),
+            "workbook_headline_value": summary.get("average_intrinsic"),
+            "reason": (
+                "Suppressed because a corporate free-cash-flow DCF is not an "
+                "applicable primary method for a balance-sheet financial."
+            ),
+        }
+        v.setdefault("dcf_perpetual", {})["intrinsic_value_per_share"] = None
+        v.setdefault("dcf_exit", {})["intrinsic_value_per_share"] = None
+        for key in ("dcf_intrinsic", "exit_intrinsic", "comps_intrinsic",
+                    "average_intrinsic", "upside"):
+            summary[key] = None
+        v["summary"] = summary
+        data["valuation"] = v
         return data
     v = data.get("valuation") or {}
     price = (data.get("company_overview") or {}).get("current_price") or override.get("current_price")
@@ -651,6 +1280,11 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
         "fair_value": fair_value,
         "method": "Justified P/B x ROE",
         "inputs": override.get("bank_inputs") or {},
+        "intrinsic_fair_value": override.get("intrinsic_fair_value") or fair_value,
+        "forward_consensus_fair_value": override.get(
+            "forward_consensus_fair_value"
+        ),
+        "peer_fair_value": override.get("peer_fair_value"),
     }
     # The engine and the summary must rate and print the same number.
     v.setdefault("dcf_perpetual", {})["intrinsic_value_per_share"] = fair_value
@@ -686,28 +1320,120 @@ def enforce_valuation_publication_boundary(
         valuation_publication_boundary,
     )
     from src.financial_freshness import financial_statement_freshness
-    from src.valuation_methodology import assess_valuation_methodology
-
-    summary = valuation.get("summary") or {}
-    legs = {
-        "perpetual_dcf": (valuation.get("dcf_perpetual") or {}).get(
-            "intrinsic_value_per_share"
-        ),
-        "exit_multiple_dcf": (valuation.get("dcf_exit") or {}).get(
-            "intrinsic_value_per_share"
-        ),
-        "market_comps": summary.get("comps_intrinsic"),
-    }
-    is_bank = bool(valuation.get("bank"))
-    ratio, band, warning = (
-        (None, None, None) if is_bank else valuation_dispersion(legs)
+    from src.valuation_methodology import (
+        assess_valuation_methodology,
+        normalize_peer_comps_policy,
     )
-    existing = valuation.get("reliability") or {}
-    band = existing.get("band") or band
-    ratio = existing.get("dispersion_ratio") or ratio
-    warning = " ".join(
-        part for part in (existing.get("warning"), warning) if part
-    ) or None
+
+    suitability = assess_valuation_methodology(financial_data or {})
+    reconstructed_bank_override = None
+    if (
+        suitability.get("primary_method") == "justified_pb_roe"
+        and not valuation.get("bank")
+    ):
+        # Rehydrate pre-metadata workbooks from the source financial artifact.
+        # This is deterministic and prevents both bad outcomes: publishing the
+        # workbook's inapplicable industrial DCF, or declaring a valid bank
+        # valuation unavailable when its audited inputs are still present.
+        from src.agents.fm.bank_valuation import build_bank_valuation_override
+
+        assumptions = data.get("assumptions") or {}
+        cost_of_capital = data.get("cost_of_capital") or {}
+        capm = {
+            "risk_free_rate": cost_of_capital.get("risk_free_rate"),
+            "equity_risk_premium_total": cost_of_capital.get("equity_risk_premium"),
+            "beta": cost_of_capital.get("beta"),
+        }
+        reconstructed_bank_override = build_bank_valuation_override(
+            financial_data or {},
+            terminal_growth=assumptions.get("terminal_growth"),
+            capm=capm,
+        )
+        if reconstructed_bank_override:
+            valuation["bank"] = {
+                "fair_value": reconstructed_bank_override.get("fair_value"),
+                "intrinsic_fair_value": reconstructed_bank_override.get(
+                    "intrinsic_fair_value"
+                ),
+                "forward_consensus_fair_value": reconstructed_bank_override.get(
+                    "forward_consensus_fair_value"
+                ),
+                "peer_fair_value": reconstructed_bank_override.get("peer_fair_value"),
+                "inputs": reconstructed_bank_override.get("bank_inputs") or {},
+            }
+    summary = valuation.get("summary") or {}
+    # Method classification is authoritative even if the correct valuation
+    # could not be computed. Otherwise a missing bank override makes the final
+    # report rediscover and publish the legacy industrial DCF it should reject.
+    is_bank = bool(
+        valuation.get("bank")
+        or suitability.get("primary_method") == "justified_pb_roe"
+    )
+    bank_valuation = valuation.get("bank") or {}
+    peer_comps = (((financial_data or {}).get("industry_data") or {}).get("peer_comps") or {})
+    comps_publishable = normalize_peer_comps_policy(peer_comps)[
+        "included_in_blended_value"
+    ]
+    external_expectations = (financial_data or {}).get("external_expectations") or {}
+    if not external_expectations:
+        external_expectations = build_external_expectations(financial_data or {})
+
+    if is_bank:
+        legs = {
+            "justified_pb_roe": bank_valuation.get("intrinsic_fair_value"),
+            "forward_consensus_roe_scenario": bank_valuation.get(
+                "forward_consensus_fair_value"
+            ),
+            "roe_adjusted_peer_pb": bank_valuation.get("peer_fair_value"),
+        }
+        authoritative_fair_value = bank_valuation.get("fair_value")
+        usable_bank_legs = [
+            float(value) for value in legs.values()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(float(value)) and value > 0
+        ]
+        if len(usable_bank_legs) >= 2:
+            ratio, band, warning = valuation_dispersion(legs)
+        else:
+            ratio, band, warning = (
+                None,
+                "single-method",
+                "The bank valuation currently has one usable scenario. A fresh, "
+                "well-covered forward-EPS ROE scenario and/or at least three "
+                "screened same-subindustry bank peers were unavailable.",
+            )
+    else:
+        legs = {
+            "perpetual_dcf": (valuation.get("dcf_perpetual") or {}).get(
+                "intrinsic_value_per_share"
+            ),
+            "exit_multiple_dcf": (valuation.get("dcf_exit") or {}).get(
+                "intrinsic_value_per_share"
+            ),
+            "market_comps": summary.get("comps_intrinsic") if comps_publishable else None,
+        }
+        positive_dcf = [
+            float(value) for value in (
+                legs["perpetual_dcf"], legs["exit_multiple_dcf"]
+            )
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(float(value)) and value > 0
+        ]
+        dcf_midpoint = sum(positive_dcf) / len(positive_dcf) if positive_dcf else None
+        comps_value = legs["market_comps"]
+        authoritative_fair_value = (
+            (dcf_midpoint + float(comps_value)) / 2.0
+            if dcf_midpoint is not None
+            and isinstance(comps_value, (int, float))
+            and not isinstance(comps_value, bool)
+            and math.isfinite(float(comps_value))
+            and comps_value > 0
+            else dcf_midpoint
+        )
+        ratio, band, warning = valuation_dispersion(legs)
+    # This final boundary has the complete saved financial artifact and must
+    # recompute authority from it. Earlier agent state may have treated a broad
+    # sector roster as a full valuation leg.
 
     company = data.get("company_overview") or {}
     market_cap = company.get("market_cap")
@@ -717,23 +1443,103 @@ def enforce_valuation_publication_boundary(
     is_mega_cap = bool(
         isinstance(market_cap, (int, float))
         and not isinstance(market_cap, bool)
+        and math.isfinite(float(market_cap))
         and market_cap >= _megacap_threshold(market_cap_currency)
     )
     # The mega-cap corroboration rule is specifically a DCF publication
     # boundary. A justified P/B/ROE bank value has already replaced those FCF
     # legs, so the discarded DCF cannot veto the appropriate bank method.
     # Freshness and method suitability are reapplied independently below.
+    def recommendation_count(value: Any) -> int:
+        if isinstance(value, bool):
+            return 0
+        try:
+            return min(max(int(value or 0), 0), 100_000)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
     if is_bank:
-        withheld, reason = False, None
+        from src.agents.fm.bank_valuation import assess_bank_publication
+
+        bank_inputs = bank_valuation.get("inputs") or {}
+        consensus = company.get("analyst_consensus") or {}
+        recommendation = consensus.get("recommendation") or {}
+        rating_count = max(
+            recommendation_count(recommendation.get("total")),
+            recommendation_count(recommendation.get("unique_analyst_count")),
+            recommendation_count(recommendation.get("analyst_count")),
+        )
+        target_benchmark = external_expectations.get("price_target") or {}
+        recommendation_benchmark = external_expectations.get("recommendations") or {}
+        bank_publication = assess_bank_publication(
+            fair_value=authoritative_fair_value,
+            intrinsic_fair_value=bank_valuation.get("intrinsic_fair_value"),
+            peer_fair_value=bank_valuation.get("peer_fair_value"),
+            current_price=company.get("current_price"),
+            forward_consensus_fair_value=bank_valuation.get(
+                "forward_consensus_fair_value"
+            ),
+            bank_inputs=bank_inputs,
+            analyst_target=(
+                target_benchmark.get("mean") or company.get("target_mean_price")
+            ),
+            analyst_count=(
+                target_benchmark.get("analyst_count") or company.get("num_analysts")
+            ),
+            analyst_target_corroboration_qualified=bool(
+                target_benchmark.get("qualified_for_corroboration")
+            ),
+            analyst_target_contradiction_qualified=bool(
+                target_benchmark.get("qualified_for_contradiction")
+            ),
+            analyst_target_evidence=target_benchmark.get("source_evidence") or {},
+            analyst_rating=recommendation.get("label"),
+            analyst_rating_count=(
+                rating_count if recommendation_benchmark.get("active_qualified", True)
+                else 0
+            ),
+            analyst_rating_evidence=(
+                recommendation_benchmark.get("source_evidence") or {}
+            ),
+        )
+        ratio = bank_publication["dispersion_ratio"]
+        band = bank_publication["dispersion_band"]
+        warning = _join_distinct_messages(
+            warning, bank_publication.get("valuation_warning")
+        )
+        legs = bank_publication["reliability_legs"]
+        withheld = bank_publication["point_estimate_withheld"]
+        reason = bank_publication.get("publication_withheld_reason")
     else:
+        consensus = company.get("analyst_consensus") or {}
+        recommendation = consensus.get("recommendation") or {}
+        rating_evidence = (
+            (external_expectations.get("recommendations") or {}).get("source_evidence")
+            or {}
+        )
+        target_evidence = (
+            (external_expectations.get("price_target") or {}).get("source_evidence")
+            or {}
+        )
         withheld, reason = valuation_publication_boundary(
             band=band,
             legs=legs,
-            fair_value=summary.get("average_intrinsic"),
+            fair_value=authoritative_fair_value,
             current_price=company.get("current_price"),
             is_mega_cap=is_mega_cap,
             analyst_target=company.get("target_mean_price"),
             analyst_count=company.get("num_analysts"),
+            analyst_rating=recommendation.get("label"),
+            analyst_rating_count=max(
+                recommendation_count(recommendation.get("total")),
+                recommendation_count(recommendation.get("unique_analyst_count")),
+                recommendation_count(recommendation.get("analyst_count")),
+            ),
+            analyst_rating_evidence=rating_evidence,
+            analyst_target_evidence=target_evidence,
+            reverse_dcf_gap=(valuation.get("reverse_dcf") or {}).get(
+                "market_implied_vs_model"
+            ),
         )
 
     # Financial freshness is a hard input-quality boundary. Refresh time is
@@ -744,28 +1550,97 @@ def enforce_valuation_publication_boundary(
     freshness = financial_statement_freshness(financial_data or {})
     if freshness.get("status") in {"stale", "unavailable"}:
         withheld = True
-        reason = freshness.get("reason") or (
+        freshness_reason = freshness.get("reason") or (
             "The financial statements required by the valuation are unavailable."
         )
+        reason = _join_distinct_messages(reason, freshness_reason)
 
-    suitability = assess_valuation_methodology(financial_data or {})
     if not suitability.get("publication_allowed"):
         method_reason = suitability.get("reason") or (
             "The available data does not support a publishable point valuation."
         )
-        if suitability.get("specialized_service") or not withheld:
-            reason = method_reason
+        reason = _join_distinct_messages(reason, method_reason)
         withheld = True
 
-    if existing.get("point_estimate_withheld") and not is_bank:
-        withheld = True
-        reason = existing.get("withheld_reason") or reason
+    # The Street benchmark must challenge the operating case, not merely sit
+    # in a report appendix. Revenue estimates are directly comparable with the
+    # model's revenue rows, unlike EPS versus unlevered FCF. A material gap to
+    # a well-covered near-term estimate is therefore a publication blocker
+    # until the assumption is reconciled. Banks use a different method and are
+    # excluded from this corporate-revenue DCF control.
+    if not is_bank:
+        expectations = external_expectations
+        model_revenue = (data.get("projections") or {}).get("revenue") or []
+        forecast_basis = ((data.get("model_inputs") or {}).get(
+            "forecast_basis") or {})
+        aligned_estimates = align_forward_estimates_to_forecast_basis(
+            expectations, forecast_basis
+        )
+        forecast_conflicts = []
+        for index, row in enumerate(aligned_estimates[:2]):
+            if not isinstance(row, dict) or index >= len(model_revenue):
+                continue
+            model_value = model_revenue[index]
+            street_value = row.get("revenue")
+            count = recommendation_count(row.get("revenue_analyst_count"))
+            if (
+                isinstance(model_value, (int, float)) and not isinstance(model_value, bool)
+                and isinstance(street_value, (int, float)) and not isinstance(street_value, bool)
+                and math.isfinite(float(model_value)) and math.isfinite(float(street_value))
+                and street_value > 0 and count >= 5
+            ):
+                gap = float(model_value) / float(street_value) - 1.0
+                if abs(gap) > 0.15:
+                    forecast_conflicts.append(
+                        f"{row.get('horizon') or f'FY{index + 1}'} model revenue is "
+                        f"{gap:+.0%} versus the "
+                        f"{count}-analyst Street estimate"
+                    )
+        if forecast_conflicts:
+            withheld = True
+            reason = _join_distinct_messages(
+                reason,
+                "The near-term operating case is not reconciled: "
+                + "; ".join(forecast_conflicts)
+                + ". A point valuation cannot be published until this material "
+                "forecast disagreement is explained or corrected.",
+            )
+        profitability = reconcile_model_profitability(
+            expectations, data.get("projections") or {}, forecast_basis
+        )
+        earnings_conflicts = profitability.get("conflicts") or []
+        if earnings_conflicts:
+            details = "; ".join(
+                f"{row['horizon']} model NOPAT margin is "
+                f"{row['model_after_tax_operating_margin']:.1%} versus "
+                f"{row['street_implied_net_margin']:.1%} Street-implied net margin "
+                f"({row['eps_analyst_count']} EPS analysts)"
+                for row in earnings_conflicts
+            )
+            withheld = True
+            reason = _join_distinct_messages(
+                reason,
+                "The near-term profitability case is not reconciled: " + details
+                + ". NOPAT and net income are not accounting equivalents, but an "
+                "eight-point or larger disagreement requires an explicit earnings, "
+                "financing, and share-count bridge before a point valuation can be published.",
+            )
 
     return apply_valuation_override(data, {
         "valuation_method": "justified_pb_roe" if is_bank else "dcf",
-        "perpetual_price": legs["perpetual_dcf"],
-        "exit_multiple_price": legs["exit_multiple_dcf"],
-        "comps_price": legs["market_comps"],
+        "fair_value": authoritative_fair_value if is_bank else None,
+        "intrinsic_fair_value": bank_valuation.get("intrinsic_fair_value") if is_bank else None,
+        "forward_consensus_fair_value": (
+            bank_valuation.get("forward_consensus_fair_value") if is_bank else None
+        ),
+        "peer_fair_value": bank_valuation.get("peer_fair_value") if is_bank else None,
+        "bank_inputs": bank_valuation.get("inputs") if is_bank else None,
+        "reliability_legs": legs,
+        "perpetual_price": legs.get("perpetual_dcf"),
+        "exit_multiple_price": legs.get("exit_multiple_dcf"),
+        "comps_price": legs.get("market_comps"),
+        "comps_publishable": comps_publishable,
+        "authoritative_fair_value": authoritative_fair_value,
         "dispersion_band": band,
         "dispersion_ratio": ratio,
         "valuation_warning": warning,
@@ -789,11 +1664,14 @@ def extract_projections(computed_values: Dict[str, Any]) -> Dict[str, Any]:
             projections.get('(3, 6)', 0),
         ],
         'gross_profit': [
-            projections.get('(4, 2)', 0),
-            projections.get('(4, 3)', 0),
-            projections.get('(4, 4)', 0),
-            projections.get('(4, 5)', 0),
-            projections.get('(4, 6)', 0),
+            # Row 4 is cost of revenue; gross profit is row 5. Reading row 4
+            # silently handed report prompts a plausible-looking but inverted
+            # profitability series even though the workbook itself tied.
+            projections.get('(5, 2)', 0),
+            projections.get('(5, 3)', 0),
+            projections.get('(5, 4)', 0),
+            projections.get('(5, 5)', 0),
+            projections.get('(5, 6)', 0),
         ],
         'ebitda': [
             projections.get('(21, 2)', 0),
@@ -801,6 +1679,20 @@ def extract_projections(computed_values: Dict[str, Any]) -> Dict[str, Any]:
             projections.get('(21, 4)', 0),
             projections.get('(21, 5)', 0),
             projections.get('(21, 6)', 0),
+        ],
+        'operating_income': [
+            projections.get('(9, 2)', 0),
+            projections.get('(9, 3)', 0),
+            projections.get('(9, 4)', 0),
+            projections.get('(9, 5)', 0),
+            projections.get('(9, 6)', 0),
+        ],
+        'nopat': [
+            projections.get('(11, 2)', 0),
+            projections.get('(11, 3)', 0),
+            projections.get('(11, 4)', 0),
+            projections.get('(11, 5)', 0),
+            projections.get('(11, 6)', 0),
         ],
         'fcf': [
             projections.get('(19, 2)', 0),
@@ -817,7 +1709,18 @@ def extract_valuation(computed_values: Dict[str, Any]) -> Dict[str, Any]:
     summary = computed_values.get('Summary', {}).get('cells', {})
     dcf_tab = computed_values.get('Valuation (DCF)', {}).get('cells', {})
     exit_tab = computed_values.get('Valuation (Exit Multiple)', {}).get('cells', {})
-    
+    sensitivity_tab = computed_values.get('Sensitivity', {}).get('cells', {})
+
+    cash = summary.get('(14, 2)', 0)
+    debt = summary.get('(15, 2)', 0)
+    investments = summary.get('(16, 2)', 0)
+    adjusted_net_debt = (
+        debt - cash - investments
+        if all(isinstance(value, (int, float)) and not isinstance(value, bool)
+               for value in (cash, debt, investments))
+        else None
+    )
+
     return {
         'dcf_perpetual': {
             'pv_fcfs': dcf_tab.get('(19, 2)', 0),  # Sum of PV of FCFs
@@ -844,9 +1747,12 @@ def extract_valuation(computed_values: Dict[str, Any]) -> Dict[str, Any]:
             'average_intrinsic': summary.get('(26, 2)', 0),
             'upside': summary.get('(27, 2)', 0),
             'shares_outstanding': summary.get('(8, 2)', 0),
-            'cash': summary.get('(14, 2)', 0),
-            'debt': summary.get('(15, 2)', 0),
-            'net_debt': summary.get('(16, 2)', 0),
+            'cash': cash,
+            'debt': debt,
+            'investments': investments,
+            # Net debt on the same basis as the DCF equity bridge.  The old
+            # field accidentally returned row 16 (investments themselves).
+            'net_debt': adjusted_net_debt,
         },
         'reverse_dcf': {
             # Report-only diagnostic.  These cells reverse the perpetual DCF
@@ -866,7 +1772,95 @@ def extract_valuation(computed_values: Dict[str, Any]) -> Dict[str, Any]:
             'debt': dcf_tab.get('(31, 2)'),
             'investments': dcf_tab.get('(32, 2)'),
             'shares': dcf_tab.get('(36, 2)'),
+            'wacc': dcf_tab.get('(12, 2)'),
+            'tax_rate': dcf_tab.get('(8, 2)'),
+            'terminal_growth': dcf_tab.get('(23, 2)'),
+            'mid_year_adjustment': sensitivity_tab.get('(4, 2)', 0.0),
         },
+    }
+
+
+def valuation_override_from_publication_metadata(
+    computed_values: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Rehydrate a bank method from the self-contained computed artifact.
+
+    Normal worker paths pass the in-memory override directly. Report replay,
+    recovery after a process restart, and launch audits may only have the saved
+    JSON. In that case the industrial workbook cells must never replace the
+    bank valuation already persisted under ``_vynn``.
+    """
+    metadata = (
+        ((computed_values or {}).get("_vynn") or {}).get("valuation_publication")
+        or {}
+    )
+    if (
+        metadata.get("status") != "ready"
+        or metadata.get("valuation_method") != "justified_pb_roe"
+    ):
+        return None
+    inputs = metadata.get("valuation_method_inputs") or {}
+    fair_value = metadata.get("model_value_for_audit")
+    intrinsic = inputs.get("intrinsic_fair_value")
+    forward = inputs.get("forward_consensus_fair_value")
+    peer = inputs.get("peer_fair_value")
+    if not isinstance(fair_value, (int, float)) or fair_value <= 0:
+        return None
+    return {
+        "valuation_method": "justified_pb_roe",
+        "fair_value": float(fair_value),
+        "intrinsic_fair_value": intrinsic,
+        "forward_consensus_fair_value": forward,
+        "peer_fair_value": peer,
+        "bank_inputs": {
+            "bvps": inputs.get("book_value_per_share"),
+            "roe": inputs.get("return_on_equity"),
+            "beta": inputs.get("beta"),
+            "cost_of_equity": inputs.get("cost_of_equity"),
+            "terminal_growth": inputs.get("terminal_growth"),
+            "justified_pb": inputs.get("justified_price_to_book"),
+            "raw_justified_pb": inputs.get("raw_justified_price_to_book"),
+            "intrinsic_fair_value": intrinsic,
+            "forward_consensus_fair_value": forward,
+            "peer_fair_value": peer,
+            "forward_consensus_roe": inputs.get("forward_consensus_return_on_equity"),
+            "forward_consensus_justified_pb": inputs.get(
+                "forward_consensus_justified_price_to_book"
+            ),
+            "forward_consensus_roe_source": inputs.get(
+                "forward_consensus_return_on_equity_source"
+            ),
+            "forward_consensus_roe_status": inputs.get(
+                "forward_consensus_return_on_equity_status"
+            ),
+            "peer_subject_return_on_equity": inputs.get(
+                "peer_subject_return_on_equity"
+            ),
+            "peer_subject_return_on_equity_source": inputs.get(
+                "peer_subject_return_on_equity_source"
+            ),
+            "peer_implied_price_to_book": inputs.get("peer_implied_price_to_book"),
+            "peer_observation_count": inputs.get("peer_observation_count"),
+            "cost_of_equity_clamped": inputs.get("cost_of_equity_clamped"),
+            "price_to_book_clamped": inputs.get("price_to_book_clamped"),
+            "input_boundary_triggered": inputs.get("input_boundary_triggered"),
+            "book_value_cross_check_failed": inputs.get(
+                "book_value_cross_check_failed"
+            ),
+            "book_value_provider_gap": inputs.get("book_value_provider_gap"),
+            "cost_of_equity_source": inputs.get("cost_of_equity_source"),
+            "book_value_per_share_source": inputs.get("book_value_per_share_source"),
+            "return_on_equity_source": inputs.get("return_on_equity_source"),
+            "peer_method": inputs.get("peer_method"),
+        },
+        "reliability_legs": {
+            "justified_pb_roe": intrinsic,
+            "forward_consensus_roe_scenario": forward,
+            "roe_adjusted_peer_pb": peer,
+        },
+        "dispersion_band": metadata.get("valuation_confidence"),
+        "point_estimate_withheld": bool(metadata.get("point_estimate_withheld")),
+        "publication_withheld_reason": metadata.get("withheld_reason"),
     }
 
 
@@ -1031,7 +2025,7 @@ def format_number(num, decimals=2):
             return f"{sym}{num/1e3:.{decimals}f}K"
         else:
             return f"{sym}{num:.{decimals}f}"
-    except:
+    except (TypeError, ValueError, OverflowError):
         return str(num)
 
 
@@ -1041,14 +2035,109 @@ def format_percent(num, decimals=1):
         return "N/A"
     try:
         return f"{float(num)*100:.{decimals}f}%"
-    except:
+    except (TypeError, ValueError, OverflowError):
         return str(num)
 
 
+def format_valuation_method_result(value: Any) -> str:
+    """Distinguish an auditable failed method from a supported value."""
+    if (
+        not isinstance(value, (int, float)) or isinstance(value, bool)
+        or not math.isfinite(float(value))
+    ):
+        return "_unavailable_"
+    if float(value) <= 0:
+        return f"_failed method — audit output {format_number(value, 2)}_"
+    return format_number(value, 2)
+
+
+def supported_valuation_range_row(reliability: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Return an honest label/value for positive publication-boundary legs."""
+    low, high = reliability.get("range_low"), reliability.get("range_high")
+    if not all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(float(value)) and value > 0
+        for value in (low, high)
+    ):
+        return None
+    if math.isclose(float(low), float(high), rel_tol=1e-9, abs_tol=1e-9):
+        return "Only Positive Method Result", format_number(low, 2)
+    return (
+        "Supported Valuation Range",
+        f"{format_number(low, 2)} – {format_number(high, 2)}",
+    )
+
+
 def _markdown_cell(value: Any, limit: int = 160) -> str:
-    """Render provider/model text without allowing it to break a table row."""
+    """Render untrusted provider/model text as inert Markdown text."""
     text = " ".join(str(value if value is not None else "N/A").split())
-    return text.replace("|", "\\|")[:limit]
+    def escape(raw: str) -> str:
+        safe_text = raw.replace("\\", "\\\\")
+        safe_text = safe_text.replace("<", "&lt;").replace(">", "&gt;")
+        for character in ("|", "`", "*", "_", "[", "]"):
+            safe_text = safe_text.replace(character, f"\\{character}")
+        return safe_text
+
+    safe = escape(text)
+    if len(safe) <= limit:
+        return safe
+    if limit <= 0:
+        return ""
+    if limit <= 1:
+        return "…"[:limit]
+
+    # Truncate before escaping so the boundary cannot split an HTML entity or
+    # Markdown escape. Prefer a complete sentence for prose (notably the long
+    # provider company profile); fall back to a complete word for short table
+    # cells. Escaping can expand the result, so shrink again by whole words.
+    candidate = text[:limit - 1]
+    sentence_ends = [
+        match.end()
+        for match in re.finditer(r"[.!?](?:[\"')\]]?)(?=\s|$)", candidate)
+    ]
+    minimum_sentence = max(20, int((limit - 1) * 0.45))
+    if sentence_ends and sentence_ends[-1] >= minimum_sentence:
+        candidate = candidate[:sentence_ends[-1]]
+    elif " " in candidate:
+        candidate = candidate.rsplit(" ", 1)[0]
+    candidate = candidate.rstrip(" ,;:-")
+    rendered = escape(candidate)
+    while len(rendered) > limit - 1 and candidate:
+        candidate = (
+            candidate.rsplit(" ", 1)[0]
+            if " " in candidate else candidate[:-1]
+        ).rstrip(" ,;:-")
+        rendered = escape(candidate)
+    return rendered + "…"
+
+
+def _safe_markdown_link(label: Any, url: Any, limit: int = 100) -> str:
+    """Create a link only for a syntactically valid HTTP(S) source URL."""
+    display = _markdown_cell(label, limit)
+    raw_url = str(url or "").strip()
+    try:
+        parsed = urlparse(raw_url)
+    except ValueError:
+        return display
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return display
+    # Exclude Markdown delimiters and whitespace from the safe character set.
+    encoded = quote(raw_url, safe=":/?&=#%+@,.;~-_")
+    return f"[{display}]({encoded})"
+
+
+def _join_distinct_messages(*parts: Any) -> Optional[str]:
+    """Join warnings once even when two orchestration paths reapply a rail."""
+    messages: List[str] = []
+    for value in parts:
+        message = " ".join(str(value or "").split())
+        if not message:
+            continue
+        if any(message in existing for existing in messages):
+            continue
+        messages = [existing for existing in messages if existing not in message]
+        messages.append(message)
+    return " ".join(messages) or None
 
 
 _NARRATIVE_QUANTITY = re.compile(
@@ -1122,31 +2211,132 @@ def sanitize_narrative_numbers(response: str, validated_prompt: str) -> tuple[st
     return cleaned, removed
 
 
+def _external_analyst_benchmark_lines(company: Dict[str, Any]) -> list[str]:
+    """Render human analyst evidence without turning it into intrinsic value.
+
+    Analyst targets and ratings are materially useful disagreement checks, but
+    they are neither audited cash-flow inputs nor an independent DCF.  Keeping
+    this block deterministic prevents a prose model from dismissing consensus
+    as an aside (or, at the other extreme, presenting it as our own target).
+    """
+    consensus = company.get("analyst_consensus") or {}
+    target_meta = consensus.get("price_target") or {}
+    recommendation = consensus.get("recommendation") or {}
+    target = company.get("target_mean_price") or target_meta.get("mean")
+    current_price = company.get("current_price")
+    # Target coverage and rating coverage are different provider populations.
+    # Never borrow recommendation counts to make a target look better covered.
+    count = company.get("num_analysts") or target_meta.get("analyst_count")
+    source = target_meta.get("source") or "provider consensus"
+    provider_as_of = target_meta.get("as_of")
+    captured_at = consensus.get("captured_at")
+    rating_temporal = company.get("analyst_rating_temporal_quality") or {}
+    has_target_policy = "analyst_target_qualified_for_contradiction" in company
+    target_can_challenge = (
+        bool(company.get("analyst_target_qualified_for_contradiction"))
+        if has_target_policy else True
+    )
+    target_can_corroborate = (
+        bool(company.get("analyst_target_qualified_for_corroboration"))
+        if has_target_policy else True
+    )
+    has_rating_policy = "analyst_rating_qualified" in company
+    rating_qualified = (
+        bool(company.get("analyst_rating_qualified"))
+        if has_rating_policy else True
+    )
+    lines: list[str] = []
+    if isinstance(target, (int, float)) and not isinstance(target, bool) and target > 0:
+        gap = (
+            float(target) / float(current_price) - 1.0
+            if isinstance(current_price, (int, float)) and not isinstance(current_price, bool)
+            and current_price > 0 else None
+        )
+        coverage_text = _analyst_coverage_text(
+            count, target_meta.get("coverage_unit"), kind="target"
+        )
+        coverage = f" from {coverage_text}" if coverage_text != "N/A" else ""
+        if provider_as_of:
+            date_text = f"; provider as of {provider_as_of}"
+        elif captured_at:
+            date_text = f"; captured {captured_at}; provider date unavailable"
+        else:
+            date_text = "; provider date unavailable"
+        if target_can_corroborate:
+            evidence_role = "current benchmark; may challenge or corroborate"
+        elif target_can_challenge:
+            evidence_role = (
+                "provider date unavailable; may challenge but cannot corroborate"
+            )
+        else:
+            evidence_role = "stale/future evidence; provenance only"
+        lines.append(
+            f"- **External analyst target benchmark**: {format_number(target, 2)}"
+            f"{coverage} ({format_percent(gap)} versus the observed market price; "
+            f"{_markdown_cell(source, 80)}{date_text}; {evidence_role})."
+        )
+    label = recommendation.get("label")
+    rating_count = (
+        recommendation.get("total") or recommendation.get("unique_analyst_count")
+        or recommendation.get("analyst_count")
+    )
+    if label:
+        rating_coverage = _analyst_coverage_text(
+            rating_count, recommendation.get("coverage_unit"), kind="rating"
+        )
+        count_text = f" across {rating_coverage}" if rating_coverage != "N/A" else ""
+        rating_status = rating_temporal.get("status")
+        rating_role = (
+            "current directional benchmark"
+            if rating_qualified and rating_status == "current" else
+            "provider date unavailable; caution-only directional benchmark"
+            if rating_qualified else
+            "stale/future evidence; provenance only"
+        )
+        lines.append(
+            "- **External recommendation benchmark**: "
+            f"{str(label).replace('_', ' ').upper()}{count_text} ({rating_role})."
+        )
+    observations = company.get("analyst_observations") or {}
+    observation_count = observations.get("observation_count") or 0
+    if isinstance(observation_count, (int, float)) and observation_count > 0:
+        firms = sorted({
+            str(row.get("firm"))
+            for row in (observations.get("observations") or [])
+            if isinstance(row, dict) and row.get("firm")
+        })[:8]
+        firm_text = _markdown_cell(", ".join(firms), 300) if firms else ""
+        observation_source = _markdown_cell(
+            observations.get("source") or "provider", 60
+        )
+        lines.append(
+            "- **Dated external analyst records**: "
+            f"{int(observation_count)} current structured {observation_source} "
+            "observation(s)"
+            + (f" across {firm_text}" if firm_text else "")
+            + " through "
+            f"{_markdown_cell(observations.get('as_of') or 'date unavailable', 40)}. "
+            "Their firm/date/action/rating/target metadata is available as an "
+            "external cross-check. Licensed rationale prose was not read or "
+            "retained, so this report does not claim or invent research themes."
+        )
+    if lines:
+        lines.append(
+            "- Qualified external observations challenge model assumptions and publication "
+            "confidence. Evidence marked provenance-only is displayed but has no policy "
+            "vote. Analyst outputs are never averaged into intrinsic value or presented "
+            "as Vynn's price target."
+        )
+    return lines
+
+
 def generate_section_company_overview(data: Dict[str, Any], llm) -> Tuple[str, float]:
-    """Generate Company Overview section."""
+    """Generate a source-bound company overview without free-form invention."""
     company = data['company_overview']
     
     # Handle None values for employees
     employees_str = f"{company['employees']:,}" if company['employees'] else "N/A"
     
-    # Load prompt template and fill in variables
-    prompt_template = load_prompt("report_company_overview")
-    prompt = prompt_template.format(
-        company_name=company['company_name'],
-        ticker=company['ticker'],
-        sector=company['sector'],
-        industry=company['industry'],
-        description=company['description'][:500] + "..." if company['description'] else "N/A",
-        employees=employees_str,
-        market_cap=format_number(company['market_cap']),
-        current_price=format_number(company['current_price'], 2),
-        week_52_low=format_number(company['week_52_low'], 2),
-        week_52_high=format_number(company['week_52_high'], 2)
-    )
-
-    messages = [{"role": "user", "content": prompt}]
-    response, cost = llm(messages, temperature=0.5)
-    response, _ = sanitize_narrative_numbers(response, prompt)
     statistics_table = (
         "### Key Statistics\n\n"
         "| Metric | Value |\n|---|---|\n"
@@ -1159,13 +2349,82 @@ def generate_section_company_overview(data: Dict[str, Any], llm) -> Tuple[str, f
         f"| 52-Week Range | {format_number(company['week_52_low'], 2)} – "
         f"{format_number(company['week_52_high'], 2)} |"
     )
-    return f"{statistics_table}\n\n### Business Overview\n\n{response.strip()}", cost
+    description = _markdown_cell(
+        company.get('description') or "A provider-supplied business description was unavailable.",
+        1_500,
+    )
+    overview = (
+        "The following business description is reproduced from the structured "
+        "market-data profile and has not been expanded with model-generated claims.\n\n"
+        f"{description}"
+    )
+    return f"{statistics_table}\n\n### Business Overview\n\n{overview}", 0.0
 
 
 def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[str, float]:
     """Generate Financial Performance Analysis section with pre-built tables."""
     historical = data['historical']
     company = data['company_overview']
+    valuation = data.get('valuation') or {}
+    method = ((valuation.get('reliability') or {}).get('method_suitability') or {}).get(
+        'primary_method'
+    )
+    is_bank = bool(valuation.get('bank') or method == 'justified_pb_roe')
+
+    if is_bank:
+        years = historical['years']
+        history_table = (
+            "| Year | Revenue | Net Income | Total Assets | Common Equity |\n"
+            "|------|---------|------------|--------------|---------------|\n"
+        )
+        for i, year in enumerate(years):
+            history_table += (
+                f"| {year} | {format_number(historical['revenue'][i])} "
+                f"| {format_number(historical['net_income'][i])} "
+                f"| {format_number(historical['total_assets'][i])} "
+                f"| {format_number(historical['total_equity'][i])} |\n"
+            )
+
+        growth_table = (
+            "| Period | Revenue Growth | Net Income Growth | Asset Growth | Equity Growth |\n"
+            "|--------|----------------|-------------------|--------------|---------------|\n"
+        )
+        series = (
+            historical['revenue'], historical['net_income'],
+            historical['total_assets'], historical['total_equity'],
+        )
+        for i in range(1, len(years)):
+            changes = [
+                (values[i] / values[i - 1] - 1.0) if values[i - 1] else None
+                for values in series
+            ]
+            growth_table += (
+                f"| {years[i - 1]}–{years[i]} | "
+                + " | ".join(format_percent(value) for value in changes)
+                + " |\n"
+            )
+
+        profitability_table = (
+            "| Metric | Current Value |\n|--------|---------------|\n"
+            f"| Net Margin | {format_percent(company['net_margin'])} |\n"
+            f"| Return on Common Equity | {format_percent(company['roe'])} |\n"
+            f"| Return on Assets | {format_percent(company['roa'])} |\n"
+        )
+        commentary = (
+            "- Banks are balance-sheet businesses. Gross profit, EBITDA, operating "
+            "cash flow, free cash flow, and industrial operating-margin comparisons "
+            "are intentionally omitted because they are not decision-useful inputs "
+            "to the selected justified-P/B/ROE method.\n"
+            "- Revenue, net income, common equity, assets, ROE, and ROA are retained "
+            "as the relevant historical operating and capital-base record."
+        )
+        return (
+            f"### Bank Historical Financial Data ({len(years)} Years)\n\n"
+            f"{history_table}\n### Year-over-Year Bank Growth Rates\n\n{growth_table}\n"
+            f"### Current Bank Profitability Metrics\n\n{profitability_table}\n"
+            f"### Commentary\n\n{commentary}",
+            0.0,
+        )
     
     # Build revenue table from actual JSON data
     years = historical['years']
@@ -1197,25 +2456,94 @@ def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[s
     margins_table += f"| ROE | {format_percent(company['roe'])} |\n"
     margins_table += f"| ROA | {format_percent(company['roa'])} |\n"
     
-    # Load prompt template and fill in variables
-    prompt_template = load_prompt("report_financial_performance")
-    prompt = prompt_template.format(
-        company_name=company['company_name'],
-        num_years=len(years),
-        revenue_table=revenue_table,
-        growth_table=growth_table,
-        margins_table=margins_table
+    commentary = []
+    if years and historical['revenue']:
+        first_revenue, last_revenue = historical['revenue'][0], historical['revenue'][-1]
+        if isinstance(first_revenue, (int, float)) and first_revenue:
+            change = last_revenue / first_revenue - 1.0
+            commentary.append(
+                f"- Revenue changed {format_percent(change)} from {years[0]} to {years[-1]}; "
+                "the annual table above is the authoritative period record."
+            )
+    if years and historical['fcf']:
+        latest_fcf = historical['fcf'][-1]
+        latest_ocf = historical['operating_cf'][-1]
+        commentary.append(
+            f"- In {years[-1]}, operating cash flow was {format_number(latest_ocf)} and "
+            f"reported/free-cash-flow-derived cash generation was {format_number(latest_fcf)}."
+        )
+    roe = company.get('roe')
+    if isinstance(roe, (int, float)) and abs(roe) >= 0.50:
+        commentary.append(
+            "- Reported ROE is unusually large and may be distorted by a small or negative "
+            "common-equity denominator; it should not be interpreted as a sustainable return "
+            "without reviewing the balance-sheet bridge."
+        )
+    commentary.append(
+        "- Growth rates with a zero prior-year denominator are shown as 0.00% rather than "
+        "treated as economically meaningful growth."
     )
-
-    messages = [{"role": "user", "content": prompt}]
-    response, cost = llm(messages, temperature=0.5)
-    response, _ = sanitize_narrative_numbers(response, prompt)
     tables = (
         f"### Historical Financial Data ({len(years)} Years)\n\n{revenue_table}\n"
         f"### Year-over-Year Growth Rates\n\n{growth_table}\n"
         f"### Current Profitability Metrics\n\n{margins_table}"
     )
-    return f"{tables}\n### Commentary\n\n{response.strip()}", cost
+    return f"{tables}\n### Commentary\n\n" + "\n".join(commentary), 0.0
+
+
+def _publishable_valuation_commentary(
+    valuation: Dict[str, Any], company: Dict[str, Any], data: Dict[str, Any],
+) -> str:
+    """Explain a publishable valuation using only deterministic model fields."""
+    from src.valuation_methodology import normalize_peer_comps_policy
+
+    summary = valuation.get("summary") or {}
+    reliability = valuation.get("reliability") or {}
+    fair_value = summary.get("average_intrinsic")
+    current_price = company.get("current_price")
+    lines = [
+        "The valuation tables above are the authoritative model output; no free-form "
+        "narrative estimates have been added."
+    ]
+    if isinstance(fair_value, (int, float)) and not isinstance(fair_value, bool):
+        gap = (
+            float(fair_value) / float(current_price) - 1.0
+            if isinstance(current_price, (int, float)) and not isinstance(current_price, bool)
+            and current_price > 0 else None
+        )
+        lines.append(
+            f"The publishable model value is {format_number(fair_value, 2)} versus an "
+            f"observed price of {format_number(current_price, 2)} ({format_percent(gap)})."
+        )
+    method = (reliability.get("method_suitability") or {}).get("primary_method")
+    if method:
+        lines.append(
+            f"The selected methodology is `{_markdown_cell(method, 80)}`; the report "
+            "does not treat two terminal-value variants of one DCF as independent evidence."
+        )
+    peer_policy = normalize_peer_comps_policy(data.get("peer_comps") or {})
+    if (data.get("peer_comps") or {}):
+        lines.append(
+            "The peer-multiple result is "
+            + ("included as an independent valuation leg" if peer_policy["included_in_blended_value"]
+               else "shown only as a cross-check and excluded from the headline value")
+            + f" ({peer_policy['confidence']} confidence; {peer_policy['role']})."
+        )
+    reverse = valuation.get("reverse_dcf") or {}
+    implied = reverse.get("market_implied_vs_model")
+    if isinstance(implied, (int, float)) and not isinstance(implied, bool):
+        lines.append(
+            "The reverse DCF separately tests the cash-flow outcome embedded in the "
+            f"market price ({format_percent(implied)} versus model terminal free cash flow); "
+            "it is a diagnostic, not a third valuation vote."
+        )
+    analyst_lines = _external_analyst_benchmark_lines(company)
+    if analyst_lines:
+        lines.append("\n**Independent human-analyst benchmark**")
+        lines.extend(analyst_lines)
+    return "\n\n".join(lines[:5]) + (
+        "\n\n" + "\n".join(lines[5:]) if len(lines) > 5 else ""
+    )
 
 
 def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
@@ -1224,6 +2552,15 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     projections = data['projections']
     valuation = data['valuation']
     company = data['company_overview']
+    reliability = valuation.get('reliability') or {}
+    method_suitability = reliability.get('method_suitability') or {}
+    bank_method_required = (
+        method_suitability.get('primary_method') == 'justified_pb_roe'
+    )
+    forecast_basis = ((data.get('model_inputs') or {}).get('forecast_basis') or {})
+    horizon_prefix = (
+        "NTM" if forecast_basis.get("basis") == "rolling_twelve_months" else "FY"
+    )
     
     # Model assumptions table
     assumptions_table = "| Assumption | Value |\n"
@@ -1236,22 +2573,38 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     _tg_src = (data.get('cost_of_capital') or {}).get('terminal_growth_source')
     if _tg_src and _tg_src.strip().upper() != "LLM":
         assumptions_table += f"| Terminal growth basis | {_tg_src} |\n"
-    assumptions_table += f"| Revenue Growth (FY1) | {format_percent(assumptions['revenue_growth_rates'][0])} |\n"
-    assumptions_table += f"| Revenue Growth (FY2) | {format_percent(assumptions['revenue_growth_rates'][1])} |\n"
-    assumptions_table += f"| Revenue Growth (FY3) | {format_percent(assumptions['revenue_growth_rates'][2])} |\n"
-    assumptions_table += f"| Revenue Growth (FY4) | {format_percent(assumptions['revenue_growth_rates'][3])} |\n"
-    assumptions_table += f"| Revenue Growth (FY5) | {format_percent(assumptions['revenue_growth_rates'][4])} |\n"
-    assumptions_table += f"| EBITDA Margin (FY1) | {format_percent(assumptions['ebitda_margins'][0])} |\n"
-    assumptions_table += f"| EBITDA Margin (FY2) | {format_percent(assumptions['ebitda_margins'][1])} |\n"
-    assumptions_table += f"| EBITDA Margin (FY3) | {format_percent(assumptions['ebitda_margins'][2])} |\n"
-    assumptions_table += f"| EBITDA Margin (FY4) | {format_percent(assumptions['ebitda_margins'][3])} |\n"
-    assumptions_table += f"| EBITDA Margin (FY5) | {format_percent(assumptions['ebitda_margins'][4])} |\n"
+    if horizon_prefix == "NTM":
+        progress = forecast_basis.get("fiscal_year_progress")
+        progress_text = (
+            format_percent(progress)
+            if isinstance(progress, (int, float)) and not isinstance(progress, bool)
+            else "N/A"
+        )
+        assumptions_table += (
+            "| Forecast clock | Rolling twelve months from "
+            f"{_markdown_cell(forecast_basis.get('period_end'), 40)}; "
+            f"fiscal year {progress_text} elapsed |\n"
+        )
+        assumptions_table += (
+            "| Near-term consensus alignment | Fiscal-progress blend of covered "
+            "0y/+1y Street revenue; elapsed operations excluded |\n"
+        )
+    for index, value in enumerate(assumptions['revenue_growth_rates'][:5]):
+        assumptions_table += (
+            f"| Revenue Growth ({horizon_prefix}{index + 1}) | "
+            f"{format_percent(value)} |\n"
+        )
+    for index, value in enumerate(assumptions['ebitda_margins'][:5]):
+        assumptions_table += (
+            f"| EBITDA Margin ({horizon_prefix}{index + 1}) | "
+            f"{format_percent(value)} |\n"
+        )
     
     # 5-year projections table
-    projections_table = "| Fiscal Year | Revenue | EBITDA | Free Cash Flow |\n"
+    projections_table = "| Forecast Period | Revenue | EBITDA | Free Cash Flow |\n"
     projections_table += "|-------------|---------|--------|----------------|\n"
     for i in range(5):
-        projections_table += f"| FY{i+1} | {format_number(projections['revenue'][i])} | {format_number(projections['ebitda'][i])} | {format_number(projections['fcf'][i])} |\n"
+        projections_table += f"| {horizon_prefix}{i+1} | {format_number(projections['revenue'][i])} | {format_number(projections['ebitda'][i])} | {format_number(projections['fcf'][i])} |\n"
     
     # DCF Perpetual Growth results
     dcf_perp_table = "| Metric | Value |\n"
@@ -1260,7 +2613,10 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     dcf_perp_table += f"| Terminal Value | {format_number(valuation['dcf_perpetual']['terminal_value'])} |\n"
     dcf_perp_table += f"| Enterprise Value | {format_number(valuation['dcf_perpetual']['enterprise_value'])} |\n"
     dcf_perp_table += f"| Equity Value | {format_number(valuation['dcf_perpetual']['equity_value'])} |\n"
-    dcf_perp_table += f"| Intrinsic Value per Share | {format_number(valuation['dcf_perpetual']['intrinsic_value_per_share'], 2)} |\n"
+    dcf_perp_table += (
+        "| Intrinsic Value per Share | "
+        f"{format_valuation_method_result(valuation['dcf_perpetual']['intrinsic_value_per_share'])} |\n"
+    )
     
     # DCF Exit Multiple results
     dcf_exit_table = "| Metric | Value |\n"
@@ -1271,43 +2627,90 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     dcf_exit_table += f"| Terminal Enterprise Value | {format_number(valuation['dcf_exit']['terminal_ev'])} |\n"
     dcf_exit_table += f"| Enterprise Value | {format_number(valuation['dcf_exit']['enterprise_value'])} |\n"
     dcf_exit_table += f"| Equity Value | {format_number(valuation['dcf_exit']['equity_value'])} |\n"
-    dcf_exit_table += f"| Intrinsic Value per Share | {format_number(valuation['dcf_exit']['intrinsic_value_per_share'], 2)} |\n"
+    dcf_exit_table += (
+        "| Intrinsic Value per Share | "
+        f"{format_valuation_method_result(valuation['dcf_exit']['intrinsic_value_per_share'])} |\n"
+    )
     
     # Summary
     summary_table = "| Metric | Value |\n"
     summary_table += "|--------|-------|\n"
-    summary_table += f"| DCF Perpetual Intrinsic Value | {format_number(valuation['dcf_perpetual']['intrinsic_value_per_share'], 2)} |\n"
-    summary_table += f"| DCF Exit Multiple Intrinsic Value | {format_number(valuation['dcf_exit']['intrinsic_value_per_share'], 2)} |\n"
-    # The workbook's headline blends one DCF view with a present-valued
-    # market-comps view. Keep that second methodology visible here.
+    summary_table += (
+        "| DCF Perpetual Intrinsic Value | "
+        f"{format_valuation_method_result(valuation['dcf_perpetual']['intrinsic_value_per_share'])} |\n"
+    )
+    summary_table += (
+        "| DCF Exit Multiple Intrinsic Value | "
+        f"{format_valuation_method_result(valuation['dcf_exit']['intrinsic_value_per_share'])} |\n"
+    )
+    # Keep a peer result visible even when policy limits it to a cross-check.
     bank = valuation.get('bank')
     if bank:
         # A balance-sheet financial: the FCF DCF is not meaningful for a bank,
         # and the model valued it on justified P/B x ROE instead. Say so, and
         # print that number where the DCF rows would otherwise read 0.00.
         summary_table = "| Metric | Value |\n|--------|-------|\n"
-        summary_table += f"| Justified P/B x ROE Intrinsic Value | {format_number(bank['fair_value'], 2)} |\n"
+        bank_intrinsic = bank.get('intrinsic_fair_value') or bank['fair_value']
+        bank_forward = bank.get('forward_consensus_fair_value')
+        bank_peer = bank.get('peer_fair_value')
+        summary_table += (
+            f"| Normalized-ROE Justified P/B | {format_number(bank_intrinsic, 2)} |\n"
+        )
+        if isinstance(bank_forward, (int, float)) and bank_forward > 0:
+            summary_table += (
+                "| Forward-Consensus ROE Scenario | "
+                f"{format_number(bank_forward, 2)} |\n"
+            )
+        if isinstance(bank_peer, (int, float)) and bank_peer > 0:
+            summary_table += (
+                f"| ROE-Adjusted Same-Industry Peer P/B | {format_number(bank_peer, 2)} |\n"
+            )
         summary_table += "| FCF DCF | _not applied — balance-sheet financial_ |\n"
     comps = valuation['summary'].get('comps_intrinsic')
+    from src.valuation_methodology import normalize_peer_comps_policy
+    peer_policy = normalize_peer_comps_policy(data.get('peer_comps') or {})
     if isinstance(comps, (int, float)) and comps > 0 and not bank:
-        summary_table += f"| Present-Valued Market Comps | {format_number(comps, 2)} |\n"
+        comps_label = (
+            "Present-Valued Comparable Companies"
+            if peer_policy['included_in_blended_value'] else
+            "Broad-Sector Peer Multiple (context only; excluded from fair value)"
+            if peer_policy['broad_sector'] else
+            "Peer Multiple (context only; excluded from fair value)"
+        )
+        summary_table += (
+            f"| {comps_label} | {format_number(comps, 2)} |\n"
+        )
     analyst_target = valuation['summary'].get('analyst_target')
     if isinstance(analyst_target, (int, float)) and analyst_target > 0:
         summary_table += (
             f"| Analyst Consensus Target (cross-check only) | "
             f"{format_number(analyst_target, 2)} |\n")
-    # The workbook first collapses the two DCF terminal approaches into one
-    # methodology, then weights that DCF view and present-valued market comps
-    # 50/50. Do not describe this as a flat average of three independent methods.
+    # A qualified peer set can share the headline with the DCF view. Broad
+    # sector fallbacks remain visible context and do not get a valuation vote.
     legs = [valuation['dcf_perpetual']['intrinsic_value_per_share'],
             valuation['dcf_exit']['intrinsic_value_per_share'], comps]
     n_in = sum(1 for v in legs if isinstance(v, (int, float)) and v > 0)
     n_all = sum(1 for v in legs if isinstance(v, (int, float)))
-    reliability = valuation.get('reliability') or {}
     point_withheld = bool(reliability.get('point_estimate_withheld'))
     if bank:
-        label = "**Intrinsic Value (justified P/B x ROE)**"
-    elif isinstance(comps, (int, float)) and comps > 0:
+        bank_scenario_count = sum(
+            isinstance(value, (int, float)) and value > 0
+            for value in (
+                bank.get('intrinsic_fair_value'),
+                bank.get('forward_consensus_fair_value'),
+                bank.get('peer_fair_value'),
+            )
+        )
+        label = (
+            f"**Bank Valuation Composite ({bank_scenario_count} scenarios)**"
+            if bank_scenario_count > 1
+            else "**Intrinsic Value (normalized-ROE justified P/B)**"
+        )
+    elif (isinstance(comps, (int, float)) and comps > 0
+          and valuation['summary'].get(
+              'comps_included_in_blended_value',
+              peer_policy['included_in_blended_value'],
+          )):
         label = "**Blended Fair Value (50% DCF view / 50% present-valued market comps)**"
     elif n_in < n_all:
         label = "**DCF Fair Value (valid terminal approaches only)**"
@@ -1316,7 +2719,9 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     if point_withheld:
         ratio = reliability.get('dispersion_ratio')
         ratio_text = f" ({ratio:.1f}x dispersion)" if isinstance(ratio, (int, float)) else ""
-        if reliability.get('band') == 'single-method':
+        if bank:
+            withheld_label = "Withheld — bank valuation is not sufficiently corroborated"
+        elif reliability.get('band') == 'single-method':
             withheld_label = "Withheld — DCF-only result lacks independent corroboration"
         elif reliability.get('band') == 'unreliable':
             withheld_label = f"Withheld — valuation methods do not converge{ratio_text}"
@@ -1325,14 +2730,15 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         summary_table += (
             f"| **Point Estimate** | **{withheld_label}** |\n"
         )
-        low, high = reliability.get('range_low'), reliability.get('range_high')
-        if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+        supported_row = supported_valuation_range_row(reliability)
+        if supported_row:
+            range_label, range_value = supported_row
             summary_table += (
-                f"| **Supported Valuation Range** | **{format_number(low, 2)} – "
-                f"{format_number(high, 2)}** |\n"
+                f"| **{range_label}** | **{range_value}** |\n"
             )
     else:
-        summary_table += f"| {label} | **{format_number(valuation['summary']['average_intrinsic'], 2)}** |\n"
+        headline_value = bank.get('fair_value') if bank else valuation['summary']['average_intrinsic']
+        summary_table += f"| {label} | **{format_number(headline_value, 2)}** |\n"
     summary_table += f"| Current Market Price | {format_number(company['current_price'], 2)} |\n"
     # A listing that trades in another currency: show the quote a holder sees
     # and the rate behind the converted figure above (Shell: 3,437p / £34.37
@@ -1352,7 +2758,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         reliability_note = f"\n> **Valuation reliability warning:** {reliability['warning']}\n"
 
     freshness = reliability.get('financial_freshness') or {}
-    suitability = reliability.get('method_suitability') or {}
+    suitability = method_suitability
     method_basis_table = "| Control | Result |\n|---|---|\n"
     method_basis_table += (
         f"| Primary method | {_markdown_cell(suitability.get('primary_method') or ('justified_pb_roe' if bank else 'dcf'))} |\n"
@@ -1381,12 +2787,15 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         reverse.get('model_terminal_fcf'),
         reverse.get('market_implied_vs_model'),
     )
-    if bank:
+    if bank_method_required:
         reverse_table = "_Not applicable — valued on justified P/B x ROE, not a cash-flow DCF._"
     elif all(isinstance(value, (int, float)) for value in reverse_values):
         reverse_table = "| Metric | Value |\n|--------|-------|\n"
         reverse_table += f"| Market Enterprise Value | {format_number(reverse_values[0])} |\n"
-        reverse_table += f"| PV of Explicit FCF (FY1-FY10) | {format_number(reverse_values[1])} |\n"
+        reverse_table += (
+            f"| PV of Explicit FCF ({horizon_prefix}1-{horizon_prefix}10) | "
+            f"{format_number(reverse_values[1])} |\n"
+        )
         reverse_table += f"| Market-Implied Terminal FCF (Post-Horizon) | {format_number(reverse_values[2])} |\n"
         reverse_table += f"| Model Terminal FCF (Post-Horizon) | {format_number(reverse_values[3])} |\n"
         reverse_table += f"| Market-Implied FCF vs Model | {format_percent(reverse_values[4])} |\n"
@@ -1399,6 +2808,12 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
 
     analyst_consensus_table = build_analyst_consensus_table(
         company.get('analyst_consensus') or {})
+    street_reconciliation = build_street_reconciliation_table(
+        data.get('external_expectations') or {}, projections, valuation,
+        data.get('peer_comps') or {},
+        data.get('model_inputs') or {},
+        data.get('assumptions') or {},
+    )
     
     # Cost of capital — the derivation, not just the rate. A DCF is mostly an
     # argument about the discount rate: on these projections the value moves far
@@ -1436,7 +2851,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
             coc_table += f"| Premium build | {coc['erp_source']} |\n"
         if coc.get('kd_source'):
             coc_table += f"| Cost of debt build | {coc['kd_source']} |\n"
-        if valuation.get('bank'):
+        if bank_method_required:
             coc_table += ("\n_The justified P/B x ROE valuation uses the cost of equity from this build "
                           "(risk-free rate + beta x equity risk premium, held within 8-14%); the WACC "
                           "and cost of debt describe the cash-flow DCF that was not applied._\n")
@@ -1444,7 +2859,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     # A WACC x growth grid describes an FCF DCF. For a bank the DCF was not
     # applied, and recomputing it prints a grid of zeros under a P/B x ROE
     # headline (Capital One, JPMorgan). Say so instead.
-    if valuation.get('bank'):
+    if bank_method_required:
         sensitivity_table = "_Not applicable — valued on justified P/B x ROE, not a cash-flow DCF._"
     else:
         sensitivity_table = build_sensitivity_grid(
@@ -1459,46 +2874,116 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     # sensitivity, projections, both DCFs and the summary all replaced by three
     # paragraphs of prose that quoted figures from the grid it had just
     # declined to print. Numbers = code; the model writes only the commentary.
-    tables_md = (
-        f"### Valuation Method & Data Basis\n\n{method_basis_table}\n"
-        f"### Model Assumptions\n\n{assumptions_table}\n"
-        f"### Cost of Capital\n\n{coc_table or '_Cost-of-capital build unavailable for this model._'}\n\n"
-        f"### Sensitivity: Value per Share by WACC and Terminal Growth\n\n"
-        f"{sensitivity_table or '_Sensitivity grid unavailable for this model._'}\n\n"
-        f"### 5-Year Projections\n\n{projections_table}\n"
-        f"### DCF Valuation — Perpetual Growth Method\n\n{dcf_perp_table}\n"
-        f"### DCF Valuation — Exit Multiple Method\n\n{dcf_exit_table}\n"
-        f"### Market-Implied Expectations (Reverse DCF)\n\n{reverse_table}\n\n"
-        f"### Analyst Consensus Cross-Check\n\n{analyst_consensus_table}\n\n"
-        f"### Valuation Summary\n\n{summary_table}\n{reliability_note}"
-    )
-
-    prompt_template = load_prompt("report_valuation")
-    prompt = prompt_template.format(
-        company_name=company['company_name'],
-        tables=tables_md,
-    )
-    if point_withheld:
-        prompt += (
-            "\n\nPublication override: the point estimate is withheld for this exact reason: "
-            f"{reliability.get('withheld_reason') or 'the evidence is not sufficient for a point call'} "
-            "Do not replace that reason with a claim that the methods fail to converge "
-            "unless the confidence band is explicitly 'unreliable'. Call the endpoints "
-            "model-method outputs, not bull/base/bear price targets."
+    if bank:
+        bank_inputs = bank.get('inputs') or {}
+        beta_value = bank_inputs.get('beta')
+        beta_text = (
+            f"{beta_value:.2f}" if isinstance(beta_value, (int, float)) else "N/A"
+        )
+        justified_pb_value = bank_inputs.get('justified_pb')
+        justified_pb_text = (
+            f"{justified_pb_value:.2f}x"
+            if isinstance(justified_pb_value, (int, float)) else "N/A"
+        )
+        bank_inputs_table = "| Input | Value |\n|-------|-------|\n"
+        bank_inputs_table += (
+            f"| Common book value per share | {format_number(bank_inputs.get('bvps'), 2)} |\n"
+        )
+        bank_inputs_table += (
+            f"| Book-value source | {_markdown_cell(bank_inputs.get('book_value_per_share_source') or 'provider current BVPS')} |\n"
+        )
+        bank_inputs_table += (
+            f"| Sustainable common ROE | {format_percent(bank_inputs.get('roe'))} |\n"
+        )
+        bank_inputs_table += (
+            f"| ROE source | {_markdown_cell(bank_inputs.get('return_on_equity_source') or 'provider trailing ROE')} |\n"
+        )
+        if isinstance(bank_inputs.get('forward_consensus_roe'), (int, float)):
+            bank_inputs_table += (
+                "| Forward-consensus common ROE scenario | "
+                f"{format_percent(bank_inputs.get('forward_consensus_roe'))} |\n"
+            )
+            bank_inputs_table += (
+                "| Forward-ROE source | "
+                f"{_markdown_cell(bank_inputs.get('forward_consensus_roe_source') or 'unavailable')} |\n"
+            )
+        bank_inputs_table += f"| Beta | {beta_text} |\n"
+        bank_inputs_table += (
+            f"| Cost of equity | {format_percent(bank_inputs.get('cost_of_equity'))} |\n"
+        )
+        bank_inputs_table += (
+            f"| Cost-of-equity source | {_markdown_cell(bank_inputs.get('cost_of_equity_source') or 'unavailable')} |\n"
+        )
+        bank_inputs_table += (
+            f"| Long-run growth | {format_percent(bank_inputs.get('terminal_growth'))} |\n"
+        )
+        bank_inputs_table += (
+            f"| Justified P/B | {justified_pb_text} |\n"
+        )
+        if isinstance(bank_inputs.get('peer_implied_price_to_book'), (int, float)):
+            bank_inputs_table += (
+                f"| ROE-adjusted peer-implied P/B | "
+                f"{bank_inputs['peer_implied_price_to_book']:.2f}x "
+                f"({int(bank_inputs.get('peer_observation_count') or 0)} peers) |\n"
+            )
+            bank_inputs_table += (
+                "| Subject ROE used for peer normalization | "
+                f"{format_percent(bank_inputs.get('peer_subject_return_on_equity'))} "
+                f"({_markdown_cell(bank_inputs.get('peer_subject_return_on_equity_source') or 'unavailable')}) |\n"
+            )
+        boundary_status = (
+            "Triggered — point estimate cannot be published"
+            if bank_inputs.get('input_boundary_triggered') else "Passed"
+        )
+        bank_inputs_table += f"| Input safety boundaries | {boundary_status} |\n"
+        tables_md = (
+            f"### Valuation Method & Data Basis\n\n{method_basis_table}\n"
+            f"### Bank Valuation Inputs\n\n{bank_inputs_table}\n"
+            f"### Analyst Consensus Cross-Check\n\n{analyst_consensus_table}\n\n"
+            f"### Bank Valuation Summary\n\n{summary_table}\n{reliability_note}"
+        )
+    elif bank_method_required:
+        bank_unavailable = (
+            "| Control | Result |\n|---|---|\n"
+            "| Required method | Justified P/B x normalized ROE |\n"
+            "| Bank valuation inputs | Unavailable or insufficient |\n"
+            "| Industrial FCF DCF | Not applicable and suppressed |\n"
+            "| Point estimate / rating | Withheld |\n"
+        )
+        tables_md = (
+            f"### Valuation Method & Data Basis\n\n{method_basis_table}\n"
+            f"### Bank Valuation Availability\n\n{bank_unavailable}\n"
+            f"### Analyst Consensus Cross-Check\n\n{analyst_consensus_table}\n\n"
+            f"### Publication Boundary\n\n{reliability_note or '_Point estimate withheld._'}"
+        )
+    else:
+        tables_md = (
+            f"### Valuation Method & Data Basis\n\n{method_basis_table}\n"
+            f"### Model Assumptions\n\n{assumptions_table}\n"
+            f"### Cost of Capital\n\n{coc_table or '_Cost-of-capital build unavailable for this model._'}\n\n"
+            f"### Sensitivity: Value per Share by WACC and Terminal Growth\n\n"
+            f"{sensitivity_table or '_Sensitivity grid unavailable for this model._'}\n\n"
+            f"### 5-Year Projections\n\n{projections_table}\n"
+            f"### DCF Valuation — Perpetual Growth Method\n\n{dcf_perp_table}\n"
+            f"### DCF Valuation — Exit Multiple Method\n\n{dcf_exit_table}\n"
+            f"### Market-Implied Expectations (Reverse DCF)\n\n{reverse_table}\n\n"
+            f"### Analyst Consensus Cross-Check\n\n{analyst_consensus_table}\n\n"
+            f"### Model vs Street Reconciliation\n\n{street_reconciliation}\n\n"
+            f"### Valuation Summary\n\n{summary_table}\n{reliability_note}"
         )
 
-    messages = [{"role": "user", "content": prompt}]
-    response, cost = llm(messages, temperature=0.5)
-    response, _ = sanitize_narrative_numbers(response, prompt)
+    # An LLM repeatedly turned "withheld" into prose saying the market was
+    # plainly too optimistic. That is still a SELL call hidden below a NOT
+    # RATED header. The same unconstrained prose could contradict a published
+    # call, so both branches now explain code-built outputs deterministically.
+    response = (
+        _withheld_valuation_commentary(valuation, company, data)
+        if point_withheld else
+        _publishable_valuation_commentary(valuation, company, data)
+    )
+    cost = 0.0
 
-    # Belt and braces: if the model echoed the tables anyway, do not print them
-    # twice. Any commentary that begins by restating a table heading is cut
-    # back to its prose.
     commentary = response.strip()
-    for heading in ("### Model Assumptions", "## Model Assumptions", "### Cost of Capital"):
-        if commentary.startswith(heading):
-            commentary = commentary.split("### Commentary", 1)[-1].strip()
-            break
 
     return f"{tables_md}\n### Commentary\n\n{commentary}", cost
 
@@ -1509,7 +2994,7 @@ def generate_section_news_analysis(data: Dict[str, Any], llm) -> Tuple[str, floa
     company = data['company_overview']
     
     # Build catalysts table from actual JSON data (no LLM hallucination)
-    catalysts_table = "| Type | Description | Confidence | Timeline | Supporting Evidence |\n"
+    catalysts_table = "| Type | Description | Evidence Confidence | Timeline | Supporting Evidence |\n"
     catalysts_table += "|------|-------------|------------|----------|---------------------|\n"
     for c in news['catalysts']:
         evidence = "; ".join(str(item) for item in c.get('supporting_evidence', [])[:2])
@@ -1522,7 +3007,7 @@ def generate_section_news_analysis(data: Dict[str, Any], llm) -> Tuple[str, floa
         )
     
     # Build risks table from actual JSON data
-    risks_table = "| Type | Description | Severity | Likelihood | Confidence | Potential Impact |\n"
+    risks_table = "| Type | Description | Severity | Likelihood | Evidence Confidence | Potential Impact |\n"
     risks_table += "|------|-------------|----------|------------|------------|------------------|\n"
     for r in news['risks']:
         risks_table += (
@@ -1535,7 +3020,7 @@ def generate_section_news_analysis(data: Dict[str, Any], llm) -> Tuple[str, floa
         )
     
     # Build mitigations table from actual JSON data
-    mitigations_table = "| Risk Addressed | Mitigation Strategy | Effectiveness | Confidence | Company Action |\n"
+    mitigations_table = "| Risk Addressed | Mitigation Strategy | Effectiveness | Evidence Confidence | Company Action |\n"
     mitigations_table += "|----------------|---------------------|---------------|------------|----------------|\n"
     for m in news['mitigations']:
         mitigations_table += (
@@ -1546,44 +3031,24 @@ def generate_section_news_analysis(data: Dict[str, Any], llm) -> Tuple[str, floa
             f"| {_markdown_cell(m.get('company_action'), 120)} |\n"
         )
     
-    # Load prompt template and fill in variables
-    prompt_template = load_prompt("report_news_analysis")
     freshness = news.get('freshness') or {}
     display_sentiment = news['summary'].get('overall_sentiment', 'neutral').upper()
     if freshness and freshness.get('status') != 'fresh':
         display_sentiment = "UNAVAILABLE — INSUFFICIENT FRESH COVERAGE"
-    prompt = prompt_template.format(
-        company_name=company['company_name'],
-        articles_analyzed=news['summary'].get('articles_analyzed', 0),
-        overall_sentiment=display_sentiment,
-        confidence_score=f"{news['summary'].get('confidence_score', 0):.0%}",
-        key_themes=', '.join(news['summary'].get('key_themes', [])),
-        num_catalysts=len(news['catalysts']),
-        catalysts_table=catalysts_table,
-        num_risks=len(news['risks']),
-        risks_table=risks_table,
-        num_mitigations=len(news['mitigations']),
-        mitigations_table=mitigations_table
-    )
-    if freshness:
-        prompt += (
-            "\n\nEvidence freshness (must be disclosed): "
-            f"status={freshness.get('status', 'unavailable')}; "
-            f"window={freshness.get('max_age_days', 'unknown')} days; "
-            f"newest={freshness.get('newest_published_at') or 'unavailable'}; "
-            f"oldest={freshness.get('oldest_published_at') or 'unavailable'}; "
-            f"stale excluded={freshness.get('stale_articles_excluded', 0)}."
-        )
-        if freshness.get('status') != 'fresh':
-            prompt += (
-                " Coverage is insufficient for a broad sentiment conclusion. "
-                "Label any observations preliminary and do not call the overall "
-                "outlook bullish or bearish."
-            )
 
-    messages = [{"role": "user", "content": prompt}]
-    response, cost = llm(messages, temperature=0.5)
-    response, _ = sanitize_narrative_numbers(response, prompt)
+    if freshness and freshness.get('status') != 'fresh':
+        response = (
+            "No broad market-sentiment conclusion is published because fresh, "
+            "source-dated coverage is insufficient. The empty or limited tables above "
+            "must not be interpreted as evidence that no catalysts or risks exist."
+        )
+    else:
+        response = (
+            f"The evidence-screening layer classified {len(news['catalysts'])} catalyst(s), "
+            f"{len(news['risks'])} risk(s), and {len(news['mitigations'])} mitigation(s) "
+            "from the admitted source set. The tables preserve the supported descriptions "
+            "and confidence fields; no additional events or claims are inferred here."
+        )
     freshness_line = ""
     if freshness:
         freshness_line = (
@@ -1593,27 +3058,32 @@ def generate_section_news_analysis(data: Dict[str, Any], llm) -> Tuple[str, floa
             f"{freshness.get('newest_published_at') or 'unavailable'}.\n\n"
         )
     tables = (
-        f"{freshness_line}**Overall Sentiment**: {display_sentiment}\n\n"
+        f"{freshness_line}**News Sentiment**: {display_sentiment}\n\n"
         f"### Catalysts Identified ({len(news['catalysts'])})\n\n{catalysts_table}\n"
         f"### Risks Identified ({len(news['risks'])})\n\n{risks_table}\n"
         f"### Risk Mitigations ({len(news['mitigations'])})\n\n{mitigations_table}"
     )
-    return f"{tables}\n### Commentary\n\n{response.strip()}", cost
+    return f"{tables}\n### Commentary\n\n{response.strip()}", 0.0
 
 
 def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, float]:
-    """Generate Investment Thesis section."""
+    """Generate an evidence-bound thesis without an unvalidated prose call."""
     company = data['company_overview']
     valuation = data['valuation']
     news = data['news']
     
     reliability = valuation.get('reliability') or {}
+    is_bank = bool(
+        valuation.get('bank')
+        or ((reliability.get('method_suitability') or {}).get('primary_method')
+            == 'justified_pb_roe')
+    )
     if reliability.get('point_estimate_withheld'):
-        low, high = reliability.get('range_low'), reliability.get('range_high')
-        if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+        supported_row = supported_valuation_range_row(reliability)
+        if supported_row:
+            range_label, range_value = supported_row
             intrinsic_value = (
-                f"point estimate withheld; model cases span {format_number(low, 2)}–"
-                f"{format_number(high, 2)}"
+                f"point estimate withheld; {range_label.lower()} is {range_value}"
             )
         else:
             intrinsic_value = "point estimate withheld because the evidence is not sufficient for publication"
@@ -1622,56 +3092,127 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
         intrinsic_value = format_number(valuation['summary']['average_intrinsic'], 2)
         upside = format_percent(valuation['summary']['upside'])
 
-    # Load prompt template and fill in variables
-    prompt_template = load_prompt("report_investment_thesis")
     freshness = news.get('freshness') or {}
-    safe_sentiment = news['summary'].get('overall_sentiment', 'neutral').upper()
-    if freshness and freshness.get('status') != 'fresh':
-        safe_sentiment = "UNAVAILABLE — INSUFFICIENT FRESH COVERAGE"
     assumptions = data.get('assumptions') or {}
     projections = data.get('projections') or {}
-    model_context = {
-        "revenue_growth_fy1_fy5": assumptions.get('revenue_growth_rates') or [],
-        "ebitda_margin_fy1_fy5": assumptions.get('ebitda_margins') or [],
-        "projected_revenue_fy1_fy5": projections.get('revenue') or [],
-        "projected_fcf_fy1_fy5": projections.get('fcf') or [],
-    }
-    news_is_sufficient = not freshness or freshness.get('status') == 'fresh'
-    news_context = {
-        "coverage": freshness or {"status": "legacy_unknown"},
-        "catalysts": [
-            item.get('description') for item in news.get('catalysts', [])[:5]
-            if item.get('description')
-        ] if news_is_sufficient else [],
-        "risks": [
-            item.get('description') for item in news.get('risks', [])[:5]
-            if item.get('description')
-        ] if news_is_sufficient else [],
-    }
-    prompt = prompt_template.format(
-        company_name=company['company_name'],
-        current_price=format_number(company['current_price'], 2),
-        intrinsic_value=intrinsic_value,
-        upside=upside,
-        sentiment=safe_sentiment,
-        num_catalysts=len(news['catalysts']),
-        num_risks=len(news['risks']),
-        model_context=json.dumps(model_context, indent=2),
-        news_context=json.dumps(news_context, indent=2),
+    forecast_basis = ((data.get('model_inputs') or {}).get('forecast_basis') or {})
+    horizon_prefix = (
+        "NTM" if forecast_basis.get("basis") == "rolling_twelve_months" else "FY"
     )
+    lines = ["### Evidence Boundary", ""]
     if reliability.get('point_estimate_withheld'):
-        prompt += (
-            "\n\nPublication override: no directional rating or point target is supported. "
-            "Discuss bull and bear OPERATING cases, but do not convert the valuation-range "
-            "endpoints into bull/base/bear price targets and do not announce a bullish or "
-            "bearish investment stance. The model cases are methodology outputs, not "
-            "probability-weighted scenarios."
+        lines.append(
+            "**Valuation conclusion: INCONCLUSIVE.** No directional investment thesis "
+            "is published. The valuation evidence does not support a defensible point "
+            "estimate, rating, or Vynn price target."
+        )
+        reason = reliability.get('withheld_reason')
+        if reason:
+            lines.append(
+                "\n**Why publication is withheld**: "
+                f"{_markdown_cell(compact_publication_reason(reason), 800)}"
+            )
+        lines.append(
+            f"\n**Positive method evidence**: {intrinsic_value}. These method results are "
+            "not probability-weighted bull/base/bear targets or a publishable fair value."
+        )
+    else:
+        lines.append(
+            f"The model publishes an intrinsic value of {intrinsic_value} versus the "
+            f"observed price of {format_number(company.get('current_price'), 2)} "
+            f"({upside}). The separately generated recommendation applies the product's "
+            "rating rules and may not be overridden by this section."
         )
 
-    messages = [{"role": "user", "content": prompt}]
-    response, cost = llm(messages, temperature=0.6)
-    response, _ = sanitize_narrative_numbers(response, prompt)
-    return response, cost
+    lines.extend(["", "### Bank-Method Checks" if is_bank else "### Operating-Case Checks", ""])
+    revenues = projections.get('revenue') or []
+    fcfs = projections.get('fcf') or []
+    growth = assumptions.get('revenue_growth_rates') or []
+    if is_bank:
+        bank_inputs = (valuation.get('bank') or {}).get('inputs') or {}
+        lines.extend([
+            "- The applicable method uses common book value per share, sustainable "
+            "common ROE, cost of equity, and long-run growth; it does not use an "
+            "industrial free-cash-flow forecast.",
+            f"- Sustainable common ROE is {format_percent(bank_inputs.get('roe'))}; "
+            f"cost of equity is {format_percent(bank_inputs.get('cost_of_equity'))}; "
+            f"long-run growth is {format_percent(bank_inputs.get('terminal_growth'))}.",
+        ])
+    if revenues and not is_bank:
+        lines.append(
+            f"- Model revenue runs from {format_number(revenues[0])} in "
+            f"{horizon_prefix}1 to "
+            f"{format_number(revenues[min(4, len(revenues) - 1)])} in "
+            f"{horizon_prefix}{min(5, len(revenues))}."
+        )
+    if fcfs and not is_bank:
+        lines.append(
+            f"- Model free cash flow runs from {format_number(fcfs[0])} in "
+            f"{horizon_prefix}1 to "
+            f"{format_number(fcfs[min(4, len(fcfs) - 1)])} in "
+            f"{horizon_prefix}{min(5, len(fcfs))}."
+        )
+    if growth and not is_bank:
+        lines.append(
+            f"- The explicit revenue-growth path starts at {format_percent(growth[0])} "
+            f"and reaches {format_percent(growth[min(4, len(growth) - 1)])} by "
+            f"{horizon_prefix}{min(5, len(growth))}."
+        )
+
+    analyst_lines = _external_analyst_benchmark_lines(company)
+    lines.extend(["", "### Human-Analyst Cross-Checks and Forecast Anchors", ""])
+    lines.extend(analyst_lines or [
+        "- A sufficiently covered external analyst target/rating benchmark was unavailable."
+    ])
+
+    expectations = data.get('external_expectations') or {}
+    aligned_expectations = align_forward_estimates_to_forecast_basis(
+        expectations, forecast_basis
+    )
+    for index, row in enumerate(aligned_expectations[:2] if not is_bank else []):
+        if not isinstance(row, dict) or index >= len(revenues):
+            continue
+        street = row.get('revenue')
+        count = row.get('revenue_analyst_count') or 0
+        if isinstance(street, (int, float)) and street > 0:
+            gap = revenues[index] / street - 1.0
+            lines.append(
+                f"- {row.get('horizon') or f'{horizon_prefix}{index + 1}'} model revenue "
+                f"is {format_number(revenues[index])} versus "
+                f"a {int(count)}-analyst Street estimate of {format_number(street)} "
+                f"({format_percent(gap)} difference)."
+            )
+
+    lines.extend(["", "### Event-Evidence Coverage", ""])
+    if freshness:
+        lines.append(
+            f"- Coverage status is {str(freshness.get('status') or 'unavailable').upper()}: "
+            f"{freshness.get('fresh_articles', 0)} source-dated articles inside the "
+            f"{freshness.get('max_age_days', 'unknown')}-day window."
+        )
+    else:
+        lines.append("- News freshness metadata is unavailable; no broad event conclusion is used.")
+    if reliability.get('point_estimate_withheld'):
+        lines.extend(["", "### Evidence Required Before a Directional Call", ""])
+        if is_bank:
+            lines.extend([
+                "- Reconcile normalized common ROE, common book value, cost of equity, "
+                "and long-run growth against current bank fundamentals.",
+                "- Obtain a policy-complete same-subindustry bank peer set and/or a "
+                "well-covered forward-EPS-implied ROE scenario.",
+            ])
+        else:
+            lines.extend([
+                "- Reconcile the internal cash-conversion, reinvestment, discount-rate, "
+                "and terminal assumptions against the forward-estimate benchmark.",
+                "- Obtain another suitable independent intrinsic method or a "
+                "policy-complete, fundamentally comparable peer set when the current "
+                "method gap is exceptional.",
+            ])
+        lines.append(
+            "- Refresh the financial and event evidence before changing the publication status."
+        )
+    return "\n".join(lines), 0.0
 
 
 def generate_section_recommendation(data: Dict[str, Any], llm, logger: Optional[StockAnalystLogger] = None) -> Tuple[str, float, Dict[str, Any]]:
@@ -1737,24 +3278,29 @@ def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], l
         r"^\*\*12-Month Price Target\*\*:\s*(.+?)\s*$", recommendation, re.M
     )
     return_match = re.search(
-        r"^\*\*Expected Return\*\*:\s*(.+?)\s*$", recommendation, re.M
+        r"^\*\*(?:Expected Return|Implied Return if Intrinsic Value Converges)\*\*:\s*"
+        r"(.+?)\s*$",
+        recommendation,
+        re.M,
     )
     if rating != "NOT RATED" and target_match and return_match:
         lines.append(
             f"**12-Month Price Target**: {target_match.group(1).strip()} "
-            f"({return_match.group(1).strip()} expected return)"
+            f"({return_match.group(1).strip()} if intrinsic value converges)"
         )
 
     lines.extend(["", "### Decision Context", ""])
     if reliability.get('point_estimate_withheld'):
-        low, high = reliability.get('range_low'), reliability.get('range_high')
-        if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+        supported_row = supported_valuation_range_row(reliability)
+        if supported_row:
+            range_label, range_value = supported_row
             lines.append(
-                f"- The model supports a method range of {format_number(low, 2)}–"
-                f"{format_number(high, 2)}, not a single fair value."
+                f"- {range_label}: {range_value}; this is not a single fair value."
             )
         if reliability.get('withheld_reason'):
-            lines.append(f"- {_markdown_cell(reliability['withheld_reason'], 500)}")
+            lines.append(
+                f"- {_markdown_cell(compact_publication_reason(reliability['withheld_reason']), 1_500)}"
+            )
     else:
         summary = valuation.get('summary') or {}
         lines.append(
@@ -1763,12 +3309,30 @@ def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], l
             f"implied gap: {format_percent(summary.get('upside'))}."
         )
 
+    # The external benchmark is a first-page decision input, not an appendix
+    # footnote.  Render the current target and directional view alongside the
+    # model while preserving the explicit boundary that they are independent
+    # checks and never ingredients in intrinsic value.
+    analyst_lines = _external_analyst_benchmark_lines(company)
+    lines.extend(analyst_lines[:2])
+
     reverse = valuation.get('reverse_dcf') or {}
     implied = reverse.get('market_implied_vs_model')
     if isinstance(implied, (int, float)) and not isinstance(implied, bool):
+        if abs(implied) < 0.0005:
+            reverse_comparison = "approximately the same terminal free cash flow as"
+        elif implied > 0:
+            reverse_comparison = (
+                f"{format_percent(implied)} more terminal free cash flow than"
+            )
+        else:
+            reverse_comparison = (
+                f"{format_percent(abs(implied))} less terminal free cash flow than"
+            )
         lines.append(
-            f"- Reverse DCF: the market-implied terminal free cash flow is "
-            f"{format_percent(implied)} versus the model terminal free cash flow."
+            f"- Reverse DCF: the market requires {reverse_comparison} the model, "
+            "holding the explicit forecast "
+            "and valuation assumptions fixed."
         )
 
     news = data.get('news') or {}
@@ -1794,11 +3358,22 @@ def valuation_publication_status(data: Dict[str, Any]) -> str:
         f"**Valuation Confidence**: {band}",
         "**Point Estimate**: Withheld",
     ]
-    low, high = reliability.get('range_low'), reliability.get('range_high')
-    if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+    supported_row = supported_valuation_range_row(reliability)
+    if supported_row:
+        range_label, range_value = supported_row
         lines.append(
-            f"**Supported Valuation Range**: {format_number(low, 2)} – {format_number(high, 2)}"
+            f"**{range_label}**: {range_value}"
         )
+    failed = reliability.get("failed_legs") or {}
+    if isinstance(failed, dict) and failed:
+        rendered = ", ".join(
+            f"{str(name).replace('_', ' ')} {format_number(value, 2)}"
+            for name, value in failed.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        )
+        if rendered:
+            lines.append(f"**Failed Method Outputs (audit only)**: {rendered}")
     reason = reliability.get('withheld_reason')
     if reason:
         lines.append(str(reason))
@@ -1931,86 +3506,125 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     
     # Catalysts with evidence
     news_appendix.append("### A. Detailed News Analysis\n")
-    news_appendix.append(f"**Analysis Method**: {data.get('screening_method', 'LLM-based screening')}")
+    news_appendix.append(
+        f"**Analysis Method**: {_markdown_cell(data.get('screening_method', 'model-based screening'))}"
+    )
     news_appendix.append(f"**Articles Analyzed**: {news['summary'].get('articles_analyzed', 0)}")
     freshness = news.get('freshness') or {}
-    appendix_sentiment = news['summary'].get('overall_sentiment', 'neutral').upper()
+    appendix_sentiment = str(news['summary'].get('overall_sentiment', 'neutral')).upper()
     if freshness and freshness.get('status') != 'fresh':
         appendix_sentiment = "UNAVAILABLE — INSUFFICIENT FRESH COVERAGE"
-    news_appendix.append(f"**Overall Sentiment**: {appendix_sentiment} (Confidence: {news['summary'].get('confidence_score', 0):.0%})\n")
+    news_appendix.append(
+        f"**News Sentiment**: {_markdown_cell(appendix_sentiment)} "
+        f"(screening confidence: {format_percent(news['summary'].get('confidence_score'))})\n"
+    )
     if freshness:
         news_appendix.append(
             f"**Freshness Coverage**: {str(freshness.get('status', 'unavailable')).upper()} — "
             f"{freshness.get('fresh_articles', 0)} source-dated articles inside a "
             f"{freshness.get('max_age_days', 'unknown')}-day window; "
             f"{freshness.get('stale_articles_excluded', 0)} stale and "
-            f"{freshness.get('unknown_date_articles_excluded', 0)} undated excluded.\n"
+            f"{freshness.get('unknown_date_articles_excluded', 0)} undated and "
+            f"{freshness.get('irrelevant_articles_excluded', 0)} unrelated excluded.\n"
         )
     
     news_appendix.append("#### Catalysts - Detailed Evidence\n")
     for i, catalyst in enumerate(news['catalysts'], 1):
-        news_appendix.append(f"**{i}. {catalyst.get('description', 'N/A')}**")
-        news_appendix.append(f"- **Type**: {catalyst.get('type', 'N/A').title()}")
-        news_appendix.append(f"- **Timeline**: {catalyst.get('timeline', 'N/A').title()}")
-        news_appendix.append(f"- **Confidence**: {catalyst.get('confidence', 0):.0%}")
-        news_appendix.append(f"- **LLM Reasoning**: {catalyst.get('llm_reasoning', 'N/A')}")
-        news_appendix.append(f"- **Potential Impact**: {catalyst.get('potential_impact', 'N/A')}")
+        news_appendix.append(f"**{i}. {_markdown_cell(catalyst.get('description'), 300)}**")
+        news_appendix.append(f"- **Type**: {_markdown_cell(str(catalyst.get('type', 'N/A')).title())}")
+        news_appendix.append(f"- **Timeline**: {_markdown_cell(str(catalyst.get('timeline', 'N/A')).title())}")
+        news_appendix.append(
+            f"- **Evidence confidence**: {format_percent(catalyst.get('confidence'))}"
+        )
+        if catalyst.get('confidence_basis'):
+            news_appendix.append(
+                f"- **Confidence basis**: {_markdown_cell(catalyst.get('confidence_basis'), 240)}"
+            )
+        news_appendix.append(f"- **Potential Impact**: {_markdown_cell(catalyst.get('potential_impact'), 300)}")
         
         news_appendix.append(f"- **Supporting Evidence**:")
         for evidence in catalyst.get('supporting_evidence', []):
-            news_appendix.append(f"  - {evidence}")
+            news_appendix.append(f"  - {_markdown_cell(evidence, 500)}")
         
         if catalyst.get('direct_quotes'):
             news_appendix.append(f"- **Direct Quotes**:")
             for quote_obj in catalyst.get('direct_quotes', [])[:2]:  # First 2 quotes
-                news_appendix.append(f"  - \"{quote_obj.get('quote', '')}\"")
-                news_appendix.append(f"    - Source: [{quote_obj.get('source_article', 'N/A')}]({quote_obj.get('source_url', '#')})")
+                news_appendix.append(f"  - \"{_markdown_cell(quote_obj.get('quote', ''), 500)}\"")
+                news_appendix.append(
+                    "    - Source: "
+                    + _safe_markdown_link(
+                        quote_obj.get('source_article', 'N/A'),
+                        quote_obj.get('source_url'),
+                    )
+                )
         
         news_appendix.append("")
     
     # Risks with evidence
     news_appendix.append("#### Risks - Detailed Evidence\n")
     for i, risk in enumerate(news['risks'], 1):
-        news_appendix.append(f"**{i}. {risk.get('description', 'N/A')}**")
-        news_appendix.append(f"- **Type**: {risk.get('type', 'N/A').title()}")
-        news_appendix.append(f"- **Severity**: {risk.get('severity', 'N/A').title()}")
-        news_appendix.append(f"- **Likelihood**: {risk.get('likelihood', 'N/A').title()}")
-        news_appendix.append(f"- **Confidence**: {risk.get('confidence', 0):.0%}")
-        news_appendix.append(f"- **LLM Reasoning**: {risk.get('llm_reasoning', 'N/A')}")
-        news_appendix.append(f"- **Potential Impact**: {risk.get('potential_impact', 'N/A')}")
+        news_appendix.append(f"**{i}. {_markdown_cell(risk.get('description'), 300)}**")
+        news_appendix.append(f"- **Type**: {_markdown_cell(str(risk.get('type', 'N/A')).title())}")
+        news_appendix.append(f"- **Severity**: {_markdown_cell(str(risk.get('severity', 'N/A')).title())}")
+        news_appendix.append(f"- **Likelihood**: {_markdown_cell(str(risk.get('likelihood', 'N/A')).title())}")
+        news_appendix.append(
+            f"- **Evidence confidence**: {format_percent(risk.get('confidence'))}"
+        )
+        if risk.get('confidence_basis'):
+            news_appendix.append(
+                f"- **Confidence basis**: {_markdown_cell(risk.get('confidence_basis'), 240)}"
+            )
+        news_appendix.append(f"- **Potential Impact**: {_markdown_cell(risk.get('potential_impact'), 300)}")
         
         news_appendix.append(f"- **Supporting Evidence**:")
         for evidence in risk.get('supporting_evidence', []):
-            news_appendix.append(f"  - {evidence}")
+            news_appendix.append(f"  - {_markdown_cell(evidence, 500)}")
         
         if risk.get('direct_quotes'):
             news_appendix.append(f"- **Direct Quotes**:")
             for quote_obj in risk.get('direct_quotes', [])[:2]:
-                news_appendix.append(f"  - \"{quote_obj.get('quote', '')}\"")
-                news_appendix.append(f"    - Source: [{quote_obj.get('source_article', 'N/A')}]({quote_obj.get('source_url', '#')})")
+                news_appendix.append(f"  - \"{_markdown_cell(quote_obj.get('quote', ''), 500)}\"")
+                news_appendix.append(
+                    "    - Source: "
+                    + _safe_markdown_link(
+                        quote_obj.get('source_article', 'N/A'),
+                        quote_obj.get('source_url'),
+                    )
+                )
         
         news_appendix.append("")
     
     # Mitigations with evidence
     news_appendix.append("#### Risk Mitigations - Detailed Evidence\n")
     for i, mitigation in enumerate(news['mitigations'], 1):
-        news_appendix.append(f"**{i}. {mitigation.get('strategy', 'N/A')}**")
-        news_appendix.append(f"- **Risk Addressed**: {mitigation.get('risk_addressed', 'N/A')}")
-        news_appendix.append(f"- **Effectiveness**: {mitigation.get('effectiveness', 'N/A').title()}")
-        news_appendix.append(f"- **Confidence**: {mitigation.get('confidence', 0):.0%}")
-        news_appendix.append(f"- **Company Action**: {mitigation.get('company_action', 'N/A')}")
-        news_appendix.append(f"- **LLM Reasoning**: {mitigation.get('llm_reasoning', 'N/A')}")
-        news_appendix.append(f"- **Implementation Timeline**: {mitigation.get('implementation_timeline', 'N/A')}")
+        news_appendix.append(f"**{i}. {_markdown_cell(mitigation.get('strategy'), 300)}**")
+        news_appendix.append(f"- **Risk Addressed**: {_markdown_cell(mitigation.get('risk_addressed'), 300)}")
+        news_appendix.append(f"- **Effectiveness**: {_markdown_cell(str(mitigation.get('effectiveness', 'N/A')).title())}")
+        news_appendix.append(
+            f"- **Evidence confidence**: {format_percent(mitigation.get('confidence'))}"
+        )
+        if mitigation.get('confidence_basis'):
+            news_appendix.append(
+                f"- **Confidence basis**: {_markdown_cell(mitigation.get('confidence_basis'), 240)}"
+            )
+        news_appendix.append(f"- **Company Action**: {_markdown_cell(mitigation.get('company_action'), 300)}")
+        news_appendix.append(f"- **Implementation Timeline**: {_markdown_cell(mitigation.get('implementation_timeline'), 200)}")
         
         news_appendix.append(f"- **Supporting Evidence**:")
         for evidence in mitigation.get('supporting_evidence', []):
-            news_appendix.append(f"  - {evidence}")
+            news_appendix.append(f"  - {_markdown_cell(evidence, 500)}")
         
         if mitigation.get('direct_quotes'):
             news_appendix.append(f"- **Direct Quotes**:")
             for quote_obj in mitigation.get('direct_quotes', [])[:2]:
-                news_appendix.append(f"  - \"{quote_obj.get('quote', '')}\"")
-                news_appendix.append(f"    - Source: [{quote_obj.get('source_article', 'N/A')}]({quote_obj.get('source_url', '#')})")
+                news_appendix.append(f"  - \"{_markdown_cell(quote_obj.get('quote', ''), 500)}\"")
+                news_appendix.append(
+                    "    - Source: "
+                    + _safe_markdown_link(
+                        quote_obj.get('source_article', 'N/A'),
+                        quote_obj.get('source_url'),
+                    )
+                )
         
         news_appendix.append("")
     
@@ -2023,64 +3637,126 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
     evidence_list = evidence_pack.get('evidence', [])
     
     if evidence_list:
-        news_appendix.append("| ID | Type | Date | Source Title | URL |")
-        news_appendix.append("|----|------|------|--------------|-----|")
+        news_appendix.append("| ID | Type | Date | Quality | Evidence | Source |")
+        news_appendix.append("|----|------|------|---------|----------|--------|")
         
         for evidence in evidence_list:
-            eid = evidence.get('id', 'N/A')
-            etype = evidence.get('type', 'N/A').replace('_', ' ').title()
-            date = evidence.get('date', 'N/A')
+            eid = _markdown_cell(evidence.get('id', 'N/A'), 20)
+            etype = _markdown_cell(
+                str(evidence.get('type', 'N/A')).replace('_', ' ').title(), 80
+            )
+            date = _markdown_cell(evidence.get('date', 'N/A'), 40)
             
             # Get title and source
             title = evidence.get('title', 'N/A')
             source = evidence.get('source', 'N/A')
-            
-            # Truncate title if too long
-            display_title = title[:80] + "..." if len(title) > 80 else title
+            quality = _markdown_cell(evidence.get('source_quality', 'unrated'), 40)
+            source_title = evidence.get('source_article_title') or source
+            display_title = _markdown_cell(title, 80)
             
             # Get URL
-            url = evidence.get('url', '#')
-            url_display = f"[Link]({url})" if url != '#' else 'N/A'
+            url_display = _safe_markdown_link(
+                source_title, evidence.get('url'), limit=70
+            )
             
-            news_appendix.append(f"| {eid} | {etype} | {date} | {display_title} | {url_display} |")
+            news_appendix.append(
+                f"| {eid} | {etype} | {date} | {quality} | {display_title} | {url_display} |"
+            )
         
         news_appendix.append("")
         
         # Add detailed snippets for each evidence
         news_appendix.append("#### Evidence Details\n")
         for evidence in evidence_list:
-            eid = evidence.get('id', 'N/A')
-            title = evidence.get('title', 'N/A')
-            snippet = evidence.get('snippet', 'N/A')
-            source = evidence.get('source', 'N/A')
+            eid = _markdown_cell(evidence.get('id', 'N/A'), 20)
+            title = _markdown_cell(evidence.get('title', 'N/A'), 300)
+            snippet = _markdown_cell(evidence.get('snippet', 'N/A'), 700)
+            raw_source = evidence.get('source', 'N/A')
+            source = _markdown_cell(raw_source, 100)
+            source_title = _markdown_cell(
+                evidence.get('source_article_title') or raw_source, 200
+            )
+            quality = _markdown_cell(evidence.get('source_quality', 'unrated'), 40)
             
             news_appendix.append(f"**{eid}: {title}**")
-            news_appendix.append(f"- **Source**: {source}")
+            news_appendix.append(f"- **Publisher**: {source} ({quality})")
+            news_appendix.append(f"- **Article**: {source_title}")
             news_appendix.append(f"- **Excerpt**: {snippet}")
             news_appendix.append("")
     else:
         news_appendix.append("*No evidence citations found in this report.*\n")
     
-    report_parts.append(f"""## Appendix
+    forecast_basis = ((data.get('model_inputs') or {}).get('forecast_basis') or {})
+    appendix_horizon = (
+        "NTM" if forecast_basis.get("basis") == "rolling_twelve_months" else "FY"
+    )
+    external = data.get('external_expectations') or {}
+    analyst_providers = set()
+    for block in (
+        (external.get('price_target') or {}).get('source_evidence') or {},
+        (external.get('recommendations') or {}).get('source_evidence') or {},
+    ):
+        analyst_providers.update(str(name) for name in block if name)
+    observation_source = (external.get('analyst_observations') or {}).get('source')
+    if observation_source:
+        analyst_providers.add(str(observation_source))
+    analyst_source_line = (
+        "; analyst target and rating benchmarks from "
+        + ", ".join(sorted(analyst_providers))
+        if analyst_providers else ""
+    )
 
-{chr(10).join(news_appendix)}
+    bank = (data.get('valuation') or {}).get('bank')
+    if bank:
+        bank_inputs = bank.get('inputs') or {}
+        justified_pb_value = bank_inputs.get('justified_pb')
+        justified_pb_text = (
+            f"{justified_pb_value:.2f}x"
+            if isinstance(justified_pb_value, (int, float))
+            and not isinstance(justified_pb_value, bool) else "N/A"
+        )
+        peer_pb_value = bank_inputs.get('peer_implied_price_to_book')
+        peer_pb_text = (
+            f"{peer_pb_value:.2f}x"
+            if isinstance(peer_pb_value, (int, float))
+            and not isinstance(peer_pb_value, bool) else "N/A"
+        )
+        model_assumptions_appendix = f"""### C. Key Bank Valuation Assumptions
 
-### C. Key Model Assumptions
+| Assumption | Value |
+|-----------|-------|
+| Common book value per share | {format_number(bank_inputs.get('bvps'), 2)} |
+| Sustainable common ROE | {format_percent(bank_inputs.get('roe'))} |
+| Cost of equity | {format_percent(bank_inputs.get('cost_of_equity'))} |
+| Long-run growth | {format_percent(bank_inputs.get('terminal_growth'))} |
+| Justified P/B | {justified_pb_text} |
+| Forward-consensus common ROE | {format_percent(bank_inputs.get('forward_consensus_roe'))} |
+| ROE-adjusted peer-implied P/B | {peer_pb_text} |
+
+_An industrial WACC/FCF/EBITDA forecast is not applicable to this balance-sheet financial and is intentionally omitted._"""
+    else:
+        model_assumptions_appendix = f"""### C. Key Model Assumptions
 
 | Assumption | Value |
 |-----------|-------|
 | WACC | {format_percent(_wacc_used)} |
 | Terminal Growth Rate | {format_percent(assumptions['terminal_growth'])} |
-| Revenue Growth (FY1) | {format_percent(assumptions['revenue_growth_rates'][0])} |
-| Revenue Growth (FY2) | {format_percent(assumptions['revenue_growth_rates'][1])} |
-| Revenue Growth (FY3) | {format_percent(assumptions['revenue_growth_rates'][2])} |
-| Revenue Growth (FY4) | {format_percent(assumptions['revenue_growth_rates'][3])} |
-| Revenue Growth (FY5) | {format_percent(assumptions['revenue_growth_rates'][4])} |
-| EBITDA Margin (FY1) | {format_percent(assumptions['ebitda_margins'][0])} |
-| EBITDA Margin (FY2) | {format_percent(assumptions['ebitda_margins'][1])} |
-| EBITDA Margin (FY3) | {format_percent(assumptions['ebitda_margins'][2])} |
-| EBITDA Margin (FY4) | {format_percent(assumptions['ebitda_margins'][3])} |
-| EBITDA Margin (FY5) | {format_percent(assumptions['ebitda_margins'][4])} |
+| Revenue Growth ({appendix_horizon}1) | {format_percent(assumptions['revenue_growth_rates'][0])} |
+| Revenue Growth ({appendix_horizon}2) | {format_percent(assumptions['revenue_growth_rates'][1])} |
+| Revenue Growth ({appendix_horizon}3) | {format_percent(assumptions['revenue_growth_rates'][2])} |
+| Revenue Growth ({appendix_horizon}4) | {format_percent(assumptions['revenue_growth_rates'][3])} |
+| Revenue Growth ({appendix_horizon}5) | {format_percent(assumptions['revenue_growth_rates'][4])} |
+| EBITDA Margin ({appendix_horizon}1) | {format_percent(assumptions['ebitda_margins'][0])} |
+| EBITDA Margin ({appendix_horizon}2) | {format_percent(assumptions['ebitda_margins'][1])} |
+| EBITDA Margin ({appendix_horizon}3) | {format_percent(assumptions['ebitda_margins'][2])} |
+| EBITDA Margin ({appendix_horizon}4) | {format_percent(assumptions['ebitda_margins'][3])} |
+| EBITDA Margin ({appendix_horizon}5) | {format_percent(assumptions['ebitda_margins'][4])} |"""
+
+    report_parts.append(f"""## Appendix
+
+{chr(10).join(news_appendix)}
+
+{model_assumptions_appendix}
 
 ### D. Disclaimers
 
@@ -2089,8 +3765,9 @@ The analysis is based on publicly available information and proprietary financia
 performance does not guarantee future results. Investors should conduct their own due diligence 
 and consult with financial advisors before making investment decisions.
 
-**Data Sources**: Financial data from yfinance, news analysis from article screening ({news['summary'].get('articles_analyzed', 0)} articles), 
-valuation based on DCF modeling with source-grounded assumptions and disclosed fallbacks.
+**Data Sources**: Financial statements, market data, and baseline forward estimates via yfinance{analyst_source_line};
+news analysis from source-dated article screening ({news['summary'].get('articles_analyzed', 0)} articles);
+macro, country-risk, and cost-of-capital sources are disclosed beside each model assumption. Analyst evidence is a benchmark only and is never averaged into intrinsic value.
 
 ---
 
@@ -2147,8 +3824,18 @@ def generate_professional_report(
         'cost_of_capital': extract_cost_of_capital(computed_values),
         'projections': extract_projections(computed_values),
         'valuation': extract_valuation(computed_values),
+        'external_expectations': (
+            financial_data.get('external_expectations')
+            or build_external_expectations(financial_data)
+        ),
+        'peer_comps': (financial_data.get('industry_data') or {}).get('peer_comps') or {},
+        'model_inputs': (computed_values.get('_vynn') or {}).get('model_inputs') or {},
         'news': extract_news_analysis(screening_data),
     }
+    valuation_override = (
+        valuation_override
+        or valuation_override_from_publication_metadata(computed_values)
+    )
     data = apply_valuation_override(data, valuation_override)
     data = enforce_valuation_publication_boundary(data, financial_data)
     
@@ -2284,8 +3971,18 @@ async def generate_professional_report_async(
         'cost_of_capital': extract_cost_of_capital(computed_values),
         'projections': extract_projections(computed_values),
         'valuation': extract_valuation(computed_values),
+        'external_expectations': (
+            financial_data.get('external_expectations')
+            or build_external_expectations(financial_data)
+        ),
+        'peer_comps': (financial_data.get('industry_data') or {}).get('peer_comps') or {},
+        'model_inputs': (computed_values.get('_vynn') or {}).get('model_inputs') or {},
         'news': extract_news_analysis(screening_data),
     }
+    valuation_override = (
+        valuation_override
+        or valuation_override_from_publication_metadata(computed_values)
+    )
     data = apply_valuation_override(data, valuation_override)
     data = enforce_valuation_publication_boundary(data, financial_data)
 

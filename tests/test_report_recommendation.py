@@ -154,11 +154,261 @@ class TestValidationAnnotations:
             {"degraded": True, "coverage_details": {"coverage_pct": 72.5}})
         assert "Validation Warning" in out
         assert "72.5%" in out
+        assert "claim-to-evidence validation" in out
+
+    def test_claim_support_fallback_omits_generated_prose(self, engine):
+        fixed = dict(FIXED_NUMBERS)
+        pack = {"evidence": [
+            {"id": "E1", "type": "catalyst_product",
+             "title": "Generated demand interpretation",
+             "source_article_title": "Apple launches a new iPhone",
+             "relevance": 0.9},
+            {"id": "E2", "type": "risk_regulatory",
+             "title": "Generated regulatory interpretation",
+             "source_article_title": "Regulator opens Apple review",
+             "relevance": 0.8},
+        ]}
+        out = engine._evidence_safe_recommendation(
+            fixed, pack, {"citation_support_issues": [{"claim": "invented"}]}
+        )
+        assert "Apple launches a new iPhone. [E1]" in out
+        assert "Regulator opens Apple review. [E2]" in out
+        assert "Generated demand interpretation" not in out
+        assert "Generated regulatory interpretation" not in out
+        assert "generated prose was omitted" in out
+        assert "invented" not in out
 
     def test_clean_validation_adds_no_warning(self, engine):
         out = engine._format_final_output(LLM_RESPONSE, FIXED_NUMBERS, {})
         assert "Validation Warning" not in out
         assert "News evidence was unavailable" not in out
+
+    def test_executive_summary_describes_negative_reverse_dcf_gap_as_less(self):
+        from report_agent import generate_executive_summary
+
+        text, cost = generate_executive_summary(
+            {"recommendation": (
+                "### Investment Rating: BUY\n"
+                "**12-Month Price Target**: $277.20\n"
+                "**Implied Return if Intrinsic Value Converges**: +27.0%\n"
+            )},
+            {
+                "company_overview": {"current_price": 218.29},
+                "valuation": {
+                    "reliability": {},
+                    "summary": {"average_intrinsic": 277.20, "upside": 0.27},
+                    "reverse_dcf": {"market_implied_vs_model": -0.397},
+                },
+                "news": {"freshness": {}},
+            },
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("executive summary must remain deterministic")
+            ),
+        )
+
+        assert cost == 0.0
+        assert "39.7% less terminal free cash flow than the model" in text
+        assert "-39.7% more" not in text
+
+    def test_empty_json_cannot_pass_on_zero_sentence_coverage(self):
+        from src.recommendation_validator import RecommendationValidator
+
+        corrected, report = RecommendationValidator().validate_and_correct(
+            "{}", FIXED_NUMBERS, {"evidence": [{
+                "id": "E1", "type": "catalyst_product",
+                "source_article_title": "Apple launches device",
+                "snippet": "Apple launched a new device.",
+            }]},
+        )
+
+        assert corrected["rating"] == "SELL"
+        assert report["valid"] is False
+        assert "investment thesis is missing" in report["structure_issues"]
+
+    def test_full_engine_falls_back_when_rewrites_stay_empty(self, engine):
+        company = {
+            "ticker": "TEST", "current_price": 100.0,
+            "week_52_low": 80.0, "week_52_high": 120.0,
+            "currency": "USD",
+        }
+        valuation = {
+            "dcf_perpetual": {"intrinsic_value_per_share": 90.0},
+            "dcf_exit": {"intrinsic_value_per_share": 110.0},
+            "summary": {"average_intrinsic": 100.0},
+            "reliability": {},
+        }
+        screening = {
+            "analysis_summary": {
+                "overall_sentiment": "neutral", "articles_analyzed": 1,
+            },
+            "freshness": {"status": "fresh"},
+            "catalysts": [{
+                "type": "product", "description": "New device launch",
+                "confidence": 0.8, "source_articles": [{
+                    "title": "Apple launches device",
+                    "url": "https://example.com/device",
+                    "snippet": "Apple launched a new device.",
+                }],
+            }],
+            "risks": [],
+        }
+        calls = []
+
+        def empty_llm(messages, temperature=0.6):
+            calls.append(messages)
+            return "{}", 0.0
+
+        output, _, pack = engine.generate_recommendation(
+            company, valuation, screening, empty_llm
+        )
+
+        assert len(calls) == 4
+        assert "Narrative validation fallback" in output
+        assert "Apple launches device" in output
+        assert "New device launch" not in output
+        assert pack["validation"]["status"] == "degraded"
+
+    def test_rewrite_receives_actual_source_evidence_and_safe_guidance(self, engine):
+        prompt = engine._build_rewrite_prompt(
+            corrected_json={"thesis": "Generated interpretation [E1]."},
+            fixed_numbers=FIXED_NUMBERS,
+            evidence_pack={"evidence": [{
+                "id": "E1",
+                "title": "Generated interpretation",
+                "reasoning": "Generated reasoning",
+                "source_article_title": "Apple files quarterly results",
+                "snippet": "Apple reported quarterly revenue.",
+                "source": "example.com",
+                "date": "2026-09-01",
+            }]},
+            validation_report={
+                "errors": ["claim support failed"],
+                "citation_support_issues": [{"claim": "unsupported"}],
+            },
+            attempt=3,
+        )
+
+        assert "Apple files quarterly results" in prompt
+        assert "Apple reported quarterly revenue" in prompt
+        assert "Generated reasoning" not in prompt
+        assert "be aggressive" not in prompt.lower()
+        assert "cite relevant evidence" not in prompt.lower()
+        assert "citations to comparisons, valuations, targets" not in prompt.lower()
+
+    def test_withheld_rating_never_calls_llm_or_enters_rewrite_loop(self, engine):
+        company = {
+            "ticker": "TEST", "current_price": 100.0,
+            "week_52_low": 80.0, "week_52_high": 120.0,
+            "currency": "USD",
+        }
+        valuation = {
+            "dcf_perpetual": {"intrinsic_value_per_share": 50.0},
+            "dcf_exit": {"intrinsic_value_per_share": 60.0},
+            "summary": {"average_intrinsic": 55.0},
+            "reliability": {
+                "point_estimate_withheld": True,
+                "withheld_reason": "Independent evidence disagrees.",
+                "range_low": 50.0,
+                "range_high": 60.0,
+                "band": "single-method",
+            },
+        }
+        screening = {
+            "analysis_summary": {
+                "overall_sentiment": "neutral", "articles_analyzed": 1,
+            },
+            "freshness": {"status": "fresh"},
+            "catalysts": [{
+                "type": "product", "description": "New device launch",
+                "confidence": 0.8, "source_articles": [{
+                    "title": "Apple launches device",
+                    "url": "https://example.com/device",
+                    "snippet": "Apple launched a new device.",
+                }],
+            }],
+            "risks": [],
+        }
+
+        def forbidden_llm(*_args, **_kwargs):
+            raise AssertionError("withheld output must not call the LLM")
+
+        output, cost, pack = engine.generate_recommendation(
+            company, valuation, screening, forbidden_llm
+        )
+
+        assert cost == 0.0
+        assert "Investment Rating: NOT RATED" in output
+        assert "Publication note" in output
+        assert "fallback" not in output.lower()
+        assert pack["validation"]["status"] == "not_rated_deterministic"
+
+    def test_limited_news_is_described_as_excluded_not_absent(self, engine):
+        output = engine._evidence_safe_recommendation(
+            {
+                "rating": "NOT RATED",
+                "rating_available": False,
+                "price_available": True,
+                "inputs": {"valuation_reliability": {
+                    "band": "single-method",
+                    "range_low": 100.0,
+                    "range_high": 120.0,
+                }},
+                "rating_withheld_reason": "Independent evidence conflicts.",
+            },
+            {
+                "evidence": [],
+                "articles_analyzed": 6,
+                "news_freshness": {
+                    "status": "limited",
+                    "fresh_articles": 6,
+                    "minimum_articles": 8,
+                },
+            },
+            {"deterministic_not_rated": True, "citation_support_issues": []},
+        )
+
+        assert "6-article sample is below the coverage threshold" in output
+        assert "at least 8 are required" in output
+        assert "No validated source-grounded news signals" not in output
+
+    def test_limited_news_uses_deterministic_recommendation_without_calling_llm(self, engine):
+        company = {
+            "ticker": "NVDA", "current_price": 218.29,
+            "week_52_low": 164.27, "week_52_high": 236.54,
+            "currency": "USD",
+        }
+        valuation = {
+            "dcf_perpetual": {"intrinsic_value_per_share": 265.87},
+            "dcf_exit": {"intrinsic_value_per_share": 288.53},
+            "summary": {"average_intrinsic": 277.20},
+            "reliability": {"band": "single-method"},
+        }
+        screening = {
+            "analysis_summary": {
+                "overall_sentiment": "bullish", "articles_analyzed": 6,
+            },
+            "freshness": {
+                "status": "limited", "fresh_articles": 6,
+                "minimum_articles": 8,
+            },
+            "catalysts": [], "risks": [],
+        }
+
+        def forbidden_llm(*_args, **_kwargs):
+            raise AssertionError("limited news must not enter free-form recommendation")
+
+        output, cost, pack = engine.generate_recommendation(
+            company, valuation, screening, forbidden_llm
+        )
+
+        assert cost == 0.0
+        assert "Investment Rating: BUY" in output
+        assert "12-Month Price Target" in output
+        assert "current news coverage did not meet the evidence threshold" in output
+        assert "6-article sample is below the coverage threshold" in output
+        assert pack["validation"]["status"] == "limited_news_deterministic"
+        assert pack["validation"]["coverage_pct"] is None
+        assert "source headlines shown here" not in output
 
     def test_the_formatter_never_reads_an_undefined_name(self):
         """
@@ -347,7 +597,10 @@ class TestChatMatchesTheReport:
         import inspect
         from src.agents.tools.analysis_tools import WriteReportTool
         source = inspect.getsource(WriteReportTool.execute)
-        assert "_report_headline(state.report.content)" in source
+        # The markdown parser is now bounded by the machine publication gate;
+        # a legacy/stale report cannot resurrect a rating after withholding.
+        assert "_bounded_report_headline(" in source
+        assert "point_estimate_withheld=withheld" in source
 
     def test_the_tool_warns_against_mixing_the_two_bases(self):
         """
@@ -392,12 +645,15 @@ class TestRatioPrecision:
     "20.927107x earnings ... 3.3263094x book value".
     """
 
-    def test_ratios_are_rounded_before_the_model_sees_them(self):
+    def test_ratios_are_typed_and_formatted_before_the_model_sees_them(self):
         import inspect
         source = inspect.getsource(RecommendationEngineV3)
-        assert 'def _ratio(value):' in source
-        for key in ("pe_ratio", "ev_ebitda", "pb_ratio", "roe", "net_margin"):
-            assert f'"{key}": _ratio(' in source, key
+        assert 'def _multiple(value):' in source
+        assert 'def _percent(value):' in source
+        for key in ("pe_ratio", "ev_ebitda", "pb_ratio"):
+            assert f'"{key}": _multiple(' in source, key
+        for key in ("roe", "net_margin", "revenue_growth"):
+            assert f'"{key}": _percent(' in source, key
 
     def test_rounding_helper_handles_real_and_missing_values(self):
         """Exercised against the helper the engine actually defines."""
@@ -406,17 +662,19 @@ class TestRatioPrecision:
         import textwrap
 
         tree = ast.parse(textwrap.dedent(inspect.getsource(RecommendationEngineV3)))
-        fn = next((n for n in ast.walk(tree)
-                   if isinstance(n, ast.FunctionDef) and n.name == "_ratio"), None)
-        assert fn is not None, "_ratio helper not found in RecommendationEngineV3"
+        functions = {n.name: n for n in ast.walk(tree)
+                     if isinstance(n, ast.FunctionDef)}
+        assert {"_multiple", "_percent"} <= set(functions)
 
         ns: dict = {}
-        exec(compile(ast.Module(body=[fn], type_ignores=[]), "<ratio>", "exec"), ns)
-        ratio = ns["_ratio"]
+        exec(compile(ast.Module(
+            body=[functions["_multiple"], functions["_percent"]], type_ignores=[]
+        ), "<ratio>", "exec"), ns)
+        multiple, percent = ns["_multiple"], ns["_percent"]
 
-        assert ratio(20.927107) == 20.93
-        assert ratio(3.3263094) == 3.33
-        assert ratio("N/A") == "N/A"
-        assert ratio(None) == "N/A"
-        assert ratio(float("nan")) == "N/A"
-        assert ratio(True) is True          # a bool is not a ratio
+        assert multiple(20.927107) == "20.93x"
+        assert percent(.163) == "16.3%"
+        assert multiple("N/A") == "N/A"
+        assert percent(None) == "N/A"
+        assert multiple(float("nan")) == "N/A"
+        assert percent(True) is True

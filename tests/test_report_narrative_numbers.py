@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
-from report_agent import sanitize_narrative_numbers  # noqa: E402
+from report_agent import extract_valuation, sanitize_narrative_numbers  # noqa: E402
 
 
 def test_validated_money_percent_and_multiple_are_preserved():
@@ -46,3 +46,26 @@ def test_scale_normalization_allows_equivalent_money_formatting():
     )
     assert removed == 0
     assert "1.20 billion" in cleaned
+
+
+def test_extracted_equity_bridge_does_not_mislabel_investments_as_net_debt():
+    computed = {
+        "Summary": {"cells": {
+            "(14, 2)": 40.0,
+            "(15, 2)": 85.0,
+            "(16, 2)": 107.0,
+        }},
+        "Valuation (DCF)": {"cells": {
+            "(12, 2)": 0.09,
+            "(23, 2)": 0.025,
+        }},
+        "Sensitivity": {"cells": {"(4, 2)": 0.5}},
+    }
+
+    valuation = extract_valuation(computed)
+
+    assert valuation["summary"]["investments"] == 107.0
+    assert valuation["summary"]["net_debt"] == -62.0
+    assert valuation["dcf_inputs"]["wacc"] == 0.09
+    assert valuation["dcf_inputs"]["terminal_growth"] == 0.025
+    assert valuation["dcf_inputs"]["mid_year_adjustment"] == 0.5

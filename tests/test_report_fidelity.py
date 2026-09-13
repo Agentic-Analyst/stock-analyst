@@ -63,6 +63,41 @@ def test_report_agent_imports_cleanly():
     assert m._strip_echoed_heading("## Executive Summary\n\nbody", "Executive Summary").strip() == "body"
 
 
+def test_long_table_text_ends_with_an_ellipsis_not_a_broken_word():
+    from src.report_agent import _markdown_cell
+
+    rendered = _markdown_cell("alpha beta gamma", 12)
+    assert rendered == "alpha beta…"
+
+
+def test_long_business_text_prefers_a_complete_sentence_and_safe_escape_boundary():
+    from src.report_agent import _markdown_cell
+
+    rendered = _markdown_cell(
+        "First complete sentence. Second sentence with <unsafe> trailing text.",
+        45,
+    )
+
+    assert rendered == "First complete sentence.…"
+    assert "&l…" not in rendered
+
+
+def test_untrusted_markdown_text_is_rendered_inert():
+    from src.report_agent import _markdown_cell, _safe_markdown_link
+
+    rendered = _markdown_cell("<script>x</script> | **bold** [link]")
+    assert "<script>" not in rendered
+    assert "\\|" in rendered
+    assert "\\*\\*bold\\*\\*" in rendered
+    assert "\\[link\\]" in rendered
+    assert _safe_markdown_link("bad [label]", "javascript:alert(1)") == (
+        "bad \\[label\\]"
+    )
+    safe = _safe_markdown_link("source", "https://example.com/a) [x](javascript:1)")
+    assert safe.startswith("[source](https://example.com/")
+    assert ") [x]" not in safe
+
+
 def test_recommendation_engine_imports_cleanly():
     import importlib
     m = importlib.import_module("src.recommendation_engine")
@@ -143,8 +178,9 @@ class TestMissingPriceInvalidatesTheRating:
     @pytest.mark.parametrize("missing", [0, None])
     def test_no_price_yields_no_price_target(self, missing):
         # The old penny substitution produced a confident target from
-        # 290.73/0.01. Zero is the honest answer; the narrative says why.
-        assert self._run(missing)["targets"]["m12"]["price"] == 0.0
+        # 290.73/0.01. Null is the honest machine-readable answer: zero is a
+        # real price and can be misrendered as a catastrophic price target.
+        assert self._run(missing)["targets"]["m12"]["price"] is None
 
     def test_a_real_price_still_produces_a_rating(self):
         r = self._run(620.0)
@@ -193,3 +229,54 @@ class TestBriefDirective:
         # ~8 section prompts run in parallel; an unbounded brief would dominate
         # each one and multiply token cost.
         assert self.d("x" * 9000).count("x") <= 2000
+
+
+class TestExternalBenchmarkTemporalRoles:
+    def render(self, **policy):
+        from src.report_agent import _external_analyst_benchmark_lines
+        return "\n".join(_external_analyst_benchmark_lines({
+            "current_price": 100.0,
+            "target_mean_price": 120.0,
+            "num_analysts": 20,
+            "analyst_consensus": {
+                "price_target": {"mean": 120.0, "source": "provider"},
+                "recommendation": {"label": "buy", "total": 18},
+            },
+            **policy,
+        }))
+
+    def test_undated_target_can_challenge_but_not_corroborate(self):
+        text = self.render(
+            analyst_target_qualified_for_contradiction=True,
+            analyst_target_qualified_for_corroboration=False,
+            analyst_rating_qualified=True,
+        )
+        assert "may challenge but cannot corroborate" in text
+        assert "provider date unavailable; caution-only directional benchmark" in text
+
+    def test_stale_target_and_rating_are_provenance_only(self):
+        text = self.render(
+            analyst_target_qualified_for_contradiction=False,
+            analyst_target_qualified_for_corroboration=False,
+            analyst_rating_qualified=False,
+        )
+        assert text.count("provenance only") >= 2
+
+    def test_target_line_never_borrows_rating_population(self):
+        from src.report_agent import _external_analyst_benchmark_lines
+
+        text = "\n".join(_external_analyst_benchmark_lines({
+            "current_price": 100.0,
+            "target_mean_price": 120.0,
+            "analyst_consensus": {
+                "price_target": {"mean": 120.0, "source": "provider"},
+                "recommendation": {"label": "buy", "total": 48},
+            },
+        }))
+
+        target_line = next(line for line in text.splitlines()
+                           if "External analyst target benchmark" in line)
+        rating_line = next(line for line in text.splitlines()
+                           if "External recommendation benchmark" in line)
+        assert "48 analysts" not in target_line
+        assert "48 rating observations" in rating_line

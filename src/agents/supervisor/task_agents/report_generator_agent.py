@@ -129,7 +129,10 @@ async def report_generator_agent(
         # Record it on the report's WARNING slot — never `error`, which
         # is_report_generated() treats as report-failed and would turn a
         # successfully delivered report into a workflow failure.
-        if "News evidence was unavailable" in report_text:
+        if (
+            "News evidence was unavailable" in report_text
+            or "current news coverage did not meet the evidence threshold" in report_text
+        ):
             state.report.warning = (
                 "recommendation section generated without news evidence "
                 "(citations omitted)"
