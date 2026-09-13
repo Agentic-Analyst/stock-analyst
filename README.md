@@ -455,6 +455,27 @@ docker run --rm --env-file .env -v $(pwd)/data:/data \
 
 The published image ([`fuzanwenn/stock-analyst`](https://hub.docker.com/r/fuzanwenn/stock-analyst)) is `linux/amd64`. In production the worker runs as a one-shot container spawned per request by a FastAPI backend, which tails its stdout and streams progress to the frontend over SSE.
 
+Production builds happen on `vynnai-prod`, from `/opt/vynn/stock-analyst`,
+after the shared-core commit referenced by both requirement locks is available
+on GitHub. Publish a versioned image, resolve its registry digest, and configure
+the API with that digest—never with `:latest`:
+
+```bash
+ssh root@128.140.85.148 'cd /opt/vynn/stock-analyst && \
+  docker build --target production \
+    --build-arg VYNN_SOURCE_REVISION=<STOCK_ANALYST_COMMIT> \
+    -t fuzanwenn/stock-analyst:<RELEASE_ID> . && \
+  docker push fuzanwenn/stock-analyst:<RELEASE_ID> && \
+  docker pull fuzanwenn/stock-analyst:<RELEASE_ID> && \
+  docker image inspect fuzanwenn/stock-analyst:<RELEASE_ID> \
+    --format "{{index .RepoDigests 0}}"'
+```
+
+Put the resulting `name@sha256:...` in the server-only `api.env` as
+`BACKEND_IMAGE`, set the matching immutable `ANALYSIS_MODEL_VERSION`, keep
+`PEER_COMPS_ENABLED=false`, and review the API scheduler dry-run before
+enabling scheduled research.
+
 ---
 
 ## Project structure
