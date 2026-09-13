@@ -108,4 +108,3 @@ def test_reinvestment_sensitivity_is_visible_but_never_an_intrinsic_vote():
     assert "not forward guidance or an independent valuation vote" in full
     assert "Reinvestment sensitivity" in compact
     assert "receives no valuation vote" in compact
-
