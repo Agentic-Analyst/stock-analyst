@@ -84,7 +84,7 @@ typing-inspection==0.4.4
 typing_extensions==4.16.0
 urllib3==2.7.0
 uuid_utils==0.17.1
-vynn_core @ git+https://github.com/Agentic-Analyst/vynn-core.git@c242fc35859fa9c9c52a7bc135de1480c953b84e
+vynn_core @ git+https://github.com/Agentic-Analyst/vynn-core.git@a28639fc7521af7f1a6d498cfa4d343433929492
 websockets==16.1.1
 xxhash==4.0.1
 yfinance==1.7.0
