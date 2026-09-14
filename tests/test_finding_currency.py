@@ -61,9 +61,17 @@ class TestSymbolTable:
     def test_unknown_code_falls_back_to_itself(self):
         assert currency_symbol("XYZ") == "XYZ "
 
-    def test_missing_currency_is_dollars(self):
-        assert _symbol(None) == "$"
-        assert _symbol("") == "$"
+    def test_missing_currency_prints_no_symbol(self):
+        """
+        Reversed on purpose. This used to assert "$", back when no tool
+        published a currency and dollars were the best available guess. Every
+        money-bearing tool now reports its currency, so the default is reached
+        only when the currency is genuinely unknown, and a dollar sign there
+        turns a yen or rupee figure into a US-dollar claim. A bare number
+        states what is known and nothing more.
+        """
+        assert _symbol(None) == ""
+        assert _symbol("") == ""
 
 
 class TestMoneyFormatting:
@@ -72,8 +80,12 @@ class TestMoneyFormatting:
         assert _money(388.27, "EUR") == "€388.27"
         assert "$" not in _money(388.27, "EUR")
 
-    def test_defaults_to_dollars_when_unknown(self):
-        assert _money(388.27) == "$388.27"
+    def test_unknown_currency_prints_a_bare_number(self):
+        """A currency-less 5,509.10 must not read as $5,509.10 (it was JPY)."""
+        assert _money(388.27) == "388.27"
+        assert _money(5509.1) == "5,509.10"
+        assert _money(226_443_575_296) == "226.4B"
+        assert "$" not in _money(5509.1)
 
     def test_scales_keep_the_symbol(self):
         assert _money(226_443_575_296, "EUR") == "€226.4B"
@@ -109,12 +121,25 @@ class TestFindingsCarryCurrency:
                                   "currency": "EUR"})
         assert found[0]["value"] == "€226.4B"
 
-    def test_us_listings_are_unchanged(self):
-        """The default path must not regress: no currency means dollars."""
+    def test_us_listings_are_unchanged_when_the_tool_reports_usd(self):
+        """GetPricesTool publishes the listing currency, so NVDA still reads
+        in dollars: the symbol comes from the tool, not from a default."""
         found = extract_findings("get_prices",
                                  {"ticker": "NVDA", "latest_price": 209.22,
-                                  "day_change_pct": -2.1})
+                                  "currency": "USD", "day_change_pct": -2.1})
         assert found[0]["value"] == "$209.22"
+
+    def test_a_listing_with_unknown_currency_is_not_labelled_dollars(self):
+        """Reversed on purpose (see TestSymbolTable). When the tool could not
+        determine the currency, the chip carries the number and no unit."""
+        found = extract_findings("get_prices",
+                                 {"ticker": "MC.PA", "latest_price": 459.35,
+                                  "day_change_pct": 1.5})
+        assert found[0]["value"] == "459.35"
+        assert "$" not in found[0]["value"]
+        found = extract_findings("build_model",
+                                 {"fair_value": 5509.1, "upside_vs_market": -0.02})
+        assert found[0]["value"] == "5,509.10"
 
 
 class TestToolsReportTheirCurrency:
