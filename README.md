@@ -173,7 +173,7 @@ A **ReAct tool-use agent** at the entry point. There is no fixed pipeline and no
                    Excel DCF  ·  Screening JSON  ·  Analyst Report
 ```
 
-The four analysis agents — `financial_data`, `model_generation`, `news_analysis`, `report_generator` — are exposed to the agent **as tools**, sharing a single `FinancialState` blackboard so the `data → model → news → report` dependency chain still holds when a full analysis is warranted. Independent stages run concurrently over that shared blackboard (model ∥ news; report sections in parallel; news screening batched and fanned out) — which matters because news analysis and report generation together account for ~93% of wall clock on a full run. When only a quick answer is needed, none of that heavy machinery runs at all.
+The four analysis agents — `financial_data`, `model_generation`, `news_analysis`, `report_generator` — are exposed to the agent **as tools**, sharing a single `FinancialState` blackboard so the `data → model → news → report` dependency chain still holds when a full analysis is warranted. Independent stages run concurrently over that shared blackboard (model ∥ news; report sections in parallel; news screening batched and fanned out) — which matters because the LLM-bound stages, news analysis and report generation, are what a full run spends its time on. When only a quick answer is needed, none of that heavy machinery runs at all.
 
 Tools self-register through a minimal `Tool` base and `ToolRegistry` that emit both OpenAI- and Anthropic-shaped schemas, so the same tool objects work across providers. A tool that declares a missing dependency (e.g. no FRED key) is simply not offered to the model.
 
@@ -449,28 +449,30 @@ Screening is **parallelized**: up to 50 articles are batched and the batches dis
 
 ## Performance
 
-LLM-bound operations dominate wall-clock; raw data collection and DCF generation complete in seconds. From the committed timing experiments:
+LLM calls dominate wall-clock; data collection and DCF generation finish in seconds.
+That shape is structural — it follows from which stages call a model — and it is the
+part worth knowing.
 
-| Measurement | Value | Source |
-|---|---|---|
-| Full 4-agent workflow | ~6.4 min (383 s) | `experiments/results/experiment_1` |
-| News-heavy workflow | ~3.6 min (215 s) | `experiments/results/experiment_1` |
-| Financials + model only | ~20–100 s | `experiments/results/experiment_1` |
+**No current latency benchmark is published here, and the reason is worth stating.**
+`experiments/results/experiment_1` is the only timing evidence in the repository. It
+reads real production logs, and it says so plainly — *"actual production conditions, not
+synthetic tests"* — but three things disqualify it as a headline:
 
-**Component share of a full run** (META, 383 s):
+- its full-workflow figure rests on **one run** (the report's own Statistical Summary:
+  *"Based on 1 complete run"*), while the five runs it does record span 20 s to 383 s;
+- it is dated **December 12, 2024**;
+- it extracted its numbers from **supervisor workflow logs** — the pipeline now reachable
+  only behind `USE_LEGACY_SUPERVISOR=1`, not the ReAct path that serves requests today.
 
-| Stage | Seconds | Share |
-|---|---|---|
-| News Analysis | 189.36 | 49.4% |
-| Report Generator | 167.60 | 43.8% |
-| Supervisor | ~16.24 | 4.2% |
-| Model Generation | 5.16 | 1.3% |
-| Financial Data | 4.66 | 1.2% |
+Quoting a single 2024 run of a retired code path as a current benchmark would be the
+same error this README spends its first section arguing against, so the numbers are left
+in the experiment directory where their caveats travel with them.
 
-The two dominant stages — news analysis and report generation, together ~93% of wall
-clock — run concurrently over the shared blackboard rather than in sequence. That is the
-mechanism; this repo does not publish a measured parallel-vs-sequential reduction, and no
-such percentage is claimed here.
+What *is* current is the concurrency, and it is verifiable in the source rather than in a
+timing table: `analysis_tools.py:1593` dispatches model generation and news analysis
+together under `asyncio.gather`, report sections are generated in parallel, and news
+screening is batched behind a semaphore. Re-running the harness against the present
+engine, over enough runs to average, is open work.
 
 **Reproducibility is not claimed here.** `experiments/results/experiment_3` holds nine
 real repeated runs across NVDA, AAPL and MSFT, and their per-run records are committed.
