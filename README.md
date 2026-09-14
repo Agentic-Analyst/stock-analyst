@@ -296,12 +296,19 @@ when that workflow runs; the standard valuation workbook is the ten tabs above.
 
 </details>
 
-**2. Professional Analyst Report** ([NVDA sample](samples/NVDA_Professional_Analysis_Report.pdf) · [ORCL sample](samples/ORCL_Professional_Analysis_Report.pdf))
+**2. Professional Analyst Report** ([NVDA sample](samples/NVDA_Professional_Analysis_Report.pdf) · [ORCL sample](samples/ORCL_Professional_Analysis_Report.pdf) — both November 2025, before the publication boundary; their ratings and multi-horizon targets are superseded, see the excerpt below)
 
 Multi-section PDF (typically 35–40 pages) covering: Executive Summary, Company Overview, Financial Performance (4-year historicals + YoY growth + profitability), DCF Valuation (dual method, 5-year projections), News & Market Analysis (up to 50 articles screened into structured catalysts/risks/mitigations with confidence scores, quotes, and source URLs), Investment Thesis (bull/bear/balanced), Recommendation with multi-horizon price targets **or a documented withholding**, and a full evidence appendix.
 
 <details>
-<summary>NVDA report excerpt — Recommendation & Price Target</summary>
+<summary>NVDA report excerpt — November 2025 vintage, superseded (kept as a before/after)</summary>
+
+**This excerpt is from the November 2025 sample PDF and the current engine will not
+produce it.** It is kept because the difference between it and today's output is the
+clearest demonstration in this repo of the publication boundary being applied to the
+author's own past work.
+
+What the old engine printed:
 
 ```
 Investment Rating: HOLD
@@ -327,7 +334,30 @@ Calculation Methodology:
                   = 3.8%
 ```
 
-Every number here is computed by `RecommendationCalculator`. The LLM writes only the surrounding narrative; `RecommendationValidator` verifies every figure matches.
+Three things in that block are now repudiated in the calculator's own source:
+
+- **The sector haircut is gone.** `src/recommendation_calculator.py:143` reads
+  `adj_val_gap_pct = raw_val_gap_pct`, under the comment `# 3. No unmeasured sector
+  haircut.` The `sector_premium_adjustment` field still exists in the `inputs` payload
+  for downstream compatibility, but it is initialised to `0.0` and nothing moves it.
+- **The weighted blend is gone.** `:153` reads `expected_return_pct = raw_val_gap_pct`.
+  The comment above it is the reasoning: the old code "multiplied them by arbitrary
+  40%/20% weights and called the sum a 12-month price target. That produced a precise
+  number which no financial model had actually estimated."
+- **The 3- and 6-month targets are hard-nulled.** `:283-284` emit
+  `"m3": {"price": None, ...}` and `"m6": {"price": None, ...}`, commented "No invented
+  three/six-month path and no pseudo-confidence band made from historical volatility."
+  A published target now has one auditable basis — convergence to the intrinsic value
+  that already cleared the publication boundary.
+
+Run NVDA through today's engine and it does not return a softer HOLD. In the
+2026-09-13 sweep it withheld outright: reliability band `single-method`, the DCF
+standing +27% from the market with no qualifying independent corroboration, and the
+workbook headline labelled `DCF scenario midpoint (not published)`.
+
+The invariant that did survive: every number in a published report is computed by
+`RecommendationCalculator`, the LLM writes only the surrounding narrative, and
+`RecommendationValidator` rejects any figure that does not match.
 
 </details>
 
@@ -442,18 +472,28 @@ clock — run concurrently over the shared blackboard rather than in sequence. T
 mechanism; this repo does not publish a measured parallel-vs-sequential reduction, and no
 such percentage is claimed here.
 
-**Reproducibility** (`experiments/results/experiment_3`): for **NVDA specifically**, 100%
-success with a mean of 384.5 s, standard deviation 6.3 s, coefficient of variation 0.016
-and a reproducibility score of 0.985 — drawn from 9 total runs across 3 tickers. The
-aggregate stability score across that set is 0.983, with a time CV of 0.339. The
-experiment's own stated limitation is the sample size, so treat 0.985 as an NVDA result,
-not a platform-wide guarantee.
+**Reproducibility is not claimed here.** `experiments/results/experiment_3` holds nine
+real repeated runs across NVDA, AAPL and MSFT, and their per-run records are committed.
+But the summary that computes the headline consistency score
+(`reproducibility_summary_20251212_035647.json`) titles itself *"Simulated from
+Historical Data"*, and the companion stability summary *"Simulated from Expected
+Behavior"*. A score derived from a simulation is not a measurement, so no reproducibility
+figure is quoted in this README. Re-running the harness against the current engine and
+scoring the real runs is open work.
 
 Because the agent decides scope, most conversational questions — a price check, a macro question, a technical read — return without ever entering the analysis pipeline. A full comprehensive report remains the heavy path, invoked only when the request warrants it. Repeated-ticker runs are faster still: MongoDB article caching skips scrape and filter.
 
-**Case studies** (end-to-end on real tickers):
+**Case studies — November/December 2025 vintage, throughput only:**
 
-| Company | Articles | Catalysts | Risks | DCF Fair Value | Market Price | Upside | Rating |
+These rows are kept as evidence of end-to-end throughput — articles scraped, screened
+and carried into a workbook — and the article/catalyst/risk counts still describe how
+the pipeline behaves. The ratings do not. They predate the publication boundary, and
+two of the three would not be published by the current engine: NVDA withheld in the
+2026-09-13 sweep on a `single-method` band, and an ORCL row showing −78.0% from a
+single surviving leg is the exact shape the dispersion rail now refuses to attach a
+rating to. Read the last two columns as the behaviour the boundary was built to stop.
+
+| Company | Articles | Catalysts | Risks | DCF Fair Value | Market Price | Upside | Rating (2025, superseded) |
 |---|---|---|---|---|---|---|---|
 | NVDA | 50 screened | 13 | 10 | $215.62 | $191.98 | +12.3% | HOLD |
 | ORCL | 50 screened | 9 | 8 | $49.04 | $222.85 | −78.0% | SELL |
@@ -600,7 +640,7 @@ src/
 └── session_manager.py          # multi-turn conversation memory
 prompts/                        # 34 externalized prompt templates
 experiments/                    # timing, reproducibility and case-study harnesses
-tests/                          # 43 files, 8,768 lines
+tests/                          # 70 files, 18,143 lines
 ```
 
 ---
@@ -624,7 +664,7 @@ tests/                          # 43 files, 8,768 lines
 - **News freshness.** SerpAPI's Google News results can lag breaking news by 15–30 minutes; not suitable for intraday signals.
 - **Model calibration is not yet an accuracy claim.** Established-company inputs are now grounded and exceptional/uncorroborated outputs are withheld, but the rating weights and difficult profiles (pre-revenue biotech, SPACs, recent IPOs with thin history) still require a clean, versioned cross-sectional cohort and a genuine 12-month outcome backtest before they can be called calibrated.
 - **The withholding rate is high by design, and is itself unvalidated.** 14 of 20 large caps withholding says the model disagrees with the market often; it does not yet say who is right. Resolving that needs the outcome backtest above.
-- **Reproducibility is measured on a small sample.** The 0.985 figure is NVDA across a 9-run, 3-ticker experiment — evidence of stable orchestration, not a platform-wide SLA.
+- **Reproducibility is unscored.** Nine real repeated runs are committed under `experiments/results/experiment_3`, but the summary that scores them declares itself simulated, so no consistency figure is published. Scoring the real runs against the current engine is open work.
 - **Companies a DCF does not fit.** Pre-revenue and deeply FCF-negative businesses yield negative intrinsic values under both DCF methods; no assumption set repairs this, because discounted cash flow is the wrong instrument for them. The blend excludes failed legs and the dispersion rail states plainly when a fair value rests on one surviving method — but the honest output in these cases is a range and a caveat, not a price target.
 - **Yahoo Finance rate limiting.** `yfinance` can throttle under heavy concurrent use; the client retries with backoff but does not queue requests across simultaneous analyses.
 - **Symbol resolution.** Non-Latin names are resolved via the model's transliteration plus search; obscure or ambiguously-named companies may need the ticker stated explicitly.
