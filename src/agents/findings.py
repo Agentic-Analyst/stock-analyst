@@ -39,10 +39,17 @@ def _num(v) -> Optional[float]:
 
 def _symbol(ccy: Optional[str]) -> str:
     """
-    The listing's own currency symbol, defaulting to "$".
+    The listing's own currency symbol, or nothing when the currency is unknown.
+
+    This used to default to "$". Every tool that can know its currency now
+    publishes it, so the default only ever fired when the currency was
+    genuinely unknown, and a dollar sign there is not a default but a claim:
+    a yen or rupee fair value streamed to the user as US dollars. A bare
+    number says exactly what is known. lib/research/parse.ts on the web side
+    applies the same rule to the same figures.
     """
     if not ccy:
-        return "$"
+        return ""
     return currency_symbol(ccy)
 
 
@@ -95,7 +102,8 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
         return []
 
     out: List[Dict[str, str]] = []
-    # The listing's currency, when the tool reported one. Absent it, "$".
+    # The listing's currency, when the tool reported one. Absent it, the
+    # figure prints bare: an unknown unit is never rendered as dollars.
     ccy = result.get("currency")
 
     def add(kind: str, label: str, value: Optional[str], sub: Optional[str] = None):
