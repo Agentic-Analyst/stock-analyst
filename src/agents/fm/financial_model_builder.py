@@ -509,6 +509,13 @@ class FinancialModelBuilder:
             "formula_integrity": integrity,
             "model_integrity": semantic_integrity,
             "reinvestment_sensitivity": reinvestment,
+            # Retain the full, machine-readable derivation used by this
+            # workbook. The visible Assumptions notes are intentionally terse;
+            # this payload preserves source dates, exact beta sample identity,
+            # statement periods, issuer-credit observations, and D/E inputs.
+            "cost_of_capital": dict(
+                (self.llm_assumptions or {}).get("capm") or {}
+            ),
             "model_inputs": {
                 "revenue_growth_source": revenue_source,
                 "forecast_basis": (self.llm_assumptions or {}).get("forecast_basis"),

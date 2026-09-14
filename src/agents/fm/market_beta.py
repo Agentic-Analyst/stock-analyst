@@ -27,6 +27,7 @@ existing callers and tests keep working.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Optional
 
 # Exchange suffix -> home index. Verified against live history for the first
@@ -99,6 +100,23 @@ def compute_beta(symbol: Optional[str]) -> Optional[dict]:
             raw = float(cov[0, 1] / cov[1, 1])
             corr = np.corrcoef(df["s"], df["i"])[0, 1]
             r2 = float(corr * corr) if np.isfinite(corr) else 0.0
+            # Persist the exact aligned sample identity without redistributing
+            # provider price history. Float.hex() is lossless and stable, so a
+            # later audit can verify that it is looking at the same returns.
+            digest = hashlib.sha256()
+            for observed_at, row in df.iterrows():
+                stamp = (
+                    observed_at.isoformat()
+                    if hasattr(observed_at, "isoformat") else str(observed_at)
+                )
+                digest.update(
+                    (
+                        f"{stamp}|{float(row['s']).hex()}|"
+                        f"{float(row['i']).hex()}\n"
+                    ).encode("utf-8")
+                )
+            start = df.index.min()
+            end = df.index.max()
             return {
                 "raw": raw,
                 "blume": 0.67 * raw + 0.33,
@@ -106,6 +124,25 @@ def compute_beta(symbol: Optional[str]) -> Optional[dict]:
                 "observations": int(len(df)),
                 "index": index,
                 "window": f"{period} {'monthly' if interval == '1mo' else 'weekly'}",
+                "period": period,
+                "interval": interval,
+                "observation_start": (
+                    start.isoformat() if hasattr(start, "isoformat") else str(start)
+                ),
+                "observation_end": (
+                    end.isoformat() if hasattr(end, "isoformat") else str(end)
+                ),
+                "observations_sha256": digest.hexdigest(),
+                "series_source": "Yahoo Finance via yfinance",
+                "series_adjustment": "auto_adjust=True",
+                "sufficient_statistics": {
+                    "security_return_mean": float(df["s"].mean()),
+                    "benchmark_return_mean": float(df["i"].mean()),
+                    "security_return_variance": float(cov[0, 0]),
+                    "benchmark_return_variance": float(cov[1, 1]),
+                    "return_covariance": float(cov[0, 1]),
+                    "return_correlation": float(corr),
+                },
                 "weak_fit": r2 < _WEAK_FIT_R2,
             }
         except Exception:

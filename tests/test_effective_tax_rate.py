@@ -111,6 +111,7 @@ def test_the_old_signature_still_works():
 def test_forward_rate_normalizes_current_and_three_annual_observations():
     data = {"ttm_bridge": {
         "status": "current",
+        "latest_period": "2026-09-30",
         "income_statement": {
             "Tax Rate For Calcs": 0.18,
             "Tax Provision": 90.0,
@@ -130,6 +131,31 @@ def test_forward_rate_normalizes_current_and_three_annual_observations():
     details = _effective_tax_rate_details({}, data)
     assert details["rate"] == 0.19
     assert "median" in details["source"]
+    assert details["observation_details"] == [
+        {"period": "2026-09-30", "basis": "ttm", "rate": 0.18,
+         "calculation": "provider_calculated_rate", "tax_rate_for_calcs": 0.18},
+        {"period": "2025-12-31", "basis": "annual", "rate": 0.12,
+         "calculation": "provider_calculated_rate", "tax_rate_for_calcs": 0.12},
+        {"period": "2024-12-31", "basis": "annual", "rate": 0.40,
+         "calculation": "provider_calculated_rate", "tax_rate_for_calcs": 0.40},
+        {"period": "2023-12-31", "basis": "annual", "rate": 0.20,
+         "calculation": "provider_calculated_rate", "tax_rate_for_calcs": 0.20},
+    ]
+
+
+def test_ratio_tax_provenance_preserves_the_exact_numerator_and_denominator():
+    details = _effective_tax_rate_details({}, payload({
+        "Tax Provision": 150.0, "Pretax Income": 1000.0,
+    }))
+
+    assert details["observation_details"] == [{
+        "period": "2025-01-31",
+        "basis": "annual",
+        "rate": 0.15,
+        "calculation": "tax_provision/pretax_income",
+        "tax_provision": 150.0,
+        "pretax_income": 1000.0,
+    }]
 
 
 def test_ttm_provider_calculation_rate_precedes_raw_ratio():

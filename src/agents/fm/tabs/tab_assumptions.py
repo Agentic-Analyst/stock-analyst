@@ -446,10 +446,14 @@ class AssumptionsTabBuilder:
         # the tab's Ke = Rf + beta x B24 reproduces the CAPM's own cost of
         # equity. The note says what was added.
         _crp = capm.get("country_risk_premium") or 0.0
-        _pub = capm.get("mature_erp_published")
-        _base = (f"Mature-market ERP {capm.get('equity_risk_premium', 0.055)*100:.1f}% (house assumption"
-                 + (f"; Damodaran's implied base {_pub*100:.2f}%" if isinstance(_pub, (int, float)) else "")
-                 + ")")
+        _erp_source = capm.get("mature_erp_selected_source") or "source unavailable"
+        _erp_as_of = capm.get("mature_erp_as_of")
+        _erp_date = f", as of {_erp_as_of}" if _erp_as_of else ""
+        _base = (
+            f"Mature-market ERP "
+            f"{capm.get('equity_risk_premium', 0.055)*100:.2f}% "
+            f"({_erp_source}{_erp_date})"
+        )
         _seed(24, "Equity Risk Premium (ERP + country premium)", "equity_risk_premium_total", 0.055, '0.00%',
               f"[{_base} + country premium {_crp*100:.2f}%: {capm.get('crp_source', 'none')}]"
               if capm else "[Mature-market ERP]")

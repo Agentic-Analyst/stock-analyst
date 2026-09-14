@@ -152,6 +152,21 @@ class TestComputeBeta:
         assert fit["index"] == "^NSEI"
         assert fit["observations"] == 60
         assert fit["weak_fit"] is False
+        assert fit["observation_start"].startswith("2021-02-28")
+        assert fit["observation_end"].startswith("2026-01-31")
+        assert len(fit["observations_sha256"]) == 64
+        assert fit["series_source"] == "Yahoo Finance via yfinance"
+        assert fit["series_adjustment"] == "auto_adjust=True"
+        stats = fit["sufficient_statistics"]
+        assert (
+            stats["return_covariance"] / stats["benchmark_return_variance"]
+        ) == pytest.approx(fit["raw"])
+
+        # The digest identifies the exact aligned observations, not merely the
+        # requested window. Repeating the same sample must reproduce it.
+        assert compute_beta("X.NS")["observations_sha256"] == fit[
+            "observations_sha256"
+        ]
 
     def test_blume_adjustment(self, monkeypatch):
         import numpy as np

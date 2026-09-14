@@ -14,9 +14,10 @@ This module grounds those parameters from observable data:
   * WACC        — CAPM: the 10Y government yield in the cash flows' own
                   currency less the sovereign's default spread (sovereign_rates,
                   country_risk), beta regressed on the home index and
-                  Blume-adjusted (market_beta), a 5.5% mature-market ERP plus
-                  Damodaran's country premium, blended with after-tax cost of
-                  debt (government yield + spread) at actual D/E weights.
+                  Blume-adjusted (market_beta), the selected published
+                  mature-market ERP (or an explicitly labelled override /
+                  fallback) plus Damodaran's country premium, blended with
+                  after-tax cost of debt at actual D/E weights.
   * Terminal g  — clamped to [2.0%, 3.0%], then capped at the currency's
                   risk-free rate.
   * Margin paths— for companies with positive trailing operating profit, the
@@ -143,7 +144,12 @@ def _issuer_credit_spread(
         if (ebit is None or interest is None or interest <= 0
                 or not math.isfinite(ebit / interest)):
             return
-        observations.append({"period": label, "interest_coverage": ebit / interest})
+        observations.append({
+            "period": label,
+            "operating_income": ebit,
+            "interest_expense": interest,
+            "interest_coverage": ebit / interest,
+        })
 
     bridge = json_data.get("ttm_bridge") or {}
     if bridge.get("status") == "current":
@@ -197,7 +203,7 @@ def _issuer_credit_spread(
 # a deploy; EQUITY_RISK_PREMIUM overrides the mature-market ERP.
 
 
-def _mature_erp() -> float:
+def _mature_erp(table: Optional[Dict[str, Any]] = None) -> float:
     """
     The mature-market equity risk premium.
 
@@ -234,20 +240,71 @@ def _mature_erp() -> float:
                 return value
         except ValueError:
             pass
-    try:
-        # Imported here, not at module scope: country_risk reaches the network
-        # on first use and this module is imported during model build.
-        from .country_risk import load_table
-        published = (load_table() or {}).get("mature_erp")
-    except Exception:
-        # A failed fetch must never break model generation; fall through to
-        # the embedded snapshot value below.
-        published = None
+    if table is not None:
+        published = table.get("mature_erp")
+    else:
+        try:
+            # Imported here, not at module scope: country_risk reaches the
+            # network on first use and this module is imported during build.
+            from .country_risk import load_table
+            published = (load_table() or {}).get("mature_erp")
+        except Exception:
+            # A failed fetch must never break model generation; fall through
+            # to the embedded snapshot value below.
+            published = None
     # The band is a sanity gate, not a preference: a parse failure that yields
     # 0.4 or 0.0004 must not silently become the discount rate.
     if isinstance(published, (int, float)) and 0.03 <= float(published) <= 0.09:
         return float(published)
     return _ERP
+
+
+def _mature_erp_provenance(
+    selected_rate: float, table: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Name the source which actually won ERP resolution.
+
+    A workbook previously printed the published Damodaran rate next to the
+    selected rate without saying whether an environment override or the 5.5%
+    embedded fallback had won. Equal-looking provenance is not provenance.
+    """
+    raw_override = os.getenv("EQUITY_RISK_PREMIUM")
+    try:
+        override = float(raw_override) if raw_override else None
+    except (TypeError, ValueError):
+        override = None
+    if (
+        override is not None and 0.03 <= override <= 0.09
+        and abs(float(selected_rate) - override) <= 1e-12
+    ):
+        return {
+            "resolution": "operator_override",
+            "selected_source": "EQUITY_RISK_PREMIUM environment override",
+            "as_of": None,
+        }
+
+    source_table = table if isinstance(table, dict) else {}
+    published = source_table.get("mature_erp")
+    if (
+        isinstance(published, (int, float)) and not isinstance(published, bool)
+        and 0.03 <= float(published) <= 0.09
+        and abs(float(selected_rate) - float(published)) <= 1e-12
+    ):
+        return {
+            "resolution": "published",
+            "selected_source": (
+                source_table.get("source") or "published mature-market ERP"
+            ),
+            "as_of": source_table.get("as_of"),
+        }
+
+    return {
+        "resolution": "embedded_fallback",
+        "selected_source": (
+            f"embedded {_ERP:.2%} house fallback; published ERP unavailable"
+        ),
+        "as_of": None,
+    }
 
 
 def risk_free_details(currency: Optional[str] = "USD") -> Dict[str, Any]:
@@ -383,6 +440,10 @@ def collect_market_assumption_snapshot(
     symbol = basic.get("symbol") or company.get("ticker")
     risk_free = risk_free_details(currency)
     table = load_table() or {}
+    # Select the value and its provenance from the same immutable table read;
+    # otherwise a cache refresh between two reads could mislabel the input.
+    selected_erp = _mature_erp(table)
+    erp_provenance = _mature_erp_provenance(selected_erp, table)
     return {
         "schema_version": 1,
         "status": "ready",
@@ -394,9 +455,14 @@ def collect_market_assumption_snapshot(
         "country_risk": _country_risk_details(
             str(basic.get("country") or ""), currency
         ),
-        "mature_equity_risk_premium": _mature_erp(),
+        "mature_equity_risk_premium": selected_erp,
         "mature_equity_risk_premium_published": table.get("mature_erp"),
         "mature_equity_risk_premium_source": table.get("source"),
+        "mature_equity_risk_premium_resolution": erp_provenance["resolution"],
+        "mature_equity_risk_premium_selected_source": erp_provenance[
+            "selected_source"
+        ],
+        "mature_equity_risk_premium_as_of": erp_provenance["as_of"],
     }
 
 
@@ -472,6 +538,18 @@ def _saved_market_assumption_snapshot(
         if not isinstance(fit.get("index"), str) or not isinstance(
             fit.get("window"), str
         ) or not isinstance(fit.get("weak_fit"), bool):
+            return None
+        for key in (
+            "observation_start", "observation_end", "observations_sha256",
+            "series_source", "series_adjustment",
+        ):
+            if key in fit and not isinstance(fit.get(key), str):
+                return None
+        checksum = fit.get("observations_sha256")
+        if checksum is not None and (
+            len(checksum) != 64
+            or any(char not in "0123456789abcdef" for char in checksum.lower())
+        ):
             return None
     return value
 
@@ -576,16 +654,36 @@ def capm_components(company_data: Dict[str, Any],
     crp = float(country_details["premium"])
     crp_source = str(country_details.get("source") or "")
     domicile = country_details.get("domicile")
-    erp = (
-        float(snapshot["mature_equity_risk_premium"])
-        if snapshot else _mature_erp()
-    )
+    erp_table = None
+    if snapshot:
+        erp = float(snapshot["mature_equity_risk_premium"])
+    else:
+        from .country_risk import load_table
+        erp_table = load_table() or {}
+        erp = _mature_erp(erp_table)
     erp_total = erp + crp
     if snapshot:
         erp_published = snapshot.get("mature_equity_risk_premium_published")
+        erp_resolution = snapshot.get(
+            "mature_equity_risk_premium_resolution", "legacy_unrecorded"
+        )
+        erp_selected_source = snapshot.get(
+            "mature_equity_risk_premium_selected_source"
+        ) or snapshot.get("mature_equity_risk_premium_source")
+        erp_as_of = snapshot.get("mature_equity_risk_premium_as_of")
     else:
-        from .country_risk import load_table
-        erp_published = (load_table() or {}).get("mature_erp")
+        erp_published = erp_table.get("mature_erp")
+        erp_provenance = _mature_erp_provenance(erp, erp_table)
+        erp_resolution = erp_provenance["resolution"]
+        erp_selected_source = erp_provenance["selected_source"]
+        erp_as_of = erp_provenance["as_of"]
+
+    if fit and fit.get("observation_start") and fit.get("observation_end"):
+        beta_source += (
+            f", sample {fit['observation_start']} to {fit['observation_end']}"
+        )
+    if fit and fit.get("observations_sha256"):
+        beta_source += f", returns sha256 {fit['observations_sha256'][:12]}…"
 
     tax_details = _effective_tax_rate_details(company_data, json_data)
     tax = tax_details["rate"]
@@ -614,6 +712,10 @@ def capm_components(company_data: Dict[str, Any],
     kd_after_tax = kd_pre_tax * (1 - tax)
 
     equity = float(md.get("market_cap_financial") or 0)
+    equity_source = (
+        "company_data.market_data.market_cap_financial"
+        if equity > 0 else None
+    )
     weights_note = "financial-currency market cap / (market cap + total debt)"
     if equity <= 0:
         raw_equity = md.get("market_cap")
@@ -626,23 +728,37 @@ def capm_components(company_data: Dict[str, Any],
             and raw_equity > 0 and fx > 0
         ):
             equity = float(raw_equity) * float(fx)
+            equity_source = (
+                "company_data.market_data.market_cap converted with "
+                "company_data.market_data.fx_listing_to_financial"
+            )
             weights_note = (
                 f"market cap converted {listing_currency}->{currency} / "
                 "(market cap + total debt)"
             )
         elif listing_currency == currency:
             equity = float(raw_equity or 0)
+            equity_source = (
+                "company_data.market_data.market_cap" if equity > 0 else None
+            )
             weights_note = "market cap / (market cap + total debt)"
         elif isinstance(raw_equity, (int, float)) and raw_equity > 0:
             # Unlike currencies cannot be weighted.  Treating a USD market cap
             # as CNY (or vice versa) is worse than an explicit all-equity
             # fallback and was the source of BABA's false 50% debt weight.
             equity = 0.0
+            equity_source = None
             weights_note = (
                 f"market cap is {listing_currency} while debt is {currency}; "
                 "FX unavailable — all-equity weights used"
             )
-    debt = float(cs.get("total_debt") or 0)
+    raw_debt = cs.get("total_debt")
+    debt = float(raw_debt or 0)
+    debt_source = (
+        "company_data.capital_structure.total_debt"
+        if isinstance(raw_debt, (int, float)) and not isinstance(raw_debt, bool)
+        else "unavailable; model assumes zero debt"
+    )
     if equity > 0:
         w_e = equity / (equity + debt)
     else:
@@ -682,11 +798,15 @@ def capm_components(company_data: Dict[str, Any],
         "sovereign_default_spread": rfd["default_spread"],
         "equity_risk_premium": erp,
         "mature_erp_published": erp_published,
+        "mature_erp_resolution": erp_resolution,
+        "mature_erp_selected_source": erp_selected_source,
+        "mature_erp_as_of": erp_as_of,
         "country_risk_premium": crp,
         "crp_source": crp_source,
         "equity_risk_premium_total": erp_total,
         "beta": beta,
         "beta_source": beta_source,
+        "beta_fit": dict(fit) if isinstance(fit, dict) else None,
         "beta_r_squared": beta_r2,
         "beta_index": beta_index,
         "cost_of_equity": ke,
@@ -704,12 +824,25 @@ def capm_components(company_data: Dict[str, Any],
         "tax_rate": tax,
         "tax_rate_source": tax_details["source"],
         "tax_rate_observations": tax_details["observations"],
+        "tax_rate_observation_details": tax_details.get(
+            "observation_details", []
+        ),
         "after_tax_cost_of_debt": kd_after_tax,
         "equity_value": equity,
         "debt_value": debt,
         "equity_weight": w_e,
         "debt_weight": w_d,
         "weights_note": weights_note,
+        "capital_structure_inputs": {
+            "equity_value": equity,
+            "equity_source": equity_source,
+            "debt_value": debt,
+            "debt_source": debt_source,
+            "captured_at": (
+                (json_data or {}).get("scraped_at")
+                if isinstance(json_data, dict) else None
+            ),
+        },
         "wacc": wacc,
         "wacc_unclamped": raw_wacc,
         # Kept as a flag, not an alteration: a WACC outside [6%, 20%] usually
@@ -767,18 +900,35 @@ def _current_shares(md: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-def _tax_rate_observation(row: Dict[str, Any]) -> Optional[float]:
-    """One usable statement-period cash-tax observation, provider field first."""
+def _tax_rate_observation_details(
+    row: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """One usable cash-tax observation and the exact fields behind it."""
     calcs = _number(row if isinstance(row, dict) else {}, "Tax Rate For Calcs")
     if calcs is not None and 0.0 < calcs <= 0.5:
-        return calcs
+        return {
+            "rate": calcs,
+            "calculation": "provider_calculated_rate",
+            "tax_rate_for_calcs": calcs,
+        }
     provision = _number(row if isinstance(row, dict) else {}, "Tax Provision")
     pretax = _number(row if isinstance(row, dict) else {}, "Pretax Income")
     if pretax is not None and pretax > 0 and provision is not None:
         ratio = provision / pretax
         if 0.0 < ratio <= 0.5:
-            return ratio
+            return {
+                "rate": ratio,
+                "calculation": "tax_provision/pretax_income",
+                "tax_provision": provision,
+                "pretax_income": pretax,
+            }
     return None
+
+
+def _tax_rate_observation(row: Dict[str, Any]) -> Optional[float]:
+    """One usable statement-period cash-tax observation, provider field first."""
+    details = _tax_rate_observation_details(row)
+    return details["rate"] if details else None
 
 
 def _tax_rate_from_statements(json_data: Dict[str, Any]) -> Optional[float]:
@@ -825,26 +975,45 @@ def _normalized_tax_rate_from_statements(
     each period, and use their median.  Sparse companies still use the one
     valid observation rather than manufacturing history.
     """
-    observations: List[float] = []
+    details = _normalized_tax_rate_observation_details(json_data)
+    observations = [row["rate"] for row in details]
+    return (
+        (float(statistics.median(observations)) if observations else None),
+        observations,
+    )
+
+
+def _normalized_tax_rate_observation_details(
+    json_data: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """The dated statement observations behind the normalized tax rate."""
+    observations: List[Dict[str, Any]] = []
     bridge = (json_data or {}).get("ttm_bridge") or {}
     if bridge.get("status") == "current":
-        rate = _tax_rate_observation(bridge.get("income_statement") or {})
-        if rate is not None:
-            observations.append(rate)
+        details = _tax_rate_observation_details(
+            bridge.get("income_statement") or {}
+        )
+        if details is not None:
+            observations.append({
+                "period": str(bridge.get("latest_period") or "TTM"),
+                "basis": "ttm",
+                **details,
+            })
     statements = (json_data or {}).get("financial_statements", {}) or {}
     income = statements.get("income_statement", {}) or {}
     for period in sorted(
         (p for p in income if isinstance(p, str)), reverse=True
     ):
-        rate = _tax_rate_observation(income.get(period) or {})
-        if rate is not None:
-            observations.append(rate)
+        details = _tax_rate_observation_details(income.get(period) or {})
+        if details is not None:
+            observations.append({
+                "period": period,
+                "basis": "annual",
+                **details,
+            })
         if len(observations) >= 4:
             break
-    return (
-        (float(statistics.median(observations)) if observations else None),
-        observations,
-    )
+    return observations
 
 
 def _effective_tax_rate_details(
@@ -864,6 +1033,11 @@ def _effective_tax_rate_details(
                 "rate": rate,
                 "source": f"company_data.growth_profitability.{key}",
                 "observations": [rate],
+                "observation_details": [{
+                    "period": None,
+                    "basis": f"company_data.growth_profitability.{key}",
+                    "rate": rate,
+                }],
             }
     rate, observations = _normalized_tax_rate_from_statements(json_data or {})
     if rate is not None:
@@ -874,11 +1048,15 @@ def _effective_tax_rate_details(
                 "effective-tax observations"
             ),
             "observations": observations,
+            "observation_details": _normalized_tax_rate_observation_details(
+                json_data or {}
+            ),
         }
     return {
         "rate": _TAX_DEFAULT,
         "source": "25% mature-market fallback; no usable issuer observation",
         "observations": [],
+        "observation_details": [],
     }
 
 

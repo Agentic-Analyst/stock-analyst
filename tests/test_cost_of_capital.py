@@ -171,7 +171,10 @@ class TestRiskFreeBuild:
 
     def test_mature_erp_can_be_overridden(self, monkeypatch):
         monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.05")
-        assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(0.05)
+        overridden = capm_components(US_MEGACAP)
+        assert overridden["equity_risk_premium"] == pytest.approx(0.05)
+        assert overridden["mature_erp_resolution"] == "operator_override"
+        assert "environment override" in overridden["mature_erp_selected_source"]
         # An out-of-band override is ignored. The fallback used to be the 5.5%
         # house constant; it is now Damodaran's published implied premium,
         # which is the point of the change — so assert the fallback IS the
@@ -180,7 +183,9 @@ class TestRiskFreeBuild:
         monkeypatch.delenv("EQUITY_RISK_PREMIUM", raising=False)
         _fallback = _ag._mature_erp()
         monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.5")
-        assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(_fallback)
+        resolved = capm_components(US_MEGACAP)
+        assert resolved["equity_risk_premium"] == pytest.approx(_fallback)
+        assert resolved["mature_erp_resolution"] == "published"
 
     def test_the_build_is_published_for_the_workbook_and_report(self):
         c = capm_components(INDIAN_MIDCAP)
@@ -208,6 +213,12 @@ class TestRiskFreeBuild:
         assert c["issuer_interest_coverage"] == pytest.approx(10.0)
         assert c["issuer_synthetic_rating"] == "Aaa/AAA"
         assert c["issuer_credit_spread"] == pytest.approx(0.004)
+        assert c["issuer_interest_coverage_observations"][0] == {
+            "period": "2026-TTM",
+            "operating_income": 32_000,
+            "interest_expense": 2_000,
+            "interest_coverage": 16.0,
+        }
         assert c["pre_tax_cost_of_debt"] == pytest.approx(
             c["risk_free_rate"] + c["domicile_default_spread"] + 0.004
         )
@@ -308,13 +319,14 @@ class TestCapmBuild:
             "default_spread": 0.002, "label": "dated source",
             "source": "test", "as_of": "2026-09-11", "proxy": False,
         })
-        monkeypatch.setattr(_ag, "_mature_erp", lambda: 0.0423)
+        monkeypatch.setattr(_ag, "_mature_erp", lambda *_: 0.0423)
         monkeypatch.setattr(_ag, "_country_risk_details", lambda *_: {
             "input_country": "United States", "assumed_country": None,
             "premium": 0.0023, "source": "test", "domicile": None,
         })
         monkeypatch.setattr(country_risk, "load_table", lambda: {
             "mature_erp": 0.0423, "source": "dated test table",
+            "as_of": "2026-01-01",
         })
         monkeypatch.setattr(market_beta, "compute_beta", lambda _: None)
 
@@ -328,7 +340,25 @@ class TestCapmBuild:
         assert result["status"] == "ready"
         assert result["currency"] == "USD"
         assert result["risk_free"]["as_of"] == "2026-09-11"
+        assert result["mature_equity_risk_premium_resolution"] == "published"
+        assert result["mature_equity_risk_premium_selected_source"] == "dated test table"
+        assert result["mature_equity_risk_premium_as_of"] == "2026-01-01"
         assert result["mature_equity_risk_premium_source"] == "dated test table"
+        import json
+        json.dumps(result)
+
+    def test_capital_structure_inputs_preserve_values_sources_and_capture_time(self):
+        financials = {"scraped_at": "2026-09-13T21:35:40+00:00"}
+
+        result = capm_components(US_MEGACAP, financials)
+
+        assert result["capital_structure_inputs"] == {
+            "equity_value": 3_000_000_000_000.0,
+            "equity_source": "company_data.market_data.market_cap",
+            "debt_value": 30_000_000_000.0,
+            "debt_source": "company_data.capital_structure.total_debt",
+            "captured_at": "2026-09-13T21:35:40+00:00",
+        }
 
     def test_it_returns_the_derivation_not_just_the_answer(self):
         """
@@ -871,7 +901,9 @@ class TestReviewFindings:
         c = capm_components(US_MEGACAP)
         ws = AssumptionsTabBuilder({"capm": c, "terminal_growth_note": "capped at the USD risk-free rate 4.55%"}).create_tab(openpyxl.Workbook())
         note = ws["C24"].value
-        assert "country premium 0.23%" in note and "Damodaran's implied base 4.23%" in note and "house assumption" in note
+        assert "country premium 0.23%" in note
+        assert f"Mature-market ERP {c['equity_risk_premium']*100:.2f}%" in note
+        assert str(c["mature_erp_selected_source"]) in note
         assert ws["C27"].value == f"[{c['kd_source']}]"
         assert ws["C30"].value == "[capped at the USD risk-free rate 4.55%]"
         assert ws.column_dimensions["C"].width >= 60
