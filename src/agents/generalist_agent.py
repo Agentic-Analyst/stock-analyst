@@ -532,14 +532,36 @@ class GeneralistAgent:
             if self.ctx.logger and hasattr(self.ctx.logger, "program_end"):
                 self.ctx.logger.program_end()
 
+        _state, response_ticker, response_company = self._answer_subject()
         return {
             "status": "completed",
-            "ticker": self.ctx.ticker or "CHAT",
-            "company_name": self.ctx.company_name,
+            "ticker": response_ticker or "CHAT",
+            "company_name": response_company,
             "session_name": self.ctx.session_name,
             "answer": final_text,
             "total_cost": self.total_cost,
         }
+
+    def _answer_subject(self):
+        """Return the state and identity that govern this turn's answer.
+
+        ``read_report`` reconstructs a fail-closed publication boundary from a
+        saved artifact.  That boundary controls a report follow-up, but it must
+        never replace the active financial-model state on ``AgentContext``.
+        """
+        if "read_report" in getattr(self, "_tools_used", set()):
+            report_state = getattr(self.ctx, "report_guard_state", None)
+            if report_state is not None:
+                return (
+                    report_state,
+                    getattr(self.ctx, "report_guard_ticker", None),
+                    getattr(self.ctx, "report_guard_company_name", None),
+                )
+        return (
+            getattr(self.ctx, "state", None),
+            getattr(self.ctx, "ticker", None),
+            getattr(self.ctx, "company_name", None),
+        )
 
     def _guard_final_answer(self, answer_text: str) -> str:
         """Apply the shared deterministic valuation/news publication boundary.
@@ -549,8 +571,8 @@ class GeneralistAgent:
         would leave the last and most visible summary unprotected.
         """
         answer_text = self._guard_specialized_answer(answer_text)
-        state = getattr(self.ctx, "state", None)
-        ticker = str(getattr(self.ctx, "ticker", None) or "the company")
+        state, subject_ticker, _company_name = self._answer_subject()
+        ticker = str(subject_ticker or "the company")
         try:
             # Keep one implementation of the safety rules.  Construction is
             # deliberately bypassed because the guard only consumes `state`
@@ -830,7 +852,11 @@ class GeneralistAgent:
                 email=self.email, ticker="CHAT",
                 session_name=session_name,
             )
-            idx = sm.start_conversation(user_query=self.user_prompt, company_name=self.ctx.company_name)
+            _, subject_ticker, subject_company = self._answer_subject()
+            idx = sm.start_conversation(
+                user_query=self.user_prompt,
+                company_name=subject_company,
+            )
             # Capture the rich analysis this turn produced so a FOLLOW-UP can
             # answer "summarize the report / break out the cases / compare" from
             # stored results instead of re-running the whole pipeline. Without
@@ -839,9 +865,9 @@ class GeneralistAgent:
             # Record the subject ticker so the NEXT turn's context can inherit
             # it ("build a financial model for me" after a Cerebras discussion
             # must resolve to CBRS, not a clarifying question).
-            if self.ctx.ticker:
+            if subject_ticker:
                 analysis_results = analysis_results or {}
-                analysis_results["ticker"] = self.ctx.ticker
+                analysis_results["ticker"] = subject_ticker
             # Link the turn to its persisted answer file (per-turn answers stop
             # multi-turn sessions overwriting each other).
             if self.ctx.base_path is not None:
@@ -873,7 +899,7 @@ class GeneralistAgent:
         substantive ran (e.g. a plain macro answer with no ticker).
         """
         results: dict = {}
-        state = getattr(self.ctx, "state", None)
+        state, _ticker, _company_name = self._answer_subject()
         if state is None:
             return results
         try:

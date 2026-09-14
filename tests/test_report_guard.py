@@ -567,7 +567,7 @@ def test_published_report_guard_leaves_nonconflicting_discussion_untouched():
     assert ag._guard_final_answer(answer) == answer
 
 
-def test_read_report_rehydrates_withheld_boundary_for_a_fresh_process(
+def test_read_report_uses_separate_guard_without_replacing_live_state(
     tmp_path, monkeypatch,
 ):
     from agents.tools.analysis_tools import ReadReportTool
@@ -638,8 +638,19 @@ def test_read_report_rehydrates_withheld_boundary_for_a_fresh_process(
         "analysis_summary": {"overall_sentiment": "bearish"},
     }))
     monkeypatch.setattr("path_utils.get_latest_analysis_path", lambda *_: base)
+    live_state = types.SimpleNamespace(
+        financial_model=types.SimpleNamespace(
+            valuation_metrics={
+                "fair_value": 260.0,
+                "point_estimate_withheld": False,
+            },
+        ),
+    )
     ctx = types.SimpleNamespace(
-        email="launch@example.com", state=None, ticker=None, company_name=None,
+        email="launch@example.com",
+        state=live_state,
+        ticker="MSFT",
+        company_name="Microsoft Corporation",
     )
 
     payload = json.loads(asyncio.run(ReadReportTool(ctx).execute("AAPL")))
@@ -653,10 +664,23 @@ def test_read_report_rehydrates_withheld_boundary_for_a_fresh_process(
     assert "price_target_12m" not in payload
     assert "price_target_expected_return_pct" not in payload
     assert payload["news_freshness"]["status"] == "limited"
-    assert ctx.state.financial_model.valuation_metrics["fair_value"] == 167.67
+    assert ctx.state is live_state
+    assert ctx.state.financial_model.valuation_metrics["fair_value"] == 260.0
+    assert ctx.ticker == "MSFT"
+    assert ctx.company_name == "Microsoft Corporation"
+    assert ctx.report_guard_ticker == "AAPL"
+    assert ctx.report_guard_company_name == "Apple Inc."
+    assert ctx.report_guard_state.financial_model.valuation_metrics[
+        "fair_value"
+    ] == 167.67
 
-    ag = _agent("summarize the report", ctx_ticker="AAPL")
+    ag = _agent("summarize the report", tools_used={"read_report"}, ctx_ticker="MSFT")
     ag.ctx = ctx
+    assert ag._answer_subject() == (
+        ctx.report_guard_state,
+        "AAPL",
+        "Apple Inc.",
+    )
     guarded = ag._guard_final_answer(
         "The report is bearish and its fair value is USD 167.67."
     )
@@ -665,6 +689,27 @@ def test_read_report_rehydrates_withheld_boundary_for_a_fresh_process(
     assert "human-analyst mean target USD 335.72" in guarded
     assert "reverse DCF" in guarded
     assert "209.0% above the model" in guarded
+
+    fresh_ctx = types.SimpleNamespace(
+        email="launch@example.com", state=None, ticker=None, company_name=None,
+    )
+    json.loads(asyncio.run(ReadReportTool(fresh_ctx).execute("AAPL")))
+    assert fresh_ctx.state is None
+    assert fresh_ctx.ticker is None
+    fresh_agent = _agent(
+        "summarize the report", tools_used={"read_report"}, ctx_ticker=None,
+    )
+    fresh_agent.ctx = fresh_ctx
+    assert fresh_agent._answer_subject()[1:] == ("AAPL", "Apple Inc.")
+    assert fresh_agent._guard_final_answer(
+        "The report is bearish and its fair value is USD 167.67."
+    ).startswith("AAPL is NOT RATED")
+
+
+def test_read_report_is_serialized_because_it_installs_a_turn_guard():
+    from agents.tools.analysis_tools import ReadReportTool
+
+    assert ReadReportTool.is_readonly is False
 
 
 class TestForcedTextTurns:

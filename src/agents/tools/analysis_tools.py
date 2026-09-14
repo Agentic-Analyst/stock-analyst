@@ -44,6 +44,13 @@ class AgentContext:
         self.state = None            # FinancialState, created when a ticker is set
         self.ticker: Optional[str] = None
         self.company_name: Optional[str] = None
+        # Loading an older report needs a reconstructed state so the final-answer
+        # publication guard can fail closed.  Keep that state separate: replacing
+        # the active FinancialState here can erase a model built earlier in the
+        # same turn (including its publishable fair value).
+        self.report_guard_state = None
+        self.report_guard_ticker: Optional[str] = None
+        self.report_guard_company_name: Optional[str] = None
         # When continuing an existing chat, pin the session identity to the
         # incoming session_id so the run logger (and the SESSION_ID it emits on
         # completion) stays STABLE across every turn. Otherwise each turn would
@@ -1808,7 +1815,10 @@ class ReadReportTool(_CtxTool):
         "report text (or an error if none exists yet)."
     )
     parameters = {"type": "object", "properties": _TICKER_PARAM, "required": ["ticker"]}
-    is_readonly = True
+    # The filesystem operation is read-only, but this installs a turn-local
+    # publication guard on AgentContext.  It must not be scheduled concurrently
+    # with another context-changing analysis tool.
+    is_readonly = False
 
     async def execute(self, ticker: str) -> str:
         import asyncio
@@ -1841,10 +1851,12 @@ class ReadReportTool(_CtxTool):
             )
         base, content = loaded
         state = _rehydrate_report_guard_state(base, ticker, content)
-        self.ctx.state = state
-        self.ctx.ticker = ticker
         basic = getattr(state.financial_data, "key_metrics", {}).get("basic_info", {})
-        self.ctx.company_name = basic.get("long_name") or basic.get("short_name") or ticker
+        self.ctx.report_guard_state = state
+        self.ctx.report_guard_ticker = ticker
+        self.ctx.report_guard_company_name = (
+            basic.get("long_name") or basic.get("short_name") or ticker
+        )
 
         metrics = state.financial_model.valuation_metrics
         supported = []
