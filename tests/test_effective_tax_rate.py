@@ -24,6 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from agents.fm.assumption_grounding import (
     _TAX_DEFAULT,
     _effective_tax_rate,
+    _effective_tax_rate_details,
+    _normalized_tax_rate_from_statements,
     _tax_rate_from_statements,
 )
 
@@ -104,3 +106,65 @@ def test_an_etf_with_no_income_statement_keeps_the_default():
 def test_the_old_signature_still_works():
     """capm_components is called from two places; one passes no payload."""
     assert _effective_tax_rate({}) == _TAX_DEFAULT
+
+
+def test_forward_rate_normalizes_current_and_three_annual_observations():
+    data = {"ttm_bridge": {
+        "status": "current",
+        "latest_period": "2026-09-30",
+        "income_statement": {
+            "Tax Rate For Calcs": 0.18,
+            "Tax Provision": 90.0,
+            "Pretax Income": 1000.0,
+        },
+    }, "financial_statements": {"income_statement": {
+        "2025-12-31": {"Tax Rate For Calcs": 0.12},
+        "2024-12-31": {"Tax Rate For Calcs": 0.40},
+        "2023-12-31": {"Tax Rate For Calcs": 0.20},
+        "2022-12-31": {"Tax Rate For Calcs": 0.50},
+    }}}
+
+    rate, observations = _normalized_tax_rate_from_statements(data)
+
+    assert observations == [0.18, 0.12, 0.40, 0.20]
+    assert rate == 0.19
+    details = _effective_tax_rate_details({}, data)
+    assert details["rate"] == 0.19
+    assert "median" in details["source"]
+    assert details["observation_details"] == [
+        {"period": "2026-09-30", "basis": "ttm", "rate": 0.18,
+         "calculation": "provider_calculated_rate", "tax_rate_for_calcs": 0.18},
+        {"period": "2025-12-31", "basis": "annual", "rate": 0.12,
+         "calculation": "provider_calculated_rate", "tax_rate_for_calcs": 0.12},
+        {"period": "2024-12-31", "basis": "annual", "rate": 0.40,
+         "calculation": "provider_calculated_rate", "tax_rate_for_calcs": 0.40},
+        {"period": "2023-12-31", "basis": "annual", "rate": 0.20,
+         "calculation": "provider_calculated_rate", "tax_rate_for_calcs": 0.20},
+    ]
+
+
+def test_ratio_tax_provenance_preserves_the_exact_numerator_and_denominator():
+    details = _effective_tax_rate_details({}, payload({
+        "Tax Provision": 150.0, "Pretax Income": 1000.0,
+    }))
+
+    assert details["observation_details"] == [{
+        "period": "2025-01-31",
+        "basis": "annual",
+        "rate": 0.15,
+        "calculation": "tax_provision/pretax_income",
+        "tax_provision": 150.0,
+        "pretax_income": 1000.0,
+    }]
+
+
+def test_ttm_provider_calculation_rate_precedes_raw_ratio():
+    data = {"ttm_bridge": {
+        "status": "current",
+        "income_statement": {
+            "Tax Rate For Calcs": 0.21,
+            "Tax Provision": 100.0,
+            "Pretax Income": 1000.0,
+        },
+    }}
+    assert _tax_rate_from_statements(data) == 0.21

@@ -1,6 +1,5 @@
 """
 The workbook's sensitivity grid must contain numbers.
-
 THE BUG. The Sensitivity tab shipped with its interior cells formatted and
 empty, plus a note reading "NOTE: Select B12:E17, Data > What-If Analysis >
 Data Table". A user who opened the financial model found a shaded 5x3 rectangle
@@ -223,11 +222,10 @@ class TestExitMultipleGrid:
         used = set(re.findall(r"([A-Z][A-Z0-9]+)\(", formula))
         assert used <= {"IF", "IFERROR"}, used
 
-    def test_all_five_periods_are_discounted(self, formula):
-        """The exit tab projects five years, in row 7 columns B through F."""
-        for column in "BCDEF":
+    def test_all_ten_periods_are_discounted(self, formula):
+        """The exit tab uses the same FY1-FY10 horizon as the Gordon DCF."""
+        for column in "BCDEFGHIJK":
             assert f"'Valuation (Exit Multiple)'!{column}$7" in formula
-        assert "'Valuation (Exit Multiple)'!G$7" not in formula
 
     def test_terminal_value_is_ebitda_times_this_column_s_multiple(self, formula):
         assert "'Valuation (Exit Multiple)'!$B$12*E$22" in formula
@@ -247,8 +245,32 @@ class TestExitMultipleGrid:
     def test_the_mid_year_toggle_applies_to_the_explicit_periods(self, formula):
         assert "-$B$4)" in formula
 
+    def test_the_mid_year_toggle_also_applies_to_terminal_value(self, formula):
+        assert "('Valuation (Exit Multiple)'!$B$5-$B$4)" in formula
+
     def test_each_cell_is_distinct(self):
         b = SensitivityTabBuilder()
         cells = {b._exit_value_per_share_formula(r, c)
                  for r in range(23, 28) for c in range(3, 8)}
         assert len(cells) == 25
+def test_summary_midpoint_excludes_an_unavailable_zero_leg():
+    import logging
+    import openpyxl
+
+    from src.agents.fm.formula_evaluator import FormulaEvaluator
+
+    workbook = openpyxl.Workbook()
+    sensitivity = workbook.active
+    sensitivity.title = "Sensitivity"
+    SensitivityTabBuilder()._setup_summary_block(sensitivity)
+    sensitivity["B32"] = 100.0
+    sensitivity["B33"] = 0.0
+    historical = workbook.create_sheet("Historical")
+    historical["F2"] = 80.0
+
+    evaluator = FormulaEvaluator(workbook)
+    evaluator.set_logger(logging.getLogger("test_sensitivity_midpoint"))
+    cells = evaluator.evaluate_all_tabs()["Sensitivity"]["cells"]
+
+    assert cells["(34, 2)"] == pytest.approx(100.0)
+    assert cells["(36, 2)"] == pytest.approx(0.25)

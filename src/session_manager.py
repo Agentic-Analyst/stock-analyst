@@ -32,7 +32,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any
-from src.path_utils import DATA_ROOT
+from src.path_utils import DATA_ROOT, safe_path_component
 
 
 class SessionManager:
@@ -47,9 +47,13 @@ class SessionManager:
             ticker: Stock ticker symbol
             session_name: Name of the session (optional, defaults to 'default')
         """
-        self.email = email.lower()
-        self.ticker = ticker.upper()
-        self.session_name = session_name or "default"
+        self.email = safe_path_component(email, "email").lower()
+        self.ticker = safe_path_component(
+            ticker, "ticker", max_length=80
+        ).upper()
+        self.session_name = safe_path_component(
+            session_name or "default", "session name", max_length=160
+        )
         
         # Session directory: {DATA_ROOT}/{email}/sessions/{ticker}/
         # In Docker: /data/{email}/sessions/{ticker}/
@@ -124,7 +128,7 @@ class SessionManager:
         # Save to disk
         self.save()
     
-    def start_conversation(self, user_query: str, company_name: str) -> int:
+    def start_conversation(self, user_query: str, company_name: str = "") -> int:
         """
         Start a new conversation and save it immediately.
         This ensures the user query is saved even if the program crashes.
@@ -269,13 +273,42 @@ class SessionManager:
                 valuation = analysis_results.get("valuation", {})
                 if valuation:
                     summary_lines.append(f"- **Valuation Analysis**:")
+                    currency = str(valuation.get("currency") or "USD")
                     if "current_price" in valuation:
-                        summary_lines.append(f"  - Current Stock Price: ${valuation.get('current_price', 'N/A')}")
+                        summary_lines.append(
+                            f"  - Current Stock Price: {currency} "
+                            f"{valuation.get('current_price', 'N/A')}"
+                        )
+                    if valuation.get("point_estimate_withheld"):
+                        summary_lines.append(
+                            "  - Rating / point fair value: NOT RATED / withheld"
+                        )
+                        low, high = valuation.get("range_low"), valuation.get("range_high")
+                        if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+                            if (valuation.get("support_shape") == "single_estimate"
+                                    or round(float(low), 2) == round(float(high), 2)):
+                                summary_lines.append(
+                                    f"  - Supported DCF scenario estimate: {currency} "
+                                    f"{low:,.2f}"
+                                )
+                            else:
+                                summary_lines.append(
+                                    f"  - Supported method range: {currency} "
+                                    f"{low:,.2f}–{high:,.2f}"
+                                )
+                        reason = valuation.get("publication_withheld_reason")
+                        if reason:
+                            summary_lines.append(
+                                f"  - Publication reason: {str(reason)[:1500]}"
+                            )
                     if "fair_value" in valuation:
-                        summary_lines.append(f"  - Fair Value: ${valuation.get('fair_value', 'N/A')}")
+                        summary_lines.append(
+                            f"  - Fair Value: {currency} "
+                            f"{valuation.get('fair_value', 'N/A')}"
+                        )
                     if "upside_downside" in valuation:
                         upside = valuation.get('upside_downside', 0)
-                        summary_lines.append(f"  - Upside/Downside: {upside:+.2f}%")
+                        summary_lines.append(f"  - Upside/Downside: {upside:+.2%}")
                     if "model_type" in valuation:
                         summary_lines.append(f"  - Model Used: {valuation.get('model_type', 'N/A')}")
                 
@@ -283,10 +316,14 @@ class SessionManager:
                 news = analysis_results.get("news_summary", {})
                 if news:
                     summary_lines.append(f"- **News Analysis**:")
+                    if "freshness_status" in news:
+                        summary_lines.append(
+                            f"  - Freshness: {news.get('freshness_status', 'unavailable')}"
+                        )
                     if "articles_analyzed" in news:
                         summary_lines.append(f"  - Articles Analyzed: {news.get('articles_analyzed', 0)}")
                     if "overall_sentiment" in news:
-                        summary_lines.append(f"  - Overall Sentiment: {news.get('overall_sentiment', 'N/A')}")
+                        summary_lines.append(f"  - News Sentiment: {news.get('overall_sentiment', 'N/A')}")
                     
                     # Catalysts / risks: render one readable line each.
                     # (These are rich dicts — dumping them raw buried the

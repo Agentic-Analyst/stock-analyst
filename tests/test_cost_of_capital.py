@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.join(_ROOT, "src"))
 
 from src.agents.fm.assumption_grounding import (
     capm_components,
+    collect_market_assumption_snapshot,
     compute_capm_wacc,
     risk_free_details,
     risk_free_rate,
@@ -147,7 +148,9 @@ class TestRiskFreeBuild:
         assert c["pre_tax_cost_of_debt"] == pytest.approx(c["risk_free_rate"] + c["domicile_default_spread"] + 0.015)
         assert c["domicile"] == "India"
         assert c["kd_source"].startswith("risk-free 5.02% (default-free) + India sovereign spread 1.87%")
-        assert c["kd_source"].endswith("+ 1.5% credit spread")
+        assert c["kd_source"].endswith(
+            "+ 1.5% house credit-spread fallback; issuer coverage unavailable"
+        )
 
     def test_the_country_premium_is_the_published_one(self):
         c = capm_components(INDIAN_MIDCAP)
@@ -168,7 +171,10 @@ class TestRiskFreeBuild:
 
     def test_mature_erp_can_be_overridden(self, monkeypatch):
         monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.05")
-        assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(0.05)
+        overridden = capm_components(US_MEGACAP)
+        assert overridden["equity_risk_premium"] == pytest.approx(0.05)
+        assert overridden["mature_erp_resolution"] == "operator_override"
+        assert "environment override" in overridden["mature_erp_selected_source"]
         # An out-of-band override is ignored. The fallback used to be the 5.5%
         # house constant; it is now Damodaran's published implied premium,
         # which is the point of the change — so assert the fallback IS the
@@ -177,7 +183,9 @@ class TestRiskFreeBuild:
         monkeypatch.delenv("EQUITY_RISK_PREMIUM", raising=False)
         _fallback = _ag._mature_erp()
         monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.5")
-        assert capm_components(US_MEGACAP)["equity_risk_premium"] == pytest.approx(_fallback)
+        resolved = capm_components(US_MEGACAP)
+        assert resolved["equity_risk_premium"] == pytest.approx(_fallback)
+        assert resolved["mature_erp_resolution"] == "published"
 
     def test_the_build_is_published_for_the_workbook_and_report(self):
         c = capm_components(INDIAN_MIDCAP)
@@ -186,8 +194,172 @@ class TestRiskFreeBuild:
             assert key in c, key
         assert c["risk_free_kind"] == "snapshot"
 
+    def test_large_firm_uses_normalized_interest_coverage_for_credit_spread(self):
+        financials = {
+            "ttm_bridge": {
+                "status": "current", "latest_period": "2026-TTM",
+                "income_statement": {
+                    "Operating Income": 32_000, "Interest Expense": 2_000,
+                },
+            },
+            "financial_statements": {"income_statement": {
+                "2025": {"Operating Income": 30_000, "Interest Expense": 3_000},
+                "2024": {"Operating Income": 28_000, "Interest Expense": 2_800},
+            }},
+        }
+
+        c = capm_components(US_MEGACAP, financials)
+
+        assert c["issuer_interest_coverage"] == pytest.approx(10.0)
+        assert c["issuer_synthetic_rating"] == "Aaa/AAA"
+        assert c["issuer_credit_spread"] == pytest.approx(0.004)
+        assert c["issuer_interest_coverage_observations"][0] == {
+            "period": "2026-TTM",
+            "operating_income": 32_000,
+            "interest_expense": 2_000,
+            "interest_coverage": 16.0,
+        }
+        assert c["pre_tax_cost_of_debt"] == pytest.approx(
+            c["risk_free_rate"] + c["domicile_default_spread"] + 0.004
+        )
+        assert "Damodaran" in c["issuer_credit_spread_source"]
+
+    def test_one_coverage_period_is_not_enough_to_assign_a_rating(self):
+        financials = {"financial_statements": {"income_statement": {
+            "2025": {"Operating Income": 3_000, "Interest Expense": 1_000},
+        }}}
+
+        c = capm_components(US_MEGACAP, financials)
+
+        assert c["issuer_synthetic_rating"] is None
+        assert c["issuer_credit_spread"] == pytest.approx(0.015)
+
+    def test_small_firm_does_not_use_the_large_firm_rating_table(self):
+        company = {
+            **US_MEGACAP,
+            "market_data": {"market_cap": 4_000_000_000},
+        }
+        financials = {"financial_statements": {"income_statement": {
+            "2025": {"Operating Income": 10_000, "Interest Expense": 1_000},
+            "2024": {"Operating Income": 9_000, "Interest Expense": 1_000},
+        }}}
+
+        c = capm_components(company, financials)
+
+        assert c["issuer_synthetic_rating"] is None
+        assert c["issuer_credit_spread"] == pytest.approx(0.015)
+        assert ">$5B" in c["issuer_credit_spread_source"]
+
 
 class TestCapmBuild:
+    def test_saved_market_snapshot_prevents_live_requeries(self, monkeypatch):
+        snapshot = {
+            "schema_version": 1,
+            "status": "ready",
+            "captured_at": "2026-09-12T12:00:00+00:00",
+            "currency": "USD",
+            "symbol": "AAPL",
+            "risk_free": {
+                "currency": "USD", "rate": 0.04,
+                "sovereign_yield": 0.042, "default_spread": 0.002,
+                "label": "saved risk-free", "source": "saved",
+                "as_of": "2026-09-11", "proxy": False,
+            },
+            "beta_fit": {
+                "raw": 1.1, "blume": 1.067, "r_squared": 0.5,
+                "observations": 59, "index": "^GSPC",
+                "window": "5y monthly", "weak_fit": False,
+            },
+            "country_risk": {
+                "input_country": "United States", "assumed_country": None,
+                "premium": 0.0023, "source": "saved CRP",
+                "domicile": {
+                    "name": "United States", "rating": "Aa1",
+                    "default_spread": 0.0015, "crp": 0.0023,
+                },
+            },
+            "mature_equity_risk_premium": 0.0423,
+            "mature_equity_risk_premium_published": 0.0423,
+            "mature_equity_risk_premium_source": "saved Damodaran table",
+        }
+        financials = {"market_assumption_snapshot": snapshot}
+
+        monkeypatch.setattr(_ag, "risk_free_details", lambda *_: (_ for _ in ()).throw(
+            AssertionError("live risk-free source queried")))
+        monkeypatch.setattr(_ag, "_mature_erp", lambda: (_ for _ in ()).throw(
+            AssertionError("live ERP source queried")))
+        import src.agents.fm.market_beta as market_beta
+        monkeypatch.setattr(market_beta, "compute_beta", lambda *_: (_ for _ in ()).throw(
+            AssertionError("live beta source queried")))
+
+        company = {
+            "basic_info": {
+                "symbol": "AAPL", "currency": "USD",
+                "country": "United States",
+            },
+            "capital_structure": {"beta": 1.05, "total_debt": 30e9},
+            "market_data": {"market_cap": 3e12},
+            "growth_profitability": {},
+        }
+        result = capm_components(company, financials)
+
+        assert result["market_input_snapshot_status"] == "saved_snapshot"
+        assert result["market_input_snapshot_captured_at"] == snapshot["captured_at"]
+        assert result["risk_free_rate"] == 0.04
+        assert result["beta"] == pytest.approx(1.067)
+        assert result["country_risk_premium"] == 0.0023
+        assert result["equity_risk_premium"] == 0.0423
+
+    def test_snapshot_collector_records_only_json_safe_market_inputs(self, monkeypatch):
+        import src.agents.fm.country_risk as country_risk
+        import src.agents.fm.market_beta as market_beta
+
+        monkeypatch.setattr(_ag, "risk_free_details", lambda currency: {
+            "currency": currency, "rate": 0.04, "sovereign_yield": 0.042,
+            "default_spread": 0.002, "label": "dated source",
+            "source": "test", "as_of": "2026-09-11", "proxy": False,
+        })
+        monkeypatch.setattr(_ag, "_mature_erp", lambda *_: 0.0423)
+        monkeypatch.setattr(_ag, "_country_risk_details", lambda *_: {
+            "input_country": "United States", "assumed_country": None,
+            "premium": 0.0023, "source": "test", "domicile": None,
+        })
+        monkeypatch.setattr(country_risk, "load_table", lambda: {
+            "mature_erp": 0.0423, "source": "dated test table",
+            "as_of": "2026-01-01",
+        })
+        monkeypatch.setattr(market_beta, "compute_beta", lambda _: None)
+
+        result = collect_market_assumption_snapshot({
+            "basic_info": {
+                "symbol": "AAPL", "currency": "USD",
+                "country": "United States",
+            }
+        })
+
+        assert result["status"] == "ready"
+        assert result["currency"] == "USD"
+        assert result["risk_free"]["as_of"] == "2026-09-11"
+        assert result["mature_equity_risk_premium_resolution"] == "published"
+        assert result["mature_equity_risk_premium_selected_source"] == "dated test table"
+        assert result["mature_equity_risk_premium_as_of"] == "2026-01-01"
+        assert result["mature_equity_risk_premium_source"] == "dated test table"
+        import json
+        json.dumps(result)
+
+    def test_capital_structure_inputs_preserve_values_sources_and_capture_time(self):
+        financials = {"scraped_at": "2026-09-13T21:35:40+00:00"}
+
+        result = capm_components(US_MEGACAP, financials)
+
+        assert result["capital_structure_inputs"] == {
+            "equity_value": 3_000_000_000_000.0,
+            "equity_source": "company_data.market_data.market_cap",
+            "debt_value": 30_000_000_000.0,
+            "debt_source": "company_data.capital_structure.total_debt",
+            "captured_at": "2026-09-13T21:35:40+00:00",
+        }
+
     def test_it_returns_the_derivation_not_just_the_answer(self):
         """
         The components existed as locals and were discarded, which is why the
@@ -215,6 +387,42 @@ class TestCapmBuild:
         expected_w_d = 36_731_000_000 / (226_443_575_296 + 36_731_000_000)
         assert c["debt_weight"] == pytest.approx(expected_w_d, abs=1e-6)
         assert c["equity_weight"] + c["debt_weight"] == pytest.approx(1.0)
+
+    def test_cross_currency_market_cap_is_converted_before_debt_weighting(self):
+        baba = {
+            "basic_info": {
+                "currency": "CNY", "listing_currency": "USD", "country": "China",
+            },
+            "capital_structure": {"beta": 1.0, "total_debt": 266.53e9},
+            "market_data": {
+                "market_cap": 271.68e9,
+                "fx_listing_to_financial": 6.7075,
+            },
+            "growth_profitability": {},
+        }
+
+        c = capm_components(baba)
+
+        equity_cny = 271.68e9 * 6.7075
+        assert c["equity_value"] == pytest.approx(equity_cny)
+        assert c["debt_weight"] == pytest.approx(
+            266.53e9 / (equity_cny + 266.53e9)
+        )
+        assert "USD->CNY" in c["weights_note"]
+
+    def test_cross_currency_weights_fail_safe_when_fx_is_unavailable(self):
+        issuer = {
+            "basic_info": {"currency": "CNY", "listing_currency": "USD"},
+            "capital_structure": {"total_debt": 250.0},
+            "market_data": {"market_cap": 300.0},
+            "growth_profitability": {},
+        }
+
+        c = capm_components(issuer)
+
+        assert c["equity_weight"] == 1.0
+        assert c["debt_weight"] == 0.0
+        assert "FX unavailable" in c["weights_note"]
 
     def test_a_us_company_still_gets_a_us_risk_free(self):
         c = capm_components(US_MEGACAP)
@@ -511,6 +719,45 @@ class TestReportAssemblyRuns:
         report = integrate_report_sections(self._sections(), data)
         assert "| WACC |" in report
 
+    def test_appendix_survives_and_escapes_hostile_source_fields(self):
+        from src.report_agent import integrate_report_sections
+        data = self._data()
+        hostile = {
+            "description": "<script>alert(1)</script> | forged",
+            "type": 123,
+            "timeline": None,
+            "confidence": "not-a-number",
+            "potential_impact": "**untrusted**",
+            "supporting_evidence": ["[click](javascript:alert(1))"],
+            "direct_quotes": [{
+                "quote": "raw <img src=x onerror=alert(1)>",
+                "source_article": "bad [label]",
+                "source_url": "javascript:alert(1)",
+            }],
+        }
+        data["news"]["catalysts"] = [hostile]
+        sections = self._sections()
+        sections["evidence_pack"] = {"evidence": [{
+            "id": "E1|fake",
+            "type": 42,
+            "date": "2026-09-12|fake",
+            "title": "title | injected",
+            "source": "source",
+            "source_quality": "high",
+            "source_article_title": "malicious ](javascript:alert(1))",
+            "url": "javascript:alert(1)",
+            "snippet": "<script>alert(1)</script>",
+        }]}
+
+        report = integrate_report_sections(sections, data)
+
+        assert "<script>" not in report
+        assert "<img" not in report
+        assert "[click](javascript:" not in report
+        assert "[malicious ](javascript:" not in report
+        assert "not-a-number" in report  # degraded field is shown, not fatal
+        assert "E1\\|fake" in report
+
 
 class TestTerminalGrowthCannotOutgrowTheCurrency:
     """
@@ -572,7 +819,10 @@ class TestReviewFindings:
         c = capm_components({"basic_info": {"currency": "XXX", "country": "Atlantis"},
                              "capital_structure": {"beta": 1.0, "total_debt": 0},
                              "market_data": {"market_cap": 1e9}, "growth_profitability": {}})
-        assert c["kd_source"] == "risk-free 5.00% (RISK_FREE_XXX override) + 1.5% credit spread"
+        assert c["kd_source"] == (
+            "risk-free 5.00% (RISK_FREE_XXX override) + 1.5% house "
+            "credit-spread fallback; issuer coverage unavailable"
+        )
         assert c["pre_tax_cost_of_debt"] == pytest.approx(0.065)
 
     def test_the_us_proxy_has_the_us_spread_taken_out_like_any_other_us_bond(self):
@@ -585,7 +835,10 @@ class TestReviewFindings:
 
     def test_an_aaa_domicile_borrows_over_the_default_free_rate(self):
         c = capm_components(LVMH)                        # no country -> Germany assumed, Aaa
-        assert c["kd_source"] == "risk-free 3.36% (default-free) + 1.5% credit spread"
+        assert c["kd_source"] == (
+            "risk-free 3.36% (default-free) + 1.5% house credit-spread "
+            "fallback; issuer coverage unavailable"
+        )
         assert c["pre_tax_cost_of_debt"] == pytest.approx(_SNAPSHOT["EUR"][0] + 0.015)
 
     def test_an_italian_euro_issuer_borrows_over_the_btp_not_the_bund(self):
@@ -648,7 +901,9 @@ class TestReviewFindings:
         c = capm_components(US_MEGACAP)
         ws = AssumptionsTabBuilder({"capm": c, "terminal_growth_note": "capped at the USD risk-free rate 4.55%"}).create_tab(openpyxl.Workbook())
         note = ws["C24"].value
-        assert "country premium 0.23%" in note and "Damodaran's implied base 4.23%" in note and "house assumption" in note
+        assert "country premium 0.23%" in note
+        assert f"Mature-market ERP {c['equity_risk_premium']*100:.2f}%" in note
+        assert str(c["mature_erp_selected_source"]) in note
         assert ws["C27"].value == f"[{c['kd_source']}]"
         assert ws["C30"].value == "[capped at the USD risk-free rate 4.55%]"
         assert ws.column_dimensions["C"].width >= 60
@@ -680,8 +935,9 @@ class TestReviewFindings:
                                       "income_statement": {"2025": {"EBITDA": 1000.0}}}},
         )
         assert a["sustainable_growth_cap"] == pytest.approx(a["capm"]["risk_free_rate"])
-        assert a["exit_multiple"] == pytest.approx(22.0)
-        assert any("deferred to projected FY5 cash conversion" in n for n in notes)
+        assert a["exit_multiple"] == pytest.approx(30.0)
+        assert a["exit_multiple_available"] is True
+        assert any("deferred to projected FY10 cash conversion" in n for n in notes)
 
     def test_historical_cash_conversion_cannot_rewrite_the_exit_input(self):
         from src.agents.fm.assumption_grounding import ground_assumptions
@@ -703,7 +959,75 @@ class TestReviewFindings:
         base["financial_statements"]["cash_flow"]["2025"]["Free Cash Flow"] = 800.0
         high, _ = ground_assumptions(
             {"wacc": 0.09, "terminal_growth_rate": 0.025}, base)
-        assert low["exit_multiple"] == high["exit_multiple"] == pytest.approx(14.4)
+        assert low["exit_multiple"] == high["exit_multiple"] == pytest.approx(18.0)
+
+    def test_exit_reference_does_not_apply_an_unexplained_blanket_haircut(self):
+        from src.agents.fm.assumption_grounding import ground_assumptions
+
+        payload = {
+            "company_data": {
+                "basic_info": {"currency": "USD", "country": "United States"},
+                "capital_structure": {"beta": 1.0, "total_debt": 0},
+                "market_data": {"market_cap": 1e12},
+                "valuation_metrics": {"enterprise_to_ebitda": 12.5},
+            }
+        }
+        grounded, notes = ground_assumptions({}, payload)
+        assert grounded["exit_multiple"] == pytest.approx(12.5)
+        assert grounded["exit_multiple_available"] is True
+        assert any("no arbitrary de-rating" in note for note in notes)
+
+    def test_missing_current_multiple_does_not_invent_an_exit_method(self):
+        from src.agents.fm.assumption_grounding import ground_assumptions
+
+        payload = {
+            "company_data": {
+                "basic_info": {"currency": "USD", "country": "United States"},
+                "capital_structure": {"beta": 1.0, "total_debt": 0},
+                "market_data": {"market_cap": 1e12},
+                "valuation_metrics": {"enterprise_to_ebitda": None},
+            }
+        }
+        grounded, notes = ground_assumptions({}, payload)
+        assert grounded["exit_multiple"] == 0
+        assert grounded["exit_multiple_available"] is False
+        assert grounded["exit_multiple_source"] == "unavailable"
+        assert any("no generic terminal multiple" in note for note in notes)
+
+    def test_low_margin_profitable_company_is_grounded_not_treated_as_preprofit(self):
+        from src.agents.fm.assumption_grounding import ground_assumptions
+
+        statements = {
+            "2025": {"Total Revenue": 1000.0, "Operating Income": 40.0,
+                     "EBITDA": 60.0, "Gross Profit": 250.0},
+            "2024": {"Total Revenue": 950.0, "Operating Income": 38.0,
+                     "EBITDA": 57.0, "Gross Profit": 237.5},
+            "2023": {"Total Revenue": 900.0, "Operating Income": 36.0,
+                     "EBITDA": 54.0, "Gross Profit": 225.0},
+        }
+        payload = {
+            "company_data": {
+                "basic_info": {"currency": "USD", "country": "United States"},
+                "capital_structure": {"beta": 1.0, "total_debt": 0},
+                "market_data": {"market_cap": 1e12},
+                "growth_profitability": {
+                    "operating_margins": 0.04, "ebitda_margins": 0.06,
+                    "gross_margins": 0.25,
+                },
+                "valuation_metrics": {"enterprise_to_ebitda": 15.0},
+            },
+            "financial_statements": {"income_statement": statements},
+        }
+        assumptions = {
+            "operating_margins": [0.25] * 5,
+            "ebitda_margins": [0.30] * 5,
+            "gross_margins": [0.40] * 5,
+        }
+        grounded, notes = ground_assumptions(assumptions, payload)
+        assert grounded["operating_margins"] == pytest.approx([0.04] * 5)
+        assert grounded["ebitda_margins"] == pytest.approx([0.06] * 5)
+        assert grounded["gross_margins"] == pytest.approx([0.25] * 5)
+        assert any("operating margin path grounded" in note for note in notes)
 
     def test_the_report_grid_never_shows_negative_growth(self):
         from src.report_agent import build_sensitivity_grid

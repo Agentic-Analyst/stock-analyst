@@ -8,9 +8,32 @@ This module provides consistent path generation and management for user data org
 import os
 import pathlib
 from datetime import datetime
+from typing import Any
 
 # Use environment variable for data path, default to local development
 DATA_ROOT = pathlib.Path(os.getenv('DATA_PATH', 'data'))
+
+
+def safe_path_component(value: Any, label: str, *, max_length: int = 160) -> str:
+    """Return one non-traversing filesystem path component.
+
+    This module is called by HTTP jobs, scheduled jobs, local scripts, and
+    values extracted by an LLM.  Enforce path safety here instead of relying on
+    every upstream caller to validate identically.
+    """
+    component = str(value or "").strip()
+    if (
+        not component
+        or len(component) > max_length
+        or component in {".", ".."}
+        or "/" in component
+        or "\\" in component
+        or "\x00" in component
+        or any(ord(char) < 32 or ord(char) == 127 for char in component)
+        or pathlib.PurePath(component).parts != (component,)
+    ):
+        raise ValueError(f"Invalid {label} path component")
+    return component
 
 def get_analysis_path(email: str, ticker: str, timestamp: str = None) -> pathlib.Path:
     """
@@ -26,7 +49,10 @@ def get_analysis_path(email: str, ticker: str, timestamp: str = None) -> pathlib
     """
     if timestamp is None:
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    return DATA_ROOT / email.lower() / ticker.upper() / timestamp
+    safe_email = safe_path_component(email, "email").lower()
+    safe_ticker = safe_path_component(ticker, "ticker", max_length=80).upper()
+    safe_timestamp = safe_path_component(timestamp, "timestamp", max_length=80)
+    return DATA_ROOT / safe_email / safe_ticker / safe_timestamp
 
 def get_latest_analysis_path(email: str, ticker: str) -> pathlib.Path:
     """
@@ -39,7 +65,9 @@ def get_latest_analysis_path(email: str, ticker: str) -> pathlib.Path:
     Returns:
         Pathlib.Path object pointing to latest analysis directory
     """
-    base_path = DATA_ROOT / email.lower() / ticker.upper()
+    safe_email = safe_path_component(email, "email").lower()
+    safe_ticker = safe_path_component(ticker, "ticker", max_length=80).upper()
+    base_path = DATA_ROOT / safe_email / safe_ticker
     if not base_path.exists():
         return None
         

@@ -90,44 +90,42 @@ def numbers(**kw):
     return base
 
 
-def lines_sum(inputs):
-    return (0.4 * inputs["adj_val_gap_pct"]
-            + 0.4 * inputs["net_catalyst_risk_pct"]
-            + 0.2 * inputs["momentum_score_pct"])
-
-
-def test_the_three_lines_sum_to_the_uncapped_figure():
+def test_qualitative_scores_do_not_manufacture_a_return_forecast():
     calc = RecommendationCalculator(sector="Financial Services")
-    out = calc.calculate_fixed_numbers(**numbers())
-    i = out["inputs"]
-    assert abs(lines_sum(i) - i["uncapped_expected_return_pct"]) < 0.05
+    baseline = calc.calculate_fixed_numbers(**numbers(
+        fair_value=485.0, catalyst_score_pct=0, risk_score_pct=0,
+        momentum_score_pct=0))
+    noisy = calc.calculate_fixed_numbers(**numbers(
+        fair_value=485.0, catalyst_score_pct=25, risk_score_pct=1,
+        momentum_score_pct=10))
+    assert noisy["expected_return_pct_12m"] == baseline["expected_return_pct_12m"] == -3.0
+    assert noisy["targets"]["m12"]["price"] == 485.0
+    assert noisy["inputs"]["qualitative_signals_used_in_target"] is False
 
 
-def test_a_capped_run_reports_the_cap_rather_than_hiding_it():
-    """The shipped VOO shape: lines summing past the cap."""
+def test_target_is_not_arbitrarily_capped_away_from_published_fair_value():
     calc = RecommendationCalculator(sector="Financial Services")
     out = calc.calculate_fixed_numbers(**numbers(
-        dcf_perpetual=20.0, dcf_exit=25.0, momentum_score_pct=-10.0, risk_score_pct=0.0,
-        catalyst_score_pct=6.5))
-    i = out["inputs"]
-    assert i["cap_applied"] is True
-    assert abs(lines_sum(i) - i["uncapped_expected_return_pct"]) < 0.05
-    assert out["expected_return_pct_12m"] == -i["cap_pct"]
-    assert abs(i["uncapped_expected_return_pct"]) > i["cap_pct"]
+        current_price=100.0, dcf_perpetual=150.0, dcf_exit=170.0,
+        fair_value=160.0, analyst_target=170.0, analyst_count=20))
+    assert out["inputs"]["cap_applied"] is False
+    assert out["expected_return_pct_12m"] == 60.0
+    assert out["targets"]["m12"]["price"] == 160.0
 
 
-def test_an_uncapped_run_says_so():
+def test_short_horizon_paths_are_not_invented():
     calc = RecommendationCalculator(sector="Technology")
     out = calc.calculate_fixed_numbers(**numbers())
-    i = out["inputs"]
-    assert i["cap_applied"] is False
-    assert abs(out["expected_return_pct_12m"] - i["uncapped_expected_return_pct"]) < 0.05
+    assert out["targets"]["m3"]["price"] is None
+    assert out["targets"]["m6"]["price"] is None
+    assert out["target_basis"] == "published_intrinsic_value_convergence"
 
 
-def test_the_cap_is_reported_so_the_report_can_name_it():
+def test_no_return_cap_is_presented_as_model_evidence():
     calc = RecommendationCalculator(sector="Technology")
     i = calc.calculate_fixed_numbers(**numbers())["inputs"]
-    assert i["cap_pct"] == 30.0
+    assert i["cap_applied"] is False
+    assert i["cap_pct"] is None
 
 
 def test_rating_uses_the_same_blended_fair_value_the_report_shows():
@@ -143,18 +141,18 @@ def test_rating_uses_the_same_blended_fair_value_the_report_shows():
     ))
     assert out["inputs"]["valuation_basis"] == "blended_fair_value"
     assert out["inputs"]["raw_val_gap_pct"] == 10.0
-    assert out["expected_return_pct_12m"] == 4.0
+    assert out["expected_return_pct_12m"] == 10.0
     assert out["rating"] == "HOLD"
 
 
 def test_rating_bands_are_symmetric_around_hold():
     calc = RecommendationCalculator()
-    assert calc._determine_rating(7.99) == "HOLD"
-    assert calc._determine_rating(-7.99) == "HOLD"
-    assert calc._determine_rating(8.0) == "BUY"
-    assert calc._determine_rating(-8.0) == "SELL"
-    assert calc._determine_rating(20.0) == "STRONG BUY"
-    assert calc._determine_rating(-20.0) == "STRONG SELL"
+    assert calc._determine_rating(14.99) == "HOLD"
+    assert calc._determine_rating(-14.99) == "HOLD"
+    assert calc._determine_rating(15.0) == "BUY"
+    assert calc._determine_rating(-15.0) == "SELL"
+    assert calc._determine_rating(30.0) == "STRONG BUY"
+    assert calc._determine_rating(-30.0) == "STRONG SELL"
 
 
 def test_consensus_is_recorded_as_a_cross_check_not_added_to_return():
@@ -175,7 +173,7 @@ def test_consensus_is_recorded_as_a_cross_check_not_added_to_return():
     assert out["inputs"]["analyst_count"] == 25
 
 
-def test_well_covered_opposite_consensus_reduces_extreme_conviction_symmetrically():
+def test_well_covered_opposite_consensus_withholds_the_call_symmetrically():
     calc = RecommendationCalculator()
     common = dict(
         catalyst_score_pct=0.0, risk_score_pct=0.0,
@@ -188,12 +186,111 @@ def test_well_covered_opposite_consensus_reduces_extreme_conviction_symmetricall
     bullish = calc.calculate_fixed_numbers(
         ticker="X", current_price=100.0, dcf_perpetual=170.0, dcf_exit=170.0,
         fair_value=170.0, analyst_target=80.0, **common)
-    assert bearish["expected_return_pct_12m"] == -28.0
-    assert bearish["rating"] == "SELL"
-    assert bullish["expected_return_pct_12m"] == 28.0
-    assert bullish["rating"] == "BUY"
-    assert bearish["rating_confidence"] == bullish["rating_confidence"] == "low"
+    assert bearish["expected_return_pct_12m"] is None
+    assert bearish["rating"] == "NOT RATED"
+    assert bullish["expected_return_pct_12m"] is None
+    assert bullish["rating"] == "NOT RATED"
+    assert bearish["rating_confidence"] is bullish["rating_confidence"] is None
     assert bearish["inputs"]["consensus_alignment"] == "conflicting"
+
+
+def test_well_covered_analyst_ratings_are_not_discarded_when_target_is_neutral():
+    calc = RecommendationCalculator()
+    out = calc.calculate_fixed_numbers(**numbers(
+        current_price=100.0,
+        dcf_perpetual=40.0,
+        dcf_exit=50.0,
+        fair_value=45.0,
+        analyst_target=98.0,
+        analyst_count=39,
+        analyst_rating="strong_buy",
+        analyst_rating_count=53,
+        catalyst_score_pct=0.0,
+        risk_score_pct=0.0,
+        momentum_score_pct=0.0,
+    ))
+    assert out["inputs"]["analyst_target_gap_pct"] == -2.0
+    assert out["inputs"]["analyst_rating"] == "strong_buy"
+    assert out["inputs"]["analyst_rating_count"] == 53
+    assert out["inputs"]["consensus_alignment"] == "conflicting"
+    assert out["rating"] == "NOT RATED"
+    assert out["rating_confidence"] is None
+
+
+def test_external_alignment_is_auditable_even_when_publication_is_withheld():
+    calc = RecommendationCalculator()
+    out = calc.calculate_fixed_numbers(**numbers(
+        current_price=100.0,
+        dcf_perpetual=40.0,
+        dcf_exit=50.0,
+        fair_value=45.0,
+        analyst_rating="buy",
+        analyst_rating_count=20,
+        valuation_reliability={
+            "point_estimate_withheld": True,
+            "withheld_reason": "Independent evidence conflicts.",
+        },
+    ))
+    assert out["rating"] == "NOT RATED"
+    assert out["inputs"]["consensus_alignment"] == "conflicting"
+
+
+def test_malformed_numeric_provider_inputs_fail_neutral_not_with_an_exception():
+    calc = RecommendationCalculator()
+    out = calc.calculate_fixed_numbers(**numbers(
+        current_price="not-a-price",
+        dcf_perpetual=float("nan"),
+        dcf_exit=True,
+        catalyst_score_pct="high",
+        risk_score_pct={"bad": "shape"},
+        momentum_score_pct=float("inf"),
+        hist_vol_annual_pct=-1,
+        analyst_target=120.0,
+        analyst_count="many",
+        analyst_rating="buy",
+        analyst_rating_count=float("inf"),
+    ))
+
+    assert out["rating"] == "NOT RATED"
+    assert out["price_available"] is False
+    assert out["inputs"]["analyst_count"] == 0
+    assert out["inputs"]["analyst_rating_count"] == 0
+    assert out["inputs"]["hist_vol_annual_pct"] == 18.0
+
+
+def test_company_context_formats_percentages_and_multiples_for_humans():
+    from recommendation_engine import RecommendationEngineV3
+
+    prompt = RecommendationEngineV3()._build_explainer_prompt(
+        {"rating_available": True}, {"evidence": []},
+        {
+            "revenue_growth": .16, "net_margin": .28, "roe": 1.49,
+            "debt_to_equity": .78, "pe_trailing": 29.123,
+        }, {}, citations_enabled=False,
+    )
+    assert '"revenue_growth": "16.0%"' in prompt
+    assert '"net_margin": "28.0%"' in prompt
+    assert '"roe": "149.0%"' in prompt
+    assert '"debt_equity": "0.78x"' in prompt
+    assert '"pe_ratio": "29.12x"' in prompt
+
+
+def test_limited_news_is_not_described_as_unavailable_when_articles_exist():
+    from recommendation_engine import RecommendationEngineV3
+
+    prompt = RecommendationEngineV3()._build_explainer_prompt(
+        {"rating_available": True}, {"evidence": []}, {}, {}, citations_enabled=False)
+    # No freshness object genuinely means unavailable.
+    assert "No source-dated news evidence is available" in prompt
+
+    limited = RecommendationEngineV3()._build_explainer_prompt(
+        {"rating_available": True},
+        {"evidence": [], "news_freshness": {"status": "limited", "fresh_articles": 8},
+         "articles_analyzed": 8},
+        {}, {}, citations_enabled=False,
+    )
+    assert "News coverage is limited (8 source-dated articles)" in limited
+    assert "insufficient/limited, not unavailable" in limited
 
 
 def test_fallback_recommendation_keeps_the_rating_confidence():
@@ -231,7 +328,7 @@ def test_unreliable_valuation_cannot_publish_a_rating_or_target():
     assert "do not converge" in out["rating_withheld_reason"]
 
 
-def test_wide_valuation_keeps_the_view_but_lowers_confidence():
+def test_wide_valuation_withholds_the_point_view():
     calc = RecommendationCalculator()
     out = calc.calculate_fixed_numbers(**numbers(
         valuation_reliability={
@@ -242,10 +339,10 @@ def test_wide_valuation_keeps_the_view_but_lowers_confidence():
             "range_high": 480.0,
         },
     ))
-    assert out["rating_available"] is True
-    assert out["rating"] != "NOT RATED"
-    assert out["rating_confidence"] == "low"
-    assert out["targets"]["m12"]["price"] is not None
+    assert out["rating_available"] is False
+    assert out["rating"] == "NOT RATED"
+    assert out["rating_confidence"] is None
+    assert out["targets"]["m12"]["price"] is None
 
 
 def test_historical_volatility_uses_saved_daily_prices():

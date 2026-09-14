@@ -59,12 +59,12 @@ def _valuation_data():
     }
 
 
-def _evaluate_reverse_dcf():
+def _evaluate_reverse_dcf(*, terminal_fcf=80.0):
     workbook = openpyxl.Workbook()
     dcf = workbook.active
     dcf.title = "Valuation (DCF)"
     dcf["B19"] = 100.0   # PV of explicit FY1-FY10 FCF
-    dcf["B24"] = 80.0    # model FY11 FCF
+    dcf["B24"] = terminal_fcf    # model FY11 FCF
     # PV of the model terminal value: 80 / (10%-2%) * 0.3855.
     # The reverse DCF references this actual PV rather than assuming a horizon.
     dcf["B26"] = 385.5
@@ -103,6 +103,14 @@ def test_reverse_dcf_uses_the_model_terminal_pv_not_a_fixed_horizon():
     assert "$K$17" not in formula
 
 
+def test_reverse_dcf_percentage_is_unavailable_for_nonpositive_model_fcf():
+    _, cells = _evaluate_reverse_dcf(terminal_fcf=-80.0)
+
+    assert isinstance(cells["(53, 2)"], (int, float))
+    assert cells["(54, 2)"] == -80.0
+    assert cells["(55, 2)"] == ""
+
+
 def test_report_extracts_and_prints_the_diagnostic():
     from src.report_agent import extract_valuation, generate_section_valuation
 
@@ -127,7 +135,7 @@ def test_report_extracts_and_prints_the_diagnostic():
     assert "excluded from fair value" in text
 
 
-def test_bank_report_marks_reverse_dcf_not_applicable():
+def test_bank_report_omits_inapplicable_reverse_dcf_section():
     from src.report_agent import generate_section_valuation
 
     data = _valuation_data()
@@ -140,5 +148,5 @@ def test_bank_report_marks_reverse_dcf_not_applicable():
         data, lambda messages, temperature=0.5: ("commentary", 0.0)
     )
 
-    assert "### Market-Implied Expectations (Reverse DCF)" in text
-    assert "Not applicable — valued on justified P/B x ROE" in text
+    assert "### Market-Implied Expectations (Reverse DCF)" not in text
+    assert "### Bank Valuation Inputs" in text

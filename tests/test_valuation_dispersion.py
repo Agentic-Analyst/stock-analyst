@@ -24,6 +24,7 @@ Run:  python -m pytest tests/test_valuation_dispersion.py -q
 import os
 import re
 import sys
+import math
 
 import pytest
 
@@ -35,7 +36,7 @@ _SRC = os.path.join(
 _text = open(_SRC).read()
 _start = _text.index("def valuation_dispersion(")
 _end = _text.index("\nclass ", _start)
-_ns: dict = {}
+_ns: dict = {"math": math}
 exec(compile(_text[_start:_end], _SRC, "exec"), _ns)
 valuation_dispersion = _ns["valuation_dispersion"]
 valuation_publication_boundary = _ns["valuation_publication_boundary"]
@@ -130,6 +131,65 @@ class TestGuardsAgainstFalseAlarms:
         assert band(a=0.0, b=100.0) == "single-method"
 
 
+class TestFailedMethodPublicationBoundary:
+    def test_surviving_leg_is_audit_only_even_when_close_to_market(self):
+        withheld, reason = valuation_publication_boundary(
+            band="single-method",
+            legs={"perpetual_dcf": -7.23, "exit_multiple_dcf": 83.33},
+            fair_value=83.33,
+            current_price=80.0,
+        )
+        assert withheld is True
+        assert "non-positive value" in reason
+
+    def test_failed_leg_does_not_hide_market_street_or_reverse_dcf_evidence(self):
+        withheld, reason = valuation_publication_boundary(
+            band="single-method",
+            legs={"perpetual_dcf": 14.64, "exit_multiple_dcf": 0.0},
+            fair_value=14.64,
+            current_price=365.44,
+            is_mega_cap=True,
+            analyst_target=391.0,
+            analyst_count=39,
+            analyst_rating="buy",
+            analyst_rating_count=45,
+            reverse_dcf_gap=66.76,
+        )
+
+        assert withheld is True
+        assert "exit_multiple_dcf" in reason
+        assert "-96% from the market" in reason
+        assert "39-analyst target benchmark is +7%" in reason
+        assert "terminal free cash flow +6676% versus the model" in reason
+
+    @pytest.mark.parametrize("value", [None, 0.0, -10.0, float("nan")])
+    def test_invalid_intrinsic_output_fails_closed(self, value):
+        withheld, reason = valuation_publication_boundary(
+            band=None, legs={}, fair_value=value, current_price=100.0,
+        )
+        assert withheld is True
+        assert "No finite positive" in reason
+
+    def test_no_positive_leg_still_reports_independent_evidence(self):
+        withheld, reason = valuation_publication_boundary(
+            band=None,
+            legs={"perpetual_dcf": -50.0, "exit_multiple_dcf": 0.0},
+            fair_value=-25.0,
+            current_price=60.0,
+            analyst_target=80.0,
+            analyst_count=12,
+            analyst_rating="buy",
+            analyst_rating_count=18,
+            reverse_dcf_gap=55.0,
+        )
+
+        assert withheld is True
+        assert "No finite positive" in reason
+        assert "12-analyst target benchmark is +33%" in reason
+        assert "BUY (18 ratings)" in reason
+        assert "terminal free cash flow +5500% versus the model" in reason
+
+
 class TestNoteContent:
     def test_unreliable_note_forbids_quoting_a_number(self):
         n = note(perpetual=3.97, exit_multiple=215.64)
@@ -172,14 +232,16 @@ class TestPublicationBoundary:
         assert withheld is True
         assert "no independent market-comps" in reason.lower()
 
-    def test_same_dcf_output_can_be_published_for_a_non_megacap(self):
-        assert valuation_publication_boundary(
+    def test_large_non_megacap_dcf_gap_still_needs_numeric_corroboration(self):
+        withheld, reason = valuation_publication_boundary(
             band="single-method",
             legs=self.AAPL_LEGS,
             fair_value=167.67,
             current_price=332.27,
             is_mega_cap=False,
-        ) == (False, None)
+        )
+        assert withheld is True
+        assert "analyst-target evidence does not corroborate both" in reason
 
     def test_independent_comps_do_not_override_conflicting_broad_consensus(self):
         withheld, reason = valuation_publication_boundary(
@@ -192,7 +254,21 @@ class TestPublicationBoundary:
             analyst_count=39,
         )
         assert withheld is True
-        assert "39-analyst consensus" in reason
+        assert "39-analyst target benchmark" in reason
+
+    def test_wide_methods_publish_a_range_not_a_point_call(self):
+        withheld, reason = valuation_publication_boundary(
+            band="wide",
+            legs={"perpetual_dcf": 145.0, "exit_multiple_dcf": 177.0,
+                  "market_comps": 329.0},
+            fair_value=245.0,
+            current_price=266.0,
+            is_mega_cap=True,
+            analyst_target=278.0,
+            analyst_count=22,
+        )
+        assert withheld is True
+        assert "more than 1.8x" in reason
 
     def test_supportive_consensus_allows_an_exceptional_model_call(self):
         assert valuation_publication_boundary(
@@ -204,3 +280,75 @@ class TestPublicationBoundary:
             analyst_target=220.0,
             analyst_count=20,
         ) == (False, None)
+
+    def test_well_covered_rating_is_material_when_target_is_unavailable(self):
+        withheld, reason = valuation_publication_boundary(
+            band="single-method",
+            legs={"perpetual_dcf": 50.0, "exit_multiple_dcf": 60.0},
+            fair_value=55.0,
+            current_price=100.0,
+            is_mega_cap=False,
+            analyst_rating="strong_buy",
+            analyst_rating_count=24,
+        )
+        assert withheld is True
+        assert "STRONG BUY" in reason
+        assert "24 ratings" in reason
+
+    def test_supportive_rating_alone_cannot_validate_a_precise_large_target(self):
+        withheld, reason = valuation_publication_boundary(
+            band="single-method",
+            legs={"perpetual_dcf": 50.0, "exit_multiple_dcf": 60.0},
+            fair_value=55.0,
+            current_price=100.0,
+            is_mega_cap=False,
+            analyst_rating="sell",
+            analyst_rating_count=24,
+        )
+        assert withheld is True
+        assert "analyst-target evidence does not corroborate both" in reason
+
+    def test_same_direction_but_trivial_target_gap_does_not_corroborate_model(self):
+        withheld, reason = valuation_publication_boundary(
+            band="single-method",
+            legs={"perpetual_dcf": 72.58, "exit_multiple_dcf": 87.71},
+            fair_value=80.15,
+            current_price=53.72,
+            is_mega_cap=False,
+            analyst_target=57.07,
+            analyst_count=32,
+            analyst_rating="buy",
+            analyst_rating_count=52,
+        )
+        assert withheld is True
+        assert "+49%" in reason
+        assert "32-analyst target benchmark is +6%" in reason
+
+    def test_aligned_target_direction_and_magnitude_can_corroborate_large_dcf(self):
+        assert valuation_publication_boundary(
+            band="single-method",
+            legs={"perpetual_dcf": 72.0, "exit_multiple_dcf": 88.0},
+            fair_value=80.0,
+            current_price=53.0,
+            is_mega_cap=False,
+            analyst_target=76.0,
+            analyst_count=18,
+            analyst_rating="buy",
+            analyst_rating_count=20,
+        ) == (False, None)
+
+    def test_non_megacap_comps_conflict_is_not_mislabeled_megacap(self):
+        withheld, reason = valuation_publication_boundary(
+            band="moderate",
+            legs={"perpetual_dcf": 45.0, "exit_multiple_dcf": 55.0,
+                  "market_comps": 60.0},
+            fair_value=55.0,
+            current_price=100.0,
+            is_mega_cap=False,
+            analyst_rating_evidence={
+                "finnhub": {"label": "buy", "analyst_count": 20},
+            },
+        )
+        assert withheld is True
+        assert "for the company" in reason
+        assert "mega-cap" not in reason

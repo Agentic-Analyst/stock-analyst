@@ -22,11 +22,14 @@ All formulas reference the correct cells from existing tabs:
 - Historical: F2 (Current Stock Price)
 """
 
+from typing import Any, Dict, Optional
+
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 from ..financial_model_builder import ExcelFormats
+from .tab_bank_valuation import currency_number_format
 
 
 class SummaryTabBuilder:
@@ -39,10 +42,15 @@ class SummaryTabBuilder:
     
     def __init__(self, comps_ev_ebitda: float = 0.0, comps_ps: float = 0.0,
                  comps_source: str = None, comps_peer_count: int = 0,
+                 comps_included_in_blend: bool = False,
+                 comps_confidence: str = None, comps_role: str = None,
+                 exit_multiple_available: bool = None,
                  analyst_target: float = 0.0, analyst_target_low: float = 0.0,
                  analyst_target_high: float = 0.0, analyst_count: int = 0,
                  analyst_source: str = None, analyst_as_of: str = None,
-                 analyst_rating: str = None):
+                 analyst_captured_at: str = None,
+                 analyst_rating: str = None, currency: str = "USD",
+                 modeling_basis: Optional[Dict[str, Any]] = None):
         """
         Initialize the Summary builder.
 
@@ -54,13 +62,29 @@ class SummaryTabBuilder:
         self.comps_ps = float(comps_ps or 0.0)
         self.comps_source = comps_source or "unavailable"
         self.comps_peer_count = int(comps_peer_count or 0)
+        self.comps_included_in_blend = bool(comps_included_in_blend)
+        self.comps_confidence = comps_confidence or "unrated"
+        self.comps_role = comps_role or "comparable_company_valuation"
+        self.exit_multiple_available = (
+            True if exit_multiple_available is None else bool(exit_multiple_available)
+        )
         self.analyst_target = float(analyst_target or 0.0)
         self.analyst_target_low = float(analyst_target_low or 0.0)
         self.analyst_target_high = float(analyst_target_high or 0.0)
         self.analyst_count = int(analyst_count or 0)
         self.analyst_source = analyst_source or "source unavailable"
         self.analyst_as_of = analyst_as_of or "date unavailable"
+        self.analyst_captured_at = analyst_captured_at or "capture time unavailable"
         self.analyst_rating = (analyst_rating or "not available").replace("_", " ")
+        self.currency = currency or "USD"
+        self.price_format = currency_number_format(self.currency)
+        self.modeling_basis = modeling_basis or {}
+        self.horizon_prefix = (
+            "NTM" if (self.modeling_basis.get("forecast_basis") or {}).get(
+                "basis") == "rolling_twelve_months" else "FY"
+        )
+        prefix = self.price_format.split("#,##", 1)[0]
+        self.large_currency_format = prefix + '#,##0.0,,," B"'
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -91,12 +115,21 @@ class SummaryTabBuilder:
         
         # Format the sheet
         self._format_sheet(ws)
+        for row in (9, 18, 22, 26, 30, 31):
+            ws.cell(row=row, column=2).number_format = self.price_format
+        for row in (10, 13, 14, 15, 16, 17, 20, 21, 29, 33, 34, 35, 51, 52, 53, 54):
+            ws.cell(row=row, column=2).number_format = self.large_currency_format
         
         return ws
     
     def _setup_header(self, ws: Worksheet) -> None:
         """Set up header (row 1)."""
-        ws.cell(row=1, column=1, value="SUMMARY — DUAL DCF (PERPETUAL & EXIT MULTIPLE)")
+        ws.cell(
+            row=1, column=1,
+            value=("SUMMARY — DUAL DCF (PERPETUAL & EXIT MULTIPLE)"
+                   if self.exit_multiple_available else
+                   "SUMMARY — PERPETUAL-GROWTH DCF (EXIT MULTIPLE UNAVAILABLE)"),
+        )
         ws.cell(row=1, column=1).font = Font(bold=True, size=14)
     
     def _setup_key_snapshot(self, ws: Worksheet) -> None:
@@ -241,7 +274,12 @@ class SummaryTabBuilder:
         ws.cell(row=21, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
         # Row 22: Value per Share (Exit Multiple DCF)
-        ws.cell(row=22, column=1, value="Value per Share (Exit Multiple DCF)")
+        ws.cell(
+            row=22, column=1,
+            value=("Value per Share (Exit Multiple DCF)"
+                   if self.exit_multiple_available else
+                   "Exit Multiple DCF — unavailable"),
+        )
         ws.cell(row=22, column=1).font = Font(bold=True, size=11)
         ws.cell(row=22, column=2, value="='Valuation (Exit Multiple)'!$B$25")
         ws.cell(row=22, column=2).number_format = '$0.00'
@@ -268,8 +306,14 @@ class SummaryTabBuilder:
         ws.cell(row=24, column=1, value="")
         ws.cell(row=25, column=1, value="")
         
-        # Row 26: Average of Methods
-        ws.cell(row=26, column=1, value="Blended Fair Value (Per-Share)")
+        # Row 26: policy-eligible headline. Do not label a DCF-only value as a
+        # blend merely because an excluded peer cross-check remains in B30.
+        ws.cell(
+            row=26, column=1,
+            value=("Blended Fair Value (Per-Share)"
+                   if self.comps_included_in_blend
+                   else "DCF Fair Value (Per-Share)"),
+        )
         ws.cell(row=26, column=1).font = Font(bold=True, size=12)
         # Blended fair value: the DCF VIEW and the market view, 50/50.
         #
@@ -297,14 +341,19 @@ class SummaryTabBuilder:
         # UNRELIABLE valuation rail downstream.
         _dcf_n = '(($B$18>0)+($B$22>0))'
         _dcf_avg = f'((MAX($B$18,0)+MAX($B$22,0))/{_dcf_n})'
-        ws.cell(
-            row=26, column=2,
-            value=(
+        if self.comps_included_in_blend:
+            blend_formula = (
                 f'=IF({_dcf_n}=0,'
                 'IF($B$30>0,$B$30,AVERAGE($B$18,$B$22)),'
                 f'IF($B$30>0,({_dcf_avg}+$B$30)/2,{_dcf_avg}))'
-            ),
-        )
+            )
+        else:
+            # Preserve the broad market cross-check in B30, but do not grant
+            # a low-confidence sector roster a 50% intrinsic-value vote.
+            blend_formula = (
+                f'=IF({_dcf_n}=0,AVERAGE($B$18,$B$22),{_dcf_avg})'
+            )
+        ws.cell(row=26, column=2, value=blend_formula)
         ws.cell(row=26, column=2).number_format = '$0.00'
         ws.cell(row=26, column=2).font = Font(bold=True, size=12)
         ws.cell(row=26, column=2).fill = PatternFill(
@@ -340,13 +389,13 @@ class SummaryTabBuilder:
         Set up Sanity Metrics (Terminal Year) section (rows 33-39).
         
         Rows:
-        33: Revenue (FY5) = Projections!F3
-        34: EBITDA (FY5) = Projections!F21
-        35: FCF (FY5) = Projections!F19
-        36: EV/EBITDA - Perpetual = IFERROR(B17/B34, "")
-        37: EV/EBITDA - Exit Multiple = IFERROR(B20/B34, "")
-        38: FCF Yield on EV - Perpetual = IFERROR(B35/B17, "")
-        39: FCF Yield on EV - Exit Multiple = IFERROR(B35/B20, "")
+        33: Revenue (FY10) = FY5 revenue extended by the stage-2 growth path
+        34: EBITDA (FY10) = Exit Multiple!B12
+        35: FCF (FY10) = Exit Multiple!K7
+        36: Present EV / FY10 EBITDA - Perpetual = IFERROR(B17/B34, "")
+        37: Present EV / FY10 EBITDA - Exit = IFERROR(B20/B34, "")
+        38: FY10 FCF / Present EV - Perpetual = IFERROR(B35/B17, "")
+        39: FY10 FCF / Present EV - Exit = IFERROR(B35/B20, "")
         """
         # Row 30: Two-year forward market-comps target discounted to the same
         # present valuation date as the DCF. EV/EBITDA produces enterprise
@@ -378,10 +427,12 @@ class SummaryTabBuilder:
         ws.cell(row=30, column=2).font = Font(bold=True, size=11)
         ws.cell(row=30, column=7,
                 value=(f"EV/EBITDA {self.comps_ev_ebitda:.1f}x / "
-                       f"P/S {self.comps_ps:.1f}x on FY2, discounted 2y "
+                       f"P/S {self.comps_ps:.1f}x on {self.horizon_prefix}2, discounted 2y "
                        f"at WACC / cost of equity respectively; "
                        f"{self.comps_source}; "
-                       f"{self.comps_peer_count} peers (0 = n/a)"))
+                       f"{self.comps_peer_count} peers (0 = n/a); "
+                       f"confidence {self.comps_confidence}; role {self.comps_role}; "
+                       f"included in blend: {'yes' if self.comps_included_in_blend else 'no'}"))
         ws.cell(row=30, column=7).font = Font(italic=True, size=9)
 
         # Row 31: analyst consensus, reference only (never in the blend)
@@ -396,44 +447,58 @@ class SummaryTabBuilder:
             ws.cell(
                 row=31, column=7,
                 value=(f"{self.analyst_source}; {self.analyst_count} analysts; "
-                       f"{self.analyst_rating}; as of {self.analyst_as_of}{target_range}; "
+                       f"{self.analyst_rating}; provider as of {self.analyst_as_of}; "
+                       f"captured {self.analyst_captured_at}{target_range}; "
                        "cross-check only, excluded from intrinsic value"),
             )
             ws.cell(row=31, column=7).font = Font(italic=True, size=9)
         ws.cell(row=32, column=1, value="")
         
-        # Row 33: Revenue (FY5)
-        ws.cell(row=33, column=1, value="Revenue (FY5)")
-        ws.cell(row=33, column=2, value="='Projections'!$F$3")
+        # Rows 33-35 use the same FY10 terminal horizon as both DCF methods.
+        # Previously the terminal reconciliation silently compared FY5
+        # EBITDA/FCF with a FY10 Gordon perpetuity.
+        ws.cell(row=33, column=1, value=f"Revenue ({self.horizon_prefix}10)")
+        ws.cell(
+            row=33, column=2,
+            value=("=IF('Valuation (DCF)'!$F$16>0,Projections!$F$3*"
+                   "'Valuation (DCF)'!$K$16/'Valuation (DCF)'!$F$16,0)"),
+        )
         ws.cell(row=33, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
-        # Row 34: EBITDA (FY5)
-        ws.cell(row=34, column=1, value="EBITDA (FY5)")
-        ws.cell(row=34, column=2, value="='Projections'!$F$21")
+        # Row 34: EBITDA (FY10)
+        ws.cell(row=34, column=1, value=f"EBITDA ({self.horizon_prefix}10)")
+        ws.cell(row=34, column=2, value="='Valuation (Exit Multiple)'!$B$12")
         ws.cell(row=34, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
-        # Row 35: FCF (FY5)
-        ws.cell(row=35, column=1, value="FCF (FY5)")
-        ws.cell(row=35, column=2, value="='Projections'!$F$19")
+        # Row 35: FCF (FY10)
+        ws.cell(row=35, column=1, value=f"FCF ({self.horizon_prefix}10)")
+        ws.cell(row=35, column=2, value="='Valuation (Exit Multiple)'!$K$7")
         ws.cell(row=35, column=2).number_format = '[$$-409]#,##0.0,,," B"'
         
-        # Row 36: EV/EBITDA - Perpetual
-        ws.cell(row=36, column=1, value="EV/EBITDA — Perpetual")
+        # These are deliberately labelled as cross-horizon diagnostics. The
+        # numerator is present enterprise value while the denominator is a
+        # terminal-year operating metric; it is not the terminal exit multiple
+        # shown in row 7 and must never be presented as one.
+        ws.cell(row=36, column=1,
+                value=f"Present EV / {self.horizon_prefix}10 EBITDA (diagnostic) — Perpetual")
         ws.cell(row=36, column=2, value="=IFERROR($B$17/$B$34,\"\")")
         ws.cell(row=36, column=2).number_format = '0.0"x"'
         
-        # Row 37: EV/EBITDA - Exit Multiple
-        ws.cell(row=37, column=1, value="EV/EBITDA — Exit Multiple")
+        # Row 37: present EV / terminal EBITDA - Exit Multiple
+        ws.cell(row=37, column=1,
+                value=f"Present EV / {self.horizon_prefix}10 EBITDA (diagnostic) — Exit")
         ws.cell(row=37, column=2, value="=IFERROR($B$20/$B$34,\"\")")
         ws.cell(row=37, column=2).number_format = '0.0"x"'
         
-        # Row 38: FCF Yield on EV - Perpetual
-        ws.cell(row=38, column=1, value="FCF Yield on EV — Perpetual")
+        # Row 38: terminal FCF / present EV - Perpetual
+        ws.cell(row=38, column=1,
+                value=f"{self.horizon_prefix}10 FCF / Present EV (diagnostic) — Perpetual")
         ws.cell(row=38, column=2, value="=IFERROR($B$35/$B$17,\"\")")
         ws.cell(row=38, column=2).number_format = '0.0%'
         
-        # Row 39: FCF Yield on EV - Exit Multiple
-        ws.cell(row=39, column=1, value="FCF Yield on EV — Exit Multiple")
+        # Row 39: terminal FCF / present EV - Exit Multiple
+        ws.cell(row=39, column=1,
+                value=f"{self.horizon_prefix}10 FCF / Present EV (diagnostic) — Exit")
         ws.cell(row=39, column=2, value="=IFERROR($B$35/$B$20,\"\")")
         ws.cell(row=39, column=2).number_format = '0.0%'
     
@@ -467,12 +532,12 @@ class SummaryTabBuilder:
         
         # Row 43: Check DF ≤ 1 (Perpetual)
         ws.cell(row=43, column=1, value="Check: DF ≤ 1 (Perpetual)")
-        ws.cell(row=43, column=2, value="=MAX('Valuation (DCF)'!$B$17:$F$17)<=1")
+        ws.cell(row=43, column=2, value="=MAX('Valuation (DCF)'!$B$17:$K$17)<=1")
         ws.cell(row=43, column=2).alignment = Alignment(horizontal="center")
         
         # Row 44: Check DF ≤ 1 (Exit Multiple)
         ws.cell(row=44, column=1, value="Check: DF ≤ 1 (Exit Multiple)")
-        ws.cell(row=44, column=2, value="=MAX('Valuation (Exit Multiple)'!$B$8:$F$8)<=1")
+        ws.cell(row=44, column=2, value="=MAX('Valuation (Exit Multiple)'!$B$8:$K$8)<=1")
         ws.cell(row=44, column=2).alignment = Alignment(horizontal="center")
         
         # Row 45: Check Shares > 0 & Price > 0
@@ -508,7 +573,11 @@ class SummaryTabBuilder:
         ws.cell(row=51, column=2, value="=$B$29")
         ws.cell(row=51, column=2).number_format = '[$$-409]#,##0.0,,," B"'
 
-        ws.cell(row=52, column=1, value="PV of Explicit FCF (FY1-FY10)")
+        ws.cell(
+            row=52, column=1,
+            value=(f"PV of Explicit FCF ({self.horizon_prefix}1-"
+                   f"{self.horizon_prefix}10)"),
+        )
         ws.cell(row=52, column=2, value="='Valuation (DCF)'!$B$19")
         ws.cell(row=52, column=2).number_format = '[$$-409]#,##0.0,,," B"'
 
@@ -529,7 +598,15 @@ class SummaryTabBuilder:
         ws.cell(row=54, column=2).number_format = '[$$-409]#,##0.0,,," B"'
 
         ws.cell(row=55, column=1, value="Market-Implied FCF vs Model")
-        ws.cell(row=55, column=2, value='=IFERROR($B$53/$B$54-1,"")')
+        # A percentage change has no economic interpretation when the model
+        # terminal FCF is zero or negative (for example a pre-profit issuer).
+        # Keep the absolute market-implied FCF diagnostic, but fail this ratio
+        # closed instead of publishing a precise-looking negative percentage
+        # whose sign is only an artefact of dividing by a negative baseline.
+        ws.cell(
+            row=55, column=2,
+            value='=IF($B$54>0,IFERROR($B$53/$B$54-1,""),"")',
+        )
         ws.cell(row=55, column=2).number_format = '0.0%'
 
         ws.cell(

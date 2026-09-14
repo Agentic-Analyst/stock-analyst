@@ -53,6 +53,7 @@ def _metric(row: Dict[str, Any], names: Iterable[str]) -> Optional[float]:
 
 
 def _aggregate_flow(rows: Iterable[Dict[str, Any]]) -> Dict[str, float]:
+    rows = list(rows)
     values: Dict[str, list[float]] = {}
     for row in rows:
         for field, raw in (row or {}).items():
@@ -61,12 +62,32 @@ def _aggregate_flow(rows: Iterable[Dict[str, Any]]) -> Dict[str, float]:
                 values.setdefault(str(field), []).append(value)
     out = {}
     for field, observations in values.items():
+        # A TTM flow must cover all four quarters. Summing a field that Yahoo
+        # exposed in only one quarter silently annualized one quarter as a
+        # full year (BABA D&A became CNY 4.9B versus CNY 47.1B reported for the
+        # fiscal year). Optional partial fields are omitted and downstream
+        # logic falls back to complete annual evidence.
+        if len(observations) != len(rows):
+            continue
         lowered = field.lower()
         if any(token in lowered for token in _AVERAGE_FIELDS + _RATE_FIELDS):
             out[field] = sum(observations) / len(observations)
         else:
             out[field] = sum(observations)
     return out
+
+
+def _complete_metric_sum(
+    rows: Iterable[Dict[str, Any]], names: Iterable[str], *, require_positive: bool = False,
+) -> Optional[float]:
+    """Sum an alias-aware flow only when every quarter has a real value."""
+    values = []
+    for row in rows:
+        value = _metric(row, names)
+        if value is None or (require_positive and value <= 0):
+            return None
+        values.append(value)
+    return sum(values) if values else None
 
 
 def _unavailable(now: datetime, reason: str, **extra: Any) -> Dict[str, Any]:
@@ -89,7 +110,10 @@ def build_ttm_bridge(
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     try:
-        max_age = max(90, int(os.getenv("QUARTERLY_STATEMENT_MAX_AGE_DAYS", "150") or 150))
+        max_age = min(
+            180,
+            max(90, int(os.getenv("QUARTERLY_STATEMENT_MAX_AGE_DAYS", "150") or 150)),
+        )
     except ValueError:
         max_age = 150
 
@@ -134,8 +158,10 @@ def build_ttm_bridge(
             period_gaps_days=gaps,
         )
 
-    income = _aggregate_flow(normalized["income_statement"][period] for period in periods)
-    cash_flow = _aggregate_flow(normalized["cash_flow"][period] for period in periods)
+    income_rows = [normalized["income_statement"][period] for period in periods]
+    cash_flow_rows = [normalized["cash_flow"][period] for period in periods]
+    income = _aggregate_flow(income_rows)
+    cash_flow = _aggregate_flow(cash_flow_rows)
     balance = dict(normalized["balance_sheet"][periods[0]])
     revenue = _metric(income, ("Total Revenue", "Operating Revenue", "Revenue"))
     operating_cf = _metric(cash_flow, ("Operating Cash Flow", "Total Cash From Operating Activities"))
@@ -155,12 +181,60 @@ def build_ttm_bridge(
     investments = _metric(balance, ("Other Short Term Investments", "Short Term Investments"))
     if investments is None and combined is not None:
         investments = max(0.0, combined - (cash or 0.0))
+    broad_investments = _metric(balance, (
+        "Investments And Advances", "Investmentin Financial Assets",
+    ))
+    # Yahoo's balance-sheet schema places ``Other Short Term Investments`` in
+    # current assets and ``Investments And Advances`` / ``Investmentin
+    # Financial Assets`` in non-current assets.  They are distinct buckets.
+    # Taking max(short, non-current) omitted one of them for cash-rich issuers:
+    # AAPL lost $22.9B from its equity bridge.  Alias rows within the broad
+    # bucket are alternatives (chosen by _metric), but the current and
+    # non-current buckets must be added.
+    valid_short = (
+        float(investments) if investments is not None and investments >= 0 else None
+    )
+    valid_broad = (
+        float(broad_investments)
+        if broad_investments is not None and broad_investments >= 0 else None
+    )
+    if valid_short is not None and valid_broad is not None:
+        non_operating_investments = valid_short + valid_broad
+        non_operating_investments_source = (
+            "short_term_investments_plus_investments_and_advances"
+        )
+    elif valid_broad is not None:
+        non_operating_investments = valid_broad
+        non_operating_investments_source = "investments_and_advances"
+    elif valid_short is not None:
+        non_operating_investments = valid_short
+        non_operating_investments_source = "short_term_investments"
+    else:
+        non_operating_investments = None
+        non_operating_investments_source = None
     debt = _metric(balance, ("Total Debt", "TotalDebt"))
     capex = _metric(cash_flow, ("Capital Expenditure", "Capital Expenditures"))
-    da = _metric(cash_flow, (
+    capex_source = "reported_four_quarter_sum" if capex is not None else None
+    if capex is None:
+        # Some Yahoo quarterly payloads publish OCF and FCF for every quarter
+        # but omit the capex row. By definition FCF = OCF + capex when capex is
+        # carried as a negative cash outflow, so this is an exact bridge—not an
+        # estimated reinvestment assumption.
+        free_cash_flow = _metric(cash_flow, ("Free Cash Flow",))
+        if free_cash_flow is not None and operating_cf is not None:
+            derived = free_cash_flow - operating_cf
+            if derived <= 0:
+                capex = derived
+                capex_source = "derived_from_complete_fcf_minus_ocf"
+    da = _complete_metric_sum(cash_flow_rows, (
         "Depreciation And Amortization", "Depreciation Amortization Depletion",
         "Depreciation",
-    )) or _metric(income, ("Reconciled Depreciation", "Depreciation And Amortization"))
+    ), require_positive=True)
+    # Do not substitute income-statement ``Reconciled Depreciation`` here. It
+    # can exclude amortization and other non-cash add-backs required by UFCF;
+    # Alibaba's four-quarter income sum was CNY 4.9B while the complete annual
+    # cash-flow statement reported CNY 47.1B D&A. Missing quarterly cash-flow
+    # D&A therefore falls back to complete annual history downstream.
     tax_provision = _metric(income, ("Tax Provision",))
     pretax_income = _metric(income, ("Pretax Income", "Income Before Tax"))
 
@@ -180,11 +254,14 @@ def build_ttm_bridge(
             "revenue": revenue,
             "operating_cash_flow": operating_cf,
             "capital_expenditure": capex,
+            "capital_expenditure_source": capex_source,
             "depreciation_and_amortization": da,
             "capex_to_revenue": capex / revenue if capex is not None else None,
             "da_to_revenue": da / revenue if da is not None else None,
             "cash": cash,
             "short_term_investments": investments,
+            "non_operating_investments": non_operating_investments,
+            "non_operating_investments_source": non_operating_investments_source,
             "total_debt": debt,
             "effective_tax_rate": (
                 tax_provision / pretax_income

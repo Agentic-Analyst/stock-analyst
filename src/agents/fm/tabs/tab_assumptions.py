@@ -2,19 +2,20 @@
 Tab 3: Assumptions Tab Builder with Excel Formulas
 
 This module creates the Assumptions tab with embedded Excel formulas that
-reference the Raw tab for calculations. LLM is used to infer forward projections.
+reference the Raw tab for calculations. Forward numerical inputs are seeded
+from financial statements and qualified analyst estimates, then passed through
+the deterministic grounding layer.
 
 Key Design:
 - FY0 values use formulas referencing Raw tab
-- FY1-FY5 values use formulas referencing hidden LLM_Inferred tab
-- LLM integration uses proper LLMProvider from llms.config
+- FY1-FY5 values use formulas referencing the visible Model_Inputs audit tab
 """
 
 from typing import Dict, Optional, Any
+import math
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment
-import json
 from pathlib import Path
 import sys
 
@@ -22,7 +23,6 @@ import sys
 current_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(current_dir.parent.parent.parent))  # Add 'src' to path
 
-from llms.config import get_llm
 from ..financial_metrics import (
     depreciation_and_amortization,
     depreciation_excel_formula,
@@ -36,11 +36,11 @@ class AssumptionsTabBuilder:
     Layout:
     - Column A: Labels
     - Column B: FY0 (latest actual, calculated from Raw using formulas)
-    - Columns C-G: FY1-FY5 (formulas referencing LLM_Inferred tab)
+    - Columns C-G: FY1-FY5 (formulas referencing Model_Inputs tab)
     """
     
     def __init__(self, llm_assumptions: Optional[Dict[str, Any]] = None):
-        """Initialize with optional LLM-inferred assumptions."""
+        """Initialize with source-grounded model assumptions."""
         self.llm_assumptions = llm_assumptions or {}
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
@@ -49,16 +49,16 @@ class AssumptionsTabBuilder:
         if "Assumptions" in workbook.sheetnames:
             ws = workbook["Assumptions"]
             workbook.remove(ws)
-        if "LLM_Inferred" in workbook.sheetnames:
-            ws = workbook["LLM_Inferred"]
+        if "Model_Inputs" in workbook.sheetnames:
+            ws = workbook["Model_Inputs"]
             workbook.remove(ws)
-        
-        # Create hidden LLM_Inferred tab first
-        self._create_llm_inferred_tab(workbook)
-        
+
+        # Create the visible input/provenance tab first.
+        self._create_model_inputs_tab(workbook)
+
         # Create Assumptions tab
         ws = workbook.create_sheet("Assumptions", 2)
-        
+
         self._setup_headers(ws)
         self._setup_fy0_year(ws)
         self._setup_valuation_params(ws)
@@ -71,75 +71,114 @@ class AssumptionsTabBuilder:
         
         return ws
     
-    def _create_llm_inferred_tab(self, workbook: openpyxl.Workbook) -> None:
-        """Create hidden tab with LLM-inferred values."""
-        ws = workbook.create_sheet("LLM_Inferred", 3)
+    def _create_model_inputs_tab(self, workbook: openpyxl.Workbook) -> None:
+        """Create the visible tab containing grounded numerical inputs."""
+        ws = workbook.create_sheet("Model_Inputs", 3)
         
         # Headers
         ws.cell(row=1, column=1, value="Metric").font = Font(bold=True)
+        forecast_basis = self.llm_assumptions.get("forecast_basis") or {}
+        horizon_prefix = (
+            "NTM" if forecast_basis.get("basis") == "rolling_twelve_months"
+            else "FY"
+        )
         for i in range(5):
-            ws.cell(row=1, column=2 + i, value=f"FY{i+1}").font = Font(bold=True)
+            ws.cell(
+                row=1, column=2 + i, value=f"{horizon_prefix}{i+1}"
+            ).font = Font(bold=True)
         
         # WACC and Terminal Growth (same for all years, but we'll put in B column)
         ws.cell(row=2, column=1, value="WACC")
-        ws.cell(row=2, column=2, value=self.llm_assumptions.get('wacc', 0.09))
+        ws.cell(row=2, column=2, value=self.llm_assumptions.get('wacc'))
         
         ws.cell(row=3, column=1, value="Terminal Growth Rate")
-        ws.cell(row=3, column=2, value=self.llm_assumptions.get('terminal_growth_rate', 0.025))
+        ws.cell(row=3, column=2, value=self.llm_assumptions.get('terminal_growth_rate'))
         
         # Revenue Growth Rates (FY1-FY5)
         ws.cell(row=4, column=1, value="Revenue Growth Rate")
-        rates = self.llm_assumptions.get('revenue_growth_rates', [0.05] * 5)
+        rates = self.llm_assumptions.get('revenue_growth_rates', [None] * 5)
         for i, rate in enumerate(rates):
             ws.cell(row=4, column=2 + i, value=rate)
         
         # Gross Margins (FY1-FY5)
         ws.cell(row=5, column=1, value="Gross Margin")
-        margins = self.llm_assumptions.get('gross_margins', [0.46] * 5)
+        margins = self.llm_assumptions.get('gross_margins', [None] * 5)
         for i, margin in enumerate(margins):
             ws.cell(row=5, column=2 + i, value=margin)
         
         # EBITDA Margins (FY1-FY5)
         ws.cell(row=6, column=1, value="EBITDA Margin")
-        ebitda = self.llm_assumptions.get('ebitda_margins', [0.33] * 5)
+        ebitda = self.llm_assumptions.get('ebitda_margins', [None] * 5)
         for i, margin in enumerate(ebitda):
             ws.cell(row=6, column=2 + i, value=margin)
         
         # Operating Margins (FY1-FY5)
         ws.cell(row=7, column=1, value="Operating Margin")
-        operating = self.llm_assumptions.get('operating_margins', [0.31] * 5)
+        operating = self.llm_assumptions.get('operating_margins', [None] * 5)
         for i, margin in enumerate(operating):
             ws.cell(row=7, column=2 + i, value=margin)
         
         # DSO Days (FY1-FY5)
         ws.cell(row=8, column=1, value="DSO Days")
-        dso = self.llm_assumptions.get('dso_days', [45] * 5)
+        dso = self.llm_assumptions.get('dso_days', [None] * 5)
         for i, days in enumerate(dso):
             ws.cell(row=8, column=2 + i, value=days)
         
         # DIO Days (FY1-FY5)
         ws.cell(row=9, column=1, value="DIO Days")
-        dio = self.llm_assumptions.get('dio_days', [10] * 5)
+        dio = self.llm_assumptions.get('dio_days', [None] * 5)
         for i, days in enumerate(dio):
             ws.cell(row=9, column=2 + i, value=days)
         
         # DPO Days (FY1-FY5)
         ws.cell(row=10, column=1, value="DPO Days")
-        dpo = self.llm_assumptions.get('dpo_days', [90] * 5)
+        dpo = self.llm_assumptions.get('dpo_days', [None] * 5)
         for i, days in enumerate(dpo):
             ws.cell(row=10, column=2 + i, value=days)
-        
-        # Make this tab visible (not hidden) for transparency
-        # ws.sheet_state = 'hidden'  # User requested this be visible
-    
+
+        # One normalized forward tax rate feeds both NOPAT and after-tax debt
+        # cost.  Previously WACC used TTM tax while this workbook independently
+        # recomputed the latest annual rate, creating two answers in one model.
+        capm = self.llm_assumptions.get("capm") or {}
+        ws.cell(row=11, column=1, value="Normalized Cash Tax Rate")
+        ws.cell(row=11, column=2, value=capm.get("tax_rate", 0.25))
+        ws.cell(row=11, column=2).number_format = '0.00%'
+        ws.cell(row=11, column=3, value=capm.get("tax_rate_source"))
+
+        # Make the change in forecast clock visible. A user should not have to
+        # inspect a literal formula in Projections!B3 to discover that FY0 is a
+        # current TTM base and 0y/+1y consensus has been blended into NTM1.
+        if forecast_basis.get("basis") == "rolling_twelve_months":
+            ws.cell(row=12, column=1, value="Forecast Basis")
+            ws.cell(row=12, column=2, value="Rolling twelve months")
+            ws.cell(row=12, column=3, value=forecast_basis.get("method"))
+            ws.cell(row=13, column=1, value="Forecast Base Period End")
+            ws.cell(row=13, column=2, value=forecast_basis.get("period_end"))
+            ws.cell(row=14, column=1, value="TTM Revenue Base")
+            ws.cell(row=14, column=2, value=forecast_basis.get("base_revenue"))
+            ws.cell(row=14, column=2).number_format = '#,##0'
+            ws.cell(row=15, column=1, value="Fiscal Year Elapsed")
+            ws.cell(
+                row=15, column=2,
+                value=forecast_basis.get("fiscal_year_progress"),
+            ).number_format = '0.0%'
+
+        # This tab intentionally stays visible so every model input is auditable.
+
     def _setup_headers(self, ws: Worksheet) -> None:
         """Set up column headers."""
         ws.cell(row=1, column=1, value="Metric").font = Font(bold=True)
-        ws.cell(row=1, column=2, value="FY0 (Actual)").font = Font(bold=True)
-        
+        ws.cell(row=1, column=2, value="Latest FY Actual").font = Font(bold=True)
+        forecast_basis = self.llm_assumptions.get("forecast_basis") or {}
+        horizon_prefix = (
+            "NTM" if forecast_basis.get("basis") == "rolling_twelve_months"
+            else "FY"
+        )
         for i in range(5):
             col = 3 + i
-            ws.cell(row=1, column=col, value=f"FY{i+1}").font = Font(bold=True)
+            ws.cell(
+                row=1, column=col, value=f"{horizon_prefix}{i+1}"
+            ).font = Font(bold=True)
     
     def _setup_fy0_year(self, ws: Worksheet) -> None:
         """Set up FY0 year extraction using simpler approach."""
@@ -154,12 +193,12 @@ class AssumptionsTabBuilder:
         
         # WACC
         ws.cell(row=4, column=1, value="WACC").font = Font(bold=True)
-        ws.cell(row=4, column=2, value='=LLM_Inferred!B2').number_format = '0.00%'
+        ws.cell(row=4, column=2, value='=Model_Inputs!B2').number_format = '0.00%'
         ws.cell(row=4, column=3, value="[Derived CAPM / observed capital structure]").font = Font(italic=True, size=9)
         
         # Terminal Growth Rate
         ws.cell(row=5, column=1, value="Terminal Growth Rate (g)").font = Font(bold=True)
-        ws.cell(row=5, column=2, value='=LLM_Inferred!B3').number_format = '0.00%'
+        ws.cell(row=5, column=2, value='=Model_Inputs!B3').number_format = '0.00%'
         ws.cell(row=5, column=3, value="[Grounded to long-run band and currency risk-free cap]").font = Font(italic=True, size=9)
     
     def _setup_revenue_growth(self, ws: Worksheet) -> None:
@@ -179,17 +218,17 @@ class AssumptionsTabBuilder:
         )
         ws.cell(row=7, column=2, value=formula_fy0).number_format = '0.00%'
         
-        # FY1-FY5: Reference LLM_Inferred tab (columns B-F for FY1-FY5)
+        # FY1-FY5: Reference Model_Inputs tab (columns B-F)
         for i in range(5):
-            col_letter = chr(66 + i)  # B, C, D, E, F (FY1-FY5 in LLM_Inferred)
+            col_letter = chr(66 + i)  # B, C, D, E, F in Model_Inputs
             # Use simple IFERROR for compatibility with all Excel versions
             if i == 0:
                 # FY1: fallback to FY0 (B7) if blank
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}4,"")<>"",LLM_Inferred!{col_letter}4,B7)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}4,"")<>"",Model_Inputs!{col_letter}4,B7)'
             else:
                 # FY2-FY5: fallback to previous FY
                 prev_col = chr(66 + i)  # C, D, E, F (previous column in Assumptions tab)
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}4,"")<>"",LLM_Inferred!{col_letter}4,{prev_col}7)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}4,"")<>"",Model_Inputs!{col_letter}4,{prev_col}7)'
             ws.cell(row=7, column=3 + i, value=formula).number_format = '0.00%'
     
     def _setup_operating_margins(self, ws: Worksheet) -> None:
@@ -206,14 +245,14 @@ class AssumptionsTabBuilder:
         )
         ws.cell(row=9, column=2, value=formula_fy0).number_format = '0.00%'
         
-        # FY1-FY5: Reference LLM_Inferred (columns B-F)
+        # FY1-FY5: Reference Model_Inputs (columns B-F)
         for i in range(5):
             col_letter = chr(66 + i)  # B, C, D, E, F
             if i == 0:
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}5,"")<>"",LLM_Inferred!{col_letter}5,B9)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}5,"")<>"",Model_Inputs!{col_letter}5,B9)'
             else:
                 prev_col = chr(66 + i)  # C, D, E, F
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}5,"")<>"",LLM_Inferred!{col_letter}5,{prev_col}9)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}5,"")<>"",Model_Inputs!{col_letter}5,{prev_col}9)'
             ws.cell(row=9, column=3 + i, value=formula).number_format = '0.00%'
         
         # EBITDA Margin
@@ -227,14 +266,14 @@ class AssumptionsTabBuilder:
         )
         ws.cell(row=10, column=2, value=formula_fy0).number_format = '0.00%'
         
-        # FY1-FY5: Reference LLM_Inferred (columns B-F)
+        # FY1-FY5: Reference Model_Inputs (columns B-F)
         for i in range(5):
             col_letter = chr(66 + i)  # B, C, D, E, F
             if i == 0:
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}6,"")<>"",LLM_Inferred!{col_letter}6,B10)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}6,"")<>"",Model_Inputs!{col_letter}6,B10)'
             else:
                 prev_col = chr(66 + i)  # C, D, E, F
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}6,"")<>"",LLM_Inferred!{col_letter}6,{prev_col}10)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}6,"")<>"",Model_Inputs!{col_letter}6,{prev_col}10)'
             ws.cell(row=10, column=3 + i, value=formula).number_format = '0.00%'
         
         # Operating Margin
@@ -247,14 +286,14 @@ class AssumptionsTabBuilder:
         )
         ws.cell(row=11, column=2, value=formula_fy0).number_format = '0.00%'
         
-        # FY1-FY5: Reference LLM_Inferred (columns B-F)
+        # FY1-FY5: Reference Model_Inputs (columns B-F)
         for i in range(5):
             col_letter = chr(66 + i)  # B, C, D, E, F
             if i == 0:
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}7,"")<>"",LLM_Inferred!{col_letter}7,B11)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}7,"")<>"",Model_Inputs!{col_letter}7,B11)'
             else:
                 prev_col = chr(66 + i)  # C, D, E, F
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}7,"")<>"",LLM_Inferred!{col_letter}7,{prev_col}11)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}7,"")<>"",Model_Inputs!{col_letter}7,{prev_col}11)'
             ws.cell(row=11, column=3 + i, value=formula).number_format = '0.00%'
     
     def _setup_working_capital(self, ws: Worksheet) -> None:
@@ -271,14 +310,14 @@ class AssumptionsTabBuilder:
         )
         ws.cell(row=13, column=2, value=formula_fy0).number_format = '0.0'
         
-        # FY1-FY5: Reference LLM_Inferred (columns B-F)
+        # FY1-FY5: Reference Model_Inputs (columns B-F)
         for i in range(5):
             col_letter = chr(66 + i)  # B, C, D, E, F
             if i == 0:
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}8,"")<>"",LLM_Inferred!{col_letter}8,B13)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}8,"")<>"",Model_Inputs!{col_letter}8,B13)'
             else:
                 prev_col = chr(66 + i)  # C, D, E, F
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}8,"")<>"",LLM_Inferred!{col_letter}8,{prev_col}13)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}8,"")<>"",Model_Inputs!{col_letter}8,{prev_col}13)'
             ws.cell(row=13, column=3 + i, value=formula).number_format = '0.0'
         
         # DIO
@@ -291,14 +330,14 @@ class AssumptionsTabBuilder:
         )
         ws.cell(row=14, column=2, value=formula_fy0).number_format = '0.0'
         
-        # FY1-FY5: Reference LLM_Inferred (columns B-F)
+        # FY1-FY5: Reference Model_Inputs (columns B-F)
         for i in range(5):
             col_letter = chr(66 + i)  # B, C, D, E, F
             if i == 0:
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}9,"")<>"",LLM_Inferred!{col_letter}9,B14)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}9,"")<>"",Model_Inputs!{col_letter}9,B14)'
             else:
                 prev_col = chr(66 + i)  # C, D, E, F
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}9,"")<>"",LLM_Inferred!{col_letter}9,{prev_col}14)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}9,"")<>"",Model_Inputs!{col_letter}9,{prev_col}14)'
             ws.cell(row=14, column=3 + i, value=formula).number_format = '0.0'
         
         # DPO
@@ -311,14 +350,14 @@ class AssumptionsTabBuilder:
         )
         ws.cell(row=15, column=2, value=formula_fy0).number_format = '0.0'
         
-        # FY1-FY5: Reference LLM_Inferred (columns B-F)
+        # FY1-FY5: Reference Model_Inputs (columns B-F)
         for i in range(5):
             col_letter = chr(66 + i)  # B, C, D, E, F
             if i == 0:
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}10,"")<>"",LLM_Inferred!{col_letter}10,B15)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}10,"")<>"",Model_Inputs!{col_letter}10,B15)'
             else:
                 prev_col = chr(66 + i)  # C, D, E, F
-                formula = f'=IF(IFERROR(LLM_Inferred!{col_letter}10,"")<>"",LLM_Inferred!{col_letter}10,{prev_col}15)'
+                formula = f'=IF(IFERROR(Model_Inputs!{col_letter}10,"")<>"",Model_Inputs!{col_letter}10,{prev_col}15)'
             ws.cell(row=15, column=3 + i, value=formula).number_format = '0.0'
         
         # CCC - ALL columns use formulas
@@ -365,29 +404,13 @@ class AssumptionsTabBuilder:
         ws.cell(row=19, column=2, value=formula).number_format = '#,##0'
         ws.cell(row=19, column=3, value="[From JSON]").font = Font(italic=True, size=9)
         
-        # Effective Tax Rate
-        ws.cell(row=20, column=1, value="Effective Tax Rate (FY0)").font = Font(bold=True)
-        # Tax Provision / Pretax Income goes negative in a tax-credit year — PC
-        # Jeweller booked a -9.7M provision on 7.1B of pretax income and the DCF
-        # discounted debt at an after-tax cost ABOVE its pre-tax cost. Yahoo
-        # publishes "Tax Rate For Calcs" (0.40 for that same year); use it when
-        # present, fall back to the ratio, and clamp to [0, 50%] either way.
-        # Written with IF only — no MAX/MIN around a function call. Our formula
-        # evaluator (which produces the JSON the report reads) splits MAX/MIN
-        # arguments on commas without honouring the parentheses of a nested
-        # SUMIFS, so MIN(0.5, SUMIFS(...)) evaluated to 0.5 and the shipped
-        # MAX(0, MIN(0.5, IF(...))) evaluated to 0 — zero tax on every forecast
-        # year, which lifted PayPal's perpetual leg from $98 to $146. Excel
-        # computes either form; only this one survives both.
-        calcs = 'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Tax Rate For Calcs",Raw!$C:$C,$B$2&"*")'
-        ratio = ('SUMIFS(Raw!$D:$D,Raw!$B:$B,"Tax Provision",Raw!$C:$C,$B$2&"*")/'
-                 'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Pretax Income",Raw!$C:$C,$B$2&"*")')
-        formula = (
-            f'=IFERROR(IF({calcs}>0,IF({calcs}>0.5,0.5,{calcs}),'
-            f'IF({ratio}<0,0,IF({ratio}>0.5,0.5,{ratio}))),"")'
-        )
-        ws.cell(row=20, column=2, value=formula).number_format = '0.00%'
-        ws.cell(row=20, column=3, value="[From JSON]").font = Font(italic=True, size=9)
+        # Normalized Cash Tax Rate. It is a forward modeling assumption, not a
+        # claim that the latest accounting-period effective rate repeats.
+        ws.cell(row=20, column=1, value="Normalized Cash Tax Rate").font = Font(bold=True)
+        ws.cell(row=20, column=2, value='=Model_Inputs!B11').number_format = '0.00%'
+        ws.cell(row=20, column=3, value=(
+            "[Same normalized issuer rate used in NOPAT and after-tax debt cost]"
+        )).font = Font(italic=True, size=9)
     
     def _setup_dcf_parameters(self, ws: Worksheet) -> None:
         """Set up DCF valuation parameters (rows 21-36)."""
@@ -423,10 +446,14 @@ class AssumptionsTabBuilder:
         # the tab's Ke = Rf + beta x B24 reproduces the CAPM's own cost of
         # equity. The note says what was added.
         _crp = capm.get("country_risk_premium") or 0.0
-        _pub = capm.get("mature_erp_published")
-        _base = (f"Mature-market ERP {capm.get('equity_risk_premium', 0.055)*100:.1f}% (house assumption"
-                 + (f"; Damodaran's implied base {_pub*100:.2f}%" if isinstance(_pub, (int, float)) else "")
-                 + ")")
+        _erp_source = capm.get("mature_erp_selected_source") or "source unavailable"
+        _erp_as_of = capm.get("mature_erp_as_of")
+        _erp_date = f", as of {_erp_as_of}" if _erp_as_of else ""
+        _base = (
+            f"Mature-market ERP "
+            f"{capm.get('equity_risk_premium', 0.055)*100:.2f}% "
+            f"({_erp_source}{_erp_date})"
+        )
         _seed(24, "Equity Risk Premium (ERP + country premium)", "equity_risk_premium_total", 0.055, '0.00%',
               f"[{_base} + country premium {_crp*100:.2f}%: {capm.get('crp_source', 'none')}]"
               if capm else "[Mature-market ERP]")
@@ -447,7 +474,7 @@ class AssumptionsTabBuilder:
         
         # Terminal Growth Rate (row 35 in markdown, row 30 here)
         ws.cell(row=30, column=1, value="Terminal Growth Rate (g)").font = Font(bold=True)
-        ws.cell(row=30, column=2, value='=LLM_Inferred!B3').number_format = '0.00%'  # From LLM
+        ws.cell(row=30, column=2, value='=Model_Inputs!B3').number_format = '0.00%'
         _tg_note = self.llm_assumptions.get("terminal_growth_note")
         ws.cell(row=30, column=3, value=(
             f"[{_tg_note}]" if _tg_note
@@ -474,160 +501,197 @@ class AssumptionsTabBuilder:
     def get_summary(self) -> Dict[str, Any]:
         """Get summary."""
         return {
-            'wacc': self.llm_assumptions.get('wacc', 0.09),
-            'terminal_growth_rate': self.llm_assumptions.get('terminal_growth_rate', 0.025),
+            'wacc': self.llm_assumptions.get('wacc'),
+            'terminal_growth_rate': self.llm_assumptions.get('terminal_growth_rate'),
             'projection_years': 5
         }
 
 
-def infer_assumptions_with_llm(json_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Use LLM to infer forward assumptions based on historical data.
-    
-    Args:
-        json_data: The financial JSON data from Raw tab
-        
-    Returns:
-        Dict with inferred assumptions
-    """
-    # Use proper LLM provider
-    llm = get_llm()
-    
-    # Load prompt template
-    current_file = Path(__file__).resolve()
-    src_dir = current_file.parent.parent.parent.parent
-    project_root = src_dir.parent
-    prompt_path = project_root / "prompts" / "assumptions_inference.md"
-    
-    if not prompt_path.exists():
-        raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
-    
-    with open(prompt_path, 'r') as f:
-        prompt_template = f.read()
-    
-    # Extract historical metrics from JSON
-    fs = json_data.get('financial_statements', {})
-    company_data = json_data.get('company_data', {})
-    analyst_data = json_data.get('analyst_data', {}) or {}
-    historical_growth = (((json_data.get('modeling_metrics', {}) or {})
-                          .get('historical_growth_rates', {}) or {})
-                         .get('revenue_growth', {}) or {})
-    
-    # Get latest year
-    years = sorted([y for y in fs.get('income_statement', {}).keys() if y != 'date'])
-    latest_year = years[-1] if years else '2024-09-30'
-    prev_year = years[-2] if len(years) > 1 else None
-    
-    # Extract metrics
-    latest_income = fs.get('income_statement', {}).get(latest_year, {})
-    prev_income = fs.get('income_statement', {}).get(prev_year, {}) if prev_year else {}
-    latest_balance = fs.get('balance_sheet', {}).get(latest_year, {})
-    
-    # Calculate FY0 metrics (handle None values)
-    revenue_fy0 = latest_income.get('Total Revenue') or 0
-    revenue_prev = prev_income.get('Total Revenue') or 0
-    revenue_growth_fy0 = ((revenue_fy0 / revenue_prev - 1) * 100) if (revenue_prev and revenue_fy0) else 0
-    
-    gross_profit = latest_income.get('Gross Profit') or 0
-    gross_margin_fy0 = (gross_profit / revenue_fy0 * 100) if (revenue_fy0 and gross_profit) else 0
-    
-    operating_income = latest_income.get('Operating Income') or 0
-    operating_margin_fy0 = (operating_income / revenue_fy0 * 100) if (revenue_fy0 and operating_income) else 0
-    
-    da = depreciation_and_amortization(fs, latest_year) or 0
-    ebitda = operating_income + da
-    ebitda_margin_fy0 = (ebitda / revenue_fy0 * 100) if (revenue_fy0 and ebitda) else 0
-    
-    # Working capital metrics (handle None values)
-    ar = latest_balance.get('Accounts Receivable') or 0
-    dso_fy0 = (ar / revenue_fy0 * 365) if (revenue_fy0 and ar) else 45
-    
-    inventory = latest_balance.get('Inventory') or 0
-    cogs = latest_income.get('Cost Of Revenue') or 0
-    dio_fy0 = (inventory / cogs * 365) if (cogs and inventory) else 10
-    
-    ap = latest_balance.get('Accounts Payable') or 0
-    dpo_fy0 = (ap / cogs * 365) if (cogs and ap) else 90
-    
-    # Tax rate (handle None values)
-    tax_provision = latest_income.get('Tax Provision') or 0
-    pretax_income = latest_income.get('Pretax Income') or 0
-    tax_rate_fy0 = (tax_provision / pretax_income * 100) if (pretax_income and tax_provision) else 21
-    
-    # Company info
-    ticker = company_data.get('basic_info', {}).get('symbol', 'UNKNOWN')
-    company_name = company_data.get('basic_info', {}).get('long_name', 'Unknown Company')
-    sector = company_data.get('basic_info', {}).get('sector', 'Unknown')
+def _finite_number(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
-    def estimate_text(table_name: str, period: str, field: str, *, percent=False) -> str:
-        value = ((analyst_data.get(table_name, {}) or {}).get(period, {}) or {}).get(field)
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            return "unavailable"
-        return f"{value * 100:.1f}%" if percent else f"{value:,.2f}"
-    
-    # Fill prompt
-    prompt = prompt_template.format(
-        company_name=company_name,
-        ticker=ticker,
-        sector=sector,
-        latest_fy=latest_year[:4],
-        revenue_growth_fy0=f"{revenue_growth_fy0:.1f}",
-        gross_margin_fy0=f"{gross_margin_fy0:.1f}",
-        ebitda_margin_fy0=f"{ebitda_margin_fy0:.1f}",
-        operating_margin_fy0=f"{operating_margin_fy0:.1f}",
-        dso_fy0=f"{dso_fy0:.1f}",
-        dio_fy0=f"{dio_fy0:.1f}",
-        dpo_fy0=f"{dpo_fy0:.1f}",
-        tax_rate_fy0=f"{tax_rate_fy0:.1f}",
-        revenue_cagr_3y=(
-            f"{historical_growth['cagr_3y'] * 100:.1f}%"
-            if isinstance(historical_growth.get('cagr_3y'), (int, float))
-            else "unavailable"
-        ),
-        revenue_growth_fy1_consensus=estimate_text(
-            'revenue_estimates', '0y', 'growth', percent=True),
-        revenue_growth_fy2_consensus=estimate_text(
-            'revenue_estimates', '+1y', 'growth', percent=True),
-        revenue_analysts_fy1=estimate_text(
-            'revenue_estimates', '0y', 'numberOfAnalysts'),
-        revenue_analysts_fy2=estimate_text(
-            'revenue_estimates', '+1y', 'numberOfAnalysts'),
-        eps_growth_fy1_consensus=estimate_text(
-            'earnings_estimates', '0y', 'growth', percent=True),
-        eps_growth_fy2_consensus=estimate_text(
-            'earnings_estimates', '+1y', 'growth', percent=True),
+
+def _statement_value(row: Dict[str, Any], *keys: str) -> Optional[float]:
+    for key in keys:
+        value = _finite_number(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def source_grounded_assumption_seed(json_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a deterministic starting point from observable source data.
+
+    This is deliberately not a valuation opinion.  The grounding layer later
+    replaces WACC, terminal growth, covered revenue years, normalized margins,
+    working capital, and terminal multiples with their authoritative methods.
+    The seed exists so a model is reproducible and an LLM/network outage cannot
+    either abort a run or inject generic software-company margins.
+    """
+    statements = (json_data.get("financial_statements") or {})
+    income = statements.get("income_statement") or {}
+    balance = statements.get("balance_sheet") or {}
+    periods = sorted(
+        (period for period, row in income.items() if isinstance(row, dict)),
+        key=str,
+        reverse=True,
     )
-    
-    # Call LLM using proper provider
-    print("\n🤖 Calling LLM to infer assumptions...")
-    messages = [{"role": "user", "content": prompt}]
-    response, cost = llm(messages, temperature=0.0)
-    print(f"   💰 LLM cost: ${cost:.4f}")
-    
-    # Parse JSON response
-    try:
-        # Clean response if it has markdown code blocks
-        response_clean = response.strip()
-        if response_clean.startswith('```'):
-            # Remove ```json or ``` markers
-            lines = response_clean.split('\n')
-            response_clean = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_clean
-        
-        assumptions = json.loads(response_clean)
-        print(f"   ✅ LLM inference successful")
-        return assumptions
-    except json.JSONDecodeError as e:
-        # Fallback to defaults if parsing fails
-        print(f"   ⚠️  Failed to parse LLM response: {e}")
-        print(f"   Using default assumptions based on FY0")
-        return {
-            'wacc': 0.09,
-            'terminal_growth_rate': 0.025,
-            'revenue_growth_rates': [0.05, 0.05, 0.04, 0.04, 0.03],
-            'gross_margins': [gross_margin_fy0/100] * 5 if gross_margin_fy0 else [0.46] * 5,
-            'ebitda_margins': [ebitda_margin_fy0/100] * 5 if ebitda_margin_fy0 else [0.33] * 5,
-            'operating_margins': [operating_margin_fy0/100] * 5 if operating_margin_fy0 else [0.31] * 5,
-            'dso_days': [dso_fy0] * 5 if dso_fy0 else [45] * 5,
-            'dio_days': [dio_fy0] * 5 if dio_fy0 else [10] * 5,
-            'dpo_days': [dpo_fy0] * 5 if dpo_fy0 else [90] * 5
-        }
+    if not periods:
+        raise ValueError("Cannot build model inputs: no annual income statements")
+    latest_period = periods[0]
+    latest_income = income[latest_period]
+    latest_balance = balance.get(latest_period) or {}
+    latest_revenue = _statement_value(latest_income, "Total Revenue", "Operating Revenue")
+    latest_operating = _statement_value(latest_income, "Operating Income")
+    if latest_revenue is None or latest_revenue <= 0 or latest_operating is None:
+        raise ValueError(
+            "Cannot build model inputs: latest annual revenue and operating income "
+            "must be present and finite"
+        )
+
+    # Prefer a qualified historical CAGR, then the latest annual change.  This
+    # is only the uncovered-year seed; qualified Street revenue dollars replace
+    # FY1/FY2 and the grounding layer creates the deterministic fade thereafter.
+    history = (((json_data.get("modeling_metrics") or {})
+                .get("historical_growth_rates") or {})
+               .get("revenue_growth") or {})
+    growth = _finite_number(history.get("cagr_3y"))
+    growth_source = "three_year_revenue_cagr"
+    if growth is None and len(periods) > 1:
+        prior_revenue = _statement_value(
+            income[periods[1]], "Total Revenue", "Operating Revenue"
+        )
+        if prior_revenue and prior_revenue > 0:
+            growth = latest_revenue / prior_revenue - 1.0
+            growth_source = "latest_annual_revenue_growth"
+    if growth is None:
+        growth = 0.0
+        growth_source = "zero_growth_when_history_unavailable"
+    # This is a provider/unit sanity rail, not a mature-company forecast.  A
+    # qualified absolute analyst forecast can still exceed it downstream.
+    growth = max(-0.50, min(1.00, growth))
+    terminal = 0.025
+    growth_path = [
+        terminal + (growth - terminal) * factor
+        for factor in (1.0, 0.80, 0.60, 0.40, 0.20)
+    ]
+
+    bridge = json_data.get("ttm_bridge") or {}
+    current_income = (
+        bridge.get("income_statement") or {}
+        if bridge.get("status") == "current" else latest_income
+    )
+    current_cash = (
+        bridge.get("cash_flow") or {}
+        if bridge.get("status") == "current" else {}
+    )
+    current_revenue = _statement_value(
+        current_income, "Total Revenue", "Operating Revenue"
+    ) or latest_revenue
+    current_operating = _statement_value(current_income, "Operating Income")
+    if current_operating is None:
+        current_operating = latest_operating
+    gross_profit = _statement_value(current_income, "Gross Profit")
+    if gross_profit is None:
+        gross_profit = _statement_value(latest_income, "Gross Profit")
+    ebitda = _statement_value(current_income, "EBITDA")
+    if ebitda is None:
+        da = _statement_value(
+            current_cash,
+            "Depreciation And Amortization",
+            "Depreciation Amortization Depletion",
+            "Depreciation",
+        )
+        if da is None:
+            da = depreciation_and_amortization(statements, latest_period)
+        # Operating income is EBIT.  If D&A is unavailable, using EBIT as the
+        # EBITDA seed is conservative and transparent; no margin is invented.
+        ebitda = current_operating + (float(da) if da is not None else 0.0)
+
+    def margin_path(amount: Optional[float]) -> list:
+        margin = amount / current_revenue if amount is not None and current_revenue else None
+        return [margin] * 5
+
+    cogs = _statement_value(
+        latest_income, "Cost Of Revenue", "Reconciled Cost Of Revenue"
+    )
+
+    def days(numerator: Optional[float], denominator: Optional[float]) -> list:
+        value = (
+            numerator / denominator * 365.0
+            if numerator is not None and denominator and denominator > 0 else None
+        )
+        return [value] * 5
+
+    assumptions = {
+        "wacc": None,
+        "terminal_growth_rate": terminal,
+        "revenue_growth_rates": growth_path,
+        "gross_margins": margin_path(gross_profit),
+        "ebitda_margins": margin_path(ebitda),
+        "operating_margins": margin_path(current_operating),
+        "dso_days": days(
+            _statement_value(latest_balance, "Accounts Receivable", "Receivables"),
+            latest_revenue,
+        ),
+        "dio_days": days(_statement_value(latest_balance, "Inventory"), cogs),
+        "dpo_days": days(
+            _statement_value(
+                latest_balance, "Accounts Payable", "Payables",
+                "Payables And Accrued Expenses",
+            ),
+            cogs,
+        ),
+        "assumption_seed_source": growth_source,
+        "assumption_seed_period": latest_period,
+    }
+    return assumptions
+
+
+def source_grounded_bank_assumption_seed(
+    json_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Seed only the shared discount-rate inputs for a bank workbook.
+
+    Banks commonly do not report ``Operating Income`` because interest income,
+    funding costs, provisions, and equity capital are the relevant economics.
+    Requiring that industrial line before selecting justified P/B prevented a
+    valid JPM model from being built at all.  Blank industrial drivers are
+    intentional here: :func:`ground_assumptions` will populate CAPM and the
+    long-run rate, while the bank model derives book value and normalized ROE
+    independently.  No fabricated operating margin is introduced merely to
+    satisfy an inapplicable DCF schema.
+    """
+    statements = (json_data.get("financial_statements") or {})
+    income = statements.get("income_statement") or {}
+    periods = sorted(
+        (period for period, row in income.items() if isinstance(row, dict)),
+        key=str,
+        reverse=True,
+    )
+    return {
+        "wacc": None,
+        "terminal_growth_rate": 0.025,
+        "revenue_growth_rates": [],
+        "gross_margins": [],
+        "ebitda_margins": [],
+        "operating_margins": [],
+        "dso_days": [],
+        "dio_days": [],
+        "dpo_days": [],
+        "assumption_seed_source": "not_applicable_to_bank_valuation",
+        "assumption_seed_period": periods[0] if periods else None,
+    }
+
+
+def infer_assumptions_with_llm(json_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Deprecated compatibility alias for the old public entry point.
+
+    Numerical valuation assumptions must not depend on generative output.  Keep
+    the name temporarily so external callers do not break, but return exactly
+    the same deterministic source-grounded seed as the model builder.
+    """
+    return source_grounded_assumption_seed(json_data)

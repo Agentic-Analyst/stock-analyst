@@ -152,6 +152,21 @@ class TestComputeBeta:
         assert fit["index"] == "^NSEI"
         assert fit["observations"] == 60
         assert fit["weak_fit"] is False
+        assert fit["observation_start"].startswith("2021-02-28")
+        assert fit["observation_end"].startswith("2026-01-31")
+        assert len(fit["observations_sha256"]) == 64
+        assert fit["series_source"] == "Yahoo Finance via yfinance"
+        assert fit["series_adjustment"] == "auto_adjust=True"
+        stats = fit["sufficient_statistics"]
+        assert (
+            stats["return_covariance"] / stats["benchmark_return_variance"]
+        ) == pytest.approx(fit["raw"])
+
+        # The digest identifies the exact aligned observations, not merely the
+        # requested window. Repeating the same sample must reproduce it.
+        assert compute_beta("X.NS")["observations_sha256"] == fit[
+            "observations_sha256"
+        ]
 
     def test_blume_adjustment(self, monkeypatch):
         import numpy as np
@@ -250,6 +265,44 @@ class TestCapmIntegration:
         c = ag.capm_components(self._pcj())
         assert "S&P 500" in c["beta_source"]
         assert "price history was unavailable" in c["beta_source"]
+
+    def test_weak_us_fit_falls_back_to_observed_sp500_beta(self, monkeypatch):
+        from src.agents.fm import assumption_grounding as ag
+        import src.agents.fm.market_beta as mb
+        monkeypatch.setattr(mb, "compute_beta", lambda s: {
+            "raw": 0.29, "blume": 0.5243, "r_squared": 0.08,
+            "observations": 59, "index": "^GSPC", "window": "5y monthly",
+            "weak_fit": True,
+        })
+        company = {
+            "basic_info": {
+                "symbol": "KO", "currency": "USD", "country": "United States",
+            },
+            "capital_structure": {"beta": 0.342, "total_debt": 44e9},
+            "market_data": {"market_cap": 380e9},
+            "growth_profitability": {},
+        }
+
+        c = ag.capm_components(company)
+
+        assert c["beta"] == pytest.approx(0.67 * 0.342 + 0.33)
+        assert "regression vs ^GSPC is not informative" in c["beta_source"]
+        assert "Yahoo S&P 500 beta 0.34" in c["beta_source"]
+
+    def test_weak_foreign_fit_does_not_use_yahoo_sp500_beta(self, monkeypatch):
+        from src.agents.fm import assumption_grounding as ag
+        import src.agents.fm.market_beta as mb
+        monkeypatch.setattr(mb, "compute_beta", lambda s: {
+            "raw": 0.05, "blume": 0.3635, "r_squared": 0.01,
+            "observations": 59, "index": "^NSEI", "window": "5y monthly",
+            "weak_fit": True,
+        })
+
+        c = ag.capm_components(self._pcj())
+
+        assert c["beta"] == pytest.approx(1.0)
+        assert "neutral beta 1.00 used" in c["beta_source"]
+        assert "Yahoo S&P 500 beta" not in c["beta_source"]
 
     def test_pc_jeweller_is_no_longer_discounted_like_a_utility(self, monkeypatch):
         """

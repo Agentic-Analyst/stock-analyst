@@ -86,3 +86,16 @@ def test_a_later_run_is_not_contaminated_by_an_earlier_one():
 def test_none_is_still_not_a_number():
     overview("EUR")
     assert fsa.format_number(None) == "N/A"
+
+
+def test_model_summary_prefers_normalized_consensus_to_stale_guidance():
+    data = {
+        "ticker": "X",
+        "company_data": {
+            "basic_info": {}, "market_data": {}, "valuation_metrics": {},
+            "capital_structure": {}, "growth_profitability": {},
+            "forward_guidance": {"target_mean_price": 100.0},
+            "analyst_consensus": {"price_target": {"mean": 210.0}},
+        },
+    }
+    assert fsa.extract_company_overview(data)["target_mean_price"] == 210.0

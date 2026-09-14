@@ -91,7 +91,7 @@ def format_number(num, decimals=2):
             return f"{sym}{num/1e3:.{decimals}f}K"
         else:
             return f"{sym}{num:.{decimals}f}"
-    except:
+    except (TypeError, ValueError, OverflowError):
         return str(num)
 
 
@@ -101,7 +101,7 @@ def format_percent(num, decimals=1):
         return "N/A"
     try:
         return f"{float(num)*100:.{decimals}f}%"
-    except:
+    except (TypeError, ValueError, OverflowError):
         return str(num)
 
 
@@ -114,6 +114,9 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
     capital_structure = company_data.get('capital_structure', {})
     growth_profitability = company_data.get('growth_profitability', {})
     forward_guidance = company_data.get('forward_guidance', {})
+    consensus_target = (
+        (company_data.get('analyst_consensus') or {}).get('price_target') or {}
+    )
 
     # Pin the currency here rather than at the call site: every figure this
     # summary formats flows from this dict, so pinning where the data is read
@@ -141,7 +144,11 @@ def extract_company_overview(financial_data: Dict[str, Any]) -> Dict[str, Any]:
         'net_margin': growth_profitability.get('profit_margins', 0),
         'roe': growth_profitability.get('return_on_equity', 0),
         'revenue_growth': growth_profitability.get('revenue_growth', 0),
-        'target_mean_price': forward_guidance.get('target_mean_price', 0),
+        'target_mean_price': (
+            consensus_target.get('mean')
+            if consensus_target.get('mean') is not None
+            else forward_guidance.get('target_mean_price', 0)
+        ),
     }
 
 
@@ -177,25 +184,28 @@ def extract_historical_financials(financial_data: Dict[str, Any]) -> Dict[str, A
 
 
 def extract_model_assumptions(computed_values: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract model assumptions from LLM_Inferred tab."""
-    llm_inferred = computed_values.get('LLM_Inferred', {}).get('cells', {})
+    """Extract grounded inputs, with legacy-workbook compatibility."""
+    model_inputs = (
+        computed_values.get('Model_Inputs', {}).get('cells', {})
+        or computed_values.get('LLM_Inferred', {}).get('cells', {})
+    )
     
     return {
-        'wacc': llm_inferred.get('(2, 2)', 0.09),
-        'terminal_growth': llm_inferred.get('(3, 2)', 0.025),
+        'wacc': model_inputs.get('(2, 2)'),
+        'terminal_growth': model_inputs.get('(3, 2)'),
         'revenue_growth_rates': [
-            llm_inferred.get('(4, 2)', 0),
-            llm_inferred.get('(4, 3)', 0),
-            llm_inferred.get('(4, 4)', 0),
-            llm_inferred.get('(4, 5)', 0),
-            llm_inferred.get('(4, 6)', 0),
+            model_inputs.get('(4, 2)', 0),
+            model_inputs.get('(4, 3)', 0),
+            model_inputs.get('(4, 4)', 0),
+            model_inputs.get('(4, 5)', 0),
+            model_inputs.get('(4, 6)', 0),
         ],
         'ebitda_margins': [
-            llm_inferred.get('(6, 2)', 0),
-            llm_inferred.get('(6, 3)', 0),
-            llm_inferred.get('(6, 4)', 0),
-            llm_inferred.get('(6, 5)', 0),
-            llm_inferred.get('(6, 6)', 0),
+            model_inputs.get('(6, 2)', 0),
+            model_inputs.get('(6, 3)', 0),
+            model_inputs.get('(6, 4)', 0),
+            model_inputs.get('(6, 5)', 0),
+            model_inputs.get('(6, 6)', 0),
         ],
     }
 
@@ -480,4 +490,3 @@ def generate_and_save_financial_summary(
         logger.info(f"   • File size: {summary_path.stat().st_size:,} bytes")
     
     return summary, summary_path, cost
-

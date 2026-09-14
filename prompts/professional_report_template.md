@@ -189,7 +189,7 @@ Generate a **professional markdown report** with the following structure:
 [... repeat for each risk]
 
 ### News Sentiment Summary
-- **Overall Sentiment**: {sentiment} ({confidence_score} confidence)
+- **News Sentiment**: {sentiment} ({confidence_score} confidence)
 - **Key Themes**: {themes}
 - **Articles Analyzed**: {num_articles}
 

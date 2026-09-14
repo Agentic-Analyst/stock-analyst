@@ -12,12 +12,13 @@ and mitigation strategies.
 """
 
 from __future__ import annotations
-import os, csv, argparse, pathlib, re, json, asyncio
+import os, csv, argparse, pathlib, re, json, asyncio, math
 from datetime import datetime
 from typing import Dict, List, Tuple, Set, Optional
 from dataclasses import dataclass, asdict
 from collections import defaultdict, Counter
 import yaml
+from urllib.parse import urlsplit, urlunsplit
 
 # Import centralized configuration
 from config import (
@@ -27,11 +28,20 @@ from config import (
     NEWS_MIN_FRESH_ARTICLES,
 )
 from news_freshness import filter_fresh_articles
+from article_relevance import filter_subject_articles
 import tiktoken
 from llms.config import get_llm
 from vynn_core import find_recent, get_article_by_url
+from recommendation_validator import RecommendationValidator
 
-PROMPTS_ROOT = pathlib.Path("prompts")
+PROMPTS_ROOT = pathlib.Path(__file__).resolve().parent.parent / "prompts"
+
+
+def _mongo_configured() -> bool:
+    return bool(
+        (os.getenv("MONGO_URI") or "").strip()
+        and (os.getenv("MONGO_DB") or "").strip()
+    )
 
 def load_prompt(prompt_name: str) -> str:
     """Load a prompt template from the prompts directory."""
@@ -54,6 +64,7 @@ class ArticleReference:
     title: str
     url: str
     publish_date: Optional[str] = None
+    snippet: Optional[str] = None
 
 @dataclass
 class Catalyst:
@@ -69,6 +80,7 @@ class Catalyst:
     direct_quotes: List[DirectQuote] = None  # Direct quotes supporting this catalyst
     source_articles: List[ArticleReference] = None  # Source articles for this catalyst
     potential_impact: Optional[str] = None  # Expected impact description
+    confidence_basis: Optional[str] = None  # Deterministic evidence calibration
     
     def __post_init__(self):
         if self.direct_quotes is None:
@@ -91,6 +103,7 @@ class Risk:
     direct_quotes: List[DirectQuote] = None  # Direct quotes supporting this risk
     source_articles: List[ArticleReference] = None  # Source articles for this risk
     likelihood: Optional[str] = None  # Likelihood assessment: low|medium|high
+    confidence_basis: Optional[str] = None  # Deterministic evidence calibration
     
     def __post_init__(self):
         if self.direct_quotes is None:
@@ -113,6 +126,7 @@ class Mitigation:
     direct_quotes: List[DirectQuote] = None  # Direct quotes supporting this mitigation
     source_articles: List[ArticleReference] = None  # Source articles for this mitigation
     implementation_timeline: Optional[str] = None  # When mitigation is expected
+    confidence_basis: Optional[str] = None  # Deterministic evidence calibration
     
     def __post_init__(self):
         if self.direct_quotes is None:
@@ -132,8 +146,10 @@ class AnalysisSummary:
     total_mitigations: int = 0
 
 class ArticleScreener:
-    def __init__(self, ticker: str, base_path: pathlib.Path):
+    def __init__(self, ticker: str, base_path: pathlib.Path,
+                 company_name: Optional[str] = None):
         self.ticker = ticker.upper()
+        self.company_name = company_name
         self.company_dir = base_path
         
         # Logger - will be set by pipeline if available
@@ -189,12 +205,13 @@ class ArticleScreener:
         batch_content = ""
         
         for i, article in enumerate(articles, 1):
+            batch_content += f"<UNTRUSTED_ARTICLE index=\"{i}\">\n"
             batch_content += f"### ARTICLE {i}: {article['file_name']}\n"
             batch_content += f"**Title:** {article['title']}\n"
             batch_content += f"**Source:** {article.get('source_url', 'N/A')}\n"
             batch_content += f"**Date:** {article.get('publish_date', 'N/A')}\n\n"
             batch_content += f"**Content:**\n{article['text']}\n\n"
-            batch_content += "---\n\n"
+            batch_content += "</UNTRUSTED_ARTICLE>\n\n"
         
         return batch_content
     
@@ -238,7 +255,9 @@ class ArticleScreener:
             # Parse response into structured insights (shared by sync + async paths)
             analysis_data = self._parse_llm_json_response(response, "batch_analysis")
             catalysts, risks, mitigations = self._parse_batch_analysis_data(analysis_data)
-            self._attach_publication_dates(catalysts, risks, mitigations, articles)
+            catalysts, risks, mitigations = self._ground_insights(
+                catalysts, risks, mitigations, articles
+            )
 
             # Display batch results
             self._log("info", f"✅ Batch {batch_num} complete: {len(catalysts)}🚀 {len(risks)}⚠️ {len(mitigations)}🛡️")
@@ -274,9 +293,13 @@ class ArticleScreener:
         if analysis_data:
             # Extract catalysts with enhanced information
             for cat_data in analysis_data.get("catalysts", []):
+                if not isinstance(cat_data, dict):
+                    continue
                 # Parse direct quotes
                 direct_quotes = []
                 for quote_data in cat_data.get("direct_quotes", []):
+                    if not isinstance(quote_data, dict):
+                        continue
                     direct_quotes.append(DirectQuote(
                         quote=quote_data.get("quote", ""),
                         source_article=quote_data.get("source_article", ""),
@@ -299,11 +322,16 @@ class ArticleScreener:
                 catalyst = Catalyst(
                     type=cat_data.get("type", "unknown").lower(),
                     description=cat_data.get("description", ""),
-                    confidence=cat_data.get("confidence", 0.5),
-                    supporting_evidence=cat_data.get("supporting_evidence", []),
-                    timeline=cat_data.get("timeline", "medium-term").lower().replace("_", "-"),
+                    confidence=self._bounded_confidence(cat_data.get("confidence")),
+                    supporting_evidence=self._string_list(
+                        cat_data.get("supporting_evidence")),
+                    timeline=self._enum_value(
+                        cat_data.get("timeline"),
+                        {"immediate", "short-term", "medium-term", "long-term"},
+                        "medium-term",
+                    ),
                     llm_reasoning=cat_data.get("reasoning", ""),
-                    llm_confidence=cat_data.get("confidence", 0.5),
+                    llm_confidence=self._bounded_confidence(cat_data.get("confidence")),
                     reasoning=cat_data.get("reasoning", ""),
                     direct_quotes=direct_quotes,
                     source_articles=source_articles,
@@ -313,9 +341,13 @@ class ArticleScreener:
 
             # Extract risks with enhanced information
             for risk_data in analysis_data.get("risks", []):
+                if not isinstance(risk_data, dict):
+                    continue
                 # Parse direct quotes
                 direct_quotes = []
                 for quote_data in risk_data.get("direct_quotes", []):
+                    if not isinstance(quote_data, dict):
+                        continue
                     direct_quotes.append(DirectQuote(
                         quote=quote_data.get("quote", ""),
                         source_article=quote_data.get("source_article", ""),
@@ -338,24 +370,33 @@ class ArticleScreener:
                 risk = Risk(
                     type=risk_data.get("type", "unknown").lower(),
                     description=risk_data.get("description", ""),
-                    severity=risk_data.get("severity", "medium").lower(),
-                    confidence=risk_data.get("confidence", 0.5),
-                    supporting_evidence=risk_data.get("supporting_evidence", []),
+                    severity=self._enum_value(
+                        risk_data.get("severity"),
+                        {"low", "medium", "high", "critical"}, "medium"),
+                    confidence=self._bounded_confidence(risk_data.get("confidence")),
+                    supporting_evidence=self._string_list(
+                        risk_data.get("supporting_evidence")),
                     potential_impact=risk_data.get("potential_impact", ""),
                     llm_reasoning=risk_data.get("reasoning", ""),
-                    llm_confidence=risk_data.get("confidence", 0.5),
+                    llm_confidence=self._bounded_confidence(risk_data.get("confidence")),
                     reasoning=risk_data.get("reasoning", ""),
                     direct_quotes=direct_quotes,
                     source_articles=source_articles,
-                    likelihood=risk_data.get("likelihood", "medium")
+                    likelihood=self._enum_value(
+                        risk_data.get("likelihood"),
+                        {"low", "medium", "high"}, "medium")
                 )
                 risks.append(risk)
             
             # Extract mitigations with enhanced information
             for mit_data in analysis_data.get("mitigations", []):
+                if not isinstance(mit_data, dict):
+                    continue
                 # Parse direct quotes
                 direct_quotes = []
                 for quote_data in mit_data.get("direct_quotes", []):
+                    if not isinstance(quote_data, dict):
+                        continue
                     direct_quotes.append(DirectQuote(
                         quote=quote_data.get("quote", ""),
                         source_article=quote_data.get("source_article", ""),
@@ -378,12 +419,15 @@ class ArticleScreener:
                 mitigation = Mitigation(
                     risk_addressed=mit_data.get("risk_addressed", ""),
                     strategy=mit_data.get("strategy", ""),
-                    confidence=mit_data.get("confidence", 0.5),
-                    supporting_evidence=mit_data.get("supporting_evidence", []),
-                    effectiveness=mit_data.get("effectiveness", "medium").lower(),
+                    confidence=self._bounded_confidence(mit_data.get("confidence")),
+                    supporting_evidence=self._string_list(
+                        mit_data.get("supporting_evidence")),
+                    effectiveness=self._enum_value(
+                        mit_data.get("effectiveness"),
+                        {"low", "medium", "high"}, "medium"),
                     company_action=mit_data.get("company_action", ""),
                     llm_reasoning=mit_data.get("reasoning", ""),
-                    llm_confidence=mit_data.get("confidence", 0.5),
+                    llm_confidence=self._bounded_confidence(mit_data.get("confidence")),
                     reasoning=mit_data.get("reasoning", ""),
                     direct_quotes=direct_quotes,
                     source_articles=source_articles,
@@ -394,27 +438,325 @@ class ArticleScreener:
         return catalysts, risks, mitigations
 
     @staticmethod
-    def _attach_publication_dates(
-        catalysts: List[Catalyst], risks: List[Risk], mitigations: List[Mitigation],
+    def _bounded_confidence(value: object, default: float = 0.5) -> float:
+        """Normalize an untrusted model score to the documented 0..1 range."""
+        if isinstance(value, bool):
+            return default
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        if not math.isfinite(number):
+            return default
+        return min(max(number, 0.0), 1.0)
+
+    @staticmethod
+    def _string_list(value: object) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()][:20]
+
+    @staticmethod
+    def _enum_value(value: object, allowed: Set[str], default: str) -> str:
+        normalized = str(value or "").strip().lower().replace("_", "-")
+        return normalized if normalized in allowed else default
+
+    @staticmethod
+    def _canonical_url(value: str) -> str:
+        try:
+            parsed = urlsplit(str(value or "").strip())
+        except ValueError:
+            return ""
+        if not parsed.netloc:
+            return ""
+        host = parsed.netloc.casefold().removeprefix("www.")
+        path = parsed.path.rstrip("/") or "/"
+        return urlunsplit((parsed.scheme.casefold() or "https", host, path, "", ""))
+
+    @staticmethod
+    def _normalized_source_text(value: str) -> str:
+        return " ".join(
+            str(value or "").replace("’", "'").replace("“", '"').replace("”", '"')
+            .casefold().split()
+        )
+
+    @classmethod
+    def _claim_supported(cls, claim: str, source_text: str) -> bool:
+        claim_numbers = RecommendationValidator._support_numbers(claim)
+        source_numbers = RecommendationValidator._support_numbers(source_text)
+        if claim_numbers and not claim_numbers.issubset(source_numbers):
+            return False
+        overlap = RecommendationValidator._support_tokens(claim).intersection(
+            RecommendationValidator._support_tokens(source_text)
+        )
+        return len(overlap) >= 2 or any(len(token) >= 7 for token in overlap)
+
+    @staticmethod
+    def _quote_excerpt(value: str, max_words: int = 25, max_chars: int = 240) -> str:
+        """Keep a short verbatim excerpt instead of reproducing article prose."""
+        text = " ".join(str(value or "").split())
+        words = text.split()
+        clipped = len(words) > max_words or len(text) > max_chars
+        candidate = " ".join(words[:max_words])
+        if len(candidate) > max_chars:
+            candidate = candidate[:max_chars + 1].rsplit(" ", 1)[0].rstrip()
+        return candidate + ("…" if clipped and candidate else "")
+
+    @classmethod
+    def _calibrate_evidence_confidence(cls, insight) -> None:
+        """Cap model confidence by the corroboration actually retained.
+
+        The score is extraction confidence, not the probability a stock outcome
+        occurs. One opinion article cannot become 99%-certain merely because the
+        language model sounded confident. Independent publishers raise the cap;
+        a verified primary/regulatory source can support a high single-source
+        score for a factual event.
+        """
+        references = getattr(insight, "source_articles", None) or []
+        canonical_urls = {
+            cls._canonical_url(getattr(reference, "url", ""))
+            for reference in references
+        }
+        canonical_urls.discard("")
+        hosts = {
+            (urlsplit(url).hostname or "").casefold().removeprefix("www.")
+            for url in canonical_urls
+        }
+        primary = any(
+            host == "sec.gov" or host.endswith(".sec.gov")
+            or host.endswith(".gov") or host == "ec.europa.eu"
+            for host in hosts
+        )
+        if len(hosts) >= 3:
+            cap, basis = 0.95, "three_or_more_independent_publishers"
+        elif len(hosts) >= 2:
+            cap, basis = 0.90, "two_independent_publishers"
+        elif len(canonical_urls) >= 2:
+            cap, basis = 0.85, "multiple_articles_one_publisher"
+        elif primary:
+            cap, basis = 0.90, "verified_primary_or_regulatory_source"
+        elif getattr(insight, "direct_quotes", None):
+            cap, basis = 0.80, "single_source_with_verified_excerpt"
+        else:
+            cap, basis = 0.70, "single_source_without_verified_excerpt"
+        raw = cls._bounded_confidence(
+            getattr(insight, "llm_confidence", None),
+            default=cls._bounded_confidence(getattr(insight, "confidence", None)),
+        )
+        insight.llm_confidence = raw
+        insight.confidence = min(raw, cap)
+        insight.confidence_basis = (
+            f"model_extraction_score={raw:.2f}; evidence_cap={cap:.2f}; {basis}"
+        )
+
+    def _ground_insights(
+        self, catalysts: List[Catalyst], risks: List[Risk], mitigations: List[Mitigation],
         articles: List[Dict],
-    ) -> None:
-        """Join model-returned citations back to source metadata deterministically."""
+    ) -> Tuple[List[Catalyst], List[Risk], List[Mitigation]]:
+        """Keep only insights whose references and claims map to input articles."""
         by_url = {}
         by_title = {}
         for article in articles:
-            published = article.get("_publication_datetime") or article.get("publish_date")
-            url = str(article.get("source_url") or article.get("url") or "").strip()
-            title = str(article.get("title") or "").strip().casefold()
+            url = self._canonical_url(article.get("source_url") or article.get("url") or "")
+            title_key = self._normalized_source_text(article.get("title") or "")
             if url:
-                by_url[url] = published
-            if title:
-                by_title[title] = published
-        for insight in [*catalysts, *risks, *mitigations]:
-            for reference in insight.source_articles:
-                reference.publish_date = (
-                    by_url.get((reference.url or "").strip())
-                    or by_title.get((reference.title or "").strip().casefold())
+                by_url[url] = article
+            if title_key:
+                by_title[title_key] = article
+
+        def resolve(title: str, url: str) -> Optional[Dict]:
+            return (
+                by_url.get(self._canonical_url(url))
+                or by_title.get(self._normalized_source_text(title))
+            )
+
+        dropped = 0
+
+        def ground(rows):
+            nonlocal dropped
+            kept = []
+            for insight in rows:
+                matched = []
+                seen_urls = set()
+                for reference in insight.source_articles:
+                    article = resolve(reference.title, reference.url)
+                    if not article:
+                        continue
+                    actual_url = str(article.get("source_url") or article.get("url") or "")
+                    canonical = self._canonical_url(actual_url)
+                    if canonical in seen_urls:
+                        continue
+                    seen_urls.add(canonical)
+                    matched.append((article, ArticleReference(
+                        title=str(article.get("title") or "Untitled"),
+                        url=actual_url,
+                        publish_date=(
+                            article.get("_publication_datetime")
+                            or article.get("publish_date")
+                        ),
+                        snippet=str(
+                            article.get("serpapi_snippet")
+                            or article.get("snippet")
+                            or article.get("text")
+                            or article.get("content")
+                            or ""
+                        )[:1000],
+                    )))
+
+                # A quote can recover a missing source_articles entry only when
+                # its own source title/URL exactly maps to this input batch.
+                for quote in insight.direct_quotes:
+                    article = resolve(quote.source_article, quote.source_url)
+                    if not article:
+                        continue
+                    actual_url = str(article.get("source_url") or article.get("url") or "")
+                    canonical = self._canonical_url(actual_url)
+                    if canonical in seen_urls:
+                        continue
+                    seen_urls.add(canonical)
+                    matched.append((article, ArticleReference(
+                        title=str(article.get("title") or "Untitled"),
+                        url=actual_url,
+                        publish_date=article.get("_publication_datetime") or article.get("publish_date"),
+                        snippet=str(article.get("serpapi_snippet") or article.get("text") or "")[:1000],
+                    )))
+
+                claim = (
+                    insight.description if hasattr(insight, "description")
+                    else f"{insight.risk_addressed} {insight.strategy}"
                 )
+                # One actual source must support the whole claim on its own.
+                # Concatenating several unrelated articles allowed token/number
+                # fragments from different sources to manufacture apparent
+                # support for a combined claim that none of them made.
+                supported_matched = []
+                for article, reference in matched:
+                    individual_text = " ".join(
+                        str(article.get(key) or "") for key in (
+                            "title", "serpapi_snippet", "snippet", "text", "content",
+                        )
+                    )
+                    if self._claim_supported(claim, individual_text):
+                        supported_matched.append((article, reference))
+                if not supported_matched:
+                    dropped += 1
+                    continue
+
+                matched = supported_matched
+                source_text = " ".join(
+                    " ".join(str(article.get(key) or "") for key in (
+                        "title", "serpapi_snippet", "snippet", "text", "content",
+                    ))
+                    for article, _ in matched
+                )
+
+                insight.source_articles = [reference for _, reference in matched]
+                valid_quotes = []
+                for quote in insight.direct_quotes:
+                    article = resolve(quote.source_article, quote.source_url)
+                    if not article or len(str(quote.quote or "").strip()) < 12:
+                        continue
+                    article_text = self._normalized_source_text(
+                        article.get("text") or article.get("content") or ""
+                    )
+                    if self._normalized_source_text(quote.quote) not in article_text:
+                        continue
+                    quote.source_article = str(article.get("title") or "Untitled")
+                    quote.source_url = str(article.get("source_url") or article.get("url") or "")
+                    quote.quote = self._quote_excerpt(quote.quote)
+                    valid_quotes.append(quote)
+                insight.direct_quotes = valid_quotes
+                insight.supporting_evidence = [
+                    item for item in insight.supporting_evidence
+                    if self._claim_supported(str(item), source_text)
+                ]
+                self._calibrate_evidence_confidence(insight)
+                kept.append(insight)
+            return kept
+
+        grounded = ground(catalysts), ground(risks), ground(mitigations)
+        if dropped:
+            self._log(
+                "warning",
+                f"Evidence provenance gate dropped {dropped} ungrounded insight(s) "
+                "with unknown sources or unsupported claims",
+            )
+        return grounded
+
+    @staticmethod
+    def _dedup_tokens(value: str) -> List[str]:
+        stop = {
+            "a", "an", "and", "are", "as", "at", "be", "by", "can",
+            "company", "could", "for", "from", "has", "have", "if", "in",
+            "into", "is", "it", "its", "may", "new", "of", "on", "or",
+            "that", "the", "their", "this", "to", "under", "when", "which",
+            "while", "with",
+        }
+        words = re.findall(r"[a-z0-9]+", str(value or "").casefold())
+        return [
+            word[:-1] if word.endswith("s") and len(word) > 4 else word
+            for word in words
+            if (len(word) > 2 or word == "ai") and word not in stop
+        ]
+
+    @classmethod
+    def _insights_are_duplicates(cls, left, right) -> bool:
+        type_aliases = {"technological": "technology", "finance": "financial"}
+        left_raw = str(getattr(left, "type", "") or "").casefold()
+        right_raw = str(getattr(right, "type", "") or "").casefold()
+        left_type = type_aliases.get(left_raw, left_raw)
+        right_type = type_aliases.get(right_raw, right_raw)
+        if left_type and right_type and left_type != right_type:
+            return False
+
+        def text(row):
+            if hasattr(row, "description"):
+                return row.description
+            return f"{getattr(row, 'risk_addressed', '')} {getattr(row, 'strategy', '')}"
+
+        left_tokens = cls._dedup_tokens(text(left))
+        right_tokens = cls._dedup_tokens(text(right))
+        if not left_tokens or not right_tokens:
+            return False
+        left_set, right_set = set(left_tokens), set(right_tokens)
+        overlap = len(left_set & right_set) / min(len(left_set), len(right_set))
+        left_bigrams = set(zip(left_tokens, left_tokens[1:]))
+        right_bigrams = set(zip(right_tokens, right_tokens[1:]))
+        return overlap >= 0.50 or (
+            overlap >= 0.25 and bool(left_bigrams & right_bigrams)
+        )
+
+    @classmethod
+    def _deduplicate_insights(cls, rows: list) -> list:
+        """Keep the strongest repeated theme without another model call.
+
+        Do not union evidence from the discarded phrasing into the retained
+        claim. Each original source passed grounding against its own wording;
+        it has not necessarily established every detail in the surviving row.
+        """
+        ordered = sorted(
+            rows or [], key=lambda row: float(getattr(row, "confidence", 0.0)),
+            reverse=True,
+        )
+        kept = []
+        for row in ordered:
+            duplicate = next(
+                (item for item in kept if cls._insights_are_duplicates(item, row)),
+                None,
+            )
+            if duplicate is None:
+                kept.append(row)
+                continue
+            duplicate.confidence = max(duplicate.confidence, row.confidence)
+            duplicate.llm_confidence = max(
+                float(duplicate.llm_confidence or duplicate.confidence),
+                float(row.llm_confidence or row.confidence),
+            )
+            if hasattr(duplicate, "severity"):
+                ranks = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+                if ranks.get(row.severity, 1) > ranks.get(duplicate.severity, 1):
+                    duplicate.severity = row.severity
+        return kept
 
     def _is_rate_limit_error(self, error_message: str) -> bool:
         """True if an error string looks like a rate-limit / token-limit failure."""
@@ -686,6 +1028,18 @@ class ArticleScreener:
         Returns:
             List of article dictionaries compatible with analyze_all_articles()
         """        
+        if not _mongo_configured():
+            self._log(
+                "info",
+                "MongoDB persistence is not configured; using current-run local articles",
+            )
+            self.last_freshness = {
+                "status": "unavailable",
+                "fresh_articles": 0,
+                "reason": "mongodb_not_configured",
+            }
+            return []
+
         try:
             self._log("info", f"📂 Loading articles from MongoDB for {self.ticker} limit: {limit}")
             
@@ -696,6 +1050,16 @@ class ArticleScreener:
             )
 
             self._log("info", f"✅ Found {len(recent_articles)} recent articles in database")
+
+            recent_articles, irrelevant_count = filter_subject_articles(
+                recent_articles, self.ticker, self.company_name
+            )
+            if irrelevant_count:
+                self._log(
+                    "warning",
+                    f"Deterministic subject gate excluded {irrelevant_count} unrelated "
+                    f"database article(s) from {self.ticker} coverage",
+                )
 
             # Filter by ticker and score, convert to screener format
             filtered_articles = []
@@ -727,6 +1091,7 @@ class ArticleScreener:
                 minimum_articles=NEWS_MIN_FRESH_ARTICLES,
                 limit=limit,
             )
+            freshness["irrelevant_articles_excluded"] = irrelevant_count
             self.last_freshness = freshness
             self._log(
                 "info",
@@ -738,15 +1103,17 @@ class ArticleScreener:
             return result
             
         except Exception as e:
-            self._log("error", f"❌ Error loading articles from MongoDB: {e}")
-            import traceback
-            self._log("error", f"Full traceback: {traceback.format_exc()}")
+            self._log(
+                "warning",
+                "MongoDB article lookup failed; using current-run local articles "
+                f"({type(e).__name__})",
+            )
             # Fallback to local file loading
             self._log("info", "⚠️  Falling back to local file loading")
             self.last_freshness = {
                 "status": "unavailable",
                 "fresh_articles": 0,
-                "error": str(e),
+                "error_type": type(e).__name__,
             }
             return []
 
@@ -785,12 +1152,16 @@ class ArticleScreener:
             all_risks.extend(batch_risks)
             all_mitigations.extend(batch_mitigations)
         
-        self._log("info", f"🔄 Using LLM to intelligently deduplicate insights across {len(articles)} articles...")
-        # Use LLM-powered deduplication instead of simple merging
-        # merged_catalysts, merged_risks, merged_mitigations = self._llm_deduplicate_insights(all_catalysts, all_risks, all_mitigations)
-        
-        self._log("info", f"✅ Batch analysis complete! Raw insights: {len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️")
-        # self._log("info", f"🔍 After LLM deduplication: {len(merged_catalysts)}🚀 {len(merged_risks)}⚠️ {len(merged_mitigations)}🛡️")
+        raw_counts = (len(all_catalysts), len(all_risks), len(all_mitigations))
+        all_catalysts = self._deduplicate_insights(all_catalysts)
+        all_risks = self._deduplicate_insights(all_risks)
+        all_mitigations = self._deduplicate_insights(all_mitigations)
+        self._log(
+            "info",
+            f"✅ Batch analysis complete: {raw_counts[0]}/{raw_counts[1]}/{raw_counts[2]} "
+            f"raw catalyst/risk/mitigation insights → "
+            f"{len(all_catalysts)}/{len(all_risks)}/{len(all_mitigations)} unique themes",
+        )
         self._log("info", f"💰 Total LLM cost: ${self.total_llm_cost:.4f} USD across {self.llm_call_count} calls")
 
         overall_summary = self._build_analysis_summary(
@@ -879,10 +1250,16 @@ class ArticleScreener:
             all_risks.extend(batch_risks)
             all_mitigations.extend(batch_mitigations)
 
+        raw_counts = (len(all_catalysts), len(all_risks), len(all_mitigations))
+        all_catalysts = self._deduplicate_insights(all_catalysts)
+        all_risks = self._deduplicate_insights(all_risks)
+        all_mitigations = self._deduplicate_insights(all_mitigations)
+
         self._log(
             "info",
-            f"✅ Parallel batch analysis complete! Raw insights: "
-            f"{len(all_catalysts)}🚀 {len(all_risks)}⚠️ {len(all_mitigations)}🛡️",
+            f"✅ Parallel batch analysis complete: "
+            f"{raw_counts[0]}/{raw_counts[1]}/{raw_counts[2]} raw themes → "
+            f"{len(all_catalysts)}/{len(all_risks)}/{len(all_mitigations)} unique themes",
         )
         self._log(
             "info",
@@ -923,7 +1300,9 @@ class ArticleScreener:
 
             analysis_data = self._parse_llm_json_response(response, "batch_analysis")
             catalysts, risks, mitigations = self._parse_batch_analysis_data(analysis_data)
-            self._attach_publication_dates(catalysts, risks, mitigations, articles)
+            catalysts, risks, mitigations = self._ground_insights(
+                catalysts, risks, mitigations, articles
+            )
 
             self._log("info", f"{indent}✅ Batch {batch_num} complete: {len(catalysts)}🚀 {len(risks)}⚠️ {len(mitigations)}🛡️")
             self._log("info", f"{indent}💰 Batch cost: ${cost:.4f} USD | Running total: ${self.total_llm_cost:.4f} USD")
@@ -991,19 +1370,33 @@ class ArticleScreener:
         return out
 
     def _determine_overall_sentiment(self, catalysts: List[Catalyst], risks: List[Risk]) -> str:
-        """Determine overall sentiment based on catalyst and risk balance."""
+        """Determine sentiment from unique-theme intensity, not raw item count.
+
+        Parallel batches can emit different counts of otherwise similar items.
+        Averages prevent article volume from becoming sentiment, while a modest
+        severity adjustment preserves genuinely serious risks. A 15% dead band
+        avoids a false directional label on mixed evidence.
+        """
         if not catalysts and not risks:
             return "neutral"
-        
-        catalyst_score = sum(c.confidence for c in catalysts)
-        risk_score = sum(r.confidence * ({"low": 1, "medium": 2, "high": 3, "critical": 4}.get(r.severity, 2)) for r in risks)
-        
-        if catalyst_score > risk_score * 1.5:
+        if catalysts and not risks:
             return "bullish"
-        elif risk_score > catalyst_score * 1.5:
+        if risks and not catalysts:
             return "bearish"
-        else:
-            return "neutral"
+
+        catalyst_score = sum(c.confidence for c in catalysts) / len(catalysts)
+        severity_weights = {
+            "low": 0.75, "medium": 1.0, "high": 1.25, "critical": 1.5,
+        }
+        risk_score = sum(
+            r.confidence * severity_weights.get(r.severity, 1.0) for r in risks
+        ) / len(risks)
+
+        if catalyst_score > risk_score * 1.15:
+            return "bullish"
+        if risk_score > catalyst_score * 1.15:
+            return "bearish"
+        return "neutral"
     
     def _extract_key_themes(self, catalysts: List[Catalyst], risks: List[Risk]) -> List[str]:
         """Extract key themes from catalysts and risks."""

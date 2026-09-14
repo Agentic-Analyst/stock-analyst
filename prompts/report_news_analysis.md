@@ -2,7 +2,7 @@ Write the News & Market Analysis section for {company_name}.
 
 **News Screening Summary**:
 - Articles Analyzed: {articles_analyzed}
-- Overall Sentiment: {overall_sentiment}
+- News Sentiment: {overall_sentiment}
 - Confidence Score: {confidence_score}
 - Key Themes: {key_themes}
 

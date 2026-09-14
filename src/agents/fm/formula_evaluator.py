@@ -17,25 +17,455 @@ Usage:
     results = evaluator.evaluate_all_tabs()
     evaluator.save_to_json(results, "output_path.json")
 """
-import re
+import ast
 import json
-from typing import Dict, Any, List, Tuple, Optional, Union
-from pathlib import Path
-from openpyxl.workbook.workbook import Workbook
-from openpyxl.worksheet.worksheet import Worksheet
-from openpyxl.utils import get_column_letter, column_index_from_string
 import math
-from src.logger import get_logger
+import re
+from pathlib import Path
+from typing import Dict, Any, List, Tuple, Optional, Union
+from openpyxl.workbook.workbook import Workbook
+from openpyxl.utils import get_column_letter, column_index_from_string
 
-import json
-import re
-from typing import Dict, Any, List, Tuple, Optional, Union
-from pathlib import Path
-import openpyxl
-from openpyxl.workbook.workbook import Workbook
-from openpyxl.worksheet.worksheet import Worksheet
-from openpyxl.utils import get_column_letter, column_index_from_string
-import math
+
+def formula_integrity(results: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a bounded manifest of formula failures in an evaluated model."""
+    issues = []
+    for tab_name, tab in (results or {}).items():
+        if tab_name == "_vynn" or not isinstance(tab, dict):
+            continue
+        cells = tab.get("cells") or {}
+        if not isinstance(cells, dict):
+            issues.append({
+                "tab": str(tab_name), "cell": None,
+                "error": "tab cells payload is not an object",
+            })
+            continue
+        for cell, value in cells.items():
+            if isinstance(value, dict) and value.get("error"):
+                issues.append({
+                    "tab": str(tab_name),
+                    "cell": str(cell),
+                    "error": str(value.get("error"))[:500],
+                    "formula": str(value.get("formula") or "")[:500] or None,
+                })
+    return {
+        "status": "ready" if not issues else "error",
+        "issue_count": len(issues),
+        "issues": issues[:50],
+        "issues_truncated": len(issues) > 50,
+    }
+
+
+def model_integrity(results: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate accounting and valuation identities after formula evaluation.
+
+    A formula can evaluate perfectly and still point at the wrong cell.  That
+    class of defect survived the old manifest: PP&E began from historical free
+    cash flow, and an incomplete SG&A disclosure made visible EBIT differ from
+    reported operating income by more than $100B.  These checks validate the
+    *meaning* of the evaluated workbook, not merely its Excel syntax.
+    """
+    results = results if isinstance(results, dict) else {}
+    issues: List[Dict[str, Any]] = []
+
+    def cell(tab: str, row: int, col: int):
+        payload = results.get(tab) or {}
+        cells = payload.get("cells") if isinstance(payload, dict) else None
+        return cells.get(f"({row}, {col})") if isinstance(cells, dict) else None
+
+    def number(value: Any) -> Optional[float]:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        value = float(value)
+        return value if math.isfinite(value) else None
+
+    def add_issue(check: str, tab: str, col: Optional[int], **detail: Any):
+        item = {"check": check, "tab": tab, "column": col}
+        item.update({key: value for key, value in detail.items() if value is not None})
+        issues.append(item)
+
+    def identity(check: str, tab: str, col: int, actual: Any, expected: Any):
+        actual_n, expected_n = number(actual), number(expected)
+        if actual_n is None or expected_n is None:
+            add_issue(
+                check, tab, col, error="identity input is not a finite number",
+                actual=actual, expected=expected,
+            )
+            return
+        tolerance = max(0.01, 1e-6 * max(abs(actual_n), abs(expected_n), 1.0))
+        delta = actual_n - expected_n
+        if abs(delta) > tolerance:
+            add_issue(
+                check, tab, col, actual=actual_n, expected=expected_n,
+                delta=delta, tolerance=tolerance,
+            )
+
+    is_bank_model = "Bank Valuation" in results and "Projections" not in results
+    required_tabs = (
+        ("Bank Valuation", "Summary") if is_bank_model else
+        ("Historical", "Projections", "Valuation (DCF)",
+         "Valuation (Exit Multiple)", "Summary")
+    )
+    for tab in required_tabs:
+        if tab not in results:
+            add_issue("required_tab", tab, None, error="required model tab is missing")
+    if issues:
+        return {
+            "status": "error", "issue_count": len(issues),
+            "issues": issues[:100], "issues_truncated": len(issues) > 100,
+        }
+
+    # Historical accounting presentation and provider/recalculation tie-outs.
+    active_history = [
+        col for col in range(2, 7) if number(cell("Historical", 1, col)) is not None
+    ]
+    if not active_history and not is_bank_model:
+        add_issue("historical_periods", "Historical", None,
+                  error="no complete historical period is available")
+    for col in active_history:
+        identity("historical_gross_profit", "Historical", col,
+                 cell("Historical", 5, col),
+                 (number(cell("Historical", 3, col)) or 0.0)
+                 - (number(cell("Historical", 4, col)) or 0.0))
+        identity("historical_ebit_tieout", "Historical", col,
+                 cell("Historical", 44, col), cell("Historical", 8, col))
+        identity("historical_ebitda", "Historical", col,
+                 cell("Historical", 19, col),
+                 (number(cell("Historical", 8, col)) or 0.0)
+                 + (number(cell("Historical", 18, col)) or 0.0))
+        identity("historical_fcf", "Historical", col,
+                 cell("Historical", 26, col),
+                 (number(cell("Historical", 23, col)) or 0.0)
+                 + (number(cell("Historical", 24, col)) or 0.0))
+        identity("historical_fcf_source_tieout", "Historical", col,
+                 cell("Historical", 25, col), cell("Historical", 26, col))
+        identity("historical_net_debt", "Historical", col,
+                 cell("Historical", 37, col),
+                 (number(cell("Historical", 35, col)) or 0.0)
+                 - (number(cell("Historical", 30, col)) or 0.0)
+                 - (number(cell("Historical", 31, col)) or 0.0))
+
+    if is_bank_model:
+        bank = "Bank Valuation"
+        bvps = number(cell(bank, 5, 2))
+        roe = number(cell(bank, 6, 2))
+        cost = number(cell(bank, 7, 2))
+        growth = number(cell(bank, 8, 2))
+        raw_pb = number(cell(bank, 10, 2))
+        bounded_pb = number(cell(bank, 11, 2))
+        peer_pb = number(cell(bank, 14, 2))
+        for name, value, positive in (
+            ("bank_book_value_per_share", bvps, True),
+            ("bank_roe", roe, False),
+            ("bank_cost_of_equity", cost, True),
+            ("bank_long_run_growth", growth, False),
+        ):
+            if value is None or (positive and value <= 0):
+                add_issue(name, bank, 2, error="required bank input is invalid",
+                          actual=value)
+        if cost is not None and growth is not None and cost <= growth:
+            add_issue("bank_cost_of_equity_above_growth", bank, 2,
+                      actual=cost, expected=f"> {growth}")
+        if None not in (roe, growth, cost) and cost != growth:
+            identity("bank_raw_justified_pb", bank, 2, raw_pb,
+                     (roe - growth) / (cost - growth))
+        if raw_pb is not None:
+            identity("bank_bounded_justified_pb", bank, 2, bounded_pb,
+                     min(3.0, max(0.4, raw_pb)))
+        if bvps is not None and bounded_pb is not None:
+            identity("bank_intrinsic_value", bank, 2, cell(bank, 12, 2),
+                     bvps * bounded_pb)
+        if bvps is not None and peer_pb is not None:
+            identity("bank_peer_value", bank, 2, cell(bank, 15, 2),
+                     bvps * peer_pb)
+        intrinsic = number(cell(bank, 12, 2))
+        peer_value = number(cell(bank, 15, 2))
+        forward_value = number(cell(bank, 17, 2))
+        forward_pb = number(cell(bank, 27, 5))
+        if forward_value is not None and forward_pb is not None and bvps is not None:
+            identity("bank_forward_consensus_value", bank, 2, forward_value,
+                     bvps * forward_pb)
+        supported = [value for value in (intrinsic, forward_value, peer_value)
+                     if value is not None and value > 0]
+        if supported:
+            identity("bank_audit_midpoint", bank, 2, cell(bank, 18, 2),
+                     sum(supported) / len(supported))
+            identity("bank_range_low", bank, 2, cell(bank, 19, 2), min(supported))
+            identity("bank_range_high", bank, 2, cell(bank, 20, 2), max(supported))
+        summary = "Summary"
+        identity("bank_summary_cost_of_equity", summary, 2,
+                 cell(summary, 4, 2), cost)
+        identity("bank_summary_growth", summary, 2,
+                 cell(summary, 5, 2), growth)
+        identity("bank_summary_roe", summary, 2,
+                 cell(summary, 6, 2), roe)
+        identity("bank_summary_justified_pb", summary, 2,
+                 cell(summary, 7, 2), bounded_pb)
+        identity("bank_summary_intrinsic", summary, 2,
+                 cell(summary, 18, 2), intrinsic)
+        if forward_value is not None and forward_value > 0:
+            identity("bank_summary_forward_consensus", summary, 2,
+                     cell(summary, 19, 2), forward_value)
+        elif cell(summary, 19, 2) not in (None, "", 0, 0.0):
+            add_issue(
+                "bank_summary_forward_consensus_absent", summary, 2,
+                error=(
+                    "summary publishes a forward-consensus value without an "
+                    "eligible forward-ROE scenario"
+                ),
+                actual=cell(summary, 19, 2),
+            )
+        # A missing peer method is a supported one-leg bank valuation.  The
+        # workbook's cross-sheet reference evaluates the blank peer cell as
+        # zero, while the semantic source value remains ``None``.  Only tie
+        # the summary peer line when an eligible peer value actually exists;
+        # otherwise require the rendered placeholder to stay blank/zero.
+        if peer_value is not None and peer_value > 0:
+            identity("bank_summary_peer", summary, 2,
+                     cell(summary, 22, 2), peer_value)
+        elif cell(summary, 22, 2) not in (None, "", 0, 0.0):
+            add_issue(
+                "bank_summary_peer_absent", summary, 2,
+                error="summary publishes a peer value without an eligible peer method",
+                actual=cell(summary, 22, 2),
+            )
+        if supported:
+            identity("bank_summary_midpoint", summary, 2,
+                     cell(summary, 26, 2), sum(supported) / len(supported))
+        return {
+            "status": "ready" if not issues else "error",
+            "issue_count": len(issues),
+            "issues": issues[:100],
+            "issues_truncated": len(issues) > 100,
+        }
+
+    # Explicit forecast identities and PP&E continuity.
+    normalized_tax = number(cell("Model_Inputs", 11, 2))
+    if normalized_tax is None or not (0.0 < normalized_tax <= 0.5):
+        add_issue(
+            "normalized_tax_rate", "Model_Inputs", 2,
+            error="normalized cash-tax rate must be finite and in (0%, 50%]",
+            actual=cell("Model_Inputs", 11, 2),
+        )
+    else:
+        identity("tax_assumption_cross_tab", "Assumptions", 2,
+                 cell("Assumptions", 20, 2), normalized_tax)
+        identity("tax_dcf_cross_tab", "Valuation (DCF)", 2,
+                 cell("Valuation (DCF)", 8, 2), normalized_tax)
+        identity("tax_exit_cross_tab", "Valuation (Exit Multiple)", 2,
+                 cell("Valuation (Exit Multiple)", 4, 2), normalized_tax)
+    for col in range(2, 7):
+        revenue = number(cell("Projections", 3, col))
+        if revenue is None or revenue <= 0:
+            add_issue("projection_revenue", "Projections", col,
+                      error="projected revenue must be finite and positive",
+                      actual=cell("Projections", 3, col))
+            continue
+        identity("projection_gross_profit", "Projections", col,
+                 cell("Projections", 5, col),
+                 revenue - (number(cell("Projections", 4, col)) or 0.0))
+        identity("projection_ebit", "Projections", col,
+                 cell("Projections", 9, col),
+                 (number(cell("Projections", 5, col)) or 0.0)
+                 - (number(cell("Projections", 7, col)) or 0.0)
+                 - (number(cell("Projections", 8, col)) or 0.0))
+        identity("projection_cash_tax", "Projections", col,
+                 cell("Projections", 10, col),
+                 max(0.0, number(cell("Projections", 9, col)) or 0.0)
+                 * (normalized_tax or 0.0))
+        identity("projection_nopat", "Projections", col,
+                 cell("Projections", 11, col),
+                 (number(cell("Projections", 9, col)) or 0.0)
+                 - (number(cell("Projections", 10, col)) or 0.0))
+        identity("projection_nwc", "Projections", col,
+                 cell("Projections", 17, col),
+                 (number(cell("Projections", 14, col)) or 0.0)
+                 + (number(cell("Projections", 15, col)) or 0.0)
+                 - (number(cell("Projections", 16, col)) or 0.0))
+        identity("projection_fcf", "Projections", col,
+                 cell("Projections", 19, col),
+                 (number(cell("Projections", 11, col)) or 0.0)
+                 + (number(cell("Projections", 12, col)) or 0.0)
+                 + (number(cell("Projections", 13, col)) or 0.0)
+                 - (number(cell("Projections", 18, col)) or 0.0))
+        beginning_expected = (
+            abs(number(cell("Historical", 38, 6)) or 0.0) if col == 2
+            else cell("Projections", 46, col - 1)
+        )
+        identity("ppe_beginning_balance", "Projections", col,
+                 cell("Projections", 43, col), beginning_expected)
+        identity("ppe_capex_sign", "Projections", col,
+                 cell("Projections", 44, col),
+                 -(number(cell("Projections", 13, col)) or 0.0))
+        identity("ppe_depreciation_sign", "Projections", col,
+                 cell("Projections", 45, col),
+                 -(number(cell("Projections", 12, col)) or 0.0))
+        identity("ppe_ending_balance", "Projections", col,
+                 cell("Projections", 46, col),
+                 (number(cell("Projections", 43, col)) or 0.0)
+                 + (number(cell("Projections", 44, col)) or 0.0)
+                 + (number(cell("Projections", 45, col)) or 0.0))
+
+    # Perpetuity DCF identities.
+    dcf = "Valuation (DCF)"
+    identity("wacc", dcf, 2, cell(dcf, 12, 2),
+             (number(cell(dcf, 6, 2)) or 0.0) * (number(cell(dcf, 10, 2)) or 0.0)
+             + (number(cell(dcf, 9, 2)) or 0.0) * (number(cell(dcf, 11, 2)) or 0.0))
+    for col in range(2, 12):
+        identity("dcf_pv_fcf", dcf, col, cell(dcf, 18, col),
+                 (number(cell(dcf, 16, col)) or 0.0)
+                 * (number(cell(dcf, 17, col)) or 0.0))
+    identity("dcf_explicit_pv_sum", dcf, 2, cell(dcf, 19, 2),
+             sum(number(cell(dcf, 18, col)) or 0.0 for col in range(2, 12)))
+    identity("dcf_enterprise_value", dcf, 2, cell(dcf, 27, 2),
+             (number(cell(dcf, 19, 2)) or 0.0) + (number(cell(dcf, 26, 2)) or 0.0))
+    identity("dcf_equity_bridge", dcf, 2, cell(dcf, 33, 2),
+             (number(cell(dcf, 27, 2)) or 0.0)
+             + (number(cell(dcf, 30, 2)) or 0.0)
+             - (number(cell(dcf, 31, 2)) or 0.0)
+             + (number(cell(dcf, 32, 2)) or 0.0))
+    shares = number(cell(dcf, 36, 2))
+    if shares is None or shares <= 0:
+        add_issue("shares_outstanding", dcf, 2,
+                  error="diluted shares must be finite and positive",
+                  actual=cell(dcf, 36, 2))
+    else:
+        identity("dcf_value_per_share", dcf, 2, cell(dcf, 37, 2),
+                 (number(cell(dcf, 33, 2)) or 0.0) / shares)
+
+    # Exit-multiple method must use the identical explicit FCF stream/discounts.
+    exit_tab = "Valuation (Exit Multiple)"
+    for col in range(2, 12):
+        identity("exit_fcf_cross_method", exit_tab, col,
+                 cell(exit_tab, 7, col), cell(dcf, 16, col))
+        identity("exit_discount_cross_method", exit_tab, col,
+                 cell(exit_tab, 8, col), cell(dcf, 17, col))
+        identity("exit_pv_fcf", exit_tab, col, cell(exit_tab, 9, col),
+                 (number(cell(exit_tab, 7, col)) or 0.0)
+                 * (number(cell(exit_tab, 8, col)) or 0.0))
+    identity("exit_explicit_pv_sum", exit_tab, 2, cell(exit_tab, 10, 2),
+             sum(number(cell(exit_tab, 9, col)) or 0.0 for col in range(2, 12)))
+    identity("exit_terminal_value", exit_tab, 2, cell(exit_tab, 14, 2),
+             (number(cell(exit_tab, 12, 2)) or 0.0)
+             * (number(cell(exit_tab, 13, 2)) or 0.0))
+    identity("exit_enterprise_value", exit_tab, 2, cell(exit_tab, 17, 2),
+             (number(cell(exit_tab, 10, 2)) or 0.0)
+             + (number(cell(exit_tab, 15, 2)) or 0.0))
+    identity("exit_equity_bridge", exit_tab, 2, cell(exit_tab, 22, 2),
+             (number(cell(exit_tab, 17, 2)) or 0.0)
+             + (number(cell(exit_tab, 19, 2)) or 0.0)
+             - (number(cell(exit_tab, 20, 2)) or 0.0)
+             + (number(cell(exit_tab, 21, 2)) or 0.0))
+    exit_multiple = number(cell(exit_tab, 3, 2))
+    exit_shares = number(cell(exit_tab, 24, 2))
+    if exit_multiple is not None and exit_multiple > 0 and exit_shares and exit_shares > 0:
+        identity("exit_value_per_share", exit_tab, 2, cell(exit_tab, 25, 2),
+                 (number(cell(exit_tab, 22, 2)) or 0.0) / exit_shares)
+
+    # Summary is a second, user-visible copy of the key bridges and outputs.
+    summary = "Summary"
+    identity("summary_perpetual_enterprise_value", summary, 2,
+             cell(summary, 17, 2),
+             (number(cell(summary, 13, 2)) or 0.0)
+             - (number(cell(summary, 14, 2)) or 0.0)
+             + (number(cell(summary, 15, 2)) or 0.0)
+             - (number(cell(summary, 16, 2)) or 0.0))
+    identity("summary_perpetual_value_per_share", summary, 2,
+             cell(summary, 18, 2), cell(dcf, 37, 2))
+    identity("summary_exit_enterprise_value", summary, 2,
+             cell(summary, 20, 2), cell(exit_tab, 17, 2))
+    identity("summary_exit_equity_value", summary, 2,
+             cell(summary, 21, 2), cell(exit_tab, 22, 2))
+    identity("summary_exit_value_per_share", summary, 2,
+             cell(summary, 22, 2), cell(exit_tab, 25, 2))
+    price = number(cell(summary, 9, 2))
+    headline = number(cell(summary, 26, 2))
+    if price and price > 0 and headline is not None:
+        identity("summary_upside", summary, 2, cell(summary, 27, 2),
+                 headline / price - 1.0)
+    identity("summary_market_enterprise_value", summary, 2,
+             cell(summary, 29, 2),
+             (number(cell(summary, 10, 2)) or 0.0)
+             - (number(cell(summary, 14, 2)) or 0.0)
+             + (number(cell(summary, 15, 2)) or 0.0)
+             - (number(cell(summary, 16, 2)) or 0.0))
+    for row in range(41, 47):
+        if cell(summary, row, 2) is not True:
+            add_issue("summary_qa_flag", summary, 2, row=row,
+                      actual=cell(summary, row, 2), expected=True)
+
+    return {
+        "status": "ready" if not issues else "error",
+        "issue_count": len(issues),
+        "issues": issues[:100],
+        "issues_truncated": len(issues) > 100,
+    }
+
+
+def _safe_arithmetic_eval(expression: str) -> Any:
+    """Evaluate the small arithmetic subset emitted by workbook builders.
+
+    Raw provider values can be referenced by formulas.  Python ``eval`` made a
+    malicious or merely malformed string cell executable after reference
+    substitution.  An explicit AST interpreter both closes that boundary and
+    makes unsupported syntax fail formula integrity instead of running it.
+    """
+    tree = ast.parse(expression, mode="eval")
+    nodes = list(ast.walk(tree))
+    if len(nodes) > 500:
+        raise ValueError("Arithmetic expression is too complex")
+
+    binary = {
+        ast.Add: lambda left, right: left + right,
+        ast.Sub: lambda left, right: left - right,
+        ast.Mult: lambda left, right: left * right,
+        ast.Div: lambda left, right: left / right,
+        ast.Pow: lambda left, right: left ** right,
+    }
+    unary = {
+        ast.UAdd: lambda value: +value,
+        ast.USub: lambda value: -value,
+    }
+    comparisons = {
+        ast.Eq: lambda left, right: left == right,
+        ast.NotEq: lambda left, right: left != right,
+        ast.Lt: lambda left, right: left < right,
+        ast.LtE: lambda left, right: left <= right,
+        ast.Gt: lambda left, right: left > right,
+        ast.GtE: lambda left, right: left >= right,
+    }
+
+    def visit(node):
+        if isinstance(node, ast.Expression):
+            return visit(node.body)
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, bool):
+                return node.value
+            if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+                return node.value
+            raise TypeError("Only numeric and boolean constants are allowed")
+        if isinstance(node, ast.BinOp) and type(node.op) in binary:
+            left, right = visit(node.left), visit(node.right)
+            if isinstance(node.op, ast.Pow) and (
+                isinstance(right, bool) or not isinstance(right, (int, float))
+                or abs(float(right)) > 100
+            ):
+                raise ValueError("Exponent is outside the supported range")
+            return binary[type(node.op)](left, right)
+        if isinstance(node, ast.UnaryOp) and type(node.op) in unary:
+            return unary[type(node.op)](visit(node.operand))
+        if (
+            isinstance(node, ast.Compare)
+            and len(node.ops) == 1
+            and len(node.comparators) == 1
+            and type(node.ops[0]) in comparisons
+        ):
+            return comparisons[type(node.ops[0])](
+                visit(node.left), visit(node.comparators[0])
+            )
+        raise ValueError(f"Unsupported arithmetic syntax: {type(node).__name__}")
+
+    return visit(tree)
 
 
 class FormulaEvaluator:
@@ -54,12 +484,13 @@ class FormulaEvaluator:
         "Raw",
         "Keys_Map",
         "Assumptions",
-        "LLM_Inferred",
+        "Model_Inputs",
         "Historical",
         "Projections",
         "Valuation (DCF)",
         "Valuation (Exit Multiple)",
         "Sensitivity",
+        "Bank Valuation",
         "Summary",
     ]
     
@@ -88,7 +519,8 @@ class FormulaEvaluator:
     
     def _log(self, level: str, message: str):
         """Log message using logger if available, otherwise print."""
-        getattr(self.logger, level)(message)
+        if self.logger is not None and hasattr(self.logger, level):
+            getattr(self.logger, level)(message)
     
     def evaluate_all_tabs(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -320,8 +752,11 @@ class FormulaEvaluator:
         if expr.upper() == 'FALSE':
             return False
         
-        # If we can't parse it, return as string
-        return expr
+        # A formula which is neither a literal, reference, arithmetic
+        # expression nor a supported function is not a valid string result.
+        # Returning the source text here silently turned misspelled functions
+        # and unsupported syntax into apparently successful cells.
+        raise ValueError(f"Unsupported formula expression: {expr}")
     
     def _is_function_call(self, expr: str) -> bool:
         """
@@ -430,8 +865,7 @@ class FormulaEvaluator:
             
             return cell.value
         
-        # Default to 0 if not found
-        return 0
+        raise ValueError(f"Formula references unknown worksheet: {tab_name}")
     
     def _evaluate_arithmetic(
         self,
@@ -497,9 +931,10 @@ class FormulaEvaluator:
                     result = self._evaluate_function(func_call, current_tab, current_row, current_col)
                     # Replace function call with its result in the expression
                     expr = expr[:start_pos] + f'({result})' + expr[pos:]
-                except Exception:
-                    # If function evaluation fails, replace with 0
-                    expr = expr[:start_pos] + '(0)' + expr[pos:]
+                except Exception as error:
+                    raise ValueError(
+                        f"Could not evaluate nested function {func_call}: {error}"
+                    ) from error
         
         # Find all cell references in the expression
         # Pattern must handle: Tab!A1, 'Tab'!A1, $A$1, Tab!$A$1, 'Tab Name'!A1
@@ -512,7 +947,9 @@ class FormulaEvaluator:
                 value = self._get_cell_value(cell_ref, current_tab)
                 # Handle errors and non-numeric values
                 if isinstance(value, dict) and 'error' in value:
-                    return '0'
+                    raise ValueError(
+                        f"Referenced formula failed at {cell_ref}: {value.get('error')}"
+                    )
                 if value is None or value == '':
                     return '0'
                 # Convert boolean to int
@@ -520,8 +957,10 @@ class FormulaEvaluator:
                     return '1' if value else '0'
                 # Wrap in parentheses to maintain operator precedence
                 return f'({value})'
-            except Exception as e:
-                return '0'
+            except Exception as error:
+                raise ValueError(
+                    f"Could not resolve cell reference {cell_ref}: {error}"
+                ) from error
         
         # Replace all cell references with their values
         evaluated_expr = re.sub(pattern, replace_cell_ref, expr)
@@ -530,13 +969,15 @@ class FormulaEvaluator:
         evaluated_expr = evaluated_expr.replace('^', '**')
         
         try:
-            # Evaluate the arithmetic expression
-            # Use safe evaluation with limited builtins
-            result = eval(evaluated_expr, {"__builtins__": {"abs": abs, "round": round}}, {})
+            result = _safe_arithmetic_eval(evaluated_expr)
             return float(result) if isinstance(result, (int, float)) else result
-        except ZeroDivisionError:
-            # Handle division by zero
-            return 0
+        except ZeroDivisionError as error:
+            # Excel produces #DIV/0!, not zero.  Raising lets an enclosing
+            # IFERROR select its explicit fallback and makes an unguarded
+            # valuation failure visible to the formula-integrity gate.
+            raise ZeroDivisionError(
+                f"Division by zero in formula: {expr}"
+            ) from error
         except Exception as e:
             raise ValueError(f"Cannot evaluate arithmetic: {expr} -> {evaluated_expr}: {e}")
     
@@ -664,8 +1105,7 @@ class FormulaEvaluator:
         elif func_name == 'ROWS':
             return self._func_rows(args, current_tab, current_row, current_col)
         else:
-            # Unsupported function - return placeholder
-            return f"[{func_name}({args_str})]"
+            raise NotImplementedError(f"Unsupported Excel function: {func_name}")
     
     def _parse_function_args(self, args_str: str) -> List[str]:
         """
@@ -712,17 +1152,32 @@ class FormulaEvaluator:
         Example: "A1:A5" -> [(tab, 1, 1), (tab, 2, 1), ..., (tab, 5, 1)]
         Example: "D:D" -> all cells in column D
         """
-        # Remove $ signs
-        range_ref = range_ref.replace('$', '')
-        
-        # Parse tab
-        if '!' in range_ref:
-            parts = range_ref.split('!')
-            tab_name = parts[0].strip("'")
-            range_part = parts[1]
+        # Remove $ signs and normalize both Excel spellings of a cross-sheet
+        # range. Some saved workbooks repeat the sheet on the second endpoint:
+        # ``'Tab'!B1:'Tab'!F1`` rather than ``'Tab'!B1:F1``.
+        range_ref = range_ref.replace('$', '').strip()
+
+        def endpoint(value: str) -> Tuple[Optional[str], str]:
+            value = value.strip()
+            if '!' not in value:
+                return None, value
+            sheet, cell = value.rsplit('!', 1)
+            return sheet.strip().strip("'"), cell.strip()
+
+        if ':' in range_ref:
+            left_raw, right_raw = range_ref.split(':', 1)
+            left_tab, left_cell = endpoint(left_raw)
+            right_tab, right_cell = endpoint(right_raw)
+            if left_tab and right_tab and left_tab != right_tab:
+                raise ValueError(f"A range cannot span two worksheets: {range_ref}")
+            tab_name = left_tab or right_tab or current_tab
+            range_part = f"{left_cell}:{right_cell}"
         else:
-            tab_name = current_tab
-            range_part = range_ref
+            tab_name, range_part = endpoint(range_ref)
+            tab_name = tab_name or current_tab
+
+        if tab_name not in self.workbook.sheetnames:
+            raise ValueError(f"Range references unknown worksheet: {tab_name}")
         
         # Parse range
         if ':' in range_part:
@@ -746,7 +1201,7 @@ class FormulaEvaluator:
                                 col = int(parts[1].strip())
                                 if start_col <= col <= end_col:
                                     cells.append((tab_name, row, col))
-                            except:
+                            except (TypeError, ValueError, IndexError):
                                 continue
                 return cells
             
@@ -766,20 +1221,20 @@ class FormulaEvaluator:
                                 col = int(parts[1].strip())
                                 if start_row <= row <= end_row:
                                     cells.append((tab_name, row, col))
-                            except:
+                            except (TypeError, ValueError, IndexError):
                                 continue
                 return cells
             
             # Regular cell range (e.g., "A1:B5")
             match_start = re.match(r'([A-Z]+)(\d+)', start_cell)
             if not match_start:
-                return []
+                raise ValueError(f"Invalid range start: {range_ref}")
             start_col = column_index_from_string(match_start.group(1))
             start_row = int(match_start.group(2))
             
             match_end = re.match(r'([A-Z]+)(\d+)', end_cell)
             if not match_end:
-                return []
+                raise ValueError(f"Invalid range end: {range_ref}")
             end_col = column_index_from_string(match_end.group(1))
             end_row = int(match_end.group(2))
             
@@ -794,7 +1249,7 @@ class FormulaEvaluator:
             # Single cell
             match = re.match(r'([A-Z]+)(\d+)', range_part)
             if not match:
-                return []
+                raise ValueError(f"Invalid cell or range reference: {range_ref}")
             col = column_index_from_string(match.group(1))
             row = int(match.group(2))
             return [(tab_name, row, col)]
@@ -808,8 +1263,12 @@ class FormulaEvaluator:
             key = f"({row}, {col})"
             if tab in self.computed_values and key in self.computed_values[tab]:
                 val = self.computed_values[tab][key]
-                if not isinstance(val, dict) or 'error' not in val:
-                    values.append(val)
+                if isinstance(val, dict) and 'error' in val:
+                    raise ValueError(
+                        f"Range {range_ref} contains a failed formula at {tab}!{key}: "
+                        f"{val.get('error')}"
+                    )
+                values.append(val)
         
         return values
     
@@ -821,7 +1280,7 @@ class FormulaEvaluator:
         """SUM function"""
         total = 0
         for arg in args:
-            if ':' in arg:
+            if ':' in arg and not self._is_function_call(arg):
                 # Range
                 values = self._get_range_values(arg, tab)
                 total += sum(float(v) for v in values if isinstance(v, (int, float)))
@@ -836,7 +1295,7 @@ class FormulaEvaluator:
         """AVERAGE function"""
         values = []
         for arg in args:
-            if ':' in arg and '(' not in arg:
+            if ':' in arg and not self._is_function_call(arg):
                 # A bare range like Raw!$D:$D. A function CALL that merely
                 # contains a range — SUMIFS(Raw!$D:$D, ...) — has a paren, and
                 # must be evaluated, not read as a range. Treating it as one
@@ -854,7 +1313,7 @@ class FormulaEvaluator:
         """COUNT function"""
         count = 0
         for arg in args:
-            if ':' in arg:
+            if ':' in arg and not self._is_function_call(arg):
                 values = self._get_range_values(arg, tab)
                 count += sum(1 for v in values if isinstance(v, (int, float)))
             else:
@@ -866,7 +1325,7 @@ class FormulaEvaluator:
     def _func_if(self, args: List[str], tab: str, row: int, col: int) -> Any:
         """IF function"""
         if len(args) < 2:
-            return 0
+            raise ValueError("IF requires at least two arguments")
         
         # Evaluate condition
         condition = self._eval_expression(args[0], tab, row, col)
@@ -965,7 +1424,7 @@ class FormulaEvaluator:
     def _func_iferror(self, args: List[str], tab: str, row: int, col: int) -> Any:
         """IFERROR function"""
         if len(args) < 1:
-            return 0
+            raise ValueError("IFERROR requires at least one argument")
         
         try:
             result = self._eval_expression(args[0], tab, row, col)
@@ -973,7 +1432,7 @@ class FormulaEvaluator:
             if isinstance(result, dict) and 'error' in result:
                 return self._eval_expression(args[1], tab, row, col) if len(args) > 1 else ""
             return result
-        except:
+        except Exception:
             return self._eval_expression(args[1], tab, row, col) if len(args) > 1 else ""
     
     def _func_sumifs(self, args: List[str], tab: str, row: int, col: int) -> float:
@@ -983,7 +1442,7 @@ class FormulaEvaluator:
         Syntax: SUMIFS(sum_range, criteria_range1, criteria1, ...)
         """
         if len(args) < 3:
-            return 0
+            raise ValueError("SUMIFS requires a sum range and at least one criteria pair")
         
         # Get sum range
         sum_range = self._get_range_values(args[0], tab)
@@ -1043,63 +1502,41 @@ class FormulaEvaluator:
     def _func_index(self, args: List[str], tab: str, row: int, col: int) -> Any:
         """INDEX function"""
         if len(args) < 2:
-            return 0
-        
-        try:
-            # Get range
-            range_values = self._get_range_values(args[0], tab)
-            
-            # Get row index (1-based)
-            row_idx_expr = args[1]
-            row_idx_val = self._eval_expression(row_idx_expr, tab, row, col)
-            
-            # Handle nested function results
-            if isinstance(row_idx_val, (int, float)):
-                row_idx = int(row_idx_val) - 1
-            else:
-                return 0
-            
-            if 0 <= row_idx < len(range_values):
-                return range_values[row_idx]
-            
-            return 0
-        except Exception as e:
-            return 0
+            raise ValueError("INDEX requires a range and row index")
+
+        range_values = self._get_range_values(args[0], tab)
+        row_idx_val = self._eval_expression(args[1], tab, row, col)
+        if isinstance(row_idx_val, bool) or not isinstance(row_idx_val, (int, float)):
+            raise TypeError("INDEX row index must be numeric")
+        row_idx = int(row_idx_val) - 1
+        if not 0 <= row_idx < len(range_values):
+            raise IndexError(
+                f"INDEX row {row_idx + 1} is outside a {len(range_values)}-value range"
+            )
+        return range_values[row_idx]
     
     def _func_match(self, args: List[str], tab: str, row: int, col: int) -> int:
         """MATCH function"""
         if len(args) < 2:
-            return 0
-        
+            raise ValueError("MATCH requires a lookup value and lookup range")
+
+        lookup_val = self._eval_expression(args[0], tab, row, col)
+        range_values = self._get_range_values(args[1], tab)
+        match_type = 0
+        if len(args) > 2:
+            match_type = int(self._eval_expression(args[2], tab, row, col))
+        if match_type != 0:
+            raise NotImplementedError(
+                f"MATCH type {match_type} is not supported; use exact match type 0"
+            )
         try:
-            # Get lookup value
-            lookup_val = self._eval_expression(args[0], tab, row, col)
-            
-            # Get lookup range
-            range_values = self._get_range_values(args[1], tab)
-            
-            # Match type (0 = exact, 1 = less than or equal, -1 = greater than or equal)
-            match_type = 0
-            if len(args) > 2:
-                match_type = int(self._eval_expression(args[2], tab, row, col))
-            
-            # Find match (1-based index)
-            if match_type == 0:
-                # Exact match
-                try:
-                    return range_values.index(lookup_val) + 1
-                except ValueError:
-                    # Try string comparison
-                    lookup_str = str(lookup_val)
-                    for i, val in enumerate(range_values):
-                        if str(val) == lookup_str:
-                            return i + 1
-                    return 0
-            else:
-                # For other match types, return 0 (not implemented)
-                return 0
-        except Exception as e:
-            return 0
+            return range_values.index(lookup_val) + 1
+        except ValueError:
+            lookup_str = str(lookup_val)
+            for i, value in enumerate(range_values):
+                if str(value) == lookup_str:
+                    return i + 1
+        raise LookupError(f"MATCH could not find {lookup_val!r}")
     
     def _func_and(self, args: List[str], tab: str, row: int, col: int) -> bool:
         """AND function"""
@@ -1127,9 +1564,11 @@ class FormulaEvaluator:
     def _func_abs(self, args: List[str], tab: str, row: int, col: int) -> float:
         """ABS function"""
         if len(args) < 1:
-            return 0
+            raise ValueError("ABS requires one argument")
         val = self._eval_expression(args[0], tab, row, col)
-        return abs(val) if isinstance(val, (int, float)) else 0
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            raise TypeError("ABS argument must be numeric")
+        return abs(val)
     
     def _func_max(self, args: List[str], tab: str, row: int, col: int) -> float:
         """MAX function"""
@@ -1138,7 +1577,7 @@ class FormulaEvaluator:
         
         values = []
         for arg in args:
-            if ':' in arg and '(' not in arg:
+            if ':' in arg and not self._is_function_call(arg):
                 # A bare range like Raw!$D:$D. A function CALL that merely
                 # contains a range — SUMIFS(Raw!$D:$D, ...) — has a paren and
                 # must be evaluated, not read as a range. Read as one it
@@ -1161,7 +1600,7 @@ class FormulaEvaluator:
         
         values = []
         for arg in args:
-            if ':' in arg and '(' not in arg:
+            if ':' in arg and not self._is_function_call(arg):
                 # A bare range like Raw!$D:$D. A function CALL that merely
                 # contains a range — SUMIFS(Raw!$D:$D, ...) — has a paren and
                 # must be evaluated, not read as a range. Read as one it
@@ -1180,35 +1619,28 @@ class FormulaEvaluator:
     def _func_round(self, args: List[str], tab: str, row: int, col: int) -> float:
         """ROUND function"""
         if len(args) < 1:
-            return 0
+            raise ValueError("ROUND requires one argument")
         val = self._eval_expression(args[0], tab, row, col)
         decimals = int(self._eval_expression(args[1], tab, row, col)) if len(args) > 1 else 0
-        return round(val, decimals) if isinstance(val, (int, float)) else 0
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            raise TypeError("ROUND value must be numeric")
+        return round(val, decimals)
     
     def _func_left(self, args: List[str], tab: str, row: int, col: int) -> str:
         """LEFT function"""
         if len(args) < 1:
-            return ""
-        
-        try:
-            text = str(self._eval_expression(args[0], tab, row, col))
-            num_chars = int(self._eval_expression(args[1], tab, row, col)) if len(args) > 1 else 1
-            return text[:num_chars]
-        except Exception as e:
-            return ""
+            raise ValueError("LEFT requires one argument")
+        text = str(self._eval_expression(args[0], tab, row, col))
+        num_chars = int(self._eval_expression(args[1], tab, row, col)) if len(args) > 1 else 1
+        return text[:num_chars]
     
     def _func_value(self, args: List[str], tab: str, row: int, col: int) -> float:
         """VALUE function"""
         if len(args) < 1:
-            return 0
-        
-        try:
-            text = str(self._eval_expression(args[0], tab, row, col))
-            # Remove common formatting
-            text = text.replace(',', '').replace('$', '').strip()
-            return float(text)
-        except Exception as e:
-            return 0
+            raise ValueError("VALUE requires one argument")
+        text = str(self._eval_expression(args[0], tab, row, col))
+        text = text.replace(',', '').replace('$', '').strip()
+        return float(text)
     
     def _func_columns(self, args: List[str], tab: str, row: int, col: int) -> int:
         """COLUMNS function"""
@@ -1261,10 +1693,18 @@ class FormulaEvaluator:
         # Convert all values to JSON-serializable format
         serializable_results = {}
         for tab_name, tab_data in results.items():
-            serializable_results[tab_name] = {
-                "cells": {k: self._serialize_value(v) for k, v in tab_data["cells"].items()},
-                "metadata": tab_data["metadata"]
-            }
+            if isinstance(tab_data, dict) and isinstance(tab_data.get("cells"), dict):
+                serializable_results[tab_name] = {
+                    "cells": {
+                        k: self._serialize_value(v)
+                        for k, v in tab_data["cells"].items()
+                    },
+                    "metadata": tab_data["metadata"],
+                }
+            else:
+                # Names beginning with '_' are bounded application metadata,
+                # not workbook tabs. Existing tab readers ignore them.
+                serializable_results[tab_name] = self._serialize_value(tab_data)
         
         # Write to file
         with open(output_path, 'w') as f:
@@ -1275,5 +1715,9 @@ class FormulaEvaluator:
         print(f"   • File size: {file_size:,} bytes ({file_size/1024:.1f} KB)")
         print(f"   • Tabs evaluated: {len(serializable_results)}")
         
-        total_cells = sum(tab["metadata"]["total_cells"] for tab in serializable_results.values())
+        total_cells = sum(
+            tab["metadata"]["total_cells"]
+            for tab in serializable_results.values()
+            if isinstance(tab, dict) and isinstance(tab.get("metadata"), dict)
+        )
         print(f"   • Total cells: {total_cells}")

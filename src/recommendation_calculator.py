@@ -22,19 +22,15 @@ class RecommendationCalculator:
     All numbers are computed using transparent, auditable formulas.
     """
     
-    # Volatility caps for price movements
-    MAX_3M_MOVEMENT = 0.12   # ±12%
-    MAX_6M_MOVEMENT = 0.20   # ±20%
-    MAX_12M_MOVEMENT = 0.30  # ±30%
-    
-    # Symmetric rating bands. The old table called -5% a SELL but required
-    # +10% for BUY, mechanically creating more sell calls from equal noise.
+    # A directional call needs a margin of safety around a noisy point
+    # valuation.  These are valuation-gap bands, not a claim that a share price
+    # follows a normal distribution or converges smoothly each quarter.
     RATING_BANDS = {
-        "STRONG BUY": (20.0, float('inf')),
-        "BUY": (8.0, 20.0),
-        "HOLD": (-8.0, 8.0),
-        "SELL": (-20.0, -8.0),
-        "STRONG SELL": (float('-inf'), -20.0)
+        "STRONG BUY": (30.0, float('inf')),
+        "BUY": (15.0, 30.0),
+        "HOLD": (-15.0, 15.0),
+        "SELL": (-30.0, -15.0),
+        "STRONG SELL": (float('-inf'), -30.0)
     }
     
     def __init__(self, sector: str = "default"):
@@ -60,6 +56,9 @@ class RecommendationCalculator:
         analyst_count: Optional[int] = None,
         analyst_source: Optional[str] = None,
         analyst_as_of: Optional[str] = None,
+        analyst_captured_at: Optional[str] = None,
+        analyst_rating: Optional[str] = None,
+        analyst_rating_count: Optional[int] = None,
         valuation_reliability: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
@@ -67,6 +66,24 @@ class RecommendationCalculator:
         
         Returns a complete FixedNumbers payload that LLM cannot modify.
         """
+        def _finite(value: Any, default: float = 0.0) -> float:
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+            ):
+                return float(value)
+            return default
+
+        def _nonnegative_count(value: Any) -> int:
+            if isinstance(value, bool):
+                return 0
+            try:
+                count_value = int(value or 0)
+            except (TypeError, ValueError, OverflowError):
+                return 0
+            return min(max(count_value, 0), 100_000)
+
         
         # A MISSING PRICE INVALIDATES THE RATING. It does not become a penny.
         #
@@ -80,20 +97,15 @@ class RecommendationCalculator:
         # Upside, a rating and a price target are all measured AGAINST the
         # market price. Without one there is nothing to measure against, so the
         # honest output is to say so rather than to invent the denominator.
-        price_available = current_price is not None and current_price > 0
-        if not price_available:
-            current_price = 0.0
-        if dcf_perpetual is None:
-            dcf_perpetual = 0
-        if dcf_exit is None:
-            dcf_exit = 0
-        if catalyst_score_pct is None:
-            catalyst_score_pct = 0
-        if risk_score_pct is None:
-            risk_score_pct = 0
-        if momentum_score_pct is None:
-            momentum_score_pct = 0
-        if hist_vol_annual_pct is None:
+        current_price = _finite(current_price)
+        price_available = current_price > 0
+        dcf_perpetual = _finite(dcf_perpetual)
+        dcf_exit = _finite(dcf_exit)
+        catalyst_score_pct = _finite(catalyst_score_pct)
+        risk_score_pct = _finite(risk_score_pct)
+        momentum_score_pct = _finite(momentum_score_pct)
+        hist_vol_annual_pct = _finite(hist_vol_annual_pct, 18.0)
+        if hist_vol_annual_pct < 0:
             hist_vol_annual_pct = 18.0
         
         # 1. DCF average
@@ -105,7 +117,7 @@ class RecommendationCalculator:
         # a method that does not fit the company, not a low estimate; the
         # Summary tab and the dispersion rail already exclude it, and the
         # rating must be built on the same number the report shows.
-        _legs = [v for v in (dcf_perpetual, dcf_exit) if isinstance(v, (int, float)) and v > 0]
+        _legs = [v for v in (dcf_perpetual, dcf_exit) if v > 0]
         dcf_avg = sum(_legs) / len(_legs) if _legs else 0
         legs_used = len(_legs)
         
@@ -127,84 +139,27 @@ class RecommendationCalculator:
             if current_price > 0 and valuation_available else 0
         )
         
-        # 3. No unmeasured sector haircut. The 40% weight below already models
-        # partial 12-month convergence toward a longer-duration fair value.
+        # 3. No unmeasured sector haircut.
         adj_val_gap_pct = raw_val_gap_pct
-        
-        # 4. Expected return (weighted formula)
-        # 40% valuation + 40% catalysts/risks + 20% momentum
+
+        # News classifications and 52-week-range position are useful context,
+        # but they are not calibrated percentage-return forecasts.  The former
+        # implementation multiplied them by arbitrary 40%/20% weights and
+        # called the sum a 12-month price target.  That produced a precise
+        # number which no financial model had actually estimated.  A published
+        # target now has one auditable basis: convergence to the point intrinsic
+        # value already approved by the valuation publication boundary.
         net_catalyst_risk_pct = catalyst_score_pct - risk_score_pct
-        
-        expected_return_pct = (
-            0.40 * adj_val_gap_pct +
-            0.40 * net_catalyst_risk_pct +
-            0.20 * momentum_score_pct
-        )
-        
-        # 5. Apply volatility caps (unless survival risk)
-        # The uncapped figure is kept so the report can show its own arithmetic
-        # honestly: the three weighted lines sum to THIS, not to the capped
-        # total, and printing the sum under a different total made the
-        # methodology section visibly not add up (a shipped VOO report showed
-        # -32.0 +2.6 -2.0 under a Total of -30.0).
-        uncapped_expected_return_pct = expected_return_pct
-        if not survival_risk:
-            expected_return_pct = max(
-                min(expected_return_pct, self.MAX_12M_MOVEMENT * 100),
-                -self.MAX_12M_MOVEMENT * 100
-            )
-        
-        # 6. Calculate price targets
-        # Progressive targets: 3M gets 33% of ER, 6M gets 67%, 12M gets 100%
-        # With no market price these are meaningless (every one would be 0), so
-        # they are left at zero and flagged rather than presented as targets.
-        target_3m = current_price * (1 + 0.33 * expected_return_pct / 100)
-        target_6m = current_price * (1 + 0.67 * expected_return_pct / 100)
-        target_12m = current_price * (1 + expected_return_pct / 100)
-        
-        # Apply individual caps if not survival risk
-        if not survival_risk:
-            target_3m = self._apply_cap(current_price, target_3m, self.MAX_3M_MOVEMENT)
-            target_6m = self._apply_cap(current_price, target_6m, self.MAX_6M_MOVEMENT)
-            target_12m = self._apply_cap(current_price, target_12m, self.MAX_12M_MOVEMENT)
-        
-        # 7. Calculate confidence ranges using volatility
-        # Range = ± (σ_annual * sqrt(horizon/12))
-        vol_decimal = hist_vol_annual_pct / 100
-        
-        range_3m_pct = vol_decimal * math.sqrt(3/12) * 100  # 3-month
-        range_6m_pct = vol_decimal * math.sqrt(6/12) * 100  # 6-month
-        range_12m_pct = vol_decimal * 100                    # 12-month
-        
-        # Apply caps to ranges
-        if not survival_risk:
-            range_3m_pct = min(range_3m_pct, self.MAX_3M_MOVEMENT * 100)
-            range_6m_pct = min(range_6m_pct, self.MAX_6M_MOVEMENT * 100)
-            range_12m_pct = min(range_12m_pct, self.MAX_12M_MOVEMENT * 100)
-        
-        # 8. Calculate range bounds
-        targets_with_ranges = {
-            "m3": {
-                "price": round(target_3m, 2),
-                "range_low": round(target_3m * (1 - range_3m_pct / 100), 2),
-                "range_high": round(target_3m * (1 + range_3m_pct / 100), 2)
-            },
-            "m6": {
-                "price": round(target_6m, 2),
-                "range_low": round(target_6m * (1 - range_6m_pct / 100), 2),
-                "range_high": round(target_6m * (1 + range_6m_pct / 100), 2)
-            },
-            "m12": {
-                "price": round(target_12m, 2),
-                "range_low": round(target_12m * (1 - range_12m_pct / 100), 2),
-                "range_high": round(target_12m * (1 + range_12m_pct / 100), 2)
-            }
-        }
+        expected_return_pct = raw_val_gap_pct
+        target_12m = valuation_value if valuation_available else None
         
         reliability = valuation_reliability or {}
-        point_estimate_withheld = bool(reliability.get("point_estimate_withheld"))
+        point_estimate_withheld = bool(
+            reliability.get("point_estimate_withheld")
+            or reliability.get("band") in {"wide", "unreliable"}
+        )
 
-        # 9. Determine rating
+        # 4. Determine rating
         #
         # A rating is a statement about price versus value. With no market
         # price there is no such statement to make, so this returns NOT RATED
@@ -228,34 +183,50 @@ class RecommendationCalculator:
         )
         
         # Human consensus is not intrinsic value, but a well-covered opposite
-        # view is evidence that our model may be missing an assumption. Keep
-        # the arithmetic untouched and reduce only the conviction of an
-        # extreme call. The rule is symmetric for bullish and bearish models.
+        # view is evidence that our model may be missing an assumption.  It is
+        # a publication gate, not a decorative footnote and not an ingredient
+        # averaged into fair value.
         consensus_alignment = "unavailable"
         rating_confidence = "moderate" if rating_available else None
-        count = int(analyst_count or 0)
-        if analyst_gap_pct is not None and count >= 5 and rating_available:
-            model_direction = 1 if raw_val_gap_pct >= 8 else (-1 if raw_val_gap_pct <= -8 else 0)
-            analyst_direction = 1 if analyst_gap_pct >= 8 else (-1 if analyst_gap_pct <= -8 else 0)
-            if model_direction and analyst_direction and model_direction != analyst_direction:
+        count = _nonnegative_count(analyst_count)
+        rating_count = _nonnegative_count(analyst_rating_count)
+        label = str(analyst_rating or "").strip().lower().replace("-", "_").replace(" ", "_")
+        rating_direction = (
+            1 if label in {"strong_buy", "buy", "outperform", "overweight"}
+            else -1 if label in {"strong_sell", "sell", "underperform", "underweight"}
+            else 0 if label in {"hold", "neutral", "market_perform", "equal_weight"}
+            else None
+        )
+        external_directions = []
+        if analyst_gap_pct is not None and count >= 5:
+            external_directions.append(
+                1 if analyst_gap_pct >= 8 else -1 if analyst_gap_pct <= -8 else 0
+            )
+        if rating_direction is not None and rating_count >= 5:
+            external_directions.append(rating_direction)
+        if external_directions:
+            model_direction = 1 if raw_val_gap_pct >= 15 else (-1 if raw_val_gap_pct <= -15 else 0)
+            non_neutral = [direction for direction in external_directions if direction]
+            conflicts = bool(
+                model_direction and any(direction != model_direction for direction in external_directions)
+            )
+            if conflicts:
                 consensus_alignment = "conflicting"
-                rating_confidence = "low"
-                if rating == "STRONG BUY":
-                    rating = "BUY"
-                elif rating == "STRONG SELL":
-                    rating = "SELL"
-            elif model_direction and model_direction == analyst_direction:
+                rating_available = False
+                rating = "NOT RATED"
+                rating_confidence = None
+            elif model_direction and non_neutral and all(
+                direction == model_direction for direction in non_neutral
+            ):
                 consensus_alignment = "supportive"
             else:
                 consensus_alignment = "mixed"
 
-        # A wide or single-method valuation can still support a directional
-        # view, but the model evidence is weaker than a converged football
-        # field. Make that visible without changing the arithmetic. An
-        # unreliable field is different: there is no defensible midpoint to
-        # rate, so all point targets and expected-return outputs are null.
+        # A single-method valuation can retain a view at low confidence when it
+        # is not exceptional. A wide or unreliable football field has no
+        # defensible midpoint, so all point targets and expected returns are null.
         reliability_band = reliability.get("band")
-        if rating_available and reliability_band in {"wide", "single-method"}:
+        if rating_available and reliability_band == "single-method":
             rating_confidence = "low"
 
         if point_estimate_withheld:
@@ -270,6 +241,14 @@ class RecommendationCalculator:
                     "Valuation evidence is not sufficient for a defensible point "
                     "estimate, directional rating, or price target."
                 )
+        elif consensus_alignment == "conflicting" and abs(raw_val_gap_pct) >= 15:
+            rating_withheld_reason = (
+                "The publishable intrinsic-value model and a sufficiently covered "
+                "external analyst benchmark point in materially different "
+                "directions. The intrinsic methods remain visible for audit, but "
+                "the rating and convergence target are withheld until the "
+                "assumption disagreement is reconciled."
+            )
         elif not valuation_available:
             rating_withheld_reason = (
                 "No usable intrinsic-value method produced a positive result."
@@ -279,7 +258,17 @@ class RecommendationCalculator:
         else:
             rating_withheld_reason = None
 
-        if not rating_available and price_available:
+        range_candidates = [value for value in _legs if value > 0]
+        supplied_low = _finite(reliability.get("range_low"))
+        supplied_high = _finite(reliability.get("range_high"))
+        range_low = supplied_low if supplied_low > 0 else (
+            min(range_candidates) if range_candidates else None
+        )
+        range_high = supplied_high if supplied_high > 0 else (
+            max(range_candidates) if range_candidates else None
+        )
+
+        if not rating_available:
             expected_return_output = None
             targets_output = {
                 period: {"price": None, "range_low": None, "range_high": None}
@@ -287,7 +276,18 @@ class RecommendationCalculator:
             }
         else:
             expected_return_output = round(expected_return_pct, 2)
-            targets_output = targets_with_ranges
+            # No invented three/six-month path and no pseudo-confidence band
+            # made from historical volatility.  The only range shown is the
+            # range of approved valuation methods.
+            targets_output = {
+                "m3": {"price": None, "range_low": None, "range_high": None},
+                "m6": {"price": None, "range_low": None, "range_high": None},
+                "m12": {
+                    "price": round(target_12m, 2),
+                    "range_low": round(range_low, 2) if range_low is not None else None,
+                    "range_high": round(range_high, 2) if range_high is not None else None,
+                },
+            }
 
         # 10. Build complete fixed numbers payload
         return {
@@ -295,6 +295,11 @@ class RecommendationCalculator:
             "ticker": ticker,
             "current_price": current_price,
             "expected_return_pct_12m": expected_return_output,
+            "target_basis": "published_intrinsic_value_convergence",
+            "target_assumption": (
+                "The 12-month case assumes convergence to the currently published "
+                "intrinsic value; it is not a statistically forecast market price."
+            ),
             "targets": targets_output,
             "rating": rating,
             "rating_confidence": rating_confidence,
@@ -316,6 +321,9 @@ class RecommendationCalculator:
                 "analyst_count": count,
                 "analyst_source": analyst_source,
                 "analyst_as_of": analyst_as_of,
+                "analyst_captured_at": analyst_captured_at,
+                "analyst_rating": analyst_rating,
+                "analyst_rating_count": rating_count,
                 "consensus_alignment": consensus_alignment,
                 "valuation_reliability": reliability or None,
                 "catalyst_score_pct": round(catalyst_score_pct, 2),
@@ -323,11 +331,10 @@ class RecommendationCalculator:
                 "net_catalyst_risk_pct": round(net_catalyst_risk_pct, 2),
                 "momentum_score_pct": round(momentum_score_pct, 2),
                 "hist_vol_annual_pct": round(hist_vol_annual_pct, 2),
-                "uncapped_expected_return_pct": round(uncapped_expected_return_pct, 2),
-                "cap_applied": bool(
-                    abs(uncapped_expected_return_pct - expected_return_pct) > 0.05
-                ),
-                "cap_pct": self.MAX_12M_MOVEMENT * 100,
+                "qualitative_signals_used_in_target": False,
+                "uncapped_expected_return_pct": round(expected_return_pct, 2),
+                "cap_applied": False,
+                "cap_pct": None,
             }
         }
     
@@ -342,13 +349,13 @@ class RecommendationCalculator:
         # Spell out the boundaries so exactly -8% maps to SELL just as exactly
         # +8% maps to BUY. A tuple loop cannot make both inner boundaries
         # inclusive without overlapping intervals.
-        if expected_return_pct >= 20.0:
+        if expected_return_pct >= 30.0:
             return "STRONG BUY"
-        if expected_return_pct >= 8.0:
+        if expected_return_pct >= 15.0:
             return "BUY"
-        if expected_return_pct > -8.0:
+        if expected_return_pct > -15.0:
             return "HOLD"
-        if expected_return_pct > -20.0:
+        if expected_return_pct > -30.0:
             return "SELL"
         return "STRONG SELL"
     

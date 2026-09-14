@@ -109,7 +109,7 @@ Generate a professional equity research report with the following structure:
 ### Overview of News Coverage
 **Articles Analyzed**: {articles_analyzed}  
 **Analysis Period**: {analysis_period}  
-**Overall Sentiment**: {overall_sentiment}  
+**News Sentiment**: {overall_sentiment}
 **Key Themes Identified**: {key_themes}
 
 ### Detailed Catalyst Analysis

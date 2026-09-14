@@ -199,7 +199,12 @@ class HistoricalTabBuilder:
             (4, "Cost Of Revenue", "Cost Of Revenue", ExcelFormats.CURRENCY, False),
             (5, "Gross Profit", None, ExcelFormats.CURRENCY, True),
             (6, "Research And Development", "Research And Development", ExcelFormats.CURRENCY, False),
-            (7, "Selling General And Administration", "Selling General And Administration", ExcelFormats.CURRENCY, False),
+            # Yahoo sometimes removes the SG&A breakout in the newest fiscal
+            # year even though the same issuer disclosed it in every preceding
+            # year (WMT FY2026 is a production example).  Row 7 is therefore
+            # the residual operating-expense bucket, not a promise that every
+            # dollar was explicitly labelled SG&A by the filing.
+            (7, "SG&A / Other Operating Expenses", "Selling General And Administration", ExcelFormats.CURRENCY, False),
             (8, "Operating Income", "Operating Income", ExcelFormats.CURRENCY, True),
             (9, "Other Income Expense", "Other Income Expense", ExcelFormats.CURRENCY, False),
             (10, "Pretax Income", "Pretax Income", ExcelFormats.CURRENCY, False),
@@ -232,6 +237,16 @@ class HistoricalTabBuilder:
                     # responses. Match the statement as well as the field so
                     # aliases do not double count the same reported value.
                     formula = f'={depreciation_excel_formula(f"{col_letter}$1")}'
+                elif row == 7:
+                    # This is deliberately a residual bucket.  Disclosed SG&A
+                    # is not consistently total operating expense: utilities,
+                    # energy and industrial issuers commonly report additional
+                    # operating-cost lines outside SG&A.  Using only the named
+                    # line left material visible tie-out failures for WMT, NEE,
+                    # XOM and CAT.  Gross profit - R&D - reported EBIT preserves
+                    # every other operating cost without pretending the entire
+                    # residual was labelled SG&A by the issuer.
+                    formula = f'={col_letter}5-{col_letter}6-{col_letter}8'
                 elif raw_field is None:
                     # Calculated formulas
                     if row == 5:  # Gross Profit
@@ -318,18 +333,36 @@ class HistoricalTabBuilder:
         """
         balance_rows = [
             (30, "Cash And Cash Equivalents", "Cash And Cash Equivalents", ExcelFormats.CURRENCY, False),
-            (31, "Short Term Investments", None, ExcelFormats.CURRENCY, False),
+            (31, "Investments / Non-operating", None, ExcelFormats.CURRENCY, False),
             (32, "Accounts Receivable", "Accounts Receivable", ExcelFormats.CURRENCY, False),
             (33, "Inventory", "Inventory", ExcelFormats.CURRENCY, False),
             (34, "Accounts Payable", "Accounts Payable", ExcelFormats.CURRENCY, False),
             (35, "Total Debt", "Total Debt", ExcelFormats.CURRENCY, False),
             (36, "Long Term Debt", "Long Term Debt", ExcelFormats.CURRENCY, False),
             (37, "Net Debt", None, ExcelFormats.CURRENCY, True),
+            # Required by the projection PP&E roll-forward.  The old workbook
+            # accidentally pointed that roll-forward at Historical row 25,
+            # which is free cash flow—not a balance-sheet asset.
+            (38, "Net PP&E", "Net PPE", ExcelFormats.CURRENCY, False),
             (39, "DSO (days)", None, ExcelFormats.NUMBER_DECIMAL, True),
             (40, "DIO (days)", None, ExcelFormats.NUMBER_DECIMAL, True),
             (41, "DPO (days)", None, ExcelFormats.NUMBER_DECIMAL, True),
             (42, "Cash Conversion Cycle (days)", None, ExcelFormats.NUMBER_DECIMAL, True),
         ]
+        # Use the same consistently scoped Yahoo aliases as assumption
+        # grounding. Exact narrow rows disappear for some issuers while broad
+        # canonical totals remain (BABA has Receivables and Payables And
+        # Accrued Expenses but no current Accounts Payable). A zero from an
+        # absent exact row must not become the FY0 base for a driver inferred
+        # from a different, broader field.
+        balance_aliases = {
+            # Narrow trade balances are the correct inputs to DSO/DPO. Broad
+            # totals remain fallbacks for issuers that do not report the narrow
+            # line; choosing the broad line first made FY0 incomparable with the
+            # projected driver and created enormous artificial delta-NWC.
+            32: ("Accounts Receivable", "Receivables"),
+            34: ("Accounts Payable", "Payables", "Payables And Accrued Expenses"),
+        }
         
         for row, label, raw_field, num_format, is_bold in balance_rows:
             ws.cell(row=row, column=1, value=label)
@@ -342,7 +375,7 @@ class HistoricalTabBuilder:
                 col_letter = chr(65 + col - 1)
                 
                 if raw_field is None:
-                    if row == 37:  # Net Debt (improved: Total Debt - Cash - ST Investments)
+                    if row == 37:  # Adjusted net debt: debt - cash - non-operating investments
                         formula = f'={col_letter}35-{col_letter}30-{col_letter}31'
                     elif row == 31:
                         # Yahoo's combined field already includes cash. Adding
@@ -359,10 +392,30 @@ class HistoricalTabBuilder:
                             f'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Short Term Investments",'
                             f'Raw!$C:$C,{col_letter}$1&"*")'
                         )
-                        formula = (
-                            f'=IF({other}<>0,{other},IF({short_term}<>0,{short_term},'
+                        current_investments = (
+                            f'IF({other}<>0,{other},IF({short_term}<>0,{short_term},'
                             f'IF({combined}>{col_letter}30,{combined}-{col_letter}30,0)))'
                         )
+                        # These aliases all describe the same non-current
+                        # investment bucket, so choose one.  It is separate
+                        # from short-term investments above and must be added.
+                        advances = (
+                            f'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Investments And Advances",'
+                            f'Raw!$C:$C,{col_letter}$1&"*")'
+                        )
+                        financial_assets = (
+                            f'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Investmentin Financial Assets",'
+                            f'Raw!$C:$C,{col_letter}$1&"*")'
+                        )
+                        available_for_sale = (
+                            f'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Available For Sale Securities",'
+                            f'Raw!$C:$C,{col_letter}$1&"*")'
+                        )
+                        noncurrent_investments = (
+                            f'IF({advances}<>0,{advances},IF({financial_assets}<>0,'
+                            f'{financial_assets},{available_for_sale}))'
+                        )
+                        formula = f'={current_investments}+{noncurrent_investments}'
                     elif row == 39:  # DSO (Days Sales Outstanding)
                         formula = f'=IFERROR(ROUND({col_letter}32/({col_letter}3/365),2),"")'
                     elif row == 40:  # DIO (Days Inventory Outstanding)
@@ -372,7 +425,16 @@ class HistoricalTabBuilder:
                     elif row == 42:  # CCC (Cash Conversion Cycle)
                         formula = f'=IFERROR(ROUND({col_letter}39+{col_letter}40-{col_letter}41,2),"")'
                 else:
-                    formula = f'=SUMIFS(Raw!$D:$D,Raw!$B:$B,"{raw_field}",Raw!$C:$C,{col_letter}$1&"*")'
+                    aliases = balance_aliases.get(row, (raw_field,))
+                    lookups = [
+                        f'SUMIFS(Raw!$D:$D,Raw!$B:$B,"{field}",'
+                        f'Raw!$C:$C,{col_letter}$1&"*")'
+                        for field in aliases
+                    ]
+                    expression = lookups[-1]
+                    for lookup in reversed(lookups[:-1]):
+                        expression = f'IF({lookup}<>0,{lookup},{expression})'
+                    formula = f'={expression}'
                 
                 ws.cell(row=row, column=col, value=formula)
                 ws.cell(row=row, column=col).number_format = num_format

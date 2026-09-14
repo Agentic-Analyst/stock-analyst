@@ -11,10 +11,11 @@ Professional-grade DCF valuation following investment banking standards:
 - Sanity checks and cross-references to Perpetual Growth method
 """
 
-from typing import Optional
+from typing import Any, Dict, Optional
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 from ..financial_model_builder import ExcelFormats
 
@@ -43,13 +44,14 @@ class ValuationExitMultipleDCFBuilder:
     """
     
     def __init__(self, projection_years: int = 5, exit_multiple: float = 20.0,
-                 growth_cap: float = 0.04):
+                 growth_cap: float = 0.04, available: Optional[bool] = None,
+                 modeling_basis: Optional[Dict[str, Any]] = None):
         """
         Initialize the Exit Multiple DCF builder.
 
         exit_multiple: terminal EV/EBITDA — grounded per company by
-        assumption_grounding (0.8x current EV/EBITDA, clamped 8-22x), then
-        bounded from projected FY5 cash conversion; the old hardcoded 20.0x
+        assumption_grounding (observable current EV/EBITDA, no invented fallback), then
+        bounded from projected FY10 cash conversion; the old hardcoded 20.0x
         applied one multiple to every sector.
         
         Args:
@@ -58,7 +60,17 @@ class ValuationExitMultipleDCFBuilder:
                 multiple, already bounded by the cash-flow currency's rate.
         """
         self.projection_years = projection_years
+        self.modeling_basis = modeling_basis or {}
+        self.horizon_prefix = (
+            "NTM" if (self.modeling_basis.get("forecast_basis") or {}).get(
+                "basis") == "rolling_twelve_months" else "FY"
+        )
         self.exit_multiple = float(exit_multiple)
+        self.available = (
+            self.exit_multiple > 0 if available is None else bool(available)
+        )
+        if not self.available:
+            self.exit_multiple = 0.0
         try:
             parsed_cap = float(growth_cap)
         except (TypeError, ValueError):
@@ -136,7 +148,12 @@ class ValuationExitMultipleDCFBuilder:
         ws.cell(row=3, column=2, value=self.exit_multiple)  # Grounded per company
         ws.cell(row=3, column=2).number_format = '0.0"x"'
         ws.cell(row=3, column=2).font = Font(bold=True)
-        ws.cell(row=3, column=7, value="User input: exit multiple assumption")
+        ws.cell(
+            row=3, column=7,
+            value=("Observable current EV/EBITDA reference"
+                   if self.available else
+                   "Unavailable: no valid observable EV/EBITDA reference"),
+        )
         ws.cell(row=3, column=7).font = Font(italic=True, size=9)
         
         # Row 4: Tax Rate
@@ -146,7 +163,11 @@ class ValuationExitMultipleDCFBuilder:
         
         # Row 5: Discount Periods
         ws.cell(row=5, column=1, value="Discount Periods (Years)")
-        ws.cell(row=5, column=2, value='=COLUMNS(Projections!B2:F2)')  # Count projection years
+        # Match the perpetual-growth DCF's ten-year explicit horizon. The old
+        # exit model stopped at FY5 while the perpetual model ran to FY10, then
+        # Summary averaged them as if they valued the same cash-flow stream.
+        ws.cell(row=5, column=2,
+                value="=COLUMNS('Valuation (DCF)'!B16:K16)")
         ws.cell(row=5, column=2).number_format = '0'
     
     def _setup_fcf_forecast(self, ws: Worksheet) -> None:
@@ -164,17 +185,20 @@ class ValuationExitMultipleDCFBuilder:
         # Row 7: FCF
         ws.cell(row=7, column=1, value="Free Cash Flow (FCF)")
         ws.cell(row=7, column=1).font = Font(bold=True)
-        for i in range(self.projection_years):
-            col = 2 + i  # B, C, D, E, F
-            col_letter = chr(64 + col)
-            formula = f'=Projections!{col_letter}19'  # FCF row in Projections
+        for i in range(10):
+            col = 2 + i  # B..K, FY1..FY10
+            col_letter = get_column_letter(col)
+            formula = (
+                f'=Projections!{col_letter}19' if i < self.projection_years
+                else f"='Valuation (DCF)'!{col_letter}16"
+            )
             ws.cell(row=7, column=col, value=formula)
             ws.cell(row=7, column=col).number_format = ExcelFormats.CURRENCY
         
         # Row 8: Discount Factor
         ws.cell(row=8, column=1, value="Discount Factor (DF)")
-        for i in range(self.projection_years):
-            col = 2 + i  # B, C, D, E, F
+        for i in range(10):
+            col = 2 + i  # B..K
             period = i + 1  # 1, 2, 3, 4, 5
             # Formula: 1/(1+WACC)^(n - MYD_adjustment)
             # MYD toggle in Sensitivity!$B$4: 0.5 if mid-year, 0 if year-end
@@ -185,9 +209,9 @@ class ValuationExitMultipleDCFBuilder:
         # Row 9: PV of FCF
         ws.cell(row=9, column=1, value="PV of FCF")
         ws.cell(row=9, column=1).font = Font(bold=True)
-        for i in range(self.projection_years):
-            col = 2 + i  # B, C, D, E, F
-            col_letter = chr(64 + col)
+        for i in range(10):
+            col = 2 + i  # B..K
+            col_letter = get_column_letter(col)
             formula = f'={col_letter}7*{col_letter}8'  # FCF * DF
             ws.cell(row=9, column=col, value=formula)
             ws.cell(row=9, column=col).number_format = ExcelFormats.CURRENCY
@@ -195,7 +219,7 @@ class ValuationExitMultipleDCFBuilder:
         # Row 10: Sum of PV(FCFs)
         ws.cell(row=10, column=1, value="Sum of PV(FCFs)")
         ws.cell(row=10, column=1).font = Font(bold=True)
-        ws.cell(row=10, column=2, value='=SUM(B9:F9)')
+        ws.cell(row=10, column=2, value='=SUM(B9:K9)')
         ws.cell(row=10, column=2).number_format = ExcelFormats.CURRENCY
         ws.cell(row=10, column=2).font = Font(bold=True)
     
@@ -203,24 +227,34 @@ class ValuationExitMultipleDCFBuilder:
         """
         Set up Terminal Value section (rows 12-15).
         
-        Row 12: Terminal Year EBITDA (from Projections F21)
+        Row 12: Terminal Year EBITDA (FY10, using the DCF stage-2 growth path)
         Row 13: Exit Multiple (reference to B3)
         Row 14: Terminal Value (Un-discounted) = EBITDA × Multiple
-        Row 15: PV of Terminal Value = TV / (1+WACC)^5
+        Row 15: PV of Terminal Value = TV / (1+WACC)^(10-MYD)
         """
         # Blank row
         ws.cell(row=11, column=1, value="")
         
         # Row 12: Terminal Year EBITDA
-        ws.cell(row=12, column=1, value="Terminal Year EBITDA (FY5)")
+        ws.cell(
+            row=12, column=1,
+            value=f"Terminal Year EBITDA ({self.horizon_prefix}10)",
+        )
         ws.cell(row=12, column=1).font = Font(bold=True)
-        ws.cell(row=12, column=2, value='=Projections!F21')  # EBITDA in final year (row 21)
+        # Stage 2 explicitly forecasts FCF rather than a second full income
+        # statement. Extend FY5 EBITDA by the exact same cumulative growth as
+        # FCF, transparently holding mature cash conversion constant.
+        ws.cell(
+            row=12, column=2,
+            value=("=IF('Valuation (DCF)'!F16>0,"
+                   "Projections!F21*'Valuation (DCF)'!K16/'Valuation (DCF)'!F16,0)"),
+        )
         ws.cell(row=12, column=2).number_format = ExcelFormats.CURRENCY
         ws.cell(row=12, column=2).font = Font(bold=True)
         
         # Row 13: Exit Multiple — SELF-LIMITING.
         #
-        # The input ($B$3) is 0.8x what the company trades at TODAY. That embeds
+        # The input ($B$3) starts from what the company trades at TODAY. That embeds
         # today's growth expectations, and applying it to a terminal year where
         # growth has already decayed to ~2.5% assumes no multiple compression at
         # all. Across 39 audited production models this is what drove the exit
@@ -232,7 +266,7 @@ class ValuationExitMultipleDCFBuilder:
         # GDP) gives the highest multiple that is not implicitly claiming the
         # company outgrows the economy forever:
         #
-        #   r       = terminal FCF / terminal EBITDA  =  $F$7 / $B$12
+        #   r       = terminal FCF / terminal EBITDA  =  $K$7 / $B$12
         #   ceiling = r * (1 + g_cap) / (WACC - g_cap)
         #
         # MIN() so this can only ever REDUCE the multiple, never inflate it.
@@ -265,15 +299,15 @@ class ValuationExitMultipleDCFBuilder:
         ws.cell(
             row=13, column=2,
             value=(
-                f'=IF(AND($B$12>0,$B$2>{cap + 0.005:.10f},$F$7/$B$12>=0.30),'
-                f'MIN($B$3,($F$7/$B$12)*{1 + cap:.10f}/($B$2-{cap:.10f})),'
+                f'=IF(AND($B$12>0,$B$2>{cap + 0.005:.10f},$K$7/$B$12>=0.30),'
+                f'MIN($B$3,($K$7/$B$12)*{1 + cap:.10f}/($B$2-{cap:.10f})),'
                 '$B$3)'
             ),
         )
         ws.cell(row=13, column=2).number_format = '0.0"x"'
         ws.cell(
             row=13, column=7,
-            value=(f"Cap uses projected FY5 FCF / EBITDA and a "
+            value=(f"Cap uses projected {self.horizon_prefix}10 FCF / EBITDA and a "
                    f"{cap*100:.2f}% sustainable-growth ceiling"),
         )
         ws.cell(row=13, column=7).font = Font(italic=True, size=9)
@@ -286,7 +320,8 @@ class ValuationExitMultipleDCFBuilder:
         # Row 15: PV of Terminal Value
         ws.cell(row=15, column=1, value="PV of Terminal Value")
         ws.cell(row=15, column=1).font = Font(bold=True)
-        ws.cell(row=15, column=2, value='=B14/(1+$B$2)^$B$5')  # TV discounted at WACC for 5 periods
+        ws.cell(row=15, column=2,
+                value='=B14/(1+$B$2)^($B$5-Sensitivity!$B$4)')
         ws.cell(row=15, column=2).number_format = ExcelFormats.CURRENCY
         ws.cell(row=15, column=2).font = Font(bold=True)
     
@@ -368,7 +403,10 @@ class ValuationExitMultipleDCFBuilder:
         # Row 25: Intrinsic Value per Share
         ws.cell(row=25, column=1, value="Intrinsic Value per Share ($)")
         ws.cell(row=25, column=1).font = Font(bold=True, size=11)
-        ws.cell(row=25, column=2, value='=B22/B24')  # Equity Value / Shares
+        # Explicit cash flows alone are not an exit-multiple method. If there
+        # was no valid multiple input, publish zero so Summary excludes this
+        # entire leg instead of counting a partial DCF as a second opinion.
+        ws.cell(row=25, column=2, value='=IF($B$3>0,B22/B24,0)')
         ws.cell(row=25, column=2).number_format = '$0.00'
         ws.cell(row=25, column=2).font = Font(bold=True, size=11)
         ws.cell(row=25, column=2).fill = PatternFill(
@@ -381,8 +419,8 @@ class ValuationExitMultipleDCFBuilder:
         """
         Set up Sanity Checks section (rows 27-30).
         
-        Row 27: Implied EV/EBITDA (FY5)
-        Row 28: EV/EBIT (FY5)
+        Row 27: Implied EV/EBITDA (FY10)
+        Row 28: EV/EBIT (FY10)
         Row 29: FCF Yield (EV Basis)
         Row 30: Equity Value from Perpetual Growth DCF (cross-check)
         """
@@ -390,18 +428,26 @@ class ValuationExitMultipleDCFBuilder:
         ws.cell(row=26, column=1, value="")
         
         # Row 27: Implied EV/EBITDA
-        ws.cell(row=27, column=1, value="Implied EV/EBITDA (FY5)")
-        ws.cell(row=27, column=2, value='=B17/Projections!F21')  # EV / EBITDA
+        ws.cell(row=27, column=1,
+                value=f"Present EV / {self.horizon_prefix}10 EBITDA (diagnostic)")
+        # A pre-profit company can legitimately have zero or negative terminal
+        # EBITDA.  That makes this diagnostic unavailable; it must not corrupt
+        # the entire downloadable model with a division-by-zero integrity
+        # failure (ASTS was the real launch-bash reproduction).
+        ws.cell(row=27, column=2, value='=IFERROR(B17/B12,"")')
         ws.cell(row=27, column=2).number_format = '0.0"x"'
         
         # Row 28: EV/EBIT
-        ws.cell(row=28, column=1, value="Implied EV/EBIT (FY5)")
-        ws.cell(row=28, column=2, value='=B17/Projections!F9')  # EV / EBIT (row 9 in Projections)
+        ws.cell(row=28, column=1,
+                value=f"Present EV / {self.horizon_prefix}10 EBIT (diagnostic)")
+        ws.cell(row=28, column=2,
+                value='=IFERROR(B17/(Projections!F9*K7/F7),"")')
         ws.cell(row=28, column=2).number_format = '0.0"x"'
         
         # Row 29: FCF Yield
-        ws.cell(row=29, column=1, value="FCF Yield (EV Basis, FY5)")
-        ws.cell(row=29, column=2, value='=Projections!F19/B17')  # FCF / EV
+        ws.cell(row=29, column=1,
+                value=f"{self.horizon_prefix}10 FCF / Present EV (diagnostic)")
+        ws.cell(row=29, column=2, value='=IFERROR(K7/B17,"")')
         ws.cell(row=29, column=2).number_format = '0.00%'
         
         # Row 30: Cross-reference to Perpetual Growth Equity Value
@@ -454,7 +500,8 @@ class ValuationExitMultipleDCFBuilder:
         ws.cell(row=35, column=1).font = Font(italic=True)
         # Note: Historical!F2 should contain current stock price
         # If not available, this will show #REF! until price is added
-        ws.cell(row=35, column=2, value='=B34/Historical!F2-1')  # (Intrinsic / Current) - 1
+        ws.cell(row=35, column=2,
+                value='=IFERROR(B34/Historical!F2-1,"")')
         ws.cell(row=35, column=2).number_format = '0.0%'
         ws.cell(row=35, column=2).font = Font(italic=True)
     

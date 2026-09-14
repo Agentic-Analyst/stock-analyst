@@ -12,6 +12,8 @@ Professional features:
 - Cross-references to both Valuation tabs
 """
 
+from typing import Any, Dict, Optional
+
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -34,9 +36,13 @@ class SensitivityTabBuilder:
     The MYD toggle affects discount factor exponents in both DCF tabs.
     """
     
-    def __init__(self):
+    def __init__(self, modeling_basis: Optional[Dict[str, Any]] = None):
         """Initialize the Sensitivity builder."""
-        pass
+        self.modeling_basis = modeling_basis or {}
+        self.horizon_prefix = (
+            "NTM" if (self.modeling_basis.get("forecast_basis") or {}).get(
+                "basis") == "rolling_twelve_months" else "FY"
+        )
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -302,11 +308,11 @@ class SensitivityTabBuilder:
         """
         Re-run the exit-multiple DCF for one (WACC, exit multiple) pair.
 
-        Mirrors 'Valuation (Exit Multiple)': FCF FY1-FY5 in row 7 columns B..F
-        discounted with the mid-year toggle, terminal value = FY5 EBITDA (row 12)
+        Mirrors 'Valuation (Exit Multiple)': FCF FY1-FY10 in row 7 columns B..K
+        discounted with the mid-year toggle, terminal value = FY10 EBITDA (row 12)
         times this column's multiple discounted over the tab's own discount
-        period count (row 5, without the mid-year adjustment — the tab discounts
-        its terminal value that way), then cash - debt + investments over shares.
+        period count (row 5) and the same mid-year adjustment, then cash - debt
+        + investments over shares.
         """
         exit_tab = "'Valuation (Exit Multiple)'"
         wacc = f"$A{row}"                        # this row's WACC
@@ -314,11 +320,11 @@ class SensitivityTabBuilder:
 
         terms = [
             f"{exit_tab}!{get_column_letter(2 + i)}$7/(1+{wacc})^({i + 1}-$B$4)"
-            for i in range(5)
+            for i in range(10)
         ]
         pv_fcf = "+".join(terms)
         terminal = (f"({exit_tab}!$B$12*{multiple})"
-                    f"/(1+{wacc})^{exit_tab}!$B$5")
+                    f"/(1+{wacc})^({exit_tab}!$B$5-$B$4)")
         bridge = f"{exit_tab}!$B$19-{exit_tab}!$B$20+{exit_tab}!$B$21"
 
         return (f'=IFERROR(({pv_fcf}+{terminal}+{bridge})'
@@ -392,8 +398,8 @@ class SensitivityTabBuilder:
         # Data table area B23:G27 - will be filled by Excel Data Table
         # C23:G27 — the exit-multiple grid, blank for the same reason and fixed
         # the same way. Each cell re-runs the exit DCF at its own WACC and exit
-        # multiple, mirroring that tab's arithmetic exactly: five discounted FCF
-        # periods carrying the mid-year toggle, a terminal value of FY5 EBITDA
+        # multiple, mirroring that tab's arithmetic exactly: ten discounted FCF
+        # periods carrying the mid-year toggle, a terminal value of FY10 EBITDA
         # times the multiple discounted over the tab's own period count, then the
         # equity bridge.
         for row in range(23, 28):
@@ -412,7 +418,7 @@ class SensitivityTabBuilder:
                       "(columns). Recalculates from the Exit Multiple tab.")
         ws.cell(row=29, column=1).font = Font(italic=True, size=9, color="666666")
         ws.cell(row=30, column=1,
-                value="Terminal value here is FY5 EBITDA x the exit multiple, so this "
+                value=f"Terminal value here is {self.horizon_prefix}10 EBITDA x the exit multiple, so this "
                       "grid is a view on the exit assumption rather than on perpetual growth.")
         ws.cell(row=30, column=1).font = Font(italic=True, size=9, color="666666")
 
@@ -438,10 +444,19 @@ class SensitivityTabBuilder:
         ws.cell(row=33, column=2).number_format = '$0.00'
         ws.cell(row=33, column=2).font = Font(bold=True)
         
-        # Row 34: Average of Methods
-        ws.cell(row=34, column=1, value="Average of Methods")
+        # Row 34: midpoint of the two terminal-value scenarios. A zero means a
+        # method was unavailable, not a valid zero-dollar vote; use the same
+        # positive-leg convention as Summary instead of AVERAGE(positive, 0).
+        ws.cell(row=34, column=1, value="DCF Scenario Midpoint")
         ws.cell(row=34, column=1).font = Font(bold=True, size=11)
-        ws.cell(row=34, column=2, value="=AVERAGE(B32:B33)")
+        _dcf_n = "((B32>0)+(B33>0))"
+        ws.cell(
+            row=34, column=2,
+            value=(
+                f"=IF({_dcf_n}=0,AVERAGE(B32:B33),"
+                f"(MAX(B32,0)+MAX(B33,0))/{_dcf_n})"
+            ),
+        )
         ws.cell(row=34, column=2).number_format = '$0.00'
         ws.cell(row=34, column=2).font = Font(bold=True, size=11)
         ws.cell(row=34, column=2).fill = PatternFill(
@@ -458,7 +473,7 @@ class SensitivityTabBuilder:
         # Row 36: Upside vs Market
         ws.cell(row=36, column=1, value="Upside vs Market")
         ws.cell(row=36, column=1).font = Font(bold=True, size=11)
-        ws.cell(row=36, column=2, value="=B34/B35-1")
+        ws.cell(row=36, column=2, value='=IFERROR(B34/B35-1,"")')
         ws.cell(row=36, column=2).number_format = '0.0%'
         ws.cell(row=36, column=2).font = Font(bold=True, size=11)
         ws.cell(row=36, column=2).fill = PatternFill(

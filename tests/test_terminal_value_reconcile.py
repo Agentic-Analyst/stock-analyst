@@ -75,6 +75,54 @@ class TestTheAlgebra:
         assert tv.defensible_multiple(0.55, 0.10, 0.12) is None
 
 
+def test_stage_two_preserves_decline_then_fades_to_terminal_growth():
+    """A negative FY5 trajectory must not snap to positive growth in FY6."""
+    import logging
+    import openpyxl
+
+    from src.agents.fm.formula_evaluator import FormulaEvaluator
+    from src.agents.fm.tabs.tab_valuation_perpetual_growth_dcf import (
+        ValuationPerpetualGrowthDCFBuilder,
+    )
+
+    workbook = openpyxl.Workbook()
+    projections = workbook.active
+    projections.title = "Projections"
+    for index, column in enumerate("BCDEF", 1):
+        projections[f"{column}2"] = 2025 + index
+        projections[f"{column}19"] = 100.0
+    assumptions = workbook.create_sheet("Assumptions")
+    assumptions["B18"] = 1.0
+    assumptions["B19"] = 0.0
+    assumptions["B20"] = 0.20
+    assumptions["B23"] = 0.04
+    assumptions["B24"] = 0.05
+    assumptions["B25"] = 1.0
+    assumptions["B27"] = 0.055
+    assumptions["B29"] = 1.0
+    assumptions["B30"] = 0.025
+    assumptions["B31"] = 1.0
+    model_inputs = workbook.create_sheet("Model_Inputs")
+    model_inputs["F4"] = -0.10
+    sensitivity = workbook.create_sheet("Sensitivity")
+    sensitivity["B4"] = 0.0
+    historical = workbook.create_sheet("Historical")
+    historical["F21"] = 100.0
+    historical["F30"] = 100.0
+
+    ValuationPerpetualGrowthDCFBuilder().create_tab(workbook)
+    evaluator = FormulaEvaluator(workbook)
+    evaluator.set_logger(logging.getLogger("test_stage_two_decline"))
+    cells = evaluator.evaluate_all_tabs()["Valuation (DCF)"]["cells"]
+
+    # FY6 fades one fifth of the way from -10.0% to +2.5%: -7.5%.
+    assert cells["(16, 7)"] == pytest.approx(92.5)
+    expected_fy10 = 100.0
+    for growth in (-0.075, -0.05, -0.025, 0.0, 0.025):
+        expected_fy10 *= 1.0 + growth
+    assert cells["(16, 11)"] == pytest.approx(expected_fy10)
+
+
 class TestVerdicts:
     def test_meta_exit_multiple_is_not_a_terminal_multiple(self):
         out = tv.reconcile(**META)
@@ -275,7 +323,37 @@ class TestCapMakesModelsConsistent:
             exit_multiple=20.0, growth_cap=0.0231,
         ).create_tab(openpyxl.Workbook())
         formula = ws["B13"].value
-        assert "$F$7/$B$12" in formula
+        assert "$K$7/$B$12" in formula
         assert "0.0231000000" in formula
         assert "Historical" not in formula
-        assert "projected FY5" in ws["G13"].value
+        assert "projected FY10" in ws["G13"].value
+
+    def test_exit_workbook_uses_the_same_ten_year_horizon_as_perpetual_dcf(self):
+        import openpyxl
+        from src.agents.fm.tabs.tab_valuation_exit_multiple_dcf import (
+            ValuationExitMultipleDCFBuilder,
+        )
+
+        ws = ValuationExitMultipleDCFBuilder().create_tab(openpyxl.Workbook())
+        assert ws["B5"].value == "=COLUMNS('Valuation (DCF)'!B16:K16)"
+        assert ws["K7"].value == "='Valuation (DCF)'!K16"
+        assert ws["B10"].value == "=SUM(B9:K9)"
+        assert "K16" in ws["B12"].value
+        assert "($B$5-Sensitivity!$B$4)" in ws["B15"].value
+
+    def test_zero_terminal_ebitda_makes_implied_multiple_unavailable(self):
+        import openpyxl
+        from src.agents.fm.formula_evaluator import FormulaEvaluator
+
+        workbook = openpyxl.Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Valuation (Exit Multiple)"
+        worksheet["B12"] = 0
+        worksheet["B17"] = 100
+        worksheet["B27"] = '=IFERROR(B17/B12,"")'
+
+        evaluator = FormulaEvaluator(workbook)
+        evaluator.TAB_ORDER = ["Valuation (Exit Multiple)"]
+        result = evaluator.evaluate_all_tabs()
+
+        assert result["Valuation (Exit Multiple)"]["cells"]["(27, 2)"] == ""

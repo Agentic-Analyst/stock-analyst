@@ -11,7 +11,8 @@ Please analyze the following {batch_size} articles for **{company_ticker}** to i
 1. **Read each article carefully** and identify key factors that could impact {company_ticker}'s stock performance
 2. **For each insight you identify**, provide detailed reasoning and cite exact quotes from the articles
 3. **Cross-reference information** across articles to build comprehensive insights
-4. **Assess confidence levels** based on the strength and clarity of the evidence
+4. **Assess extraction confidence** based on source quality, independence, and
+   clarity; do not express the probability of the predicted investment outcome
 5. **Focus on actionable insights** that would matter to investors
 
 ## Key Focus Areas:
@@ -19,6 +20,12 @@ Please analyze the following {batch_size} articles for **{company_ticker}** to i
 - **Growth Catalysts**: New products, market expansion, partnerships, technological advances, strong financials, and etc
 - **Investment Risks**: Competitive threats, regulatory challenges, market headwinds, operational issues, and etc
 - **Risk Mitigations**: Company strategies, market positions, defensive measures, management actions, and etc
+
+Exclude shopping/availability guides, price momentum, technical buy points, and
+generic market attention unless the article gives a concrete, quantified path to
+the company's revenue, margins, cash flow, capital needs, or legal exposure.
+Only call something a mitigation when the source documents that the company is
+actually taking the action.
 
 ## Citation Requirements:
 

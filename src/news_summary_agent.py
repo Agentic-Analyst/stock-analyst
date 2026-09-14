@@ -114,7 +114,7 @@ def generate_news_summary(
 
 **Analysis Overview:**
 - Articles Analyzed: {news['summary'].get('articles_analyzed', 0)}
-- Overall Sentiment: {news['summary'].get('overall_sentiment', 'neutral').upper()}
+- News Sentiment: {news['summary'].get('overall_sentiment', 'neutral').upper()}
 - Confidence Score: {news['summary'].get('confidence_score', 0):.0%}
 - Key Themes: {', '.join(news['summary'].get('key_themes', []))}
 
@@ -208,7 +208,7 @@ Format your response in clear sections with markdown headers (###).
 | Metric | Value |
 |--------|-------|
 | Articles Analyzed | {news['summary'].get('articles_analyzed', 0)} |
-| Overall Sentiment | {news['summary'].get('overall_sentiment', 'neutral').upper()} |
+| News Sentiment | {news['summary'].get('overall_sentiment', 'neutral').upper()} |
 | Confidence Score | {news['summary'].get('confidence_score', 0):.0%} |
 | Catalysts Identified | {len(news['catalysts'])} |
 | Risks Identified | {len(news['risks'])} |

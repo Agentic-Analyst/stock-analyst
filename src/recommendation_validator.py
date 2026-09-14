@@ -99,6 +99,20 @@ class RecommendationValidator:
             response_data = numeric_corrections
             validation_report["auto_corrected"] = True
 
+        # Citation percentages are meaningless when the response contains no
+        # report. Validate the required narrative shape before allowing an
+        # empty object to score 100% on a zero-sentence denominator.
+        structure_issues = self._validate_structure(
+            response_data, fixed_numbers, evidence_pack
+        )
+        if structure_issues:
+            validation_report["structure_issues"] = structure_issues
+            validation_report["errors"].append(
+                "Recommendation output is incomplete: "
+                + "; ".join(structure_issues)
+            )
+            validation_report["valid"] = False
+
         # 2. Validate evidence citations
         invalid_citations = self._validate_evidence_citations(
             response_data,
@@ -161,6 +175,69 @@ class RecommendationValidator:
         
         return response_data, validation_report
 
+    @staticmethod
+    def _validate_structure(
+        response_data: Dict[str, Any],
+        fixed_numbers: Dict[str, Any],
+        evidence_pack: Dict[str, Any],
+    ) -> List[str]:
+        """Reject vacuous but syntactically valid recommendation payloads."""
+        data = response_data if isinstance(response_data, dict) else {}
+        issues: List[str] = []
+
+        thesis = data.get("thesis")
+        if not isinstance(thesis, str) or len(thesis.strip()) < 20:
+            issues.append("investment thesis is missing")
+
+        evidence = [
+            item for item in (evidence_pack or {}).get("evidence", [])
+            if isinstance(item, dict)
+        ]
+        has_catalyst_evidence = any(
+            str(item.get("type") or "").startswith("catalyst_")
+            for item in evidence
+        )
+        has_risk_evidence = any(
+            str(item.get("type") or "").startswith("risk_")
+            for item in evidence
+        )
+
+        def has_statement(rows: Any) -> bool:
+            return isinstance(rows, list) and any(
+                isinstance(row, dict)
+                and isinstance(row.get("statement"), str)
+                and len(row["statement"].strip()) >= 10
+                for row in rows
+            )
+
+        if has_catalyst_evidence and not has_statement(data.get("catalysts")):
+            issues.append("source-backed catalysts are not summarized")
+        if has_risk_evidence and not has_statement(data.get("risks")):
+            issues.append("source-backed risks are not summarized")
+
+        if evidence:
+            scenarios = data.get("scenarios")
+            scenarios = scenarios if isinstance(scenarios, dict) else {}
+            missing_scenarios = [
+                name for name in ("bull", "base", "bear")
+                if not isinstance(scenarios.get(name), dict)
+                or not isinstance(scenarios[name].get("narrative"), str)
+                or len(scenarios[name]["narrative"].strip()) < 10
+            ]
+            if missing_scenarios:
+                issues.append(
+                    "scenario narratives are missing: "
+                    + ", ".join(missing_scenarios)
+                )
+            monitoring = data.get("monitoring_plan")
+            if not isinstance(monitoring, list) or not any(
+                isinstance(item, str) and len(item.strip()) >= 10
+                for item in monitoring
+            ):
+                issues.append("monitoring plan is missing")
+
+        return issues
+
     @classmethod
     def _support_tokens(cls, text: str) -> Set[str]:
         tokens = set()
@@ -194,7 +271,11 @@ class RecommendationValidator:
     ) -> bool:
         evidence = " ".join(
             " ".join(str(item.get(field) or "") for field in (
-                "title", "source", "snippet", "reasoning", "type", "date",
+                # ``title`` is the upstream LLM's derived insight and
+                # ``reasoning`` is its interpretation.  Treating either as
+                # source evidence made citation validation tautological.  Only
+                # the actual publisher headline/excerpt can support a claim.
+                "source_article_title", "snippet",
             ))
             for evidence_id in cited_ids
             for item in [evidence_by_id.get(evidence_id) or {}]
@@ -323,6 +404,32 @@ class RecommendationValidator:
         """
         corrections_needed = False
         corrected_data = response_data.copy()
+
+        reliability = (fixed_numbers.get('inputs') or {}).get(
+            'valuation_reliability') or {}
+        if not fixed_numbers.get('rating_available', True):
+            deterministic_perspective = (
+                "The point estimate, directional rating, and price targets are "
+                "withheld because "
+                + str(fixed_numbers.get('rating_withheld_reason') or (
+                    reliability.get('withheld_reason')
+                    or "the valuation evidence does not support a defensible point call."
+                )).strip()
+                + " The published range contains model-method outputs, not "
+                "probabilistic bull/base/bear targets."
+            )
+        else:
+            deterministic_perspective = (
+                "The published rating, target, and expected return are deterministic "
+                "calculator outputs. Analyst consensus is an external benchmark and "
+                "is not averaged into intrinsic value."
+            )
+        if corrected_data.get('valuation_perspective') != deterministic_perspective:
+            corrected_data['valuation_perspective'] = deterministic_perspective
+            report["corrections_made"].append(
+                "valuation perspective replaced with deterministic methodology text"
+            )
+            corrections_needed = True
         
         # 1. Check rating
         if response_data.get('rating') != fixed_numbers['rating']:
@@ -343,6 +450,13 @@ class RecommendationValidator:
                 corrected_data['price_targets'][period] = {}
             
             actual = corrected_data['price_targets'][period]
+
+            if expected.get('price') is None and actual.get('driver'):
+                report["corrections_made"].append(
+                    f"{period} driver removed because no target is publishable"
+                )
+                corrected_data['price_targets'][period]['driver'] = ''
+                corrections_needed = True
             
             # Check price
             if actual.get('price') != expected['price']:
@@ -497,14 +611,16 @@ class RecommendationValidator:
         # Collect sentences from ALL key fields
         key_texts = []
         
-        # Core narrative fields
+        # Core news narrative. Valuation perspective is validated against the
+        # deterministic FixedNumbers contract; news citations cannot support a
+        # DCF range, publication boundary, or model-derived target.
         key_texts.append(response_data.get('thesis', ''))
-        key_texts.append(response_data.get('valuation_perspective', ''))
         
         # Price target drivers (often missed!)
         price_targets = response_data.get('price_targets', {})
         for period in ['m3', 'm6', 'm12']:
-            driver = price_targets.get(period, {}).get('driver', '')
+            target_row = price_targets.get(period, {}) or {}
+            driver = target_row.get('driver', '') if target_row.get('price') is not None else ''
             if driver:
                 key_texts.append(driver)
         
@@ -649,7 +765,7 @@ class RecommendationValidator:
         
         # Extract all evidence snippets for content checking
         evidence_content = ' '.join([
-            ev.get('snippet', '') + ' ' + ev.get('reasoning', '')
+            ev.get('snippet', '')
             for ev in evidence_pack.get('evidence', [])
         ]).lower()
         
@@ -687,6 +803,8 @@ class RecommendationValidator:
         can never improve the situation — numeric fixes are already applied
         in-code and there are no valid IDs the model could cite.
         """
+        if validation_report.get("structure_issues"):
+            return True
         if validation_report.get("citation_enforcement_bypassed"):
             return False
         return (

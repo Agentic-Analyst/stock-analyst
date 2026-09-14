@@ -6,7 +6,8 @@ snapshot tool instead of being forced through the equity pipeline. Data comes
 from yfinance's `XXX-USD` pairs (already a dependency; no new vendor).
 
 `get_crypto` answers the questions people actually ask about a coin: its latest
-daily close, performance, risk, liquidity, supply, and one-year range. Pair it
+daily close, performance, risk, liquidity, supply, one-year range, and explicitly
+mapped network/protocol research when a supported public source is available. Pair it
 with get_technicals for RSI/moving-average levels and get_prediction_markets
 for event odds.
 """
@@ -19,7 +20,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from .base import Tool, tool_ok, tool_error
-from .crypto_utils import normalize_crypto_symbol
+from .crypto_utils import normalize_crypto_symbol, public_crypto_symbol
 
 
 def _number(value: Any) -> Optional[float]:
@@ -307,22 +308,64 @@ class GetCryptoTool(Tool):
                 })
             return payload
 
-        data = await asyncio.to_thread(_snapshot)
+        from .crypto_research import get_crypto_research
+
+        data, research = await asyncio.gather(
+            asyncio.to_thread(_snapshot),
+            asyncio.to_thread(get_crypto_research, symbol),
+        )
         if not data:
             return tool_error(f"No market data for {symbol}.", asset=asset, symbol=symbol)
+        research_capabilities = (
+            research.get("capabilities") if isinstance(research, dict) else {}
+        )
         return tool_ok(
             asset_class="crypto",
+            provider="yahoo_finance",
+            research_sources=[
+                source for source in (
+                    ((research.get("network_context") or {}).get("source")
+                     if isinstance(research, dict) else None),
+                    ((research.get("protocol_context") or {}).get("source")
+                     if isinstance(research, dict) else None),
+                ) if source
+            ],
+            capabilities={
+                "price_performance": True,
+                "market_cap_volume_supply": "when_available",
+                "technical_risk_metrics": True,
+                "on_chain_activity": bool(research_capabilities.get("network_activity")),
+                "defi_ecosystem_activity": bool(
+                    research_capabilities.get("defi_ecosystem_activity")
+                ),
+                "protocol_economics": bool(
+                    research_capabilities.get("protocol_economics")
+                ),
+                "token_holder_revenue": bool(
+                    research_capabilities.get("token_holder_revenue")
+                ),
+                # Kept false: issuer-like revenue is not a coherent generic crypto field.
+                "protocol_revenue": False,
+                "token_unlocks": False,
+                "intrinsic_valuation": False,
+            },
             methodology={
                 "returns": "cumulative_fractions_from_daily_close",
                 "change_24h": "rolling_24h_intraday_close",
                 "annualized_volatility": "daily_returns_sqrt_365",
                 "intrinsic_value": None,
-                "on_chain_data": False,
+                "on_chain_data": bool(research_capabilities.get("network_activity")),
             },
-            note=("Crypto price, liquidity, supply, and risk snapshot. No issuer "
-                  "fundamentals or DCF apply. This does not claim on-chain activity "
-                  "or protocol revenue; use get_prediction_markets for event odds."),
-            **data,
+            research=research,
+            note=("Crypto price, liquidity, supply, and risk snapshot. Mapped public "
+                  "network/protocol context may be included separately when available; "
+                  "it is not issuer revenue or intrinsic value. No generic crypto DCF "
+                  "applies. Use get_prediction_markets for event odds."),
+            **{
+                **data,
+                "symbol": public_crypto_symbol(symbol),
+                "provider_symbol": symbol,
+            },
         )
 
 

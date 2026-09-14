@@ -17,6 +17,10 @@ from .base import Tool, tool_error, tool_ok
 
 _FUND_TYPES = {"ETF", "MUTUALFUND", "MUTUAL FUND"}
 _SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.:-]{0,31}$")
+# Yahoo emits this as an overlapping exposure: government bonds are already
+# represented inside the letter-grade distribution.  It must not be added to
+# that mutually exclusive distribution (BND otherwise totals 151.83%).
+_BOND_RATING_OVERLAYS = frozenset({"us_government"})
 
 
 def _number(value: Any) -> Optional[float]:
@@ -48,29 +52,117 @@ def _metric(frame: Any, label: str, symbol: str) -> Dict[str, Optional[float]]:
         return {"fund": None, "category": None}
 
 
-def _weighted(values: Any) -> Dict[str, float]:
+def _portfolio_multiple(frame: Any, label: str, symbol: str) -> Dict[str, Optional[float]]:
+    """Normalize Yahoo fund valuation fields from yields to multiples.
+
+    Yahoo's ``topHoldings.equityHoldings`` fields are named priceToEarnings,
+    priceToBook, etc., but the observed raw values are the reciprocal portfolio
+    yields (VOO P/E arrives as 0.03974, i.e. 1 / 25.16). Presenting that raw
+    number as 0.04x is economically wrong. Zero is not invertible and remains
+    unavailable (common for bond funds).
+    """
+    raw = _metric(frame, label, symbol)
+
+    def invert(value: Optional[float]) -> Optional[float]:
+        if value is None or value <= 0:
+            return None
+        multiple = 1.0 / value
+        return multiple if 0.1 <= multiple <= 500 else None
+
+    return {"fund": invert(raw["fund"]), "category": invert(raw["category"])}
+
+
+def _bond_characteristics(frame: Any, symbol: str) -> Dict[str, Dict[str, Any]]:
+    out = {
+        key: _metric(frame, label, symbol)
+        for key, label in {
+            "duration": "Duration", "maturity": "Maturity",
+            "credit_quality": "Credit Quality",
+        }.items()
+    }
+    for key in ("duration", "maturity"):
+        out[key].update({"unit": "years", "source_unit": "years"})
+    out["credit_quality"].update({
+        "unit": "source_reported", "source_unit": "source_reported",
+    })
+    return out
+
+
+def _net_assets_metric(frame: Any, symbol: str) -> Dict[str, Any]:
+    """Normalize but fail closed on Yahoo's anomalous fund-operations AUM row.
+
+    Live Yahoo responses frequently repeat the fund value *exactly* in the
+    ``Category Average`` column and disagree materially with quote-level total
+    assets. That is not a defensible category statistic or reconciled share-class
+    AUM, so it is suppressed rather than presented as authoritative.
+    """
+    raw = _metric(frame, "Total Net Assets", symbol)
+    fund = raw["fund"] * 1_000_000 if raw["fund"] is not None and raw["fund"] > 0 else None
+    category = (raw["category"] * 1_000_000
+                if raw["category"] is not None and raw["category"] > 0 else None)
+    duplicated = (fund is not None and category is not None and
+                  math.isclose(fund, category, rel_tol=1e-12, abs_tol=1.0))
+    return {
+        "fund": None if duplicated else fund,
+        "category": None if duplicated else category,
+        "unit": "currency_absolute",
+        "source_unit": "currency_millions",
+        "status": ("suppressed_provider_scope_anomaly" if duplicated else
+                   "reported_scope_unverified" if fund is not None else "unavailable"),
+    }
+
+
+def _weighted(values: Any, *, include_zero: bool = True) -> Dict[str, float]:
     if not isinstance(values, dict):
         return {}
+    # Yahoo exposes portfolio weights as fractions. Values above one are not
+    # silently interpreted as percentages because that would mix units.
+    minimum = 0 if include_zero else 0.0
     return {str(key): number for key, value in values.items()
-            if (number := _number(value)) is not None and number >= 0}
+            if (number := _number(value)) is not None and minimum <= number <= 1
+            and (include_zero or number > 0)}
+
+
+def _provider_epoch(value: Any, *, date_only: bool = False) -> Optional[str]:
+    """Normalize a plausible provider epoch without letting bad data abort."""
+    stamp = _number(value)
+    if stamp is None or stamp <= 0:
+        return None
+    # Yahoo currently emits seconds. Accept milliseconds defensively, while
+    # rejecting ancient sentinels and dates beyond the end of 2100.
+    seconds = stamp / 1000.0 if stamp > 100_000_000_000 else stamp
+    if not 0 < seconds <= 4_133_980_800:
+        return None
+    try:
+        parsed = datetime.fromtimestamp(seconds, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return parsed.date().isoformat() if date_only else parsed.isoformat()
 
 
 def _fund_market_snapshot(info: Dict[str, Any]) -> Dict[str, Any]:
     market_price = _number(info.get("regularMarketPrice") or info.get("currentPrice"))
     nav = _number(info.get("navPrice"))
     inception = _number(info.get("fundInceptionDate"))
+    market_time = _number(info.get("regularMarketTime"))
     return {
         "market_price": market_price,
+        "market_price_as_of": _provider_epoch(market_time),
         "nav": nav,
-        "premium_discount_to_nav": (
-            market_price / nav - 1.0 if market_price is not None and nav and nav > 0 else None
-        ),
+        "nav_as_of": None,
+        # Yahoo exposes no NAV timestamp on this surface. Dividing a live or
+        # prior-close market price by an undated NAV created implausible ETF
+        # premiums in live testing, so the derived value must fail closed.
+        "premium_discount_to_nav": None,
+        "premium_discount_status": "unavailable_without_aligned_as_of",
+        # Kept for compatibility, but the adjacent scope/status is mandatory
+        # context: Yahoo does not identify whether this is the ETF share class,
+        # all classes of a pooled fund, or another aggregation.
         "total_assets": _number(info.get("totalAssets")),
+        "total_assets_scope": "provider_reported_scope_unspecified",
+        "total_assets_status": "unreconciled",
         "yield": _number(info.get("yield") or info.get("dividendYield")),
-        "inception_date": (
-            datetime.fromtimestamp(inception, tz=timezone.utc).date().isoformat()
-            if inception is not None and inception > 0 else None
-        ),
+        "inception_date": _provider_epoch(inception, date_only=True),
     }
 
 
@@ -81,7 +173,7 @@ def _top_holdings(frame: Any) -> list[dict]:
     for symbol, row in frame.head(25).iterrows():
         weight = _number(row.get("Holding Percent"))
         name = _text(row.get("Name"))
-        if weight is None or weight < 0 or not name:
+        if weight is None or not 0 <= weight <= 1 or not name:
             continue
         out.append({"symbol": str(symbol).upper(), "name": name, "weight": weight})
     return out
@@ -191,6 +283,7 @@ class GetFundTool(Tool):
                 return {"wrong_type": quote_type or "unknown"}
 
             detail: Dict[str, Any] = {}
+            partial_reasons = []
             try:
                 fund = instrument.funds_data
                 overview = fund.fund_overview or {}
@@ -204,8 +297,8 @@ class GetFundTool(Tool):
                                                   "Annual Report Expense Ratio", symbol),
                         "turnover": _metric(fund.fund_operations,
                                             "Annual Holdings Turnover", symbol),
-                        "total_net_assets": _metric(fund.fund_operations,
-                                                    "Total Net Assets", symbol),
+                        "total_net_assets": _net_assets_metric(
+                            fund.fund_operations, symbol),
                     },
                     "asset_classes": _weighted(fund.asset_classes),
                     "top_holdings": _top_holdings(fund.top_holdings),
@@ -214,42 +307,69 @@ class GetFundTool(Tool):
                         "as_of": None,
                         "note": "The upstream response does not expose a holdings as-of date.",
                     },
-                    "sector_weightings": _weighted(fund.sector_weightings),
-                    "bond_ratings": _weighted(fund.bond_ratings),
+                    "sector_weightings": _weighted(
+                        fund.sector_weightings, include_zero=False),
+                    "bond_ratings": {
+                        key: value for key, value in _weighted(
+                            fund.bond_ratings, include_zero=False
+                        ).items() if key not in _BOND_RATING_OVERLAYS
+                    },
+                    "bond_exposures": {
+                        key: value for key, value in _weighted(
+                            fund.bond_ratings, include_zero=False
+                        ).items() if key in _BOND_RATING_OVERLAYS
+                    },
                     "equity_characteristics": {
-                        key: _metric(fund.equity_holdings, label, symbol)
+                        key: _portfolio_multiple(fund.equity_holdings, label, symbol)
                         for key, label in {
                             "price_to_earnings": "Price/Earnings",
                             "price_to_book": "Price/Book",
                             "price_to_sales": "Price/Sales",
                             "price_to_cashflow": "Price/Cashflow",
-                            "median_market_cap": "Median Market Cap",
-                            "three_year_earnings_growth": "3 Year Earnings Growth",
                         }.items()
+                    } | {
+                        "median_market_cap": _metric(
+                            fund.equity_holdings, "Median Market Cap", symbol),
+                        "three_year_earnings_growth": _metric(
+                            fund.equity_holdings, "3 Year Earnings Growth", symbol),
                     },
-                    "bond_characteristics": {
-                        key: _metric(fund.bond_holdings, label, symbol)
-                        for key, label in {
-                            "duration": "Duration", "maturity": "Maturity",
-                            "credit_quality": "Credit Quality",
-                        }.items()
-                    },
+                    "bond_characteristics": _bond_characteristics(
+                        fund.bond_holdings, symbol
+                    ),
                 }
-            except Exception as exc:
-                detail = {"fund_data_error": str(exc)[:200]}
+                if not detail.get("top_holdings"):
+                    partial_reasons.append("top_holdings_unavailable")
+            except Exception:
+                # A provider detail failure must not leak implementation text or
+                # masquerade as a complete fund profile. Performance may still
+                # be independently usable.
+                partial_reasons.append("portfolio_detail_unavailable")
 
             history = fetch_history(symbol, "5y", attempts=2,
                                     auto_adjust=True, actions=False)
             detail["performance"] = _performance(history)
+            if detail["performance"]["as_of"] is None:
+                partial_reasons.append("performance_history_unavailable")
             return {
                 "name": info.get("longName") or info.get("shortName"),
                 "currency": info.get("currency"),
                 "quote_type": quote_type,
                 "market_snapshot": _fund_market_snapshot(info),
+                "data_status": "partial" if partial_reasons else "complete",
+                "partial_reasons": partial_reasons,
                 **detail,
             }
 
-        data = await asyncio.to_thread(snapshot)
+        try:
+            data = await asyncio.to_thread(snapshot)
+        except Exception:
+            # Vendor metadata is needed to verify that the symbol is actually a
+            # fund.  Never guess the asset type after an upstream failure, and
+            # never let a yfinance exception tear down the agent loop.
+            return tool_error(
+                "Fund data is unavailable right now. Try again later.",
+                ticker=symbol,
+            )
         if data.get("wrong_type"):
             return tool_error(
                 f"{symbol} is {data['wrong_type']}, not an ETF or mutual fund. "
@@ -259,15 +379,40 @@ class GetFundTool(Tool):
         return tool_ok(
             asset_class="fund",
             symbol=symbol,
+            provider="yahoo_finance",
+            capabilities={
+                "portfolio_holdings": "when_available",
+                "fund_operations": "when_available",
+                "adjusted_price_performance": True,
+                "verified_benchmark": False,
+                "tracking_error": False,
+                "issuer_dcf": False,
+            },
             methodology={
                 "ratios_weights_and_returns": "fractions",
+                "equity_valuation_fields": (
+                    "reciprocal_of_yahoo_portfolio_yields"
+                ),
+                "fund_operations_total_net_assets": "source_millions_normalized_to_absolute",
+                "total_assets_scope": (
+                    "provider_unspecified; fund-operations duplicates/conflicts fail closed"
+                ),
                 "performance_basis": "adjusted_close",
+                "bond_ratings": (
+                    "mutually_exclusive_credit_distribution; overlapping government "
+                    "exposure is reported separately in bond_exposures"
+                ),
+                "bond_characteristic_units": {
+                    "duration": "years", "maturity": "years",
+                    "credit_quality": "source_reported",
+                },
                 "benchmark": None,
-                "nav_premium_discount": "market_price_divided_by_nav_minus_one",
+                "nav_premium_discount": "unavailable_without_aligned_price_and_nav_as_of",
             },
             note=("Fund portfolio analytics; no issuer DCF applies. Holdings are the top "
                   "positions reported by the source. No benchmark, tracking error, or "
-                  "relative return is claimed without a verified benchmark identity."),
+                  "relative return is claimed without a verified benchmark identity. "
+                  "Provider-reported total assets have unspecified share-class scope."),
             **data,
         )
 

@@ -30,9 +30,17 @@ def financial_statement_freshness(
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     try:
-        max_age = max(365, int(os.getenv("FINANCIAL_STATEMENT_MAX_AGE_DAYS", "550") or 550))
+        # An annual-only operating case is a temporary fallback, not a license
+        # to ignore subsequently filed quarterlies. Around six months after the
+        # fiscal year end, a current interim filing should normally exist. Keep
+        # the override bounded so a stale production environment cannot make a
+        # two-year-old filing publishable indefinitely.
+        max_age = min(
+            240,
+            max(90, int(os.getenv("FINANCIAL_STATEMENT_MAX_AGE_DAYS", "200") or 200)),
+        )
     except ValueError:
-        max_age = 550
+        max_age = 200
     from src.financial_period_bridge import build_ttm_bridge
     ttm = build_ttm_bridge(
         (data or {}).get("quarterly_financial_statements") or {}, as_of=now
@@ -124,7 +132,8 @@ def financial_statement_freshness(
         "quarterly_status": ttm.get("status"),
         "quarterly_reason": ttm.get("reason"),
         "reason": (
-            f"Latest annual financial period is {age} days old, beyond the {max_age}-day limit."
+            f"Latest annual financial period is {age} days old, beyond the {max_age}-day "
+            "annual-only limit; a current aligned quarterly/TTM bridge is required."
             if stale else None
         ),
     }
