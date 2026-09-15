@@ -968,6 +968,34 @@ class TestMoneyFormattingFollowsTheReportCurrency:
         finally:
             set_report_currency(None)
 
+    def test_every_render_path_pins_the_currency_itself(self):
+        """
+        THE BUG: only the async WRAPPER pinned the listing currency, and
+        main.py imports the SYNC entry point. A comprehensive run therefore
+        left the contextvar empty, every code-built figure fell back to a
+        dollar sign, and a foreign report published its own headline valuation
+        in US dollars — while recommendation_engine, which carries its own
+        currency, printed the right symbol a few paragraphs away. Seen on a
+        real basket run: MC.PA read "$381.04 - $425.93" beside "EUR 417.45",
+        and TM read "$55.36K - $75.81K" for a yen listing.
+
+        The pin belongs in the functions that RENDER, so a third entry point
+        cannot reintroduce it. This asserts the source, because exercising the
+        real path needs an LLM and three JSON artifacts.
+        """
+        import inspect
+        from src import report_agent
+
+        for fn in (report_agent.generate_professional_report,
+                   report_agent.generate_professional_report_async):
+            source = inspect.getsource(fn)
+            assert "set_report_currency(" in source, (
+                f"{fn.__name__} renders sections without pinning the currency"
+            )
+            # Pinned from the financials it already loads, not a parameter a
+            # caller may forget to pass.
+            assert "basic_info" in source, fn.__name__
+
     def test_dollar_when_unpinned(self):
         from src.report_agent import format_number, set_report_currency
         set_report_currency(None)

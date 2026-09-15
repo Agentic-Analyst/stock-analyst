@@ -3807,6 +3807,25 @@ def generate_professional_report(
     financial_data = load_financial_json(financial_json_path)
     computed_values = load_computed_values_json(computed_values_json_path)
     screening_data = load_screening_json(screening_json_path)
+
+    # Pin the listing currency before any section renders.
+    #
+    # THE BUG: only the async WRAPPER did this, and main.py imports the sync
+    # path, so a comprehensive run left _REPORT_CURRENCY empty. Every
+    # code-built figure then fell back to a dollar sign and a EUR or JPY
+    # report published its own headline valuation in US dollars — while the
+    # lines built by recommendation_engine, which carries its own currency,
+    # printed the right symbol a few paragraphs away. Seen on a real basket
+    # run: MC.PA read "$381.04 - $425.93" beside "EUR 417.45".
+    #
+    # Pinned here, in the function that actually renders, so it holds for
+    # every caller rather than for one entry point.
+    try:
+        set_report_currency(
+            ((financial_data.get('company_data') or {}).get('basic_info') or {}).get('currency')
+        )
+    except Exception:
+        set_report_currency(None)   # never block a report on this
     
     if logger:
         logger.info("✅ Loaded all data files")
@@ -3961,6 +3980,16 @@ async def generate_professional_report_async(
     financial_data = load_financial_json(financial_json_path)
     computed_values = load_computed_values_json(computed_values_json_path)
     screening_data = load_screening_json(screening_json_path)
+
+    # Pin the listing currency before any section renders, for the same
+    # reason as the sync path above: the pin belongs in the function that
+    # renders, not in one caller.
+    try:
+        set_report_currency(
+            ((financial_data.get('company_data') or {}).get('basic_info') or {}).get('currency')
+        )
+    except Exception:
+        set_report_currency(None)   # never block a report on this
 
     data = {
         'company_overview': extract_company_overview(financial_data),
