@@ -11,4 +11,6 @@ def test_chat_override_updates_the_artifact_model_identity():
 
 def test_default_chat_model_is_a_valid_cli_model_choice():
     source = (Path(__file__).resolve().parents[1] / "main.py").read_text()
-    assert 'choices=["gpt-4o-mini", "gpt-5.4-mini"' in source
+    assert 'choices=["gpt-4o-mini", "gpt-5.4-mini", "gpt-6-luna"' in source
+    assert 'os.getenv("CHAT_MODEL", "gpt-6-luna")' in source
+    assert 'default="gpt-6-luna"' in source

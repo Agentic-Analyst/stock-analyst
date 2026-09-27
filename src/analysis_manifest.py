@@ -64,7 +64,7 @@ def build_analysis_manifest(environ: Optional[Mapping[str, str]] = None) -> Dict
         "source_revision": str(source.get("VYNN_SOURCE_REVISION") or "unversioned"),
         "model_version": str(source.get("ANALYSIS_MODEL_VERSION") or "unversioned"),
         "backend_image": source.get("ANALYSIS_BACKEND_IMAGE"),
-        "llm_model": source.get("ANALYSIS_LLM_MODEL") or "gpt-4o-mini",
+        "llm_model": source.get("ANALYSIS_LLM_MODEL") or "gpt-6-luna",
         "prompt_set_sha256": _file_set_hash(prompt_files),
         "requirements_sha256": _file_set_hash([requirements]),
         "configuration": config,

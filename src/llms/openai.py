@@ -22,6 +22,11 @@ def calculate_cost(response, model_name):
         # gpt-5.4-mini (approx; used for lightweight cost logging only).
         "gpt-5.4-mini": {"prompt": 0.00025, "completion": 0.00200},
         "gpt-5-mini": {"prompt": 0.00025, "completion": 0.00200},
+        # $0.10 input / $0.50 output per 1M tokens (OpenAI model page,
+        # checked 2026-09-27). Cached input ($0.01/1M) and the rate for
+        # prompts over 272K tokens are not modelled; prompts here are far
+        # shorter, so a cached call is slightly overstated.
+        "gpt-6-luna": {"prompt": 0.00010, "completion": 0.00050},
     }
 
     if model_name not in prices:
@@ -32,6 +37,22 @@ def calculate_cost(response, model_name):
         + completion_tokens * prices[model_name]["completion"] / 1000
     )
     return cost
+
+
+# GPT-6 models default to reasoning_effort "medium". On Chat Completions that
+# rejects any temperature but 1 and rejects function tools outright ("To use
+# function tools, use /v1/responses or set reasoning_effort to 'none'").
+# Every call here sends a temperature and the chat agent sends tools, so these
+# models run in the documented compatible mode. Verified against the live API
+# on 2026-09-27: both requests fail without it and succeed with it.
+_REASONING_NONE_MODELS = frozenset({"gpt-6-luna"})
+
+
+def openai_request_options(model_name: str) -> Dict[str, str]:
+    """Extra Chat Completions arguments a model needs to accept our requests."""
+    if str(model_name or "").strip().lower() in _REASONING_NONE_MODELS:
+        return {"reasoning_effort": "none"}
+    return {}
 
 
 def _call_openai_model(model_name: str, messages: List[Dict], temperature: float = 0.3) -> Tuple[str, float]:
@@ -48,7 +69,8 @@ def _call_openai_model(model_name: str, messages: List[Dict], temperature: float
                 model=model_name,
                 messages=messages,
                 temperature=temperature,
-                timeout=60
+                timeout=60,
+                **openai_request_options(model_name),
             )
 
             # Calculate cost
@@ -108,3 +130,8 @@ def gpt_4o_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, fl
 def gpt_5_4_mini(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, float]:
     """Call OpenAI gpt-5.4-mini. Returns (text, cost)."""
     return _call_openai_model("gpt-5.4-mini", messages, temperature)
+
+
+def gpt_6_luna(messages: List[Dict], temperature: float = 0.3) -> Tuple[str, float]:
+    """Call OpenAI gpt-6-luna (reasoning effort "none"). Returns (text, cost)."""
+    return _call_openai_model("gpt-6-luna", messages, temperature)

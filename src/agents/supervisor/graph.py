@@ -321,7 +321,7 @@ if __name__ == "__main__":
         )
         
         # Create config
-        config = PipelineConfig(llm_model="gpt-4o-mini")
+        config = PipelineConfig(llm_model="gpt-6-luna")
         
         # Show graph structure
         if logger:

@@ -179,7 +179,7 @@ class FinancialState:
     max_articles: int = MAX_ARTICLES
     min_score: float = MIN_SCORE
     min_confidence: float = MIN_CONFIDENCE
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "gpt-6-luna"
     cost_limit_usd: Optional[float] = None  # Max budget for LLM calls
     
     def __post_init__(self):
@@ -345,7 +345,7 @@ class PipelineConfig:
     """Configuration for the entire agentic pipeline."""
     
     # LLM configuration
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "gpt-6-luna"
     llm_temperature_planner: float = 0.1  # Low temp for routing decisions
     llm_temperature_analysis: float = 0.7  # Higher temp for analysis tasks
     llm_max_retries: int = 3

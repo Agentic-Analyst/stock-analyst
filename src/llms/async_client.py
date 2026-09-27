@@ -39,9 +39,10 @@ from logger import get_logger
 
 # Reuse the *cost* helpers and model registry from the sync layer so pricing and
 # model-name resolution stay in exactly one place. (Only the calculate_cost
-# helpers are imported — they exist on every branch — so this module never
-# hard-depends on branch-specific symbols like a prices table.)
+# helpers and the per-model request options are imported, so this module
+# never hard-depends on branch-specific symbols like a prices table.)
 from .openai import calculate_cost as _openai_cost
+from .openai import openai_request_options as _openai_options
 from .claude import calculate_cost as _claude_cost
 from .config import LLMProvider
 
@@ -134,7 +135,7 @@ _MODEL_TO_ANTHROPIC_ID = {
     "claude-3.5-haiku": "claude-3-5-haiku-20241022",
     "claude-3-opus": "claude-3-opus-20240229",
 }
-_OPENAI_MODELS = {"gpt-4o-mini", "gpt-5.4-mini", "gpt-5-mini"}
+_OPENAI_MODELS = {"gpt-4o-mini", "gpt-5.4-mini", "gpt-5-mini", "gpt-6-luna"}
 
 
 def _is_rate_limit_like(exc: Exception) -> bool:
@@ -183,7 +184,8 @@ async def _call_openai_async(
 ) -> Tuple[str, float]:
     client = _get_async_openai()
     response = await client.chat.completions.create(
-        model=model_id, messages=messages, temperature=temperature
+        model=model_id, messages=messages, temperature=temperature,
+        **_openai_options(model_id),
     )
     cost = _openai_cost(response, model_id)
     return response.choices[0].message.content, cost
@@ -283,6 +285,9 @@ async def _call_openai_tools(model_id, messages, tools, temperature, tool_choice
         "model": model_id,
         "messages": messages,
         "temperature": temperature,
+        # gpt-6-luna accepts function tools on Chat Completions only at
+        # reasoning effort "none"; see openai_request_options.
+        **_openai_options(model_id),
     }
     if tools:  # omit empty tools array
         kwargs["tools"] = tools

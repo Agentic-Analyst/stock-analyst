@@ -6,7 +6,7 @@ import os
 from typing import Callable, Tuple, List, Dict
 
 # Import all available models
-from .openai import gpt_4o_mini, gpt_5_4_mini
+from .openai import gpt_4o_mini, gpt_5_4_mini, gpt_6_luna
 from .claude import claude_3_5_sonnet, claude_3_5_haiku, claude_3_opus
 
 
@@ -17,6 +17,7 @@ class LLMProvider:
     MODELS = {
         "gpt-4o-mini": {"function": gpt_4o_mini, "api_key": "OPENAI_API_KEY"},
         "gpt-5.4-mini": {"function": gpt_5_4_mini, "api_key": "OPENAI_API_KEY"},
+        "gpt-6-luna": {"function": gpt_6_luna, "api_key": "OPENAI_API_KEY"},
         "claude-3.5-sonnet": {"function": claude_3_5_sonnet, "api_key": "ANTHROPIC_API_KEY"},
         "claude-3.5-haiku": {"function": claude_3_5_haiku, "api_key": "ANTHROPIC_API_KEY"},
         "claude-3-opus": {"function": claude_3_opus, "api_key": "ANTHROPIC_API_KEY"},
