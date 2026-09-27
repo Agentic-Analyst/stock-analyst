@@ -382,6 +382,10 @@ def audit_run(root: Path) -> Dict[str, Any]:
             bank.get("forward_consensus_fair_value") if bank else None
         ),
         "bank_peer_value": bank.get("peer_fair_value") if bank else None,
+        # A comps figure is reported for context even when policy keeps it
+        # out of the blend (a low-confidence sector roster, a legacy artifact).
+        # Readers of the canary table need to tell the two apart.
+        "peer_value_included": bool(peer_policy["included_in_blended_value"]),
         "peer_policy": peer_policy,
         "street_target": target.get("mean"),
         "street_target_count": target.get("analyst_count"),
@@ -405,6 +409,18 @@ def audit_run(root: Path) -> Dict[str, Any]:
         "withheld_reason": reliability.get("withheld_reason"),
         "reverse_dcf_market_implied_vs_model": (
             (valuation.get("reverse_dcf") or {}).get("market_implied_vs_model")
+        ),
+        "model_equivalent_revenue_growth_10y": (
+            ((valuation.get("reverse_dcf") or {}).get("required_revenue_growth") or {})
+            .get("model_equivalent_growth")
+        ),
+        "market_required_revenue_growth_10y": (
+            ((valuation.get("reverse_dcf") or {}).get("required_revenue_growth") or {})
+            .get("required_growth")
+        ),
+        "market_required_revenue_growth_bound": (
+            ((valuation.get("reverse_dcf") or {}).get("required_revenue_growth") or {})
+            .get("required_growth_beyond_bound")
         ),
         "market_implied_fcf_path_vs_model": market_path_scale.get(
             "implied_fcf_path_vs_model"

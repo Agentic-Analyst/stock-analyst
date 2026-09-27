@@ -41,6 +41,12 @@ import statistics
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from .financial_metrics import (
+    WORKING_CAPITAL_COST_BASE_COGS,
+    WORKING_CAPITAL_COST_BASE_REVENUE,
+    working_capital_cost_base,
+)
+
 _ERP = 0.055                # mature-market equity risk premium; in the range
                             # Damodaran publishes for developed markets, and the
                             # figure a sell-side DCF on a euro large-cap would use
@@ -57,16 +63,44 @@ _TERMINAL_GROWTH_BASE = 0.025
 # economics below; values outside this very broad provider-validity boundary
 # make the method unavailable.
 _EXIT_PROVIDER_MIN, _EXIT_PROVIDER_MAX = 0.1, 80.0
-_CONSENSUS_FADE_FACTORS = (0.67, 0.40, 0.20)
 # Exact, well-covered dollar forecasts can legitimately imply triple-digit
 # growth for an early commercialization story. Keep a broad unit-error rail on
 # those absolute forecasts, but do not apply the mature-company 100% ceiling
 # that is still appropriate for a provider's unverified percentage field.
 _ABSOLUTE_CONSENSUS_GROWTH_MAX = 10.0
-# Beyond the two covered years, do not blindly extrapolate a 200%+ Street step.
-# The uncovered tail is a scenario and is capped before fading toward terminal
-# growth; publication remains withheld for companies without established FCF.
-_POST_CONSENSUS_GROWTH_CAP = 1.0
+# Beyond the two covered years the Street has no number, so the model fades.
+# The former schedule took 0.67/0.40/0.20 of the excess over terminal growth
+# and was gone by year six, which treated an 11% grower as a business at the
+# end of its runway: Tesla's revenue growth reached 3.6% in NTM5 and the
+# perpetuity priced a no-growth car company at $15 a share. The fade is now
+# linear over ten years from the last covered year, with the starting point
+# capped at 30% so a hyper-growth Street step (NVIDIA +66%) is not extended
+# but a moderate one is not extinguished. Stage 2 of the perpetuity tab
+# continues the same line from NTM5 to terminal growth at NTM10.
+_POST_CONSENSUS_GROWTH_CAP = 0.30
+_POST_CONSENSUS_FADE_YEARS = 8   # NTM3 .. NTM10 reach terminal growth
+# The Street's EPS case can move the covered years' operating margin off the
+# trailing print by this much before the bridge is treated as a unit or
+# definition problem rather than an operating forecast.
+_STREET_MARGIN_ANCHOR_FLOOR = -0.05
+_STREET_MARGIN_ANCHOR_CEILING = 0.10
+_STREET_MARGIN_RECOVERY_CAP = 0.05
+
+
+def _post_consensus_growth_path(
+    covered_growth: float, terminal: float, periods: int,
+) -> List[float]:
+    """Growth for the years after Street coverage: a ten-year linear fade.
+
+    Starts at the last covered growth rate (capped at
+    ``_POST_CONSENSUS_GROWTH_CAP``) and moves in equal steps toward terminal
+    growth, reaching it eight periods later (NTM10). A declining company
+    starts below terminal and recovers on the same line rather than snapping
+    back to growth.
+    """
+    start = min(float(covered_growth), _POST_CONSENSUS_GROWTH_CAP)
+    step = (start - float(terminal)) / _POST_CONSENSUS_FADE_YEARS
+    return [start - step * k for k in range(1, periods + 1)]
 
 # Damodaran, "Ratings, Interest Coverage Ratios and Default Spread",
 # January 2026, large non-financial service firms.  The source defines the
@@ -228,8 +262,16 @@ def _mature_erp(table: Optional[Dict[str, Any]] = None) -> float:
     the one thing this page cannot afford to do.
 
     So: an explicit env override still wins (it is how a desk states a view),
-    then Damodaran's published figure, then the embedded constant as a floor
-    for when the fetch and the snapshot are both unavailable.
+    then the premium implied by today's prices under THIS model's growth
+    convention (``market_premium``, dated and reproducible), then Damodaran's
+    published figure, then the embedded constant as a floor for when the
+    fetch and the snapshot are both unavailable.
+
+    Why the calibrated premium outranks the published one (2026-09-26): his
+    premium assumes cash flows grow at the Treasury yield forever, this
+    engine's fade to 2.5%. Paired with this engine it valued the median
+    S&P 500 company ~15% below its price, a level bias no company caused.
+    ``EQUITY_RISK_PREMIUM_SOURCE=published`` restores his figure.
     """
     import os
     raw = os.getenv("EQUITY_RISK_PREMIUM")
@@ -240,6 +282,10 @@ def _mature_erp(table: Optional[Dict[str, Any]] = None) -> float:
                 return value
         except ValueError:
             pass
+    from .market_premium import calibrated_premium
+    calibrated = calibrated_premium()
+    if calibrated:
+        return float(calibrated["mature_erp"])
     if table is not None:
         published = table.get("mature_erp")
     else:
@@ -281,6 +327,15 @@ def _mature_erp_provenance(
             "resolution": "operator_override",
             "selected_source": "EQUITY_RISK_PREMIUM environment override",
             "as_of": None,
+        }
+
+    from .market_premium import calibrated_premium
+    calibrated = calibrated_premium()
+    if calibrated and abs(float(selected_rate) - float(calibrated["mature_erp"])) <= 1e-12:
+        return {
+            "resolution": "calibrated",
+            "selected_source": calibrated["label"],
+            "as_of": calibrated.get("measured_on"),
         }
 
     source_table = table if isinstance(table, dict) else {}
@@ -1267,13 +1322,10 @@ def _rolling_consensus_revenue_path(
     covered_growth = next_fiscal / current_fiscal - 1.0
     if not -0.50 <= covered_growth <= _ABSOLUTE_CONSENSUS_GROWTH_MAX:
         return None
-    tail_start = min(covered_growth, _POST_CONSENSUS_GROWTH_CAP)
     annual_targets = [current_fiscal, next_fiscal]
-    # The first three factors preserve the existing FY3-FY5 convergence when
-    # progress is zero. The terminal factor supplies the extra endpoint needed
-    # to blend a fifth rolling period when progress is non-zero.
-    for factor in (*_CONSENSUS_FADE_FACTORS, 0.0):
-        growth = terminal_growth + (tail_start - terminal_growth) * factor
+    # Four post-consensus annual steps supply the endpoints needed to blend
+    # five rolling periods when fiscal progress is non-zero.
+    for growth in _post_consensus_growth_path(covered_growth, terminal_growth, 4):
         annual_targets.append(annual_targets[-1] * (1.0 + growth))
 
     rolling_targets = [
@@ -1298,8 +1350,308 @@ def _rolling_consensus_revenue_path(
         "base_revenue": base_revenue,
         "forecast_revenue": rolling_targets,
         "revenue_growth_rates": growth_path,
+        "covered_growth": covered_growth,
         "analyst_counts": {"0y": current_count, "+1y": next_count},
         "method": "fiscal-progress blend of 0y/+1y absolute consensus",
+    }
+
+
+# Street EPS -> operating margin bridge calibration.
+# A provider's year-ago EPS within 3% of the reported diluted EPS means its
+# estimates are on the reported (GAAP/IFRS) basis; anything else is an
+# adjusted basis (stock compensation, acquired-intangible amortization and
+# one-off items excluded). The bridge is only trusted when the calibrated
+# non-operating/adjustment wedge is within 20 points of revenue.
+_BRIDGE_REPORTED_EPS_TOLERANCE = 0.03
+# EPS converted at today's FX rate drifts a few percent from the year-ago
+# print for currency reasons alone (TSMC flipped basis on a 2% TWD move).
+_BRIDGE_CONVERTED_EPS_TOLERANCE = 0.05
+# The provider's year-ago revenue must be the annual statement's revenue; if
+# Yahoo has rolled its estimates before the 10-K refreshed (Costco, AutoZone),
+# "year-ago EPS" is a different year and growth would read as an adjustment.
+_BRIDGE_FY0_REVENUE_TOLERANCE = 0.02
+# A covered-year revenue estimate outside 0.2x-5x trailing revenue is a unit
+# or currency mismatch (Infosys: INR estimates against USD statements, ~85x),
+# not growth; the band still admits a launch year that triples revenue.
+_BRIDGE_REVENUE_SCALE_BOUNDS = (0.2, 5.0)
+# A reported-basis current-year margin may not exceed both the trailing margin
+# and next year's by more than this; anything above is unremoved gains.
+_BRIDGE_CURRENT_YEAR_MARGIN_ALLOWANCE = 0.02
+# Adjusted bases can legitimately sit 20-30 points of revenue above reported
+# operating profit (ServiceNow's stock compensation, Broadcom's VMware
+# amortization), so the wedge bound only rejects data errors.
+_BRIDGE_MAX_ABS_WEDGE = 0.35
+# A provider EPS outside 1/5x-5x of the reported EPS is a unit or split
+# mismatch, not an accounting basis.
+_BRIDGE_MAX_EPS_RATIO = 5.0
+
+
+def _year_ago_bridge_calibration(
+    json_data: Dict[str, Any], tax: float, eps_conversion_rate: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    """Calibrate the EPS-to-EBIT wedge on the last reported fiscal year.
+
+    The Street publishes EPS, the DCF needs operating margin. Between them sit
+    tax, net non-operating income and, for most large companies, the
+    provider's own EPS basis.
+
+    Adjusted basis (the provider's year-ago EPS differs from reported diluted
+    EPS: Tesla, AMD, ServiceNow, Broadcom exclude stock compensation and
+    acquired-intangible amortization): the wedge is solved from the identity
+    that feeding the year-ago EPS through the bridge must return that year's
+    reported operating margin,
+
+        wedge = provider_NI_0 / ((1 - tax) * revenue_0) - EBIT_0 / revenue_0
+
+    and reported intangible amortization is carried as fixed dollars, because
+    it does not grow with revenue (Broadcom's $8.2B is 13% of FY25 revenue and
+    about 4% of the revenue the Street expects in two years).
+
+    Reported basis (year-ago EPS equals reported EPS): the wedge is net
+    interest only. Gains on investments are not recurring operating income,
+    whether or not Yahoo tags them as unusual (NVIDIA's $9B were untagged).
+    Unusual items already reported in the current fiscal year are removed
+    from the current-year estimate.
+
+    Returns None, and the bridge falls back to trailing net interest, when the
+    reported year, the provider's year-ago EPS, or its alignment with the
+    annual statement cannot be established.
+    """
+    annual = _ordered_statement_rows(json_data, "income_statement")
+    if not annual:
+        return None
+    fy0 = annual[0]
+    revenue = _number(fy0, "Total Revenue", "Operating Revenue")
+    ebit = _number(fy0, "Operating Income")
+    reported_eps = _number(fy0, "Diluted EPS", "Basic EPS")
+    shares = _number(fy0, "Diluted Average Shares", "Basic Average Shares")
+    net_income = _number(fy0, "Net Income Common Stockholders", "Net Income")
+    if shares is None and net_income is not None and reported_eps:
+        shares = net_income / reported_eps
+    net_interest = _number(fy0, "Net Non Operating Interest Income Expense")
+    if net_interest is None:
+        income_in = _number(fy0, "Interest Income", "Interest Income Non Operating")
+        expense = _number(fy0, "Interest Expense", "Interest Expense Non Operating")
+        net_interest = (income_in or 0.0) - (expense or 0.0)
+    analyst = (json_data or {}).get("analyst_data") or {}
+    current_eps = ((analyst.get("earnings_estimates") or {}).get("0y") or {})
+    current_revenue = ((analyst.get("revenue_estimates") or {}).get("0y") or {})
+    year_ago = current_eps.get("yearAgoEps") if isinstance(current_eps, dict) else None
+    year_ago_revenue = (current_revenue.get("yearAgoRevenue")
+                        if isinstance(current_revenue, dict) else None)
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+               and math.isfinite(float(v))
+               for v in (revenue, ebit, reported_eps, shares, year_ago)):
+        return None
+    if revenue <= 0 or shares <= 0 or float(year_ago) <= 0:
+        return None
+    if (isinstance(year_ago_revenue, (int, float)) and not isinstance(year_ago_revenue, bool)
+            and year_ago_revenue > 0
+            and abs(float(year_ago_revenue) / revenue - 1.0) > _BRIDGE_FY0_REVENUE_TOLERANCE):
+        return None
+    rate = eps_conversion_rate if isinstance(eps_conversion_rate, (int, float)) and \
+        not isinstance(eps_conversion_rate, bool) and eps_conversion_rate > 0 else 1.0
+    provider_eps = float(year_ago) * float(rate)
+    tolerance = (_BRIDGE_REPORTED_EPS_TOLERANCE if abs(float(rate) - 1.0) < 1e-12
+                 else _BRIDGE_CONVERTED_EPS_TOLERANCE)
+    if reported_eps > 0 and not (
+            1.0 / _BRIDGE_MAX_EPS_RATIO <= provider_eps / reported_eps <= _BRIDGE_MAX_EPS_RATIO):
+        return None
+    reported_basis = (
+        reported_eps > 0 and abs(provider_eps / reported_eps - 1.0) <= tolerance
+    )
+    amortization = None
+    if reported_basis:
+        wedge = net_interest / revenue
+    else:
+        provider_net_income = provider_eps * shares
+        wedge = provider_net_income / ((1.0 - tax) * revenue) - ebit / revenue
+        cash_flows = _ordered_statement_rows(json_data, "cash_flow")
+        if cash_flows:
+            amortization = _number(cash_flows[0], "Amortization Of Intangibles")
+            if amortization is not None and not 0 < amortization < revenue:
+                amortization = None
+    if not math.isfinite(wedge) or abs(wedge) > _BRIDGE_MAX_ABS_WEDGE:
+        return None
+
+    ytd_unusual = 0.0
+    ytd_complete = True
+    fy0_end = None
+    statements = ((json_data or {}).get("financial_statements") or {}).get(
+        "income_statement") or {}
+    if isinstance(statements, dict) and statements:
+        fy0_end = max(str(key)[:10] for key in statements.keys())
+    quarterly = (((json_data or {}).get("quarterly_financial_statements") or {})
+                 .get("income_statement") or {})
+    if reported_basis and fy0_end and isinstance(quarterly, dict):
+        for period, row in quarterly.items():
+            if str(period)[:10] > fy0_end and isinstance(row, dict):
+                if _number(row, "Total Revenue", "Operating Revenue") is None:
+                    # A sparse quarterly row (EPS and share counts only) says
+                    # nothing about its gains: the removal is incomplete.
+                    ytd_complete = False
+                ytd_unusual += _number(row, "Total Unusual Items") or 0.0
+    return {
+        "basis": "reported" if reported_basis else "adjusted",
+        "wedge": wedge,
+        "provider_year_ago_eps": provider_eps,
+        "reported_eps": reported_eps,
+        "reported_operating_margin": ebit / revenue,
+        "fiscal_year_revenue": revenue,
+        "intangible_amortization": amortization,
+        "current_year_reported_unusual": ytd_unusual,
+        "current_year_unusual_complete": ytd_complete,
+        "fiscal_year": str(fy0_end or ""),
+    }
+
+
+def _street_margin_anchor(
+    json_data: Dict[str, Any],
+    forecast_basis: Optional[Dict[str, Any]],
+    tax_rate: Any,
+    minimum_analysts: int,
+) -> Optional[Dict[str, Any]]:
+    """Operating margins implied by the Street's EPS case for the covered years.
+
+    Uses the same aligned, currency-checked forward estimates that the
+    publication boundary compares the model against, so the model can no
+    longer be blocked for disagreeing with a Street case it was never allowed
+    to see. ``tax_rate`` must be the normalized rate the model applies to
+    NOPAT: grossing net income up at one rate and taxing the resulting EBIT at
+    another manufactures operating profit (a flat 25% against NVIDIA's 14%
+    lifted its margin nine points above what the Street's own EPS implies).
+
+    The EPS-to-EBIT wedge is calibrated on the last reported year (see
+    ``_year_ago_bridge_calibration``); only when that is impossible does the
+    bridge fall back to trailing net non-operating interest. On a rolling
+    forecast clock the second covered year is the +1y estimate itself, which
+    the fiscal-progress blend otherwise leaves unused.
+    Returns None when the estimates are missing, thinly covered, or of
+    uncertain unit basis; the caller then keeps the trailing-margin path.
+    """
+    from src.external_expectations import (
+        align_forward_estimates_to_forecast_basis,
+        build_external_expectations,
+    )
+
+    expectations = (json_data or {}).get("external_expectations") or {}
+    if not isinstance(expectations, dict) or not expectations.get("forward_estimates"):
+        expectations = build_external_expectations(json_data or {})
+    rows = align_forward_estimates_to_forecast_basis(expectations, forecast_basis)
+    if not rows:
+        return None
+    raw_rows = [row for row in (expectations.get("forward_estimates") or [])
+                if isinstance(row, dict)]
+    basis = forecast_basis if isinstance(forecast_basis, dict) else {}
+    rolling = basis.get("basis") == "rolling_twelve_months" and len(rows) == 1
+    progress = basis.get("fiscal_year_progress") if rolling else None
+    if rolling and len(raw_rows) >= 2:
+        rows = [rows[0], {**raw_rows[1], "horizon": "NTM2 (+1y estimate)"}]
+
+    try:
+        tax = float(tax_rate)
+    except (TypeError, ValueError):
+        tax = _TAX_DEFAULT
+    if not math.isfinite(tax) or not 0.0 <= tax < 0.60:
+        tax = _TAX_DEFAULT
+
+    conversion = next((
+        row.get("eps_currency_conversion_rate") for row in raw_rows
+        if isinstance(row.get("eps_currency_conversion_rate"), (int, float))
+    ), None)
+    calibration = _year_ago_bridge_calibration(json_data or {}, tax, conversion)
+
+    bridge = (json_data or {}).get("ttm_bridge") or {}
+    if bridge.get("status") == "current":
+        income = bridge.get("income_statement") or {}
+    else:
+        annual = _ordered_statement_rows(json_data, "income_statement")
+        income = annual[0] if annual else {}
+    revenue = _number(income, "Total Revenue", "Operating Revenue")
+    net_non_operating = _number(income, "Net Non Operating Interest Income Expense")
+    if net_non_operating is None:
+        interest_income = _number(
+            income, "Interest Income", "Total Interest Income", "Net Interest Income",
+        )
+        interest_expense = _number(income, "Interest Expense")
+        if interest_income is None and interest_expense is None:
+            net_non_operating = 0.0
+        else:
+            net_non_operating = (interest_income or 0.0) - (interest_expense or 0.0)
+    non_operating_ratio = (
+        float(net_non_operating) / float(revenue) if revenue and revenue > 0 else 0.0
+    )
+    non_operating_ratio = _clamp(non_operating_ratio, -0.10, 0.10)
+    wedge = calibration["wedge"] if calibration else non_operating_ratio
+    ytd_unusual = calibration["current_year_reported_unusual"] if calibration else 0.0
+
+    anchored_rows = []
+    for index, row in enumerate(rows[:2]):
+        if not isinstance(row, dict):
+            break
+        net_margin = row.get("implied_net_margin")
+        if not isinstance(net_margin, (int, float)) or isinstance(net_margin, bool):
+            break
+        if not math.isfinite(float(net_margin)):
+            break
+        eps_count = _safe_count(row.get("eps_analyst_count"))
+        revenue_count = _safe_count(row.get("revenue_analyst_count"))
+        if eps_count < minimum_analysts or revenue_count < minimum_analysts:
+            break
+        if row.get("eps_unit_confidence") not in (None, "high"):
+            break
+        net_margin = float(net_margin)
+        row_revenue = row.get("revenue")
+        if (isinstance(row_revenue, (int, float)) and revenue and revenue > 0
+                and not (_BRIDGE_REVENUE_SCALE_BOUNDS[0]
+                         <= float(row_revenue) / float(revenue)
+                         <= _BRIDGE_REVENUE_SCALE_BOUNDS[1])):
+            # Revenue estimates on a different unit or currency than the
+            # statements: the margin they imply is meaningless, not extreme.
+            return None
+        row_wedge = wedge
+        amortization = (calibration or {}).get("intangible_amortization")
+        fiscal_revenue = (calibration or {}).get("fiscal_year_revenue")
+        if (amortization and fiscal_revenue and isinstance(row_revenue, (int, float))
+                and row_revenue > 0):
+            row_wedge = wedge - amortization / fiscal_revenue + amortization / float(row_revenue)
+        one_off_ratio = 0.0
+        if ytd_unusual and index == 0 and isinstance(row_revenue, (int, float)) \
+                and row_revenue > 0:
+            # The current fiscal year's reported gains are inside the 0y EPS;
+            # on a rolling clock only the 0y share of the blend carries them.
+            weight = 1.0
+            if rolling and isinstance(progress, (int, float)):
+                weight = max(0.0, min(1.0, 1.0 - float(progress)))
+            one_off_ratio = weight * ytd_unusual / float(row_revenue)
+        implied = net_margin / (1.0 - tax) - row_wedge - one_off_ratio
+        anchored_rows.append({
+            "horizon": row.get("horizon") or row.get("period") or f"FY{index + 1}",
+            "street_net_margin": net_margin,
+            "implied_operating_margin": implied,
+            "current_year_unusual_removed": one_off_ratio,
+            "eps_analyst_count": eps_count,
+            "revenue_analyst_count": revenue_count,
+        })
+    if not anchored_rows:
+        return None
+    if calibration:
+        basis_text = (
+            f"street net margin / (1 - tax) - {wedge * 100:+.1f}% wedge calibrated on "
+            f"FY{calibration['fiscal_year'][:4]} ({calibration['basis']} EPS basis: "
+            f"provider {calibration['provider_year_ago_eps']:.2f} vs reported "
+            f"{calibration['reported_eps']:.2f})"
+        )
+    else:
+        basis_text = "street net margin / (1 - tax) - net non-operating interest / revenue"
+    return {
+        "rows": anchored_rows,
+        "bridge": {
+            "tax_rate": tax,
+            "net_non_operating_ratio": wedge,
+            "calibration": calibration,
+            "basis": basis_text,
+        },
     }
 
 
@@ -1352,8 +1704,15 @@ def _deterministic_margin_path(
     return [start + (target - start) * index / (years - 1) for index in range(years)]
 
 
-def _working_capital_history(json_data: Dict[str, Any], metric: str) -> List[float]:
+def _working_capital_history(
+    json_data: Dict[str, Any], metric: str, cost_base: Optional[str] = None,
+) -> List[float]:
     statements = (json_data or {}).get("financial_statements") or {}
+    if cost_base is None:
+        cost_base = working_capital_cost_base(statements)
+    # Inventory and payables are measured against cost of revenue unless
+    # the issuer never reports one (see working_capital_cost_base).
+    measure_on_revenue = cost_base == WORKING_CAPITAL_COST_BASE_REVENUE
     income = statements.get("income_statement") or {}
     balance = statements.get("balance_sheet") or {}
     periods = sorted(set(income).intersection(balance), key=str, reverse=True)
@@ -1380,13 +1739,13 @@ def _working_capital_history(json_data: Dict[str, Any], metric: str) -> List[flo
             denominator = revenue
         elif metric == "dio_days":
             numerator = _number(bal, "Inventory")
-            denominator = cogs
+            denominator = revenue if measure_on_revenue else cogs
         else:
             numerator = _number(
                 bal, "Accounts Payable", "Payables",
                 "Payables And Accrued Expenses"
             )
-            denominator = cogs
+            denominator = revenue if measure_on_revenue else cogs
         if numerator is not None and denominator and denominator > 0:
             days = numerator / denominator * 365.0
             if 0 <= days <= 365:
@@ -1550,8 +1909,23 @@ def ground_assumptions(
     # latest year and glide to the three-year median instead of accepting a
     # different LLM guess on each run.
     grounded_working_capital = []
+    # Banks are valued on the balance sheet (justified P/B). They report no
+    # cost of revenue either, but their industrial working-capital drivers
+    # must stay exactly as they were, not be re-measured against revenue.
+    is_bank_seed = (
+        a.get("assumption_seed_source") == "not_applicable_to_bank_valuation"
+    )
+    cost_base = (
+        WORKING_CAPITAL_COST_BASE_COGS if is_bank_seed
+        else working_capital_cost_base(
+            (json_data or {}).get("financial_statements") or {}
+        )
+    )
+    # The workbook must divide by the same base the days were measured on,
+    # so the choice travels with the assumptions.
+    a["working_capital_cost_base"] = cost_base
     for key, label in (("dso_days", "DSO"), ("dio_days", "DIO"), ("dpo_days", "DPO")):
-        history = _working_capital_history(json_data, key)
+        history = _working_capital_history(json_data, key, cost_base=cost_base)
         path = _normalized_history_path(history)
         if path:
             a[key] = path
@@ -1560,7 +1934,15 @@ def ground_assumptions(
             )
     if grounded_working_capital:
         a["working_capital_source"] = "latest_actual_to_three_year_median"
-        notes.append("Working capital grounded to statements: " + ", ".join(grounded_working_capital))
+        basis_note = (
+            "; inventory and payable days are measured against revenue "
+            "because the issuer reports no cost of revenue"
+            if cost_base == WORKING_CAPITAL_COST_BASE_REVENUE else ""
+        )
+        notes.append(
+            "Working capital grounded to statements: "
+            + ", ".join(grounded_working_capital) + basis_note
+        )
 
     # Current quarterly balance sheet and TTM reinvestment intensities update
     # the places where an annual snapshot goes stale. Revenue is replaced below
@@ -1649,6 +2031,15 @@ def ground_assumptions(
                 f"at {rolling['period_end']}; 0y/+1y consensus blended without "
                 "counting elapsed fiscal operations as future cash flow"
             )
+            if float(rolling.get("covered_growth") or 0.0) > _POST_CONSENSUS_GROWTH_CAP:
+                a["post_consensus_growth_capped"] = True
+                used.append(
+                    f"uncovered tail starts at the {_POST_CONSENSUS_GROWTH_CAP*100:.0f}% "
+                    "cap before the fade"
+                )
+            used.append(
+                "post-consensus growth fades linearly toward terminal growth by NTM10"
+            )
             a["revenue_growth_rates"] = grounded_growth
             a["revenue_growth_source"] = (
                 "yahoo_analyst_consensus_rolling_twelve_months_with_deterministic_fade"
@@ -1693,18 +2084,15 @@ def ground_assumptions(
             if used:
                 if len(used) == 2 and len(grounded_growth) >= 5:
                     fy2 = grounded_growth[1]
-                    tail_start = min(fy2, _POST_CONSENSUS_GROWTH_CAP)
-                    grounded_growth[2:5] = [
-                        terminal + (tail_start - terminal) * factor
-                        for factor in _CONSENSUS_FADE_FACTORS
-                    ]
+                    grounded_growth[2:5] = _post_consensus_growth_path(fy2, terminal, 3)
                     if fy2 > _POST_CONSENSUS_GROWTH_CAP:
                         a["post_consensus_growth_capped"] = True
                         used.append(
-                            "uncovered tail capped at 100.0% before deterministic fade"
+                            f"uncovered tail starts at the {_POST_CONSENSUS_GROWTH_CAP*100:.0f}% "
+                            "cap before the fade"
                         )
                     used.append(
-                        "FY3-FY5 deterministic fade to terminal growth "
+                        "FY3-FY5 linear fade toward terminal growth by FY10 "
                         f"({grounded_growth[2]*100:.1f}%/{grounded_growth[3]*100:.1f}%/"
                         f"{grounded_growth[4]*100:.1f}%)"
                     )
@@ -1716,6 +2104,106 @@ def ground_assumptions(
                     if len(used) == 3 else "yahoo_analyst_consensus_near_term"
                 )
                 notes.append("Revenue growth anchored to consensus: " + ", ".join(used))
+
+    # 3b. Near-term operating margins anchored to the Street's EPS case.
+    #     The margin path above starts from the trailing print and normalizes
+    #     to a three-year median, which extrapolates a trough: Tesla's TTM
+    #     operating margin of 4.6% became the whole forecast while 33
+    #     analysts' EPS implied roughly 7.5%. Revenue was already the Street's
+    #     number; profitability now is too, for the two covered years, through
+    #     the same aligned, currency-checked EPS bridge the publication
+    #     boundary uses to challenge the model. Years three to five never
+    #     decay below the covered case and may recover toward the historical
+    #     median. The bridge is net income to EBIT (tax and net non-operating
+    #     interest), bounded so a definition or unit problem cannot rewrite
+    #     margins by more than ten points.
+    oms_before = list(a.get("operating_margins") or [])
+    if oms_before and operating_anchor is not None and operating_anchor > 0:
+        try:
+            street_minimum = max(5, int(os.getenv("ANALYST_CONSENSUS_MIN_ANALYSTS", "5") or 5))
+        except ValueError:
+            street_minimum = 5
+        try:
+            # The bridge must gross up at the same normalized rate the model
+            # later applies to NOPAT, or it manufactures operating profit.
+            margin_anchor = _street_margin_anchor(
+                json_data, a.get("forecast_basis"),
+                (a.get("capm") or {}).get("tax_rate", a.get("tax_rate")),
+                street_minimum,
+            )
+        except Exception:
+            margin_anchor = None
+        if margin_anchor and margin_anchor.get("rows"):
+            trailing_om = float(oms_before[0])
+            lo = trailing_om + _STREET_MARGIN_ANCHOR_FLOOR
+            hi = trailing_om + _STREET_MARGIN_ANCHOR_CEILING
+            anchored: List[float] = []
+            clamped = False
+            for row in margin_anchor["rows"][:2]:
+                om = float(row["implied_operating_margin"])
+                if om < lo or om > hi:
+                    clamped = True
+                anchored.append(_clamp(om, lo, hi))
+            calibration_basis = ((margin_anchor.get("bridge") or {}).get(
+                "calibration") or {}).get("basis")
+            if len(anchored) == 2 and calibration_basis != "adjusted":
+                # A reported-basis current year carries the gains booked so
+                # far; whatever the quarterly removal missed cannot lift it
+                # above both the trailing margin and next year's.
+                ceiling = max(trailing_om, anchored[1]) + _BRIDGE_CURRENT_YEAR_MARGIN_ALLOWANCE
+                if anchored[0] > ceiling:
+                    anchored[0] = ceiling
+                    clamped = True
+            if anchored and anchored[0] > 0.005:
+                om1 = anchored[0]
+                om2 = anchored[1] if len(anchored) > 1 else om1
+                median_hist = (
+                    statistics.median(operating_history) if operating_history else om2
+                )
+                target = max(om2, min(median_hist, om2 + _STREET_MARGIN_RECOVERY_CAP))
+                new_oms = [om1, om2] + [
+                    om2 + (target - om2) * k / 3 for k in (1, 2, 3)
+                ]
+                new_oms = new_oms[:len(oms_before)] if len(oms_before) < 5 else new_oms
+                basis_da = ((a.get("modeling_basis") or {}).get("da_to_revenue"))
+                if isinstance(basis_da, (int, float)) and not isinstance(basis_da, bool):
+                    da_ratio = float(basis_da)
+                elif (isinstance(t_em, (int, float)) and isinstance(t_om, (int, float))
+                      and not isinstance(t_em, bool) and not isinstance(t_om, bool)):
+                    da_ratio = max(0.0, float(t_em) - float(t_om))
+                else:
+                    da_ratio = 0.0
+                a["operating_margins"] = new_oms
+                a["ebitda_margins"] = [om + da_ratio for om in new_oms]
+                gms = list(a.get("gross_margins") or [])
+                for i in range(min(len(gms), len(new_oms))):
+                    gms[i] = max(gms[i], new_oms[i])
+                if gms:
+                    a["gross_margins"] = gms
+                a["margin_anchor"] = {
+                    "source": "yahoo_analyst_consensus_eps",
+                    "trailing_operating_margin": trailing_om,
+                    "anchored_operating_margins": anchored,
+                    "clamped": clamped,
+                    "recovery_target": target,
+                    "bridge": margin_anchor["bridge"],
+                    "rows": margin_anchor["rows"],
+                }
+                a["operating_margin_source"] = "yahoo_analyst_consensus_eps_bridge"
+                notes.append(
+                    "Operating margin anchored to the Street EPS case: "
+                    + ", ".join(
+                        f"{row['horizon']} {float(row['implied_operating_margin'])*100:.1f}% "
+                        f"({row['eps_analyst_count']} EPS analysts; net margin "
+                        f"{float(row['street_net_margin'])*100:.1f}%)"
+                        for row in margin_anchor["rows"][:2]
+                    )
+                    + (" (bounded to within -5/+10 points of trailing)" if clamped else "")
+                    + f"; FY3-FY5 hold or recover toward {target*100:.1f}%"
+                    + f" (trailing {trailing_om*100:.1f}%, bridge at "
+                    f"{float(margin_anchor['bridge']['tax_rate'])*100:.1f}% tax; "
+                    f"{margin_anchor['bridge']['basis']})"
+                )
 
     # 4. Exit multiple — company-specific, never one-size-fits-all.
     # Do not apply an unexplained blanket haircut. The former 0.8x rule asserted

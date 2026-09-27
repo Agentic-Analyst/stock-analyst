@@ -281,7 +281,10 @@ def test_generalist_final_answer_uses_shared_withheld_and_analyst_guard():
         "Analysts were considered as a cross-check."
     )
 
-    assert guarded.startswith("AAPL is NOT RATED")
+    # This fixture carries no market price, so the model view can only state
+    # the supported range; the withheld rating is still stated explicitly.
+    assert guarded.startswith("AAPL: the modeled cash flows support")
+    assert "Rating: NOT RATED" in guarded
     assert "154.04–$180.33" in guarded
     assert "human-analyst mean target USD 335.72" in guarded
     assert "reverse DCF" in guarded
@@ -684,7 +687,8 @@ def test_read_report_uses_separate_guard_without_replacing_live_state(
     guarded = ag._guard_final_answer(
         "The report is bearish and its fair value is USD 167.67."
     )
-    assert guarded.startswith("AAPL is NOT RATED")
+    assert guarded.startswith("AAPL: the modeled cash flows support a value below the market")
+    assert "Rating: NOT RATED" in guarded
     assert "154.04–$180.33" in guarded
     assert "human-analyst mean target USD 335.72" in guarded
     assert "reverse DCF" in guarded
@@ -701,9 +705,11 @@ def test_read_report_uses_separate_guard_without_replacing_live_state(
     )
     fresh_agent.ctx = fresh_ctx
     assert fresh_agent._answer_subject()[1:] == ("AAPL", "Apple Inc.")
-    assert fresh_agent._guard_final_answer(
+    fresh_guarded = fresh_agent._guard_final_answer(
         "The report is bearish and its fair value is USD 167.67."
-    ).startswith("AAPL is NOT RATED")
+    )
+    assert fresh_guarded.startswith("AAPL: the modeled cash flows support a value below the market")
+    assert "Rating: NOT RATED" in fresh_guarded
 
 
 def test_read_report_is_serialized_because_it_installs_a_turn_guard():

@@ -36,6 +36,8 @@ FROM runtime AS test
 COPY requirements-test.lock ./
 RUN python -m pip install --no-cache-dir -r requirements-test.lock
 COPY Dockerfile ./Dockerfile
+# The release-gate tests load these scripts by path.
+COPY scripts/ scripts/
 COPY tests/ tests/
 CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
 

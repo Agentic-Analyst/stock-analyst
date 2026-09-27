@@ -147,6 +147,328 @@ def supported_valuation_span(values: Iterable[Any]) -> Dict[str, Any]:
     return {"low": low, "high": high, "shape": shape}
 
 
+MODEL_VIEW_DIRECTION_THRESHOLD = 0.15
+
+
+
+def required_growth_sentence(required: Any) -> Optional[str]:
+    """What the price requires, as revenue growth, in one or two sentences.
+
+    ``required`` is ``external_expectations.implied_revenue_growth_for_enterprise_value``
+    output. The price's requirement is set against the SAME solve at the
+    model's own value, so the two numbers order exactly as the valuations do.
+    When new capital earns too little over its cost for the modeled-margin
+    number to be stable, the statement falls back to the company's best
+    reported margin, compared with the model's revenue path.
+    """
+    if not isinstance(required, dict) or not required.get("available"):
+        return None
+    years = int(required.get("years") or 10)
+    need = _number(required.get("required_growth"))
+    need_bound = required.get("required_growth_beyond_bound")
+    model_eq = _number(required.get("model_equivalent_growth"))
+    best_need = _number(required.get("required_growth_at_best_margin"))
+    best_bound = required.get("required_growth_at_best_margin_beyond_bound")
+    best_margin = _number(required.get("best_operating_margin"))
+    cagr = _number(required.get("model_revenue_growth"))
+    source = str(required.get("revenue_source") or "")
+    forecasts = (
+        "analyst-based forecasts" if source.startswith("yahoo_analyst_consensus")
+        else "revenue forecasts"
+    )
+    if need is not None or need_bound in ("above", "below"):
+        if need_bound == "above":
+            head = (
+                "At this price, no revenue growth up to 150% a year for "
+                f"{years} years reaches the valuation at the modeled margins"
+            )
+        elif need_bound == "below":
+            head = (
+                "At this price, the market is pricing revenue shrinking faster "
+                f"than 20% a year for {years} years at the modeled margins"
+            )
+        elif need >= 0:
+            head = (
+                f"At this price, revenue would have to grow about {need:.0%} a "
+                f"year for {years} years at the modeled margins"
+            )
+        else:
+            head = (
+                "At this price, the market is pricing revenue shrinking about "
+                f"{abs(need):.0%} a year for {years} years at the modeled margins"
+            )
+        if model_eq is not None:
+            head += (
+                f"; on the same measure, the model's {forecasts} come to "
+                + (f"about {model_eq:.0%} a year" if model_eq >= 0
+                   else f"a decline of about {abs(model_eq):.0%} a year")
+            )
+        text = head + "."
+        if (need is not None and model_eq is not None and need > model_eq
+                and best_need is not None and best_margin is not None
+                and best_need > model_eq + 0.01
+                and round(best_need * 100) != round(need * 100)):
+            text += (
+                f" Even at the company's best reported operating margin of "
+                f"{best_margin:.0%}, the price would need about {best_need:.0%} a year."
+            )
+        return text
+    if best_margin is not None and cagr is not None:
+        if best_bound == "above":
+            return (
+                "At this price, even at the company's best reported operating "
+                f"margin of {best_margin:.0%}, no revenue growth up to 150% a year "
+                f"for {years} years reaches the valuation; the model's {forecasts} "
+                f"average about {cagr:.0%} a year."
+            )
+        if best_need is not None and best_need > cagr + 0.01:
+            return (
+                "At this price, even at the company's best reported operating "
+                f"margin of {best_margin:.0%}, revenue would have to grow about "
+                f"{best_need:.0%} a year for {years} years; the model's {forecasts} "
+                f"average about {cagr:.0%} a year."
+            )
+    return None
+
+
+_PLAIN_METHOD_NOTES = (
+    ("captive-finance", "the company runs a lending arm whose loans and debt are "
+     "mixed into its accounts, so the operating business and the lender must be "
+     "valued separately"),
+    ("memory-chip", "memory-chip prices set its margins, so the forecast years are "
+     "one point of a price cycle rather than a normal year"),
+    ("sum-of-the-parts", "the company needs a sum-of-the-parts valuation of its "
+     "separate businesses"),
+)
+
+
+# The engine's own figures, as analysis_tools.valuation_publication_boundary
+# prints them for a corporate valuation: "The model is +94% from the market",
+# "37-analyst target benchmark is +46%", "finnhub rates it HOLD (20 ratings)".
+# Only the qualified evidence is printed, and only qualified evidence blocks.
+# tests/test_market_expectations.py builds reasons with that function across
+# both branches (DCF-only and model-plus-comps), so a wording change there
+# fails a test rather than reaching a user.
+_MODEL_GAP = re.compile(r"(?:model|estimate) is ([+-]\d+)% from the market")
+_TARGET_GAP = re.compile(r"target benchmark is ([+-]\d+)%")
+_RATING = re.compile(r"rates it ([a-z][a-z ]*?) \(\d+ ratings\)")
+_RATING_DIRECTION = {
+    "strong buy": 1, "buy": 1, "outperform": 1, "overweight": 1,
+    "strong sell": -1, "sell": -1, "underperform": -1, "underweight": -1,
+    "hold": 0, "neutral": 0, "market perform": 0, "equal weight": 0,
+}
+_NO_CURRENT_TARGET = "no provider-dated current analyst target qualified"
+_UNCONFIRMED = "independent analyst evidence does not confirm the model's call"
+
+
+def _street_disagreement(text: str) -> str:
+    """Name what kept the Street from backing the model, only when it is sure.
+
+    The engine withholds a rating when a qualified Street target points the
+    other way, backs less than half of the model's move, or when a qualified
+    analyst rating points another way; a DCF-only call also needs a current,
+    dated target to back it. "The model and the Street's price targets point
+    to different conclusions" misread the common case (Meta: +26% against
+    the Street's +5%, both undervalued) and blamed targets when a rating or a
+    missing target was the reason. Every specific sentence here is one the
+    printed evidence proves; anything else gets the neutral sentence. Bank
+    reasons ("The bank valuation is ...") follow different thresholds, so they
+    always get the neutral sentence. The model's own figure is left to the
+    model-view line beside this note, which states it at the range midpoint.
+    """
+    model = _MODEL_GAP.search(text)
+    gap = int(model.group(1)) if model else 0
+    if not gap:
+        return _UNCONFIRMED
+    side = "upside" if gap > 0 else "downside"
+    targets = [int(value) for value in _TARGET_GAP.findall(text)]
+    # A target at the price or on the other side never backs the model.
+    for target in sorted(targets, key=lambda value: value * gap):
+        if target * gap <= 0:
+            where = (
+                "sit at the market price" if target == 0
+                else f"point the other way ({target:+d}%)"
+            )
+            return f"the Street's price targets {where}, against the model's {side}"
+    # Below half the model's move blocks. The printed figures are rounded to
+    # a whole percent, so only a target at least a point under the bar is
+    # certain to be one the engine rejected; the tightest one is named.
+    bar = max(5, abs(gap) / 2)
+    short = [target for target in targets if abs(target) < bar - 1]
+    if short:
+        target = min(short, key=abs)
+        return (
+            f"the Street's price targets ({target:+d}%) back less than half "
+            f"of the model's {side}"
+        )
+    direction = 1 if gap > 0 else -1
+    for label in _RATING.findall(text):
+        if _RATING_DIRECTION.get(label.strip()) not in (None, direction):
+            return (
+                f"the Street's analyst ratings ({label.strip().upper()}) do not "
+                "point the same way as the model"
+            )
+    if _NO_CURRENT_TARGET in text:
+        return "no current, dated analyst target backs the model's call"
+    return _UNCONFIRMED
+
+
+def plain_rating_note(reason: Any, method_note: Optional[str] = None) -> str:
+    """Why no rating was published, in one sentence a retail reader follows.
+
+    The engine's reasons are written for an auditor ("well-covered
+    analyst-target evidence does not corroborate both the direction and
+    material magnitude"). The technical reason stays in the report and after
+    this sentence in chat; this is the line a user reads first. A reason can
+    carry two conditions at once (Amazon: the model and the Street disagree
+    AND the latest annual statements are 270 days old); the two most
+    substantive are named, disagreement before data freshness.
+    """
+    text = " ".join(str(method_note or reason or "").split()).lower()
+    if method_note:
+        for marker, plain in _PLAIN_METHOD_NOTES:
+            if marker in text:
+                return f"No rating is published because {plain}."
+        return "No rating is published because the cash-flow method does not fit this company."
+    found = []
+    if "corroborate" in text or "conflict" in text:
+        found.append(_street_disagreement(text))
+    if "span more than" in text or "disagree by more than" in text:
+        found.append("the valuation methods disagree too widely for a single fair value")
+    if "non-positive value" in text or "failed with" in text:
+        found.append("one valuation method produced no positive value")
+    if "days old" in text or "annual-only limit" in text:
+        found.append("the latest annual financial statements are too old for a current valuation")
+    if not found:
+        return "No rating is published for this run."
+    return "No rating is published because " + " and ".join(found[:2]) + "."
+
+
+def unsuitable_method_note(suitability: Any) -> Optional[str]:
+    """The methodology's own reason when it forbids publication, else None."""
+    if not isinstance(suitability, dict) or suitability.get("publication_allowed") is not False:
+        return None
+    primary = str(suitability.get("primary_method") or "")
+    if not primary.startswith("scenario_only_pending"):
+        return None
+    reason = str(suitability.get("reason") or "")
+    marker = "because "
+    if marker in reason:
+        reason = reason.split(marker, 1)[1]
+    return reason.strip() or None
+
+
+def model_view_summary(
+    *,
+    span: Dict[str, Any],
+    current_price: Any,
+    street_target: Any = None,
+    street_count: Any = None,
+    market_implied_path: Any = None,
+    currency: str = "",
+    symbol: Optional[str] = None,
+    required_growth: Optional[Dict[str, Any]] = None,
+    method_note: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The conclusion a withheld valuation still supports, in plain words.
+
+    Direction and size of the supported method span against the market, the
+    Street's mean target beside it, and the multiple of the modeled free-cash-
+    flow path that the market price assumes. It never manufactures a rating or
+    a point estimate: those stay withheld by the publication boundary. Before
+    this, a withheld rating rendered as "valuation conclusion: INCONCLUSIVE",
+    which read as "not available" to the user who asked.
+    """
+    price = _number(current_price, positive=True)
+    low = _number((span or {}).get("low"), positive=True)
+    high = _number((span or {}).get("high"), positive=True)
+    code = str(currency or "").upper()
+    if symbol is None:
+        try:
+            from src.currency import currency_symbol
+            symbol = currency_symbol(code) if code else ""
+        except Exception:
+            symbol = ""
+
+    def money(value: float) -> str:
+        return f"{symbol}{value:,.2f}" + (f" {code}" if code else "")
+
+    out: Dict[str, Any] = {
+        "direction": None, "midpoint_gap": None, "street_gap": None,
+        "price_implied_multiple": None, "headline": "", "evidence": "",
+        "price_assumes": None,
+    }
+    if method_note:
+        # The method itself was ruled out (captive lender, memory cycle,
+        # unfinished sum of the parts): its arithmetic has no direction worth
+        # stating, only the reason it cannot carry one.
+        out["headline"] = (
+            "the cash-flow model is shown only as a scenario for this company, "
+            "so it states no direction versus the market."
+        )
+        out["evidence"] = f"The method was ruled out because {str(method_note).rstrip('.')}."
+        return out
+    if low is None or high is None:
+        out["headline"] = "no supported positive valuation-method estimate is available."
+        out["evidence"] = "The valuation methods did not produce a positive value."
+        return out
+
+    midpoint = (low + high) / 2.0
+    parts: List[str] = []
+    if price is not None:
+        gap = midpoint / price - 1.0
+        out["midpoint_gap"] = gap
+        direction = (
+            "below" if gap <= -MODEL_VIEW_DIRECTION_THRESHOLD
+            else "above" if gap >= MODEL_VIEW_DIRECTION_THRESHOLD
+            else "near"
+        )
+        out["direction"] = direction
+        out["headline"] = (
+            f"the modeled cash flows support a value {direction} the market "
+            f"({gap:+.0%} at the midpoint)."
+        )
+        parts.append(f"Against a price of {money(price)}")
+    else:
+        out["headline"] = (
+            "the modeled cash flows support a valuation range, but no market "
+            "price was available to compare it with."
+        )
+
+    target = _number(street_target, positive=True)
+    count = int(_number(street_count) or 0)
+    if target is not None and price is not None:
+        street_gap = target / price - 1.0
+        out["street_gap"] = street_gap
+        parts.append(
+            f"the Street's mean target is {money(target)} ({street_gap:+.0%}"
+            + (f", {count} analysts" if count else "")
+            + ")"
+        )
+    out["evidence"] = (", ".join(parts) + ".") if parts else ""
+
+    growth_text = required_growth_sentence(required_growth)
+    if growth_text:
+        out["price_assumes"] = growth_text
+    path = _number(market_implied_path)
+    if path is not None and path > -1.0:
+        multiple = path + 1.0
+        out["price_implied_multiple"] = multiple
+        if growth_text:
+            pass
+        elif multiple >= 1.5:
+            out["price_assumes"] = (
+                f"The market price assumes about {multiple:.1f}× the modeled "
+                "free-cash-flow path."
+            )
+        elif multiple <= 0.67:
+            out["price_assumes"] = (
+                f"The market price assumes only about {multiple:.2f}× the modeled "
+                "free-cash-flow path."
+            )
+    return out
+
+
 def external_benchmark(financial_data: Dict[str, Any],
                        model_revenue: Iterable[Any] = (),
                        *, revenue_growth_source: Any = None,

@@ -166,9 +166,22 @@ The harder discipline is that **a number the engine computes correctly can still
 
 ### Valuation calibration benchmark
 
-Deployment is gated on a nightly financial-accuracy regression: agent valuations
-run against a golden dataset of 100 QQQ companies, and CI blocks release if any
-valuation drifts beyond threshold.
+Every release is checked against a fixed basket before the worker image is
+pinned, and the same check runs nightly against the pinned image
+(`scripts/nightly_valuation_canary.sh`). The canary
+(`src/valuation_model_canary.py`) builds the deterministic workbook for each
+name, evaluates every formula, applies the publication boundary and audits the
+saved artifact, all without calling a language model; the summary
+(`scripts/valuation_canary_summary.py`) prints both DCF legs, the comps leg,
+the Street target and the gap to market per name, and fails when the publish
+rate falls below threshold or any name errors. Between 2026-09-15 and
+2026-09-26 the engine withheld 9 of 11 production runs and nothing caught it;
+this check exists so a publish-rate collapse fails a build instead of reaching
+a user. Before a deploy the same summary runs with `--expect
+scripts/valuation_canary_expectations.json`, which names the outcome every
+basket name is supposed to have and why; a candidate ships with zero
+unexplained differences, or the expectation changes in the same commit as the
+engine change that explains it.
 
 Arithmetic regression tests alone are not evidence that valuations are calibrated.
 The aggregate benchmark reads only thesis conclusions and public instrument

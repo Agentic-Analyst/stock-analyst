@@ -14,12 +14,17 @@ Key Features:
 - QA checks (FCF reconciliation, EBIT validation)
 """
 
+from typing import Optional
+
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment
 
 from ..financial_model_builder import ExcelFormats
-from ..financial_metrics import depreciation_excel_formula
+from ..financial_metrics import (
+    WORKING_CAPITAL_COST_BASE_REVENUE,
+    depreciation_excel_formula,
+)
 
 
 class HistoricalTabBuilder:
@@ -36,11 +41,23 @@ class HistoricalTabBuilder:
     Note: Only includes years with complete financial data.
     """
     
-    def __init__(self):
-        """Initialize the Historical builder."""
+    def __init__(self, working_capital_cost_base: Optional[str] = None):
+        """Initialize the Historical builder.
+
+        ``working_capital_cost_base`` is "revenue" when inventory and
+        payable days are measured against revenue because the issuer
+        reports no cost of revenue (see ``working_capital_cost_base``).
+        """
         self.year_headers = {}  # Map of column -> year
         self.num_years = 0
         self.start_col = 2
+        # One decision, made in grounding, drives every cost-of-revenue
+        # choice in the workbook (banks never receive it).
+        self.no_cost_structure = (
+            working_capital_cost_base == WORKING_CAPITAL_COST_BASE_REVENUE
+        )
+        # Row 3 is revenue, row 4 cost of revenue.
+        self.working_capital_base_row = 3 if self.no_cost_structure else 4
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -97,6 +114,22 @@ class HistoricalTabBuilder:
                     if year not in years_data:
                         years_data[year] = set()
                     years_data[year].add(row[1])
+
+        # Cost of revenue is a key field only for an issuer that reports a
+        # cost structure at all. Booking Holdings presents expenses by
+        # function, with no cost of revenue and no gross profit in any
+        # year, so requiring the line left no complete year and every
+        # Booking model failed the historical-period integrity check before
+        # valuing anything. The rows below already tolerate the absence:
+        # gross profit equals revenue and the operating-expense residual
+        # keeps the EBIT tie-out. The decision is the grounding flag, not a
+        # second reading of Raw: two rules disagreed for an issuer reporting
+        # only "Reconciled Cost Of Revenue", and banks, which also have no
+        # cost of revenue, must keep their workbook unchanged. An issuer
+        # with any cost structure still needs the line in every year, so a
+        # sparse stub year cannot pass as complete.
+        if self.no_cost_structure:
+            key_fields.remove('Cost Of Revenue')
         
         # Filter to only years with all key fields
         complete_years = []
@@ -419,9 +452,11 @@ class HistoricalTabBuilder:
                     elif row == 39:  # DSO (Days Sales Outstanding)
                         formula = f'=IFERROR(ROUND({col_letter}32/({col_letter}3/365),2),"")'
                     elif row == 40:  # DIO (Days Inventory Outstanding)
-                        formula = f'=IFERROR(ROUND({col_letter}33/({col_letter}4/365),2),"")'
+                        base = f"{col_letter}{self.working_capital_base_row}"
+                        formula = f'=IFERROR(ROUND({col_letter}33/({base}/365),2),"")'
                     elif row == 41:  # DPO (Days Payable Outstanding)
-                        formula = f'=IFERROR(ROUND({col_letter}34/({col_letter}4/365),2),"")'
+                        base = f"{col_letter}{self.working_capital_base_row}"
+                        formula = f'=IFERROR(ROUND({col_letter}34/({base}/365),2),"")'
                     elif row == 42:  # CCC (Cash Conversion Cycle)
                         formula = f'=IFERROR(ROUND({col_letter}39+{col_letter}40-{col_letter}41,2),"")'
                 else:

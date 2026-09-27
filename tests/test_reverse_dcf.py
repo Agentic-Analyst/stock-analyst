@@ -150,3 +150,57 @@ def test_bank_report_omits_inapplicable_reverse_dcf_section():
 
     assert "### Market-Implied Expectations (Reverse DCF)" not in text
     assert "### Bank Valuation Inputs" in text
+
+
+def test_report_prints_the_revenue_growth_the_price_requires():
+    from src.report_agent import generate_section_valuation
+
+    data = _valuation_data()
+    data["valuation"]["reverse_dcf"] = {
+        "market_enterprise_value": 500.0, "pv_explicit_fcf": 100.0,
+        "market_implied_terminal_fcf": 83.009, "model_terminal_fcf": 80.0,
+        "market_implied_vs_model": 0.03761,
+        "required_revenue_growth": {
+            "available": True, "years": 10, "required_growth": 0.30,
+            "required_growth_beyond_bound": None, "model_equivalent_growth": 0.12,
+            "model_revenue_growth": 0.08, "best_operating_margin": 0.35,
+            "required_growth_at_best_margin": 0.22,
+            "required_growth_at_best_margin_beyond_bound": None,
+            "revenue_source": "yahoo_analyst_consensus_with_deterministic_fade",
+        },
+    }
+    text, _ = generate_section_valuation(
+        data, lambda messages, temperature=0.5: ("commentary", 0.0)
+    )
+    assert "| Revenue growth the price requires (10y, modeled margins) | 30.0% |" in text
+    assert "| Same measure at the model's value | 12.0% |" in text
+    assert "best reported margin 35.0%) | 22.0% |" in text
+    assert "| Revenue CAGR in the model (10y) | 8.0% |" in text
+    assert "the growth rows re-solve a ten-year revenue path" in text
+    assert "on the same measure, the model's analyst-based forecasts come to about 12% a year" in text
+
+
+def test_report_omits_growth_rows_when_the_method_was_ruled_out():
+    from src.report_agent import generate_section_valuation
+
+    data = _valuation_data()
+    data["valuation"]["reverse_dcf"] = {
+        "market_enterprise_value": 500.0, "pv_explicit_fcf": 100.0,
+        "market_implied_terminal_fcf": 83.009, "model_terminal_fcf": 80.0,
+        "market_implied_vs_model": 0.03761,
+        "required_revenue_growth": {
+            "available": True, "years": 10, "required_growth": 0.16,
+            "model_equivalent_growth": 0.28,
+        },
+    }
+    reliability = data["valuation"].setdefault("reliability", {})
+    reliability["method_suitability"] = {
+        "publication_allowed": False,
+        "primary_method": "scenario_only_pending_cycle_normalization",
+        "reason": "The DCF may be shown as an auditable scenario because memory-chip margins follow DRAM and NAND contract prices.",
+    }
+    text, _ = generate_section_valuation(
+        data, lambda messages, temperature=0.5: ("commentary", 0.0)
+    )
+    assert "Revenue growth the price requires" not in text
+    assert "| Market-Implied FCF vs Model | 3.8% |" in text

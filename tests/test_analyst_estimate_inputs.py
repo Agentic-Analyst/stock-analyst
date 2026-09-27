@@ -101,8 +101,10 @@ def test_revenue_consensus_anchors_near_term_and_fades_deterministically(monkeyp
 
     grounded, notes = ground_assumptions(assumptions, _grounding_data())
 
+    # FY3-FY5 fade linearly from the last covered year (11.2%) toward the
+    # 2.5% terminal rate in eight equal steps: 11.2% - (8.7% / 8) * k.
     assert grounded["revenue_growth_rates"] == pytest.approx(
-        [0.171, 0.112, 0.08329, 0.0598, 0.0424])
+        [0.171, 0.112, 0.101125, 0.09025, 0.079375])
     assert grounded["revenue_growth_source"] == "yahoo_analyst_consensus_with_deterministic_fade"
     assert any("FY1 17.1% (17 analysts)" in note for note in notes)
 
@@ -375,10 +377,50 @@ def test_well_covered_absolute_hypergrowth_forecasts_anchor_preprofit_case(monke
     assert 70.9 * (1 + grounded["revenue_growth_rates"][0]) == pytest.approx(168.8)
     assert 168.8 * (1 + grounded["revenue_growth_rates"][1]) == pytest.approx(650.8)
     assert grounded["post_consensus_growth_capped"] is True
+    # The uncovered tail starts at the 30% cap and fades linearly toward the
+    # 2.5% terminal rate over eight years: 30% - (27.5% / 8) * k for k = 1..3.
     assert grounded["revenue_growth_rates"][2:] == pytest.approx(
-        [0.67825, 0.415, 0.22]
+        [0.265625, 0.23125, 0.196875]
     )
     assert grounded["revenue_growth_source"] == (
         "yahoo_analyst_consensus_absolute_revenue_with_deterministic_fade"
     )
-    assert any("uncovered tail capped" in note for note in notes)
+    assert any("uncovered tail starts at the 30% cap" in note for note in notes)
+
+
+def test_moderate_grower_keeps_its_runway_after_street_coverage(monkeypatch):
+    """A Street step of 11.7% no longer collapses to GDP growth by year five.
+
+    The former 0.67/0.40/0.20 schedule gave 8.4%/5.8%/3.6% for years three to
+    five (Tesla's actual path), so the perpetuity valued a no-growth business.
+    The fade is now linear toward terminal growth over eight years.
+    """
+    from src.agents.fm.assumption_grounding import ground_assumptions
+
+    monkeypatch.setenv("RISK_FREE_USD", "0.04")
+    data = _grounding_data()
+    data["financial_statements"] = {
+        "income_statement": {
+            "2025-12-31": {"Total Revenue": 100.0},
+            "2024-12-31": {"Total Revenue": 95.0},
+        },
+    }
+    data["analyst_data"]["revenue_estimates"] = {
+        "0y": {"avg": 109.5, "growth": 0.095, "numberOfAnalysts": 40},
+        "+1y": {"avg": 122.3, "growth": 0.117, "numberOfAnalysts": 40},
+    }
+
+    grounded, notes = ground_assumptions({
+        "wacc": 0.10,
+        "terminal_growth_rate": 0.025,
+        "revenue_growth_rates": [0.05] * 5,
+    }, data)
+
+    fy2 = 122.3 / 109.5 - 1.0
+    step = (fy2 - 0.025) / 8
+    assert grounded["revenue_growth_rates"][2:] == pytest.approx(
+        [fy2 - step, fy2 - 2 * step, fy2 - 3 * step]
+    )
+    assert grounded["revenue_growth_rates"][4] > 0.08
+    assert "post_consensus_growth_capped" not in grounded
+    assert any("linear fade toward terminal growth by FY10" in note for note in notes)

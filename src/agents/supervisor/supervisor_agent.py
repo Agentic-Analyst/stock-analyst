@@ -119,6 +119,7 @@ from src.summary_evidence import (
     render_external_benchmark_compact,
     supported_valuation_span,
     supported_valuation_values,
+    model_view_summary, plain_rating_note, unsuitable_method_note,
 )
 import yfinance as yf
 
@@ -160,12 +161,6 @@ class SupervisorWorkflowRunner:
             metrics.get("publication_withheld_reason")
             or "The valuation evidence is not sufficiently reconciled for a point conclusion."
         )
-        answer = (
-            f"{self.ticker} is NOT RATED — valuation conclusion: INCONCLUSIVE. "
-            f"The point fair value and directional rating were withheld.\n\n"
-            f"Intrinsic-model evidence: {range_text}\n\n"
-            f"Why publication is withheld: {reason}"
-        )
         financial = getattr(self.state, "financial_data", None)
         raw_financials = getattr(financial, "raw_data", {}) or {}
         assumptions = getattr(model, "assumptions", {}) or {}
@@ -174,6 +169,30 @@ class SupervisorWorkflowRunner:
             metrics.get("model_revenue_forecast") or (),
             revenue_growth_source=assumptions.get("revenue_growth_source"),
             valuation_metrics=metrics,
+        )
+        # Lead with what the model concluded, not with the fact that a rating
+        # is missing. A withheld rating used to read as "valuation not
+        # available"; the range, the Street's number and what the price
+        # assumes are the answer, and the missing rating is the caveat.
+        view = model_view_summary(
+            span=span,
+            current_price=metrics.get("current_price"),
+            street_target=benchmark.get("target_mean"),
+            street_count=benchmark.get("target_analyst_count"),
+            market_implied_path=metrics.get("market_implied_fcf_path_vs_model"),
+            currency=currency,
+            symbol=symbol,
+            required_growth=metrics.get("market_required_revenue_growth"),
+            method_note=unsuitable_method_note(metrics.get("method_suitability")),
+        )
+        body = " ".join(
+            part for part in (view.get("evidence"), range_text, view.get("price_assumes"))
+            if part
+        )
+        answer = (
+            f"{self.ticker}: {view['headline']}\n\n{body}"
+            f"\n\nRating: NOT RATED. {plain_rating_note(metrics.get('publication_withheld_reason'), unsuitable_method_note(metrics.get('method_suitability')))} "
+            f"Detail: {reason}"
         )
         rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):

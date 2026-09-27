@@ -75,7 +75,9 @@ def test_immediate_answer_cannot_leak_withheld_value_or_unverified_sentiment(
 
     answer = runner._check_for_immediate_answer("model_generation_agent")
 
-    assert answer.startswith("TEST.PA is NOT RATED")
+    # The model view leads; the withheld rating is stated, not the opener.
+    assert answer.startswith("TEST.PA: the modeled cash flows support a value below the market")
+    assert "Rating: NOT RATED" in answer
     assert "€153.91–€183.79 EUR" in answer
     assert "independent evidence conflicts" in answer
     assert "Human-analyst and market benchmark reconciliation" in answer
@@ -121,7 +123,8 @@ def test_guard_preserves_named_external_consensus_but_rejects_model_rating():
         "$167.67 and -44.0% implied return."
     )
     guarded = runner._guard_user_answer(unsafe)
-    assert guarded.startswith("TEST is NOT RATED")
+    assert guarded.startswith("TEST: the modeled cash flows support")
+    assert "Rating: NOT RATED" in guarded
     assert "$153.91–$183.79 USD" in guarded
     assert "SELL" not in guarded
     assert "167.67" not in guarded
@@ -215,7 +218,8 @@ def test_withheld_answer_must_explain_reverse_dcf_and_human_benchmark():
         "TEST is NOT RATED and its supported range is $100-$120."
     )
 
-    assert guarded.startswith("TEST is NOT RATED")
+    assert guarded.startswith("TEST: the modeled cash flows support")
+    assert "Rating: NOT RATED" in guarded
     assert "human-analyst mean target USD 210.00" in guarded
     assert "reverse DCF" in guarded
     assert "57.3% above the model" in guarded
@@ -380,7 +384,8 @@ def test_withheld_answer_requires_dated_material_conflict_and_whole_path():
     )
     guarded = runner._guard_user_answer(incomplete)
 
-    assert guarded.startswith("AAPL is NOT RATED")
+    assert guarded.startswith("AAPL: the modeled cash flows support a value below the market")
+    assert "Rating: NOT RATED" in guarded
     assert "benzinga" in guarded
     assert "2026-09-10" in guarded
     assert "materially conflicts" in guarded

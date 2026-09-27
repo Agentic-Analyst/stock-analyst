@@ -185,7 +185,9 @@ class TestRiskFreeBuild:
         monkeypatch.setenv("EQUITY_RISK_PREMIUM", "0.5")
         resolved = capm_components(US_MEGACAP)
         assert resolved["equity_risk_premium"] == pytest.approx(_fallback)
-        assert resolved["mature_erp_resolution"] == "published"
+        # Since 2026-09-27 the default is the premium implied by market prices
+        # under this model's growth convention (market_premium.CALIBRATION).
+        assert resolved["mature_erp_resolution"] == "calibrated"
 
     def test_the_build_is_published_for_the_workbook_and_report(self):
         c = capm_components(INDIAN_MIDCAP)
@@ -380,7 +382,10 @@ class TestCapmBuild:
     def test_a_low_beta_euro_issuer_is_not_discounted_at_eleven_percent(self):
         """The shipped model returned 11.01% here and a EUR 269 fair value."""
         c = capm_components(LVMH)
-        assert 0.065 <= c["wacc"] <= 0.090, c["wacc"]
+        # The floor moved from 6.5% to 5.5% on 2026-09-27, when the calibrated
+        # premium (about one point below Damodaran's published figure) became
+        # the default; the test's purpose, never 11% again, is unchanged.
+        assert 0.055 <= c["wacc"] <= 0.090, c["wacc"]
 
     def test_weights_come_from_the_actual_capital_structure(self):
         c = capm_components(LVMH)

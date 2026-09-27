@@ -283,9 +283,17 @@ class FinancialModelBuilder:
         # Initialize all builders
         self.keys_map_builder = KeysMapTabBuilder()
         self.assumptions_builder = AssumptionsTabBuilder(llm_assumptions=self.llm_assumptions)
-        self.historical_builder = HistoricalTabBuilder()
+        working_capital_cost_base = self.llm_assumptions.get(
+            "working_capital_cost_base"
+        )
+        self.historical_builder = HistoricalTabBuilder(
+            working_capital_cost_base=working_capital_cost_base
+        )
         modeling_basis = self.llm_assumptions.get("modeling_basis") or {}
-        self.projections_builder = ProjectionsTabBuilder(modeling_basis=modeling_basis)
+        self.projections_builder = ProjectionsTabBuilder(
+            modeling_basis=modeling_basis,
+            working_capital_cost_base=working_capital_cost_base,
+        )
         self.perpetual_growth_dcf_builder = ValuationPerpetualGrowthDCFBuilder(
             modeling_basis=modeling_basis
         )
@@ -523,8 +531,27 @@ class FinancialModelBuilder:
                     isinstance(revenue_source, str)
                     and revenue_source.startswith("yahoo_analyst_consensus")
                 ),
+                # The publication boundary must be able to tell an exit leg
+                # that never ran (no admissible observed multiple) from one
+                # that failed; the workbook alone shows a zero for both.
+                "exit_multiple_available": (self.llm_assumptions or {}).get(
+                    "exit_multiple_available"
+                ),
+                "exit_multiple_source": (self.llm_assumptions or {}).get(
+                    "exit_multiple_source"
+                ),
+                "operating_margin_source": (self.llm_assumptions or {}).get(
+                    "operating_margin_source"
+                ),
+                "margin_anchor": (self.llm_assumptions or {}).get("margin_anchor"),
             },
         }
+        # What the market price requires, for readers that do not run this
+        # engine (the dashboard reads it through api-runner's run summary).
+        from src.market_expectations import build_market_expectations
+        results["_vynn"]["market_expectations"] = build_market_expectations(
+            results, self.json_data or {}, publication,
+        )
         
         # Save to JSON if path provided
         if json_output_path:

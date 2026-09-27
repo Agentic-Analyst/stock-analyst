@@ -27,10 +27,33 @@ _COMMODITY_CYCLE_INDUSTRY_HINTS = (
     "other industrial metals", "steel", "aluminum", "coking coal",
     "thermal coal",
 )
+# Memory chips are priced like a commodity: DRAM and NAND contract prices set
+# margins, which swing from deep losses to 60%+ within two years (Micron:
+# -35% in 2023, 66% trailing in 2026). A run-rate DCF capitalizes whichever
+# point of the cycle the covered years happen to sit on, so a memory maker's
+# model is kept as a scenario and no point value is published until a
+# mid-cycle margin exists. Matched on the business description (both words:
+# a GPU designer that mentions buying DRAM is not a memory maker) because
+# Yahoo files memory makers under the same "Semiconductors" industry.
+_MEMORY_CYCLE_SUMMARY_HINTS = ("dram", "nand")
+_MEMORY_CYCLE_INDUSTRY_HINTS = ("semiconductor", "computer hardware")
+
 _CONGLOMERATE_HINTS = (
     "conglomerate", "diversified industrial", "diversified holdings",
     "multi-sector holdings",
 )
+# Captive lenders named the way their parents describe them. A balance-sheet
+# test (debt/EBITDA) was tried and rejected: it also caught acquisition debt
+# (Terex, published today) and net-cash automakers (Mazda, XPeng). Limited to
+# vehicle and machinery makers, where a finance arm is the business model.
+_CAPTIVE_LENDER_INDUSTRY_HINTS = (
+    "auto manufacturers", "farm & heavy construction machinery",
+    "recreational vehicles",
+)
+_CAPTIVE_LENDER_SEGMENT_HINTS = (
+    "gm financial", "financial services business",
+)
+
 _CAPTIVE_FINANCE_SEGMENT_HINTS = (
     "financial products segment",
     "financial services segment",
@@ -351,6 +374,10 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
     has_captive_finance_segment = any(
         hint in business_summary for hint in _CAPTIVE_FINANCE_SEGMENT_HINTS
     ) and any(token in business_summary for token in ("financ", "lease", "credit"))
+    if (not has_captive_finance_segment
+            and any(hint in industry_key for hint in _CAPTIVE_LENDER_INDUSTRY_HINTS)
+            and any(hint in business_summary for hint in _CAPTIVE_LENDER_SEGMENT_HINTS)):
+        has_captive_finance_segment = True
     if has_captive_finance_segment:
         # Consolidated receivables, debt and cash flow combine an operating
         # manufacturer with a leveraged lender.  Treating the finance book as
@@ -362,6 +389,16 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
             "business; a point call requires segment earnings and cash flow, finance "
             "receivables, matched funding debt, credit losses, and a reconciled "
             "operating-company plus finance-book sum-of-the-parts valuation"
+        )
+    memory_cycle = (
+        any(hint in industry_key for hint in _MEMORY_CYCLE_INDUSTRY_HINTS)
+        and all(hint in business_summary for hint in _MEMORY_CYCLE_SUMMARY_HINTS)
+    )
+    if memory_cycle:
+        reasons.append(
+            "memory-chip margins follow DRAM and NAND contract prices, so the "
+            "covered years sit at one point of that cycle; a point call requires "
+            "a mid-cycle margin rather than the forecast years' margin"
         )
     listing_currency = str(basic.get("listing_currency") or "").upper()
     financial_currency = str(basic.get("currency") or "").upper()
@@ -394,6 +431,8 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
     primary = "dcf_only"
     if has_captive_finance_segment:
         primary = "scenario_only_pending_operating_finance_sotp"
+    elif memory_cycle:
+        primary = "scenario_only_pending_cycle_normalization"
     elif segments.get("status") == "ready":
         # Input readiness is not the same as a completed SOTP.  Until segment
         # values, corporate costs, net debt and cross-holdings are actually

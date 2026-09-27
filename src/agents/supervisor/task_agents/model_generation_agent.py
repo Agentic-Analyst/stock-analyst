@@ -502,6 +502,7 @@ async def model_generation_agent(
                             implied_fcf_path_scale_for_enterprise_value,
                             implied_terminal_growth_for_enterprise_value,
                             implied_terminal_fcf_for_enterprise_value,
+                            required_revenue_growth_from_workbook,
                         )
                         target_ev = (((raw.get("external_expectations") or {}).get(
                             "valuation_cross_check") or {}).get(
@@ -533,6 +534,13 @@ async def model_generation_agent(
                         if market_scale.get("available"):
                             valuation_metrics["market_implied_fcf_path_vs_model"] = (
                                 market_scale["implied_fcf_path_vs_model"]
+                            )
+                        required_growth = required_revenue_growth_from_workbook(
+                            computed_data
+                        )
+                        if required_growth.get("available"):
+                            valuation_metrics["market_required_revenue_growth"] = (
+                                required_growth
                             )
                         if target_scale.get("available"):
                             valuation_metrics["analyst_target_implied_fcf_path_vs_model"] = (

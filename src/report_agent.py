@@ -869,7 +869,9 @@ def extract_historical_financials(financial_data: Dict[str, Any]) -> Dict[str, A
         cf_data = cash_flow.get(year, {})
         
         historical['revenue'].append(is_data.get('Total Revenue', 0) or is_data.get('Operating Revenue', 0))
-        historical['gross_profit'].append(is_data.get('Gross Profit', 0))
+        # Not reported is not zero: Booking Holdings reports no gross profit
+        # in any year, and a 0 default printed a gross profit of $0.00.
+        historical['gross_profit'].append(is_data.get('Gross Profit'))
         historical['operating_income'].append(is_data.get('Operating Income', 0))
         historical['ebitda'].append(is_data.get('EBITDA', 0))
         historical['net_income'].append(is_data.get('Net Income', 0))
@@ -1300,6 +1302,35 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
     return data
 
 
+def _exit_multiple_leg_unavailable(
+    data: Dict[str, Any], dcf_exit: Dict[str, Any]
+) -> bool:
+    """True when the exit-multiple DCF was never computed, as opposed to failing.
+
+    Two signals, either is sufficient: the grounded assumptions recorded
+    ``exit_multiple_available`` as False, or the workbook itself carries a
+    zero terminal multiple together with a zero (or missing) per-share value,
+    which is exactly what the exit tab writes when no observable multiple was
+    admitted. A genuine failure keeps a positive multiple and produces a
+    non-positive value from real arithmetic, and must still be reported.
+    """
+    model_inputs = data.get("model_inputs") or {}
+    if isinstance(model_inputs, dict) and model_inputs.get("exit_multiple_available") is False:
+        return True
+    dcf_exit = dcf_exit if isinstance(dcf_exit, dict) else {}
+
+    def _zero(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        return not math.isfinite(float(value)) or float(value) == 0.0
+
+    return _zero(dcf_exit.get("exit_multiple")) and _zero(
+        dcf_exit.get("intrinsic_value_per_share")
+    )
+
+
 def enforce_valuation_publication_boundary(
     data: Dict[str, Any], financial_data: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -1403,15 +1434,24 @@ def enforce_valuation_publication_boundary(
                 "screened same-subindustry bank peers were unavailable.",
             )
     else:
+        dcf_exit = valuation.get("dcf_exit") or {}
         legs = {
             "perpetual_dcf": (valuation.get("dcf_perpetual") or {}).get(
                 "intrinsic_value_per_share"
             ),
-            "exit_multiple_dcf": (valuation.get("dcf_exit") or {}).get(
-                "intrinsic_value_per_share"
-            ),
+            "exit_multiple_dcf": dcf_exit.get("intrinsic_value_per_share"),
             "market_comps": summary.get("comps_intrinsic") if comps_publishable else None,
         }
+        # An exit-multiple leg that was never computed is not a method that
+        # failed. The workbook marks it unavailable (terminal multiple 0 with
+        # an "Unavailable" note) when the observed EV/EBITDA is missing or
+        # outside the provider-validity boundary, which is routine for
+        # high-multiple growth names (TSLA 134x, AMD 83x). Passing that zero
+        # into the boundary read as "at least one valuation method failed"
+        # and withheld the whole publication on its own. Omit the leg instead
+        # so the result is honestly single-method, not falsely broken.
+        if _exit_multiple_leg_unavailable(data, dcf_exit):
+            legs["exit_multiple_dcf"] = None
         positive_dcf = [
             float(value) for value in (
                 legs["perpetual_dcf"], legs["exit_multiple_dcf"]
@@ -1704,6 +1744,14 @@ def extract_projections(computed_values: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _required_revenue_growth(computed_values: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        from src.external_expectations import required_revenue_growth_from_workbook
+        return required_revenue_growth_from_workbook(computed_values)
+    except Exception:
+        return {"available": False}
+
+
 def extract_valuation(computed_values: Dict[str, Any]) -> Dict[str, Any]:
     """Extract valuation results from Summary and Valuation tabs."""
     summary = computed_values.get('Summary', {}).get('cells', {})
@@ -1762,6 +1810,9 @@ def extract_valuation(computed_values: Dict[str, Any]) -> Dict[str, Any]:
             'market_implied_terminal_fcf': summary.get('(53, 2)'),
             'model_terminal_fcf': summary.get('(54, 2)'),
             'market_implied_vs_model': summary.get('(55, 2)'),
+            # What the market price requires, as ten-year revenue growth at
+            # the modeled margins and reinvestment (benchmark only).
+            'required_revenue_growth': _required_revenue_growth(computed_values),
         },
         # The DCF tab's own inputs, so anything recomputed for the report — the
         # sensitivity grid — runs the SAME model as the headline: ten explicit
@@ -2436,15 +2487,24 @@ def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[s
     # Calculate YoY growth rates
     growth_table = "| Year | Revenue Growth | Gross Profit Growth | EBITDA Growth | Net Income Growth | Operating CF Growth | FCF Growth |\n"
     growth_table += "|------|----------------|---------------------|---------------|-------------------|---------------------|------------|\n"
+    def growth(series, i):
+        # A year the provider left blank has no growth rate. Booking's
+        # latest EBITDA is blank, and dividing it by the prior year raised
+        # TypeError and took the whole section down.
+        current, prior = series[i], series[i - 1]
+        if not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in (current, prior)
+        ):
+            return "N/A"
+        return f"{(current / prior - 1) if prior else 0:.2%}"
+
     for i in range(1, len(years)):
-        rev_growth = ((historical['revenue'][i] / historical['revenue'][i-1]) - 1) if historical['revenue'][i-1] else 0
-        gp_growth = ((historical['gross_profit'][i] / historical['gross_profit'][i-1]) - 1) if historical['gross_profit'][i-1] else 0
-        ebitda_growth = ((historical['ebitda'][i] / historical['ebitda'][i-1]) - 1) if historical['ebitda'][i-1] else 0
-        ni_growth = ((historical['net_income'][i] / historical['net_income'][i-1]) - 1) if historical['net_income'][i-1] else 0
-        ocf_growth = ((historical['operating_cf'][i] / historical['operating_cf'][i-1]) - 1) if historical['operating_cf'][i-1] else 0
-        fcf_growth = ((historical['fcf'][i] / historical['fcf'][i-1]) - 1) if historical['fcf'][i-1] else 0
-        
-        growth_table += f"| {years[i-1]}-{years[i]} | {rev_growth:.2%} | {gp_growth:.2%} | {ebitda_growth:.2%} | {ni_growth:.2%} | {ocf_growth:.2%} | {fcf_growth:.2%} |\n"
+        cells = " | ".join(
+            growth(historical[key], i)
+            for key in ('revenue', 'gross_profit', 'ebitda', 'net_income', 'operating_cf', 'fcf')
+        )
+        growth_table += f"| {years[i-1]}-{years[i]} | {cells} |\n"
     
     # Margins table
     margins_table = "| Metric | Current Value |\n"
@@ -2459,7 +2519,10 @@ def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[s
     commentary = []
     if years and historical['revenue']:
         first_revenue, last_revenue = historical['revenue'][0], historical['revenue'][-1]
-        if isinstance(first_revenue, (int, float)) and first_revenue:
+        if (
+            isinstance(first_revenue, (int, float)) and first_revenue
+            and isinstance(last_revenue, (int, float))
+        ):
             change = last_revenue / first_revenue - 1.0
             commentary.append(
                 f"- Revenue changed {format_percent(change)} from {years[0]} to {years[-1]}; "
@@ -2481,7 +2544,8 @@ def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[s
         )
     commentary.append(
         "- Growth rates with a zero prior-year denominator are shown as 0.00% rather than "
-        "treated as economically meaningful growth."
+        "treated as economically meaningful growth; a year the provider left blank is "
+        "shown as N/A."
     )
     tables = (
         f"### Historical Financial Data ({len(years)} Years)\n\n{revenue_table}\n"
@@ -2799,10 +2863,53 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         reverse_table += f"| Market-Implied Terminal FCF (Post-Horizon) | {format_number(reverse_values[2])} |\n"
         reverse_table += f"| Model Terminal FCF (Post-Horizon) | {format_number(reverse_values[3])} |\n"
         reverse_table += f"| Market-Implied FCF vs Model | {format_percent(reverse_values[4])} |\n"
+        required = reverse.get('required_revenue_growth') or {}
+        from src.summary_evidence import unsuitable_method_note
+        if unsuitable_method_note(method_suitability):
+            # A ruled-out method states no direction; the growth comparison
+            # would state one by other means.
+            required = {}
+        if required.get('available'):
+            def _growth_cell(value, bound):
+                if bound == 'above':
+                    return "above 150% a year"
+                if bound == 'below':
+                    return "below -20% a year"
+                return format_percent(value) if isinstance(value, (int, float)) else "n/a"
+            if 'required_growth' in required or required.get('required_growth_beyond_bound'):
+                reverse_table += (
+                    "| Revenue growth the price requires (10y, modeled margins) | "
+                    f"{_growth_cell(required.get('required_growth'), required.get('required_growth_beyond_bound'))} |\n"
+                )
+                if 'model_equivalent_growth' in required:
+                    reverse_table += (
+                        "| Same measure at the model's value | "
+                        f"{_growth_cell(required.get('model_equivalent_growth'), required.get('model_equivalent_growth_beyond_bound'))} |\n"
+                    )
+            if isinstance(required.get('best_operating_margin'), (int, float)):
+                reverse_table += (
+                    "| Revenue growth the price requires (10y, best reported margin "
+                    f"{format_percent(required.get('best_operating_margin'))}) | "
+                    f"{_growth_cell(required.get('required_growth_at_best_margin'), required.get('required_growth_at_best_margin_beyond_bound'))} |\n"
+                )
+            if isinstance(required.get('model_revenue_growth'), (int, float)):
+                reverse_table += (
+                    "| Revenue CAGR in the model (10y) | "
+                    f"{format_percent(required.get('model_revenue_growth'))} |\n"
+                )
         reverse_table += (
-            "\n_Diagnostic only: this holds the explicit cash flows, terminal assumptions and discounting fixed. "
-            "It is not a price target and is excluded from fair value._\n"
+            "\n_Diagnostic only, excluded from fair value. The terminal rows hold the explicit "
+            "cash flows, discounting and terminal assumptions fixed; the growth rows re-solve a "
+            "ten-year revenue path at the stated margin, charging reinvestment at the model's own "
+            "sales-to-capital ratio._\n"
         )
+        try:
+            from src.summary_evidence import required_growth_sentence
+            growth_text = required_growth_sentence(required)
+        except Exception:
+            growth_text = None
+        if growth_text:
+            reverse_table += f"\n{growth_text}\n"
     else:
         reverse_table = "_Unavailable — the source workbook does not contain the reverse-DCF diagnostic._"
 
@@ -3101,20 +3208,49 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
     )
     lines = ["### Evidence Boundary", ""]
     if reliability.get('point_estimate_withheld'):
+        # The model view leads. A withheld rating is the caveat on a
+        # conclusion, not the absence of one: the reader gets the supported
+        # range against the price, the Street's number beside it, and what
+        # the market price assumes about the modeled cash flows.
+        from src.summary_evidence import (
+            model_view_summary, supported_valuation_span, unsuitable_method_note,
+        )
+        low, high = reliability.get('range_low'), reliability.get('range_high')
+        span = supported_valuation_span([
+            value for value in (low, high)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+        ])
+        view = model_view_summary(
+            span=span,
+            current_price=company.get('current_price'),
+            street_target=company.get('target_mean_price'),
+            street_count=company.get('num_analysts'),
+            market_implied_path=(valuation.get('reverse_dcf') or {}).get(
+                'market_implied_fcf_path_vs_model'
+            ),
+            currency=str(company.get('currency') or ''),
+            required_growth=(valuation.get('reverse_dcf') or {}).get(
+                'required_revenue_growth'
+            ),
+            method_note=unsuitable_method_note(reliability.get('method_suitability')),
+        )
         lines.append(
-            "**Valuation conclusion: INCONCLUSIVE.** No directional investment thesis "
-            "is published. The valuation evidence does not support a defensible point "
-            "estimate, rating, or Vynn price target."
+            f"**Model view: {view['headline']}** No directional investment thesis "
+            "is published."
+        )
+        lines.append(
+            f"\n**What the model supports**: {view['evidence']} {intrinsic_value}."
+            + (f" {view['price_assumes']}" if view.get('price_assumes') else "")
         )
         reason = reliability.get('withheld_reason')
         if reason:
             lines.append(
-                "\n**Why publication is withheld**: "
+                "\n**Why no rating is published**: "
                 f"{_markdown_cell(compact_publication_reason(reason), 800)}"
             )
         lines.append(
-            f"\n**Positive method evidence**: {intrinsic_value}. These method results are "
-            "not probability-weighted bull/base/bear targets or a publishable fair value."
+            "\nThese method results are scenario evidence, not probability-weighted "
+            "bull/base/bear targets or a publishable fair value."
         )
     else:
         lines.append(

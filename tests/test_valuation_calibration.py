@@ -43,7 +43,10 @@ sys.path.insert(0, os.path.join(_ROOT, "src"))
 # Part 1: the equity risk premium
 # --------------------------------------------------------------------------
 
-def test_erp_prefers_the_published_figure_over_the_house_constant():
+def test_erp_prefers_the_published_figure_over_the_house_constant(monkeypatch):
+    # The published path, as selected by EQUITY_RISK_PREMIUM_SOURCE=published;
+    # the default source is now the calibrated premium (test_market_premium).
+    monkeypatch.setenv("EQUITY_RISK_PREMIUM_SOURCE", "published")
     from src.agents.fm.assumption_grounding import _mature_erp, _ERP
     from src.agents.fm.country_risk import load_table
 
@@ -76,11 +79,13 @@ def test_erp_env_override_still_wins():
 
 
 @pytest.mark.parametrize("bad", ["0.99", "0.0004", "-0.04", "abc", ""])
-def test_erp_rejects_an_unusable_override(bad):
+def test_erp_rejects_an_unusable_override(bad, monkeypatch):
     """
     A parse failure or a fat-fingered percentage must never become the
-    discount rate. Out of band falls through to the published figure.
+    discount rate. Out of band falls through to the published figure when the
+    published source is selected (and to the calibrated one by default).
     """
+    monkeypatch.setenv("EQUITY_RISK_PREMIUM_SOURCE", "published")
     from src.agents.fm.assumption_grounding import _mature_erp
     from src.agents.fm.country_risk import load_table
 
