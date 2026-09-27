@@ -983,8 +983,8 @@ Examples:
     parser.add_argument("--query", help="Override default search query for news articles")
         
     # LLM selection parameters
-    parser.add_argument("--llm", choices=["gpt-4o-mini", "gpt-5.4-mini", "claude-3.5-sonnet", "claude-3.5-haiku", "claude-3-opus"],
-                       default="gpt-4o-mini", help="LLM model to use for analysis")
+    parser.add_argument("--llm", choices=["gpt-4o-mini", "gpt-5.4-mini", "gpt-6-luna", "claude-3.5-sonnet", "claude-3.5-haiku", "claude-3-opus"],
+                       default="gpt-6-luna", help="LLM model to use for analysis")
     parser.add_argument("--list-llms", action="store_true", help="List available LLM models and exit")
     
     args = parser.parse_args()
@@ -1079,7 +1079,7 @@ Examples:
                 # The generalizable chat agent uses a stronger model for reasoning +
                 # tool selection (overridable via CHAT_MODEL). This governs both the
                 # sync and async providers for the chat path.
-                chat_model = os.getenv("CHAT_MODEL", "gpt-5.4-mini").strip()
+                chat_model = os.getenv("CHAT_MODEL", "gpt-6-luna").strip()
                 try:
                     init_llm(chat_model)
                     # Financial artifacts are created after this override.
