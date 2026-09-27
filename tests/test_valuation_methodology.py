@@ -324,3 +324,81 @@ def test_policy_normalizer_recognizes_a_complete_bank_peer_contract():
 
     assert policy["policy_complete"] is True
     assert policy["included_in_blended_value"] is True
+
+
+def _memory_maker(summary):
+    data = _operating_company()
+    data["company_data"]["basic_info"].update({
+        "industry": "Semiconductors", "business_summary": summary,
+    })
+    return data
+
+
+def test_memory_chip_maker_is_a_scenario_until_a_mid_cycle_margin_exists():
+    """Micron's covered-year margins (~80%) sit on a DRAM/NAND price peak."""
+    result = assess_valuation_methodology(_memory_maker(
+        "Micron designs, develops, manufactures and sells memory and storage "
+        "products, including DRAM, NAND and NOR memory."
+    ))
+    assert result["primary_method"] == "scenario_only_pending_cycle_normalization"
+    assert result["publication_allowed"] is False
+    assert "DRAM and NAND contract prices" in result["reason"]
+    # A scenario, not a refusal: the workbook is still built and shown.
+    assert result.get("specialized_service") is None
+
+
+def test_a_gpu_designer_that_mentions_memory_is_not_routed_to_the_cycle():
+    result = assess_valuation_methodology(_memory_maker(
+        "NVIDIA provides graphics and compute platforms; its GPUs use "
+        "high-bandwidth DRAM supplied by memory makers."
+    ))
+    assert result["publication_allowed"] is True
+
+
+def _automaker(industry, summary):
+    data = _operating_company()
+    data["company_data"]["basic_info"].update({
+        "sector": "Consumer Cyclical", "industry": industry, "business_summary": summary,
+    })
+    return data
+
+
+def test_named_captive_lender_is_held_to_a_scenario_until_split():
+    result = assess_valuation_methodology(_automaker(
+        "Auto Manufacturers",
+        "General Motors designs, builds and sells vehicles. It operates through "
+        "GMNA, GMI, Cruise and GM Financial segments; GM Financial provides "
+        "automotive financing.",
+    ))
+    assert result["primary_method"] == "scenario_only_pending_operating_finance_sotp"
+    assert result["publication_allowed"] is False
+
+
+def test_heavy_debt_without_a_lending_arm_keeps_its_dcf():
+    """Terex-like: acquisition debt, no finance book; published before this change."""
+    data = _automaker(
+        "Farm & Heavy Construction Machinery",
+        "Terex manufactures aerial work platforms and materials processing machinery.",
+    )
+    data["financial_statements"]["balance_sheet"] = {"2025-12-31": {"Total Debt": 500.0}}
+    result = assess_valuation_methodology(data)
+    assert result["publication_allowed"] is True
+
+
+def test_an_automaker_that_offers_financing_but_runs_no_lender_keeps_its_dcf():
+    result = assess_valuation_methodology(_automaker(
+        "Auto Manufacturers",
+        "Tesla designs and sells electric vehicles and energy storage, and "
+        "offers vehicle financing and insurance.",
+    ))
+    assert result["publication_allowed"] is True
+    assert result["primary_method"] == "dcf_only"
+
+
+def test_captive_lender_phrasing_is_limited_to_vehicle_and_machinery_makers():
+    data = _operating_company()
+    data["company_data"]["basic_info"].update({
+        "industry": "Specialty Retail",
+        "business_summary": "The retailer's financial services business offers store credit cards.",
+    })
+    assert assess_valuation_methodology(data)["publication_allowed"] is True

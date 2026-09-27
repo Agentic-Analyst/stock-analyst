@@ -454,6 +454,7 @@ def _rehydrate_report_guard_state(base: Path, ticker: str, content: str):
             from src.external_expectations import (
                 implied_discount_rate_for_enterprise_value,
                 implied_fcf_path_scale_for_enterprise_value,
+                required_revenue_growth_from_workbook,
                 implied_terminal_growth_for_enterprise_value,
                 implied_terminal_fcf_for_enterprise_value,
             )
@@ -490,6 +491,9 @@ def _rehydrate_report_guard_state(base: Path, ticker: str, content: str):
                 metrics["market_implied_fcf_path_vs_model"] = (
                     market_scale["implied_fcf_path_vs_model"]
                 )
+            required_growth = required_revenue_growth_from_workbook(computed)
+            if required_growth.get("available"):
+                metrics["market_required_revenue_growth"] = required_growth
             if target_scale.get("available"):
                 metrics["analyst_target_implied_fcf_path_vs_model"] = (
                     target_scale["implied_fcf_path_vs_model"]
@@ -1081,7 +1085,11 @@ def valuation_publication_boundary(*, band, legs, fair_value, current_price,
     for row in qualified_targets[:3]:
         prefix = "the" if row["source"] == "active consensus" else row["source"]
         temporal_note = (
-            " (provider date unavailable; caution only)"
+            (
+                " (provider date unavailable; capture-dated)"
+                if row.get("corroboration_qualified")
+                else " (provider date unavailable; caution only)"
+            )
             if row.get("temporal_status") == "unknown" else ""
         )
         benchmark_parts.append(
@@ -1269,10 +1277,31 @@ class BuildModelTool(_CtxTool):
             isinstance(vm, dict)
             and vm.get("comps_included_in_blended_value", True)
         )
+        # The exit-multiple leg is absent, not broken, when no observable
+        # EV/EBITDA was admitted (missing, or outside the provider boundary
+        # that high-multiple growth names routinely exceed). The grounded
+        # assumptions record that; a zero price with no admitted multiple is
+        # the same fact for older state. Feeding the zero into the dispersion
+        # and boundary checks produced "HALF THE MODEL FAILED" on TSLA and
+        # AMD and withheld publication for a method that never ran.
+        asmp_early = state.financial_model.assumptions if state.financial_model else {}
+        asmp_early = asmp_early if isinstance(asmp_early, dict) else {}
+        exit_price = vm.get("exit_multiple_price") if isinstance(vm, dict) else None
+        exit_unavailable = bool(
+            asmp_early.get("exit_multiple_available") is False
+            or (
+                isinstance(exit_price, (int, float)) and not isinstance(exit_price, bool)
+                and float(exit_price) == 0.0
+                and not (isinstance(asmp_early.get("exit_multiple"), (int, float))
+                         and float(asmp_early.get("exit_multiple") or 0) > 0)
+            )
+        )
+        if exit_unavailable:
+            exit_price = None
         if method != "justified_pb_roe" and isinstance(vm, dict):
             ratio, band, spread_note = valuation_dispersion({
                 "perpetual DCF": vm.get("perpetual_price"),
-                "exit multiple DCF": vm.get("exit_multiple_price"),
+                "exit multiple DCF": exit_price,
                 "market comps": vm.get("comps_price") if comps_in_blend else None,
             })
         elif method == "justified_pb_roe" and isinstance(vm, dict):
@@ -1331,7 +1360,7 @@ class BuildModelTool(_CtxTool):
         else:
             raw_legs = {
                 "perpetual_dcf": (vm.get("perpetual_price") if isinstance(vm, dict) else None),
-                "exit_multiple_dcf": (vm.get("exit_multiple_price") if isinstance(vm, dict) else None),
+                "exit_multiple_dcf": exit_price,
                 "market_comps": (
                     vm.get("comps_price") if isinstance(vm, dict) and comps_in_blend else None
                 ),
@@ -1359,7 +1388,9 @@ class BuildModelTool(_CtxTool):
                 "fair_value_withheld_reason": withheld_reason,
             }
             if positive_legs:
-                from src.summary_evidence import supported_valuation_span
+                from src.summary_evidence import (
+                    model_view_summary, supported_valuation_span, unsuitable_method_note,
+                )
                 support = supported_valuation_span(positive_legs)
                 withheld_payload["valuation_support_shape"] = support["shape"]
                 if support["shape"] == "single_estimate":
@@ -1371,6 +1402,19 @@ class BuildModelTool(_CtxTool):
                         "fair_value_range_low": round(support["low"], 2),
                         "fair_value_range_high": round(support["high"], 2),
                     })
+                # The conclusion the model did reach, for the answer to lead
+                # with: direction and size versus the market, the Street's
+                # number, and what the price assumes about the cash flows.
+                withheld_payload["model_view"] = model_view_summary(
+                    span=support,
+                    current_price=current_price,
+                    street_target=(asmp.get("analyst_target_mean") if isinstance(asmp, dict) else None),
+                    street_count=(asmp.get("analyst_count") if isinstance(asmp, dict) else None),
+                    market_implied_path=(vm.get("market_implied_fcf_path_vs_model") if isinstance(vm, dict) else None),
+                    currency=(_listing_currency(state) or ""),
+                    required_growth=(vm.get("market_required_revenue_growth") if isinstance(vm, dict) else None),
+                    method_note=unsuitable_method_note(vm.get("method_suitability") if isinstance(vm, dict) else None),
+                )
         else:
             fair_value_out, upside_out = fair_value, upside
 

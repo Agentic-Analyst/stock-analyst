@@ -20,6 +20,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment
 
 from ..financial_model_builder import ExcelFormats
+from ..financial_metrics import WORKING_CAPITAL_COST_BASE_REVENUE
 
 
 class ProjectionsTabBuilder:
@@ -46,15 +47,26 @@ class ProjectionsTabBuilder:
     """
     
     def __init__(self, projection_years: int = 5,
-                 modeling_basis: Optional[Dict[str, Any]] = None):
+                 modeling_basis: Optional[Dict[str, Any]] = None,
+                 working_capital_cost_base: Optional[str] = None):
         """
         Initialize the Projections builder.
         
         Args:
             projection_years: Number of projection years (default: 5)
+            working_capital_cost_base: "revenue" when inventory and payable
+                days were measured against revenue because the issuer
+                reports no cost of revenue; otherwise cost of revenue.
         """
         self.projection_years = projection_years
         self.modeling_basis = modeling_basis or {}
+        # Row 3 is revenue, row 4 cost of revenue. The balances must be
+        # rebuilt on the base their days were measured on, or a payables
+        # ratio measured on revenue would be applied to a cost line.
+        self.working_capital_base_row = (
+            3 if working_capital_cost_base == WORKING_CAPITAL_COST_BASE_REVENUE
+            else 4
+        )
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -408,6 +420,9 @@ class ProjectionsTabBuilder:
         Row 16: Accounts Payable = COGS / 365 * DPO
           - B16: =B4/365*Assumptions!C15
           - C16: =C4/365*Assumptions!D15, etc.
+          Rows 15-16 use revenue (row 3) instead of COGS when the
+          issuer reports no cost of revenue and the days were measured
+          against revenue.
         Row 17: Net Working Capital (NWC) = AR + Inventory - AP
         Row 18: ΔNWC = Change in NWC
           - B18: =B17 - (Historical!$F$32 + Historical!$F$33 - Historical!$F$34)
@@ -431,7 +446,8 @@ class ProjectionsTabBuilder:
             col_letter = chr(64 + col)  # B, C, D, E, F
             assumptions_col = chr(67 + i)  # C, D, E, F, G (for FY1-FY5 DIO in Assumptions row 14)
             
-            formula = f'={col_letter}4/365*Assumptions!{assumptions_col}14'
+            base = f'{col_letter}{self.working_capital_base_row}'
+            formula = f'={base}/365*Assumptions!{assumptions_col}14'
             ws.cell(row=15, column=col, value=formula)
             ws.cell(row=15, column=col).number_format = ExcelFormats.CURRENCY
         
@@ -442,7 +458,8 @@ class ProjectionsTabBuilder:
             col_letter = chr(64 + col)  # B, C, D, E, F
             assumptions_col = chr(67 + i)  # C, D, E, F, G (for FY1-FY5 DPO in Assumptions row 15)
             
-            formula = f'={col_letter}4/365*Assumptions!{assumptions_col}15'
+            base = f'{col_letter}{self.working_capital_base_row}'
+            formula = f'={base}/365*Assumptions!{assumptions_col}15'
             ws.cell(row=16, column=col, value=formula)
             ws.cell(row=16, column=col).number_format = ExcelFormats.CURRENCY
         

@@ -284,6 +284,27 @@ class SessionManager:
                             "  - Rating / point fair value: NOT RATED / withheld"
                         )
                         low, high = valuation.get("range_low"), valuation.get("range_high")
+                        price = valuation.get("current_price")
+                        from src.summary_evidence import unsuitable_method_note
+                        method_note = unsuitable_method_note(
+                            valuation.get("method_suitability")
+                        )
+                        if method_note:
+                            summary_lines.append(
+                                "  - Model view: scenario only; the cash-flow method "
+                                f"was ruled out because {method_note.rstrip('.')}"
+                            )
+                        elif (isinstance(low, (int, float)) and isinstance(high, (int, float))
+                                and isinstance(price, (int, float)) and price > 0):
+                            midpoint = (float(low) + float(high)) / 2.0
+                            gap = midpoint / float(price) - 1.0
+                            direction = (
+                                "below" if gap <= -0.15 else "above" if gap >= 0.15 else "near"
+                            )
+                            summary_lines.append(
+                                f"  - Model view: the modeled cash flows support a value "
+                                f"{direction} the market ({gap:+.0%} at the midpoint)"
+                            )
                         if isinstance(low, (int, float)) and isinstance(high, (int, float)):
                             if (valuation.get("support_shape") == "single_estimate"
                                     or round(float(low), 2) == round(float(high), 2)):

@@ -46,15 +46,37 @@ def _analyst_max_age_days() -> int:
     return min(max(value, 30), 730)
 
 
+_CAPTURE_CURRENT_MAX_AGE_DAYS = 7
+
+
 def _temporal_quality(provider_as_of: Any, captured_at: Any) -> Dict[str, Any]:
-    """Classify source time without pretending capture time is provider time."""
+    """Classify source time.
+
+    A provider as-of date is the authority when present. When the provider
+    gives none (Yahoo's target mean is a live aggregate with no date field),
+    the capture time is reported separately as ``capture_current`` rather than
+    being passed off as a provider date: the status stays ``unknown`` and the
+    caller decides what a fresh capture of an undated live aggregate is worth.
+    Without this, no free-tier target could ever corroborate a claim, since
+    Finnhub's dated price-target endpoint is a paid product.
+    """
     observed = _timestamp(provider_as_of)
-    reference = _timestamp(captured_at) or datetime.now(timezone.utc)
+    captured = _timestamp(captured_at)
+    reference = captured or datetime.now(timezone.utc)
     maximum = _analyst_max_age_days()
     if observed is None:
+        capture_age = (
+            (datetime.now(timezone.utc) - captured).total_seconds() / 86400.0
+            if captured is not None else None
+        )
         return {
             "status": "unknown", "age_days": None, "max_age_days": maximum,
             "provider_as_of_available": False,
+            "capture_age_days": round(capture_age, 3) if capture_age is not None else None,
+            "capture_current": bool(
+                capture_age is not None
+                and -2 <= capture_age <= _CAPTURE_CURRENT_MAX_AGE_DAYS
+            ),
         }
     age = (reference - observed).total_seconds() / 86400.0
     if age < -2:
@@ -69,6 +91,18 @@ def _temporal_quality(provider_as_of: Any, captured_at: Any) -> Dict[str, Any]:
         "max_age_days": maximum,
         "provider_as_of_available": True,
     }
+
+
+def _corroboration_qualified(covered: bool, temporal: Dict[str, Any]) -> bool:
+    """A covered target corroborates when provider-dated current, or when the
+    provider gives no date but the live aggregate was captured this week."""
+    status = (temporal or {}).get("status")
+    return bool(
+        covered and (
+            status == "current"
+            or (status == "unknown" and (temporal or {}).get("capture_current"))
+        )
+    )
 
 
 def _number(value: Any, *, positive: bool = False) -> Optional[float]:
@@ -162,6 +196,246 @@ def implied_fcf_path_scale_for_enterprise_value(
         "enterprise_value": target_ev,
         "role": "proportional_fcf_path_reverse_dcf_benchmark_only",
     }
+
+
+_IMPLIED_GROWTH_BOUNDS = (-0.20, 1.50)
+_SALES_TO_CAPITAL_BOUNDS = (0.5, 10.0)
+# A growth requirement is only stated when new capital earns comfortably more
+# than it costs. Near break-even, a 10% change in the model's reinvestment
+# moved Tesla's requirement from 72% to 79% a year and 20% erased it; a number
+# that fragile is not a finding.
+_STABLE_RETURN_MULTIPLE = 1.5
+
+
+def implied_revenue_growth_for_enterprise_value(
+    enterprise_value: Any,
+    *,
+    base_revenue: Any,
+    revenue_path: Any,
+    nopat_path: Any,
+    fcf_path: Any,
+    wacc: Any,
+    terminal_growth: Any,
+    best_operating_margin: Any = None,
+    tax_rate: Any = None,
+    model_revenue_year10: Any = None,
+    model_enterprise_value: Any = None,
+    revenue_source: Any = None,
+) -> Dict[str, Any]:
+    """The constant ten-year revenue growth a named enterprise value requires.
+
+    "The price is 20x the modeled cash flows" is true and unreadable. The
+    expectations framing (Rappaport and Mauboussin) asks the useful question
+    instead: how fast would revenue have to grow for this price to be right?
+
+    Faster growth is not free. Free cash flow is the model's own year-five
+    NOPAT margin times revenue, less reinvestment of new revenue divided by the
+    model's own sales-to-capital ratio over years one to five (no charge when
+    the model's own growth releases cash). After ten years the company grows
+    at the model's terminal rate and earns its incremental return on capital
+    (never below WACC).
+
+    The comparison figure is the SAME solve at the model's own enterprise
+    value (``model_equivalent_growth``), not the model's revenue CAGR: the
+    model's path is front-loaded and carries cash flow differently, so a CAGR
+    comparison could say "the price needs more growth than the model" for a
+    stock the model calls undervalued. On one measure the two numbers order
+    exactly as the valuations do.
+
+    A requirement is stated only when new capital earns at least 1.5x WACC; a
+    second solve at the company's best reported operating margin follows the
+    same rule. Bounds (-20%, +150%) are reported as ``beyond_bound``.
+    """
+    target = _number(enterprise_value, positive=True)
+    base = _number(base_revenue, positive=True)
+    rate = _number(wacc)
+    growth = _number(terminal_growth)
+    try:
+        revenues = [float(v) for v in revenue_path][:5]
+        nopats = [float(v) for v in nopat_path][:5]
+        fcfs = [float(v) for v in fcf_path][:5]
+    except (TypeError, ValueError):
+        revenues, nopats, fcfs = [], [], []
+    unavailable: Dict[str, Any] = {"available": False}
+    if (target is None or base is None or rate is None or growth is None
+            or len(revenues) < 5 or len(nopats) < 5 or len(fcfs) < 5
+            or not all(math.isfinite(v) for v in revenues + nopats + fcfs)
+            or revenues[4] <= 0 or rate <= growth or rate >= 0.5):
+        return unavailable
+    nopat_margin = nopats[4] / revenues[4]
+    if not math.isfinite(nopat_margin) or nopat_margin <= 0:
+        return unavailable
+    reinvested = sum(n - f for n, f in zip(nopats, fcfs))
+    added_revenue = revenues[4] - base
+    sales_to_capital: Optional[float]
+    if reinvested > 0 and added_revenue > 0:
+        sales_to_capital = min(max(added_revenue / reinvested, _SALES_TO_CAPITAL_BOUNDS[0]),
+                               _SALES_TO_CAPITAL_BOUNDS[1])
+    else:
+        # The model's own growth releases cash (negative working capital,
+        # capex below D&A): growth carries no reinvestment charge here either.
+        sales_to_capital = None
+
+    def enterprise_value_at(annual_growth: float, margin: float) -> float:
+        previous, value, discount = base, 0.0, 1.0
+        for _ in range(10):
+            revenue = previous * (1.0 + annual_growth)
+            reinvestment = ((revenue - previous) / sales_to_capital
+                            if sales_to_capital else 0.0)
+            discount /= 1.0 + rate
+            value += (margin * revenue - reinvestment) * discount
+            previous = revenue
+        if sales_to_capital:
+            terminal_rate = growth / max(margin * sales_to_capital, rate)
+        else:
+            terminal_rate = 0.0
+        terminal = margin * previous * (1.0 + growth) * (1.0 - terminal_rate) / (rate - growth)
+        return value + terminal * discount
+
+    def stable(margin: float) -> bool:
+        return (sales_to_capital is None
+                or margin * sales_to_capital >= _STABLE_RETURN_MULTIPLE * rate)
+
+    def solve(value_target: float, margin: float) -> Dict[str, Any]:
+        low, high = _IMPLIED_GROWTH_BOUNDS
+        if enterprise_value_at(high, margin) < value_target:
+            return {"growth": None, "beyond_bound": "above"}
+        if enterprise_value_at(low, margin) > value_target:
+            return {"growth": None, "beyond_bound": "below"}
+        for _ in range(100):
+            mid = (low + high) / 2.0
+            if enterprise_value_at(mid, margin) < value_target:
+                low = mid
+            else:
+                high = mid
+        return {"growth": (low + high) / 2.0, "beyond_bound": None}
+
+    result: Dict[str, Any] = {
+        "available": False,
+        "years": 10,
+        "nopat_margin": nopat_margin,
+        "sales_to_capital": sales_to_capital,
+        "incremental_return": (nopat_margin * sales_to_capital
+                               if sales_to_capital else None),
+        "wacc": rate,
+        "revenue_source": revenue_source if isinstance(revenue_source, str) else None,
+        "role": "market_expectations_benchmark_only",
+    }
+    model_value = _number(model_enterprise_value, positive=True)
+    if stable(nopat_margin):
+        at_price = solve(target, nopat_margin)
+        result.update({
+            "available": True,
+            "required_growth": at_price["growth"],
+            "required_growth_beyond_bound": at_price["beyond_bound"],
+        })
+        if model_value is not None:
+            at_model = solve(model_value, nopat_margin)
+            result.update({
+                "model_equivalent_growth": at_model["growth"],
+                "model_equivalent_growth_beyond_bound": at_model["beyond_bound"],
+            })
+    else:
+        result["model_margin_note"] = "new_capital_return_below_stability_threshold"
+
+    tax = _number(tax_rate)
+    best = _number(best_operating_margin)
+    if best is not None and tax is not None and 0.0 <= tax < 0.6:
+        best_margin = best * (1.0 - tax)
+        if best_margin > nopat_margin + 0.005 and stable(best_margin):
+            at_best = solve(target, best_margin)
+            result.update({
+                "available": True,
+                "best_operating_margin": best,
+                "required_growth_at_best_margin": at_best["growth"],
+                "required_growth_at_best_margin_beyond_bound": at_best["beyond_bound"],
+            })
+    year10 = _number(model_revenue_year10, positive=True)
+    if year10 is not None:
+        result["model_revenue_growth"] = (year10 / base) ** (1.0 / 10.0) - 1.0
+    return result
+
+
+def _workbook_cells(computed: Any, tab: str) -> Dict[str, Any]:
+    body = (computed or {}).get(tab) if isinstance(computed, dict) else None
+    cells = body.get("cells") if isinstance(body, dict) else None
+    return cells if isinstance(cells, dict) else {}
+
+
+def _workbook_row_by_label(cells: Dict[str, Any], label: str) -> Dict[int, Any]:
+    rows: Dict[int, Dict[int, Any]] = {}
+    for key, value in cells.items():
+        try:
+            row, column = (int(part) for part in str(key).strip("() ").split(","))
+        except ValueError:
+            continue
+        rows.setdefault(row, {})[column] = value
+    for row in sorted(rows):
+        if str(rows[row].get(1, "")).strip().startswith(label):
+            return rows[row]
+    return {}
+
+
+def required_revenue_growth_from_workbook(
+    computed: Any, *, enterprise_value: Any = None,
+) -> Dict[str, Any]:
+    """Run ``implied_revenue_growth_for_enterprise_value`` on a saved model.
+
+    Reads the evaluated workbook cells the DCF uses (Projections rows 3/11/19,
+    WACC and terminal growth, the tax rate, the Summary tab's market EV and
+    year-ten revenue, and the best reported operating margin in Historical),
+    so every consumer computes the same benchmark from the same artifact.
+    ``enterprise_value`` defaults to the market EV; pass an analyst-target EV
+    to ask what the Street's target requires instead.
+    """
+    projections = _workbook_cells(computed, "Projections")
+    dcf = _workbook_cells(computed, "Valuation (DCF)")
+    summary = _workbook_cells(computed, "Summary")
+    assumptions = _workbook_cells(computed, "Assumptions")
+    inputs = _workbook_cells(computed, "Model_Inputs")
+    historical = _workbook_cells(computed, "Historical")
+
+    def series(row: int) -> list:
+        return [projections.get(f"({row}, {column})") for column in range(2, 7)]
+
+    revenues = series(3)
+    first_growth = _number(assumptions.get("(7, 3)"))
+    first_revenue = _number(revenues[0] if revenues else None, positive=True)
+    base = (first_revenue / (1.0 + first_growth)
+            if first_revenue is not None and first_growth is not None
+            and first_growth > -0.99 else None)
+    margins = _workbook_row_by_label(historical, "Operating Margin")
+    observed = [value for column, value in margins.items()
+                if column > 1 and _number(value) is not None
+                and -0.5 < float(value) < 1.0]
+    # The model's own value: the DCF legs that produced a positive value. The
+    # equity bridge is shared, so their mean EV is the EV of their midpoint.
+    exit_tab = _workbook_cells(computed, "Valuation (Exit Multiple)")
+    legs = [_number(dcf.get("(27, 2)"), positive=True)]
+    if _number(exit_tab.get("(25, 2)"), positive=True) is not None:
+        legs.append(_number(exit_tab.get("(17, 2)"), positive=True))
+    legs = [leg for leg in legs if leg is not None]
+    model_value = sum(legs) / len(legs) if legs else None
+    # Workbooks saved before 2026-09-13 put FY5 revenue in this cell.
+    year10_label = str(summary.get("(33, 1)") or "")
+    year10 = summary.get("(33, 2)") if "10" in year10_label else None
+    internal = (computed or {}).get("_vynn") if isinstance(computed, dict) else None
+    revenue_source = (((internal or {}).get("model_inputs") or {}).get(
+        "revenue_growth_source") if isinstance(internal, dict) else None)
+    return implied_revenue_growth_for_enterprise_value(
+        enterprise_value if enterprise_value is not None else summary.get("(51, 2)"),
+        base_revenue=base,
+        revenue_path=revenues,
+        nopat_path=series(11),
+        fcf_path=series(19),
+        wacc=dcf.get("(12, 2)"),
+        terminal_growth=dcf.get("(23, 2)"),
+        best_operating_margin=max(observed) if observed else None,
+        tax_rate=inputs.get("(11, 2)"),
+        model_revenue_year10=year10,
+        model_enterprise_value=model_value,
+        revenue_source=revenue_source,
+    )
 
 
 def implied_discount_rate_for_enterprise_value(
@@ -474,15 +748,14 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
                 "source_endpoint": row.get("source_endpoint"),
                 "return_vs_market": mean / price - 1 if price is not None else None,
                 # Unknown provider dates may still challenge a directional
-                # claim, but cannot positively validate an exceptional point
-                # target. Stale/future-dated evidence does neither.
+                # claim. They corroborate one only when the undated live
+                # aggregate was captured within the last week; stale or
+                # future-dated evidence does neither.
                 "qualified": covered and temporal["status"] in {"current", "unknown"},
                 "qualified_for_contradiction": (
                     covered and temporal["status"] in {"current", "unknown"}
                 ),
-                "qualified_for_corroboration": (
-                    covered and temporal["status"] == "current"
-                ),
+                "qualified_for_corroboration": _corroboration_qualified(covered, temporal),
                 "currency_comparable": currency_comparable,
                 "temporal_quality": temporal,
             }
@@ -506,7 +779,7 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
                 covered and temporal["status"] in {"current", "unknown"}
             ),
             "qualified_for_corroboration": (
-                covered and temporal["status"] == "current"
+                _corroboration_qualified(covered, temporal)
             ),
             "currency_comparable": currency_comparable,
             "temporal_quality": temporal,
@@ -688,7 +961,19 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
     )
     warnings = []
     if target_mean is not None and not target.get("as_of"):
-        warnings.append("Price-target source date unavailable; capture time is not a provider as-of date.")
+        capture_dated = any(
+            (row.get("temporal_quality") or {}).get("capture_current")
+            and row.get("qualified_for_corroboration")
+            for row in target_sources.values()
+        )
+        warnings.append(
+            "Price-target source date unavailable; capture time is not a provider as-of date."
+            + (
+                f" The live aggregate captured within {_CAPTURE_CURRENT_MAX_AGE_DAYS} days "
+                "is accepted as current for corroboration."
+                if capture_dated else ""
+            )
+        )
     if target_mean is not None and target_count < 5:
         warnings.append("Price-target coverage is below five analysts.")
     stale_targets = [source for source, row in target_sources.items()

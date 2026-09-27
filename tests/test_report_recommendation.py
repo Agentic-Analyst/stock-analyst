@@ -371,6 +371,35 @@ class TestValidationAnnotations:
         assert "at least 8 are required" in output
         assert "No validated source-grounded news signals" not in output
 
+    def test_ruled_out_method_states_no_direction(self, engine):
+        output = engine._evidence_safe_recommendation(
+            {
+                "rating": "NOT RATED",
+                "rating_available": False,
+                "price_available": True,
+                "current_price": 82.6,
+                "inputs": {"valuation_reliability": {
+                    "band": "single-method",
+                    "range_low": 40.0,
+                    "range_high": 65.5,
+                    "method_suitability": {
+                        "publication_allowed": False,
+                        "primary_method": "scenario_only_pending_operating_finance_sotp",
+                        "reason": ("The DCF may be shown as an auditable scenario, but no "
+                                   "point estimate or directional rating should be published "
+                                   "because a disclosed captive-finance segment is consolidated "
+                                   "with the operating business."),
+                    },
+                }},
+                "rating_withheld_reason": "Captive finance.",
+            },
+            {"evidence": [], "articles_analyzed": 10,
+             "news_freshness": {"status": "current"}},
+            {"deterministic_not_rated": True, "citation_support_issues": []},
+        )
+        assert "**Model View**: Scenario only; the cash-flow method was ruled out because a disclosed captive-finance segment" in output
+        assert "below the market" not in output
+
     def test_limited_news_uses_deterministic_recommendation_without_calling_llm(self, engine):
         company = {
             "ticker": "NVDA", "current_price": 218.29,

@@ -979,12 +979,35 @@ class RecommendationEngineV3:
             reliability = (fixed_numbers.get("inputs") or {}).get(
                 "valuation_reliability") or {}
             band = reliability.get("band") or "unavailable"
+            low, high = reliability.get("range_low"), reliability.get("range_high")
+            price = fixed_numbers.get("current_price")
+            # The model's conclusion leads; the withheld point estimate is
+            # the caveat on it, not a substitute for it.
+            model_view = None
+            from src.summary_evidence import unsuitable_method_note
+            method_note = unsuitable_method_note(reliability.get("method_suitability"))
+            if method_note:
+                model_view = (
+                    "scenario only; the cash-flow method was ruled out because "
+                    f"{method_note.rstrip('.')}"
+                )
+            elif (isinstance(low, (int, float)) and isinstance(high, (int, float))
+                    and isinstance(price, (int, float)) and not isinstance(price, bool)
+                    and price > 0):
+                gap = (float(low) + float(high)) / 2.0 / float(price) - 1.0
+                direction = (
+                    "below" if gap <= -0.15 else "above" if gap >= 0.15 else "near"
+                )
+                model_view = (
+                    f"the modeled cash flows support a value {direction} the market "
+                    f"({gap:+.0%} at the midpoint)"
+                )
             lines.extend([
                 f"**Valuation Confidence**: {str(band).title()}",
-                "**Valuation Conclusion**: Inconclusive",
+                f"**Model View**: {model_view.capitalize()}" if model_view
+                else "**Model View**: Inconclusive",
                 "**Point Estimate**: Withheld",
             ])
-            low, high = reliability.get("range_low"), reliability.get("range_high")
             if isinstance(low, (int, float)) and isinstance(high, (int, float)):
                 lines.append(
                     f"**Supported Valuation Range**: {ccy}{low:,.2f} – {ccy}{high:,.2f}"

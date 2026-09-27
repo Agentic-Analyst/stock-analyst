@@ -24,8 +24,10 @@ current_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(current_dir.parent.parent.parent))  # Add 'src' to path
 
 from ..financial_metrics import (
+    WORKING_CAPITAL_COST_BASE_REVENUE,
     depreciation_and_amortization,
     depreciation_excel_formula,
+    working_capital_cost_base,
 )
 
 
@@ -42,6 +44,12 @@ class AssumptionsTabBuilder:
     def __init__(self, llm_assumptions: Optional[Dict[str, Any]] = None):
         """Initialize with source-grounded model assumptions."""
         self.llm_assumptions = llm_assumptions or {}
+        # True for an issuer that reports no cost of revenue and no gross
+        # profit (Booking Holdings); see working_capital_cost_base.
+        self.no_cost_structure = (
+            self.llm_assumptions.get("working_capital_cost_base")
+            == WORKING_CAPITAL_COST_BASE_REVENUE
+        )
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """Create and format the Assumptions tab with Excel formulas."""
@@ -237,13 +245,21 @@ class AssumptionsTabBuilder:
         
         # Gross Margin
         ws.cell(row=9, column=1, value="Gross Margin").font = Font(bold=True)
-        formula_fy0 = (
-            '=IFERROR('
-            'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Gross Profit",Raw!$C:$C,$B$2&"*")/'
-            'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Total Revenue",Raw!$C:$C,$B$2&"*"),'
-            '"")'
-        )
-        ws.cell(row=9, column=2, value=formula_fy0).number_format = '0.00%'
+        if self.no_cost_structure:
+            # An absent gross profit reads as zero in SUMIFS, which printed
+            # Booking's gross margin as 0.0%. Not reported is not zero.
+            ws.cell(row=9, column=8, value=(
+                "[Not reported: the issuer reports no cost of revenue "
+                "or gross profit]"
+            )).font = Font(italic=True, size=9)
+        else:
+            formula_fy0 = (
+                '=IFERROR('
+                'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Gross Profit",Raw!$C:$C,$B$2&"*")/'
+                'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Total Revenue",Raw!$C:$C,$B$2&"*"),'
+                '"")'
+            )
+            ws.cell(row=9, column=2, value=formula_fy0).number_format = '0.00%'
         
         # FY1-FY5: Reference Model_Inputs (columns B-F)
         for i in range(5):
@@ -320,12 +336,22 @@ class AssumptionsTabBuilder:
                 formula = f'=IF(IFERROR(Model_Inputs!{col_letter}8,"")<>"",Model_Inputs!{col_letter}8,{prev_col}13)'
             ws.cell(row=13, column=3 + i, value=formula).number_format = '0.0'
         
+        # Inventory and payable days are measured against cost of revenue,
+        # or against revenue for an issuer that never reports one. The label
+        # stays "DIO (Days)"/"DPO (Days)": readers find these rows by label.
+        on_revenue = self.no_cost_structure
+        cost_field = "Total Revenue" if on_revenue else "Cost Of Revenue"
+        base_note = (
+            "[Days of revenue: the issuer reports no cost of revenue]"
+            if on_revenue else None
+        )
+
         # DIO
         ws.cell(row=14, column=1, value="DIO (Days)").font = Font(bold=True)
         formula_fy0 = (
             '=IFERROR('
             'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Inventory",Raw!$C:$C,$B$2&"*")/'
-            '(SUMIFS(Raw!$D:$D,Raw!$B:$B,"Cost Of Revenue",Raw!$C:$C,$B$2&"*")/365),'
+            f'(SUMIFS(Raw!$D:$D,Raw!$B:$B,"{cost_field}",Raw!$C:$C,$B$2&"*")/365),'
             '"")'
         )
         ws.cell(row=14, column=2, value=formula_fy0).number_format = '0.0'
@@ -345,7 +371,7 @@ class AssumptionsTabBuilder:
         formula_fy0 = (
             '=IFERROR('
             'SUMIFS(Raw!$D:$D,Raw!$B:$B,"Accounts Payable",Raw!$C:$C,$B$2&"*")/'
-            '(SUMIFS(Raw!$D:$D,Raw!$B:$B,"Cost Of Revenue",Raw!$C:$C,$B$2&"*")/365),'
+            f'(SUMIFS(Raw!$D:$D,Raw!$B:$B,"{cost_field}",Raw!$C:$C,$B$2&"*")/365),'
             '"")'
         )
         ws.cell(row=15, column=2, value=formula_fy0).number_format = '0.0'
@@ -360,6 +386,12 @@ class AssumptionsTabBuilder:
                 formula = f'=IF(IFERROR(Model_Inputs!{col_letter}10,"")<>"",Model_Inputs!{col_letter}10,{prev_col}15)'
             ws.cell(row=15, column=3 + i, value=formula).number_format = '0.0'
         
+        if base_note:
+            for row in (14, 15):
+                ws.cell(row=row, column=8, value=base_note).font = Font(
+                    italic=True, size=9
+                )
+
         # CCC - ALL columns use formulas
         ws.cell(row=16, column=1, value="Cash Conversion Cycle (Days)").font = Font(bold=True)
         ws.cell(row=16, column=2, value='=IFERROR(B13+B14-B15,"")').number_format = '0.0'
@@ -615,8 +647,14 @@ def source_grounded_assumption_seed(json_data: Dict[str, Any]) -> Dict[str, Any]
         margin = amount / current_revenue if amount is not None and current_revenue else None
         return [margin] * 5
 
-    cogs = _statement_value(
-        latest_income, "Cost Of Revenue", "Reconciled Cost Of Revenue"
+    # Inventory and payable days share one denominator with grounding: cost
+    # of revenue, or revenue for an issuer that never reports one.
+    cost_base = working_capital_cost_base(statements)
+    days_base = (
+        latest_revenue if cost_base == WORKING_CAPITAL_COST_BASE_REVENUE
+        else _statement_value(
+            latest_income, "Cost Of Revenue", "Reconciled Cost Of Revenue"
+        )
     )
 
     def days(numerator: Optional[float], denominator: Optional[float]) -> list:
@@ -637,14 +675,15 @@ def source_grounded_assumption_seed(json_data: Dict[str, Any]) -> Dict[str, Any]
             _statement_value(latest_balance, "Accounts Receivable", "Receivables"),
             latest_revenue,
         ),
-        "dio_days": days(_statement_value(latest_balance, "Inventory"), cogs),
+        "dio_days": days(_statement_value(latest_balance, "Inventory"), days_base),
         "dpo_days": days(
             _statement_value(
                 latest_balance, "Accounts Payable", "Payables",
                 "Payables And Accrued Expenses",
             ),
-            cogs,
+            days_base,
         ),
+        "working_capital_cost_base": cost_base,
         "assumption_seed_source": growth_source,
         "assumption_seed_period": latest_period,
     }
