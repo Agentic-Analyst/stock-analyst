@@ -243,48 +243,74 @@ _PLAIN_METHOD_NOTES = (
 
 
 # The engine's own figures, as analysis_tools.valuation_publication_boundary
-# prints them ("The model is +94% from the market", "37-analyst target
-# benchmark is +46%"). tests/test_market_expectations.py builds reasons with
-# that function, so a wording change there fails the test, not the user.
+# prints them for a corporate valuation: "The model is +94% from the market",
+# "37-analyst target benchmark is +46%", "finnhub rates it HOLD (20 ratings)".
+# Only the qualified evidence is printed, and only qualified evidence blocks.
+# tests/test_market_expectations.py builds reasons with that function across
+# both branches (DCF-only and model-plus-comps), so a wording change there
+# fails a test rather than reaching a user.
 _MODEL_GAP = re.compile(r"(?:model|estimate) is ([+-]\d+)% from the market")
 _TARGET_GAP = re.compile(r"target benchmark is ([+-]\d+)%")
+_RATING = re.compile(r"rates it ([a-z][a-z ]*?) \(\d+ ratings\)")
+_RATING_DIRECTION = {
+    "strong buy": 1, "buy": 1, "outperform": 1, "overweight": 1,
+    "strong sell": -1, "sell": -1, "underperform": -1, "underweight": -1,
+    "hold": 0, "neutral": 0, "market perform": 0, "equal weight": 0,
+}
+_NO_CURRENT_TARGET = "no provider-dated current analyst target qualified"
+_UNCONFIRMED = "independent analyst evidence does not confirm the model's call"
 
 
 def _street_disagreement(text: str) -> str:
-    """Say how the Street disagrees with the model, not merely that it does.
+    """Name what kept the Street from backing the model, only when it is sure.
 
-    A rating is withheld when a Street target points the other way, or points
-    the same way but backs less than half of the model's move. "The model and
-    the Street point to different conclusions" misread the second case: for
-    Meta (+26% against the Street's +5%) and Booking (+94% against +46%) both
-    call the stock undervalued; the Street just backs only part of the size.
-    The model's own figure is left to the model-view line beside this note,
-    which states it at the range midpoint; repeating the blended figure here
-    put +93% and +94% side by side for Booking.
+    The engine withholds a rating when a qualified Street target points the
+    other way, backs less than half of the model's move, or when a qualified
+    analyst rating points another way; a DCF-only call also needs a current,
+    dated target to back it. "The model and the Street's price targets point
+    to different conclusions" misread the common case (Meta: +26% against
+    the Street's +5%, both undervalued) and blamed targets when a rating or a
+    missing target was the reason. Every specific sentence here is one the
+    printed evidence proves; anything else gets the neutral sentence. Bank
+    reasons ("The bank valuation is ...") follow different thresholds, so they
+    always get the neutral sentence. The model's own figure is left to the
+    model-view line beside this note, which states it at the range midpoint.
     """
     model = _MODEL_GAP.search(text)
-    targets = [int(value) for value in _TARGET_GAP.findall(text)]
     gap = int(model.group(1)) if model else 0
-    if gap and targets:
-        side = "upside" if gap > 0 else "downside"
-        for target in targets:
-            if target * gap <= 0:
-                where = (
-                    "sit at the market price" if target == 0
-                    else f"point the other way ({target:+d}%)"
-                )
-                return f"the Street's price targets {where}, against the model's {side}"
-        # The printed figures are rounded, so a target within a point of the
-        # half-the-move bar is treated as falling short; "only part" is true
-        # either way because the target sits below the model's full move.
-        for target in targets:
-            if abs(target) < abs(gap) and abs(target) < max(5, abs(gap) / 2) + 1:
-                return (
-                    f"the Street's price targets ({target:+d}%) back only part of "
-                    f"the model's {side}"
-                )
-        return "the Street's analyst ratings do not point the same way as the model"
-    return "the model and the Street's price targets point to different conclusions"
+    if not gap:
+        return _UNCONFIRMED
+    side = "upside" if gap > 0 else "downside"
+    targets = [int(value) for value in _TARGET_GAP.findall(text)]
+    # A target at the price or on the other side never backs the model.
+    for target in sorted(targets, key=lambda value: value * gap):
+        if target * gap <= 0:
+            where = (
+                "sit at the market price" if target == 0
+                else f"point the other way ({target:+d}%)"
+            )
+            return f"the Street's price targets {where}, against the model's {side}"
+    # Below half the model's move blocks. The printed figures are rounded to
+    # a whole percent, so only a target at least a point under the bar is
+    # certain to be one the engine rejected; the tightest one is named.
+    bar = max(5, abs(gap) / 2)
+    short = [target for target in targets if abs(target) < bar - 1]
+    if short:
+        target = min(short, key=abs)
+        return (
+            f"the Street's price targets ({target:+d}%) back less than half "
+            f"of the model's {side}"
+        )
+    direction = 1 if gap > 0 else -1
+    for label in _RATING.findall(text):
+        if _RATING_DIRECTION.get(label.strip()) not in (None, direction):
+            return (
+                f"the Street's analyst ratings ({label.strip().upper()}) do not "
+                "point the same way as the model"
+            )
+    if _NO_CURRENT_TARGET in text:
+        return "no current, dated analyst target backs the model's call"
+    return _UNCONFIRMED
 
 
 def plain_rating_note(reason: Any, method_note: Optional[str] = None) -> str:

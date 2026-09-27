@@ -10,6 +10,7 @@ that never happens (payables are 19% of Booking's revenue).
 """
 
 import logging
+import pathlib
 
 import openpyxl
 import pytest
@@ -33,6 +34,7 @@ from src.agents.fm.tabs.tab_raw import RawTabBuilder
 REVENUE = {"2025-12-31": 26917.0, "2024-12-31": 23739.0, "2023-12-31": 21365.0}
 PAYABLES = {"2025-12-31": 5094.0, "2024-12-31": 3824.0, "2023-12-31": 3374.0}
 RECEIVABLES = {"2025-12-31": 3820.0, "2024-12-31": 3199.0, "2023-12-31": 3253.0}
+INVENTORY = {"2025-12-31": 269.0, "2024-12-31": 237.0, "2023-12-31": 214.0}
 
 
 def _booking_statements():
@@ -48,6 +50,8 @@ def _booking_statements():
         balance[period] = {
             "Accounts Receivable": RECEIVABLES[period],
             "Accounts Payable": PAYABLES[period],
+            # Booking holds none; a small balance exercises the days path.
+            "Inventory": INVENTORY[period],
             "Cash And Cash Equivalents": 16000.0,
             "Total Debt": 17000.0,
         }
@@ -101,6 +105,13 @@ def test_any_reported_cost_structure_keeps_the_cost_of_revenue_base(fields):
     assert working_capital_cost_base(statements) == "cost_of_revenue"
 
 
+def test_gross_profit_equal_to_revenue_is_no_cost_structure():
+    statements = _booking_statements()
+    for period, revenue in REVENUE.items():
+        statements["income_statement"][period]["Gross Profit"] = revenue
+    assert working_capital_cost_base(statements) == "revenue"
+
+
 def test_empty_statements_keep_the_default_base():
     assert working_capital_cost_base({}) == "cost_of_revenue"
     assert working_capital_cost_base({"income_statement": {}}) == "cost_of_revenue"
@@ -130,6 +141,9 @@ def test_grounding_carries_the_revenue_base_to_the_workbook():
     median = _days(PAYABLES["2024-12-31"], REVENUE["2024-12-31"])
     assert grounded["dpo_days"][0] == pytest.approx(latest)      # 69.1 days
     assert grounded["dpo_days"][-1] == pytest.approx(median)     # 58.8 days
+    assert grounded["dio_days"][0] == pytest.approx(
+        _days(INVENTORY["2025-12-31"], REVENUE["2025-12-31"])
+    )
     assert any("measured against revenue" in note for note in notes)
 
 
@@ -163,6 +177,9 @@ def test_fallback_seed_uses_the_same_base():
     assert seed["dpo_days"][0] == pytest.approx(
         _days(PAYABLES["2025-12-31"], REVENUE["2025-12-31"])
     )
+    assert seed["dio_days"][0] == pytest.approx(
+        _days(INVENTORY["2025-12-31"], REVENUE["2025-12-31"])
+    )
 
 
 # --- workbook ----------------------------------------------------------------
@@ -184,6 +201,9 @@ def test_every_booking_year_is_a_complete_historical_period():
     assert [cells.get(f"(1, {col})") for col in (4, 5, 6)] == [2023, 2024, 2025]
     assert cells["(41, 6)"] == pytest.approx(
         round(_days(PAYABLES["2025-12-31"], REVENUE["2025-12-31"]), 2)
+    )
+    assert cells["(40, 6)"] == pytest.approx(
+        round(_days(INVENTORY["2025-12-31"], REVENUE["2025-12-31"]), 2)
     )
     # The accounting identities the integrity check reads still hold.
     assert cells["(5, 6)"] == pytest.approx(REVENUE["2025-12-31"])
@@ -234,10 +254,78 @@ def test_assumptions_tab_divides_by_the_grounded_base():
 def test_projected_payables_and_inventory_use_the_grounded_base():
     workbook = openpyxl.Workbook()
     sheet = ProjectionsTabBuilder(working_capital_cost_base="revenue").create_tab(workbook)
-    assert sheet["B16"].value == "=B3/365*Assumptions!C15"
-    assert sheet["F15"].value == "=F3/365*Assumptions!G14"
+    for col, days_col in zip("BCDEF", "CDEFG"):
+        assert sheet[f"{col}15"].value == f"={col}3/365*Assumptions!{days_col}14"
+        assert sheet[f"{col}16"].value == f"={col}3/365*Assumptions!{days_col}15"
 
     workbook = openpyxl.Workbook()
     sheet = ProjectionsTabBuilder().create_tab(workbook)
     assert sheet["B16"].value == "=B4/365*Assumptions!C15"
     assert sheet["F15"].value == "=F4/365*Assumptions!G14"
+
+
+def test_the_historical_rule_follows_the_grounding_flag_only():
+    # Without the flag (a bank, or an issuer reporting only "Reconciled Cost
+    # Of Revenue") the workbook keeps requiring the line, exactly as before.
+    cells = _historical_cells(_booking_statements())
+    assert all(cells.get(f"(1, {col})") in (None, "") for col in range(2, 7))
+
+
+def test_banks_keep_their_working_capital_drivers():
+    from src.agents.fm.tabs.tab_assumptions import source_grounded_bank_assumption_seed
+
+    data = _booking_grounding_data()
+    seed = source_grounded_bank_assumption_seed(data)
+    grounded, notes = ground_assumptions(seed, data)
+
+    assert grounded["working_capital_cost_base"] == "cost_of_revenue"
+    assert grounded["dpo_days"] == []           # never re-measured on revenue
+    assert not any("measured against revenue" in note for note in notes)
+
+
+# --- the full model, built offline from Booking's real statements ------------
+
+_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "bkng_no_cost_of_revenue.json"
+
+
+def _build(path):
+    from src.agents.fm.financial_model_builder import FinancialModelBuilder
+    from src.agents.fm.formula_evaluator import formula_integrity, model_integrity
+
+    class Quiet:
+        def __getattr__(self, _name):
+            return lambda *args, **kwargs: None
+
+    builder = FinancialModelBuilder("BKNG", Quiet())
+    builder.load_json_file(path)
+    builder.build_model()
+    results = builder.formula_evaluator.evaluate_all_tabs()
+    return builder, results, formula_integrity(results), model_integrity(results)
+
+
+def test_booking_builds_and_carries_its_payables():
+    builder, results, formulas, model = _build(_FIXTURE)
+    assert formulas["status"] == "ready", formulas.get("issues")
+    assert model["status"] == "ready", model.get("issues")
+
+    historical = results["Historical"]["cells"]
+    years = [historical.get(f"(1, {col})") for col in range(2, 7)]
+    assert [year for year in years if year not in (None, "")] == [2022, 2023, 2024, 2025]
+
+    assumptions = results["Assumptions"]["cells"]
+    projections = results["Projections"]["cells"]
+    revenue, payables = projections["(3, 2)"], projections["(16, 2)"]
+    payable_days = assumptions["(15, 3)"]
+    # Payables are rebuilt on revenue, at the ratio Booking actually reports.
+    assert payable_days == pytest.approx(
+        _days(5094e6, 26917e6), rel=1e-3,
+    )
+    assert payables == pytest.approx(revenue / 365.0 * payable_days, rel=1e-9)
+    assert projections["(15, 2)"] == pytest.approx(0.0)       # no inventory
+    # The first projected year no longer absorbs a fake multi-billion outflow:
+    # working capital barely moves for a business whose suppliers fund it.
+    assert abs(projections["(18, 2)"]) < 0.02 * revenue
+    assert projections["(17, 2)"] < 0                          # negative NWC
+
+    assert assumptions.get("(9, 2)") in (None, "")              # not reported
+    assert builder.llm_assumptions["working_capital_cost_base"] == "revenue"

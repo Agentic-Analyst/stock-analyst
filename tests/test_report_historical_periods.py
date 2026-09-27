@@ -122,3 +122,42 @@ def test_insufficient_news_never_calls_llm_or_invents_a_sentiment():
     assert "No broad market-sentiment conclusion is published" in text
     assert "**Overall Sentiment**: BEARISH" not in text
     assert cost == 0.0
+
+
+def test_a_blank_year_and_an_unreported_line_never_take_the_section_down():
+    # Booking Holdings: no gross profit in any year, and the provider left the
+    # latest EBITDA blank. Dividing that blank by the prior year raised
+    # TypeError and the report printed "Section unavailable".
+    financials = {"financial_statements": {
+        "income_statement": {
+            "2024-12-31": {"Total Revenue": 23739.0, "Operating Income": 7555.0,
+                           "EBITDA": 9340.0, "Net Income": 5882.0},
+            "2025-12-31": {"Total Revenue": 26917.0, "Operating Income": 9282.0,
+                           "EBITDA": None, "Net Income": 5400.0},
+        },
+        "balance_sheet": {},
+        "cash_flow": {
+            "2024-12-31": {"Operating Cash Flow": 8320.0, "Free Cash Flow": 7890.0},
+            "2025-12-31": {"Operating Cash Flow": 9410.0, "Free Cash Flow": 9090.0},
+        },
+    }}
+    historical = extract_historical_financials(financials)
+    assert historical["gross_profit"] == [None, None]
+
+    section, _ = generate_section_financial_performance({
+        "historical": historical,
+        "company_overview": {
+            "gross_margin": None, "operating_margin": 0.34, "ebitda_margin": 0.37,
+            "net_margin": 0.2, "roe": None, "roa": 0.2,
+        },
+        "valuation": {},
+    }, llm=None)
+
+    rows = {line.split("|")[1].strip(): line for line in section.splitlines()
+            if line.startswith("| 20")}
+    assert "| N/A | N/A |" in rows["2025-12-31"]          # gross profit, EBITDA
+    growth = next(line for line in section.splitlines()
+                  if line.startswith("| 2024-12-31-2025-12-31"))
+    assert growth.split("|")[2].strip() == "13.39%"       # revenue still computed
+    assert growth.split("|")[3].strip() == "N/A"          # gross profit
+    assert growth.split("|")[4].strip() == "N/A"          # EBITDA

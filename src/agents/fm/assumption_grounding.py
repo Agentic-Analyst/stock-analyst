@@ -42,6 +42,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from .financial_metrics import (
+    WORKING_CAPITAL_COST_BASE_COGS,
     WORKING_CAPITAL_COST_BASE_REVENUE,
     working_capital_cost_base,
 )
@@ -1908,8 +1909,17 @@ def ground_assumptions(
     # latest year and glide to the three-year median instead of accepting a
     # different LLM guess on each run.
     grounded_working_capital = []
-    cost_base = working_capital_cost_base(
-        (json_data or {}).get("financial_statements") or {}
+    # Banks are valued on the balance sheet (justified P/B). They report no
+    # cost of revenue either, but their industrial working-capital drivers
+    # must stay exactly as they were, not be re-measured against revenue.
+    is_bank_seed = (
+        a.get("assumption_seed_source") == "not_applicable_to_bank_valuation"
+    )
+    cost_base = (
+        WORKING_CAPITAL_COST_BASE_COGS if is_bank_seed
+        else working_capital_cost_base(
+            (json_data or {}).get("financial_statements") or {}
+        )
     )
     # The workbook must divide by the same base the days were measured on,
     # so the choice travels with the assumptions.

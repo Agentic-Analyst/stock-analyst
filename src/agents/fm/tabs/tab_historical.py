@@ -51,11 +51,13 @@ class HistoricalTabBuilder:
         self.year_headers = {}  # Map of column -> year
         self.num_years = 0
         self.start_col = 2
-        # Row 3 is revenue, row 4 cost of revenue.
-        self.working_capital_base_row = (
-            3 if working_capital_cost_base == WORKING_CAPITAL_COST_BASE_REVENUE
-            else 4
+        # One decision, made in grounding, drives every cost-of-revenue
+        # choice in the workbook (banks never receive it).
+        self.no_cost_structure = (
+            working_capital_cost_base == WORKING_CAPITAL_COST_BASE_REVENUE
         )
+        # Row 3 is revenue, row 4 cost of revenue.
+        self.working_capital_base_row = 3 if self.no_cost_structure else 4
     
     def create_tab(self, workbook: openpyxl.Workbook) -> Worksheet:
         """
@@ -120,11 +122,13 @@ class HistoricalTabBuilder:
         # Booking model failed the historical-period integrity check before
         # valuing anything. The rows below already tolerate the absence:
         # gross profit equals revenue and the operating-expense residual
-        # keeps the EBIT tie-out. An issuer that reports either line in
-        # some year still needs cost of revenue in every year, so a sparse
-        # stub year cannot pass as complete.
-        reported_anywhere = set().union(*years_data.values())
-        if not reported_anywhere.intersection({'Cost Of Revenue', 'Gross Profit'}):
+        # keeps the EBIT tie-out. The decision is the grounding flag, not a
+        # second reading of Raw: two rules disagreed for an issuer reporting
+        # only "Reconciled Cost Of Revenue", and banks, which also have no
+        # cost of revenue, must keep their workbook unchanged. An issuer
+        # with any cost structure still needs the line in every year, so a
+        # sparse stub year cannot pass as complete.
+        if self.no_cost_structure:
             key_fields.remove('Cost Of Revenue')
         
         # Filter to only years with all key fields

@@ -54,7 +54,10 @@ def test_unexplained_changes_name_every_drift_and_every_unlisted_name():
         "(The valuation methods span more than 1.8x)",
         "UNLISTED: ZZZ is PUBLISHED but has no expectation",
     ]
-    assert summary.unexplained_changes(rows[:1], expectations) == []
+    # A partial run cannot pass as the whole gate.
+    assert summary.unexplained_changes(rows[:1], expectations) == [
+        "MISSING: META is expected but was not in this run",
+    ]
 
 
 def test_cli_exit_codes(tmp_path, capsys):
@@ -118,3 +121,44 @@ def test_context_only_comps_are_starred_in_the_table():
     assert summary._comps(context).endswith("164.47*")
     assert summary._comps(legacy).endswith("164.47 ")
     assert summary._comps({"peer_value": 0, "peer_value_included": False}).strip() == "-"
+
+
+def test_a_run_with_nothing_to_judge_fails(tmp_path, capsys):
+    candidate = tmp_path / "cand.json"
+    candidate.write_text(json.dumps([]), encoding="utf-8")
+    assert summary.main([str(candidate)]) == 1
+    rows = [_row("SPY", status="passed_specialized_refusal"),
+            _row("QQQ", status="passed_specialized_refusal")]
+    candidate.write_text(json.dumps(rows), encoding="utf-8")
+    assert summary.main([str(candidate)]) == 1
+    assert "no equity rows to judge" in capsys.readouterr().out
+
+
+def test_refusals_can_be_capped(tmp_path, capsys):
+    # A refusal leaves the rate's denominator: two refused names out of three
+    # would otherwise read as a 100% publish rate.
+    rows = [_row("NVDA"), _row("TSLA", status="passed_specialized_refusal"),
+            _row("AMD", status="passed_specialized_refusal")]
+    candidate = tmp_path / "cand.json"
+    candidate.write_text(json.dumps(rows), encoding="utf-8")
+    assert summary.main([str(candidate)]) == 0
+    assert summary.main([str(candidate), "--max-refused", "0"]) == 1
+    assert "2 symbol(s) refused" in capsys.readouterr().out
+
+
+def test_audit_warnings_are_printed(tmp_path, capsys):
+    row = _row("NVDA")
+    row["status"] = "passed_with_warnings"
+    row["checks"] = ["PASS current deterministic publication invariants",
+                     "WARN saved artifact publication metadata failed; regenerate before use"]
+    candidate = tmp_path / "cand.json"
+    candidate.write_text(json.dumps([row]), encoding="utf-8")
+    assert summary.main([str(candidate), "--min-publish-rate", "0"]) == 0
+    assert "WARN NVDA: saved artifact publication metadata failed" in capsys.readouterr().out
+
+
+def test_unreadable_rows_fail_with_a_reason(tmp_path, capsys):
+    candidate = tmp_path / "cand.json"
+    candidate.write_text("", encoding="utf-8")
+    assert summary.main([str(candidate)]) == 1
+    assert "no readable canary rows" in capsys.readouterr().out

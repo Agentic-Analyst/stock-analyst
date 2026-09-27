@@ -66,7 +66,7 @@ from src.summary_evidence import plain_rating_note  # noqa: E402
 
 def test_plain_rating_notes_cover_each_withholding_reason():
     cases = {
-        "The DCF-only estimate is -94% from the market for a mega-cap, but ... does not corroborate both the direction": "model and the Street's price targets point to different conclusions.",
+        "The DCF-only estimate is -94% from the market for a mega-cap, but ... does not corroborate both the direction": "independent analyst evidence does not confirm the model's call.",
         "The valuation methods span more than 1.8x.": "valuation methods disagree too widely",
         "Latest annual financial period is 270 days old, beyond the 200-day annual-only limit": "financial statements are too old",
         "At least one valuation method failed with a non-positive value (perpetual_dcf).": "produced no positive value",
@@ -99,8 +99,8 @@ def test_two_conditions_are_both_named_disagreement_first():
               "material magnitude of that gap. Latest annual financial period is 270 "
               "days old, beyond the 200-day annual-only limit.")
     assert plain_rating_note(amazon) == (
-        "No rating is published because the model and the Street's price targets "
-        "point to different conclusions and the latest annual financial statements "
+        "No rating is published because independent analyst evidence does not "
+        "confirm the model's call and the latest annual financial statements "
         "are too old for a current valuation."
     )
 
@@ -128,7 +128,7 @@ def test_a_street_target_in_the_same_direction_backs_only_part_of_the_move():
     )
     assert plain_rating_note(reason) == (
         "No rating is published because the Street's price targets (+5%) back "
-        "only part of the model's upside."
+        "less than half of the model's upside."
     )
 
 
@@ -150,6 +150,100 @@ def test_ratings_are_named_when_every_target_backs_the_move():
         price=100.0, target=140.0, rating="hold",
     )
     assert plain_rating_note(reason) == (
-        "No rating is published because the Street's analyst ratings do not "
-        "point the same way as the model."
+        "No rating is published because the Street's analyst ratings (HOLD) do "
+        "not point the same way as the model."
+    )
+
+
+def _evidence_reason(*, legs, target_rows=None, ratings=None, price=100.0):
+    """A reason from the provider-evidence path production uses."""
+    comps = "market_comps" in legs
+    fair = (
+        ((legs["perpetual_dcf"] + legs["exit_multiple_dcf"]) / 2 + legs["market_comps"]) / 2
+        if comps else sum(legs.values()) / len(legs)
+    )
+    withheld, reason = valuation_publication_boundary(
+        band="moderate", legs=legs, fair_value=fair, current_price=price,
+        analyst_target_evidence=target_rows or {},
+        analyst_rating_evidence=ratings or {},
+    )
+    assert withheld
+    return reason
+
+
+def _target(gap, *, current=True, count=30, price=100.0):
+    return {
+        "mean": price * (1 + gap), "analyst_count": count,
+        "qualified_for_contradiction": True,
+        "qualified_for_corroboration": current,
+        "temporal_quality": {"status": "current" if current else "unknown"},
+    }
+
+
+_COMPS_UP = {"perpetual_dcf": 125.0, "exit_multiple_dcf": 135.0, "market_comps": 130.0}
+_DCF_UP = {"perpetual_dcf": 125.0, "exit_multiple_dcf": 135.0}
+
+
+def test_the_comps_branch_names_the_binding_target_not_the_first():
+    # Yahoo backs half the move; Finnhub's +3% is what the engine rejected.
+    reason = _evidence_reason(legs=_COMPS_UP, target_rows={
+        "yahoo_finance": _target(0.152), "finnhub": _target(0.03),
+    })
+    assert "The model is +30% from the market" in reason
+    assert plain_rating_note(reason) == (
+        "No rating is published because the Street's price targets (+3%) back "
+        "less than half of the model's upside."
+    )
+
+
+def test_a_target_at_the_price_is_named():
+    reason = _evidence_reason(legs=_DCF_UP, target_rows={"yahoo_finance": _target(0.0)})
+    assert plain_rating_note(reason) == (
+        "No rating is published because the Street's price targets sit at the "
+        "market price, against the model's upside."
+    )
+
+
+def test_a_rating_is_named_when_it_is_the_only_blocker():
+    # A target just above half the move is accepted; the HOLD blocks.
+    reason = _evidence_reason(
+        legs=_COMPS_UP, target_rows={"benzinga": _target(0.152)},
+        ratings={"finnhub": {"label": "hold", "analyst_count": 20}},
+    )
+    note = plain_rating_note(reason)
+    assert note == (
+        "No rating is published because the Street's analyst ratings (HOLD) do "
+        "not point the same way as the model."
+    )
+    # With no target at all, a SELL is still named, never "price targets".
+    reason = _evidence_reason(
+        legs=_COMPS_UP, ratings={"finnhub": {"label": "sell", "analyst_count": 20}},
+    )
+    assert "analyst ratings (SELL)" in plain_rating_note(reason)
+
+
+def test_a_target_that_is_not_current_is_not_called_a_disagreement():
+    reason = _evidence_reason(
+        legs=_DCF_UP, target_rows={"yahoo_finance": _target(0.40, current=False)},
+    )
+    assert plain_rating_note(reason) == (
+        "No rating is published because no current, dated analyst target backs "
+        "the model's call."
+    )
+
+
+def test_bank_reasons_get_the_neutral_sentence():
+    # Banks use their own thresholds; nothing specific is claimed for them.
+    from src.agents.fm.bank_valuation import assess_bank_publication
+    out = assess_bank_publication(
+        fair_value=140, intrinsic_fair_value=140, peer_fair_value=None, current_price=100,
+        analyst_target_evidence={"yahoo_finance": {
+            "mean": 115.0, "analyst_count": 25,
+            "qualified_for_corroboration": True, "qualified_for_contradiction": True,
+        }},
+    )
+    assert out["point_estimate_withheld"]
+    assert plain_rating_note(out["publication_withheld_reason"]) == (
+        "No rating is published because independent analyst evidence does not "
+        "confirm the model's call."
     )

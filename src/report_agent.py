@@ -869,7 +869,9 @@ def extract_historical_financials(financial_data: Dict[str, Any]) -> Dict[str, A
         cf_data = cash_flow.get(year, {})
         
         historical['revenue'].append(is_data.get('Total Revenue', 0) or is_data.get('Operating Revenue', 0))
-        historical['gross_profit'].append(is_data.get('Gross Profit', 0))
+        # Not reported is not zero: Booking Holdings reports no gross profit
+        # in any year, and a 0 default printed a gross profit of $0.00.
+        historical['gross_profit'].append(is_data.get('Gross Profit'))
         historical['operating_income'].append(is_data.get('Operating Income', 0))
         historical['ebitda'].append(is_data.get('EBITDA', 0))
         historical['net_income'].append(is_data.get('Net Income', 0))
@@ -2485,15 +2487,24 @@ def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[s
     # Calculate YoY growth rates
     growth_table = "| Year | Revenue Growth | Gross Profit Growth | EBITDA Growth | Net Income Growth | Operating CF Growth | FCF Growth |\n"
     growth_table += "|------|----------------|---------------------|---------------|-------------------|---------------------|------------|\n"
+    def growth(series, i):
+        # A year the provider left blank has no growth rate. Booking's
+        # latest EBITDA is blank, and dividing it by the prior year raised
+        # TypeError and took the whole section down.
+        current, prior = series[i], series[i - 1]
+        if not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in (current, prior)
+        ):
+            return "N/A"
+        return f"{(current / prior - 1) if prior else 0:.2%}"
+
     for i in range(1, len(years)):
-        rev_growth = ((historical['revenue'][i] / historical['revenue'][i-1]) - 1) if historical['revenue'][i-1] else 0
-        gp_growth = ((historical['gross_profit'][i] / historical['gross_profit'][i-1]) - 1) if historical['gross_profit'][i-1] else 0
-        ebitda_growth = ((historical['ebitda'][i] / historical['ebitda'][i-1]) - 1) if historical['ebitda'][i-1] else 0
-        ni_growth = ((historical['net_income'][i] / historical['net_income'][i-1]) - 1) if historical['net_income'][i-1] else 0
-        ocf_growth = ((historical['operating_cf'][i] / historical['operating_cf'][i-1]) - 1) if historical['operating_cf'][i-1] else 0
-        fcf_growth = ((historical['fcf'][i] / historical['fcf'][i-1]) - 1) if historical['fcf'][i-1] else 0
-        
-        growth_table += f"| {years[i-1]}-{years[i]} | {rev_growth:.2%} | {gp_growth:.2%} | {ebitda_growth:.2%} | {ni_growth:.2%} | {ocf_growth:.2%} | {fcf_growth:.2%} |\n"
+        cells = " | ".join(
+            growth(historical[key], i)
+            for key in ('revenue', 'gross_profit', 'ebitda', 'net_income', 'operating_cf', 'fcf')
+        )
+        growth_table += f"| {years[i-1]}-{years[i]} | {cells} |\n"
     
     # Margins table
     margins_table = "| Metric | Current Value |\n"
@@ -2508,7 +2519,10 @@ def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[s
     commentary = []
     if years and historical['revenue']:
         first_revenue, last_revenue = historical['revenue'][0], historical['revenue'][-1]
-        if isinstance(first_revenue, (int, float)) and first_revenue:
+        if (
+            isinstance(first_revenue, (int, float)) and first_revenue
+            and isinstance(last_revenue, (int, float))
+        ):
             change = last_revenue / first_revenue - 1.0
             commentary.append(
                 f"- Revenue changed {format_percent(change)} from {years[0]} to {years[-1]}; "
@@ -2530,7 +2544,8 @@ def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[s
         )
     commentary.append(
         "- Growth rates with a zero prior-year denominator are shown as 0.00% rather than "
-        "treated as economically meaningful growth."
+        "treated as economically meaningful growth; a year the provider left blank is "
+        "shown as N/A."
     )
     tables = (
         f"### Historical Financial Data ({len(years)} Years)\n\n{revenue_table}\n"

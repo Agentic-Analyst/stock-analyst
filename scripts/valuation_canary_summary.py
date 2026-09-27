@@ -27,7 +27,7 @@ floor alone and the expectation diff is read by a person before a deploy.
 
 Usage:
   valuation_canary_summary.py candidate.json [--baseline baseline.json]
-                              [--min-publish-rate 0.30]
+                              [--min-publish-rate 0.30] [--max-refused N]
                               [--expect scripts/valuation_canary_expectations.json]
 """
 from __future__ import annotations
@@ -103,12 +103,14 @@ def summarize(rows: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
     equities = _equity_rows(rows)
     published = [row for row in equities if not row.get("point_estimate_withheld")]
     failed = [row for row in rows if row.get("status") == "failed"]
+    refused = [row for row in rows if row.get("status") == "passed_specialized_refusal"]
     return {
         "label": label,
         "symbols": len(rows),
         "equities": len(equities),
         "published": len(published),
         "failed": [row.get("ticker") for row in failed],
+        "refused": [row.get("ticker") for row in refused],
         "publish_rate": (len(published) / len(equities)) if equities else 0.0,
     }
 
@@ -128,9 +130,11 @@ def unexplained_changes(
     """Names whose outcome differs from the expectation file.
 
     A name the file does not list is reported too: an unlisted name has no
-    agreed outcome, so its result cannot be called explained.
+    agreed outcome, so its result cannot be called explained. So is a listed
+    name missing from the run: a partial run must not pass as the full gate.
     """
     problems = []
+    seen = {str(row.get("ticker") or "?").upper() for row in rows}
     for row in rows:
         ticker = str(row.get("ticker") or "?").upper()
         actual = _status(row)
@@ -153,7 +157,20 @@ def unexplained_changes(
                 f"UNEXPLAINED: {ticker} expected {want} but is {actual}"
                 + (f" ({reason})" if reason else "")
             )
+    for ticker in expectations:
+        if ticker not in seen:
+            problems.append(f"MISSING: {ticker} is expected but was not in this run")
     return problems
+
+
+def warnings(rows: List[Dict[str, Any]]) -> List[str]:
+    """Audit warnings, which pass but must be read (a stale artifact, say)."""
+    out = []
+    for row in rows:
+        for check in row.get("checks") or []:
+            if str(check).startswith("WARN"):
+                out.append(f"WARN {row.get('ticker')}: {str(check)[5:].strip()}")
+    return out
 
 
 def print_table(candidate: List[Dict[str, Any]], baseline: Optional[List[Dict[str, Any]]]) -> None:
@@ -192,13 +209,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("candidate", type=Path)
     parser.add_argument("--baseline", type=Path)
-    # 5 of the 16 basket names publish today (NVDA, GOOGL, MSFT, CRH, TEX);
-    # the floor fails the gate if any one of them stops publishing.
+    # The nightly basket publishes 5 of 16 today (NVDA, GOOGL, MSFT, CRH,
+    # TEX), 6 when Booking clears its boundary. At 0.30 the floor fails once
+    # fewer than 5 of 16 judged equities publish: it catches a collapse, not
+    # a single flip, which is the --expect check's job before a deploy.
     parser.add_argument("--min-publish-rate", type=float, default=0.30)
     parser.add_argument("--expect", type=Path, help="per-name expected outcomes (JSON)")
+    # A refused equity leaves the rate's denominator, so a classification
+    # regression that refused every name would otherwise raise the rate.
+    parser.add_argument("--max-refused", type=int, default=None,
+                        help="fail when more symbols than this are refused")
     args = parser.parse_args(argv)
 
-    candidate = _rows(args.candidate)
+    try:
+        candidate = _rows(args.candidate)
+    except (OSError, ValueError) as error:
+        # The canary container failed before printing its rows (docker
+        # could not start, the image is missing, the run was killed).
+        print(f"RESULT: FAIL (no readable canary rows in {args.candidate}: {error})")
+        return 1
     baseline = _rows(args.baseline) if args.baseline else None
     print_table(candidate, baseline)
     print("* comps reported for context only; not in the blended value")
@@ -212,10 +241,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"({summary['publish_rate']:.0%})"
             + (f"; FAILED: {', '.join(summary['failed'])}" if summary["failed"] else "")
         )
+    for line in warnings(candidate):
+        print(line)
     result = summarize(candidate, "candidate")
     if result["failed"]:
         print(f"\nRESULT: FAIL ({len(result['failed'])} symbol(s) failed)")
         return 2
+    if args.max_refused is not None and len(result["refused"]) > args.max_refused:
+        print(f"\nRESULT: FAIL ({len(result['refused'])} symbol(s) refused: "
+              f"{', '.join(map(str, result['refused']))}; at most {args.max_refused} allowed)")
+        return 1
     if args.expect:
         problems = unexplained_changes(candidate, _expectations(args.expect))
         for problem in problems:
@@ -224,7 +259,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"\nRESULT: FAIL ({len(problems)} unexplained outcome(s) against {args.expect})")
             return 3
         print(f"expectations: every name matches {args.expect}")
-    if result["equities"] and result["publish_rate"] < args.min_publish_rate:
+    if not result["equities"]:
+        print("\nRESULT: FAIL (no equity rows to judge)")
+        return 1
+    if result["publish_rate"] < args.min_publish_rate:
         print(f"\nRESULT: FAIL (publish rate {result['publish_rate']:.0%} below {args.min_publish_rate:.0%})")
         return 1
     print("\nRESULT: PASS")

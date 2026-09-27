@@ -249,8 +249,7 @@ class AssumptionsTabBuilder:
             # An absent gross profit reads as zero in SUMIFS, which printed
             # Booking's gross margin as 0.0%. Not reported is not zero.
             ws.cell(row=9, column=8, value=(
-                "[Not reported: the issuer reports no cost of revenue "
-                "or gross profit]"
+                "[Not reported: the issuer reports no cost of revenue]"
             )).font = Font(italic=True, size=9)
         else:
             formula_fy0 = (

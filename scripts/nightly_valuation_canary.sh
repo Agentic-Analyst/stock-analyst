@@ -21,14 +21,20 @@ set -euo pipefail
 DEPLOY_DIR=${DEPLOY_DIR:-/opt/vynn/deploy}
 OUT_ROOT=${OUT_ROOT:-/var/lib/vynn/canary}
 BASKET=${BASKET:-"TSLA AMD NVDA META AAPL AMZN GOOGL MSFT CRH MC.PA PYPL PCJEWELLER.NS MU GM TEX BKNG"}
-# The basket carries seven names that are withheld by design (see
-# scripts/valuation_canary_expectations.json), so five of twelve publish on a
-# healthy engine. Three or fewer is the collapse this check exists to catch.
-# 5 of 16 publish today; the floor fails if any one of them stops publishing.
+# Ten basket names are withheld by design and Booking sits on a boundary
+# (scripts/valuation_canary_expectations.json), so 5 of 16 publish on a
+# healthy engine, 6 on some days. The floor fails below 5 of 16: it catches a
+# collapse, not one name flipping, which the pre-deploy --expect gate catches.
 MIN_PUBLISH_RATE=${MIN_PUBLISH_RATE:-0.30}
+# Every basket name is an operating company, so any refusal is a regression.
+MAX_REFUSED=${MAX_REFUSED:-0}
+# Nightly output is about 10 MB; keep a month of it.
+KEEP_DAYS=${KEEP_DAYS:-30}
 
 # The pinned worker digest, read from the same compose file api-runner uses.
-IMAGE=$(grep -E "^\s*-\s*BACKEND_IMAGE=" "$DEPLOY_DIR/docker-compose.prod.yml" | head -1 | sed -E 's/.*BACKEND_IMAGE=//; s/\s+$//')
+# `|| true`: under pipefail a grep with no match would otherwise end the
+# script here, silently, before the message below could say why.
+IMAGE=$(grep -E "^\s*-\s*BACKEND_IMAGE=" "$DEPLOY_DIR/docker-compose.prod.yml" | head -1 | sed -E 's/.*BACKEND_IMAGE=//; s/\s+$//' || true)
 if [ -z "$IMAGE" ]; then
   echo "nightly canary: BACKEND_IMAGE not found in $DEPLOY_DIR/docker-compose.prod.yml" >&2
   exit 3
@@ -40,19 +46,23 @@ mkdir -p "$OUT/runs"
 
 echo "=== nightly valuation canary $STAMP  image=$IMAGE ==="
 set +e
-docker run --rm --name "vynn-canary-$STAMP" --env-file "$DEPLOY_DIR/api.env" \
+docker run --rm --name "vynn-canary-$(date -u +%Y%m%dT%H%M%S)" --env-file "$DEPLOY_DIR/api.env" \
   -e DATA_PATH=/out -e VYNN_CACHE_DIR=/out/cache \
   --memory 1g --cpus 1 --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256 \
   -v "$OUT:/out" --entrypoint python "$IMAGE" \
   -m src.valuation_model_canary $BASKET --output-root /out/runs \
   > "$OUT/rows.json" 2> "$OUT/stderr.log"
 CANARY_EXIT=$?
+# Still under `set +e`: a failing summary must be recorded, not end the
+# script before latest.txt and the FAIL line are written.
+python3 "$DEPLOY_DIR/valuation_canary_summary.py" "$OUT/rows.json" \
+  --min-publish-rate "$MIN_PUBLISH_RATE" --max-refused "$MAX_REFUSED" \
+  > "$OUT/summary.txt" 2>&1
+SUMMARY_EXIT=$?
 set -e
-
-python3 "$DEPLOY_DIR/valuation_canary_summary.py" "$OUT/rows.json" --min-publish-rate "$MIN_PUBLISH_RATE" \
-  | tee "$OUT/summary.txt"
-SUMMARY_EXIT=${PIPESTATUS[0]}
+cat "$OUT/summary.txt"
 cp "$OUT/summary.txt" "$OUT_ROOT/latest.txt"
+find "$OUT_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime +"$KEEP_DAYS" -exec rm -rf {} + 2>/dev/null || true
 
 if [ "$CANARY_EXIT" -ne 0 ] || [ "$SUMMARY_EXIT" -ne 0 ]; then
   echo "nightly canary: FAIL (canary exit $CANARY_EXIT, summary exit $SUMMARY_EXIT); see $OUT" >&2
