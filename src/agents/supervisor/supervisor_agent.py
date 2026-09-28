@@ -119,7 +119,8 @@ from src.summary_evidence import (
     render_external_benchmark_compact,
     supported_valuation_span,
     supported_valuation_values,
-    model_view_summary, plain_rating_note, unsuitable_method_note,
+    model_view_summary, plain_rating_note, plain_refusal_note,
+    unsuitable_method_note,
 )
 import yfinance as yf
 
@@ -239,6 +240,73 @@ class SupervisorWorkflowRunner:
         rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
             answer += "\n\nExternal benchmark reconciliation:\n" + rendered
+        return answer
+
+    def _valuation_refusal(self) -> Optional[Dict[str, str]]:
+        """The methodology's reason when it declines to value this instrument."""
+        financial = getattr(self.state, "financial_data", None)
+        raw = getattr(financial, "raw_data", None)
+        if not isinstance(raw, dict) or not raw:
+            return None
+        try:
+            from src.valuation_methodology import assess_valuation_methodology
+            suitability = assess_valuation_methodology(raw)
+        except Exception:
+            return None
+        kind = suitability.get("specialized_service")
+        if not kind:
+            return None
+        return {"kind": str(kind), "reason": str(suitability.get("reason") or "")}
+
+    _OWN_RATING_CLAIM = re.compile(
+        r"\b(?:our|the\s+model(?:'s)?|the\s+report(?:'s)?|investment)\s+"
+        r"(?:recommend(?:ation)?|rating)\b.{0,45}"
+        r"(?:an?\s+)?(?:strong\s+buy|buy|hold|strong\s+sell|sell)\b",
+        re.I,
+    )
+    # A run with no model has no fair value; any priced one is invented.
+    _PRICED_VALUE_CLAIM = re.compile(
+        r"\b(?:fair|intrinsic)\s+value\b[^.\n]{0,40}\d", re.I,
+    )
+
+    def _guard_no_model_answer(
+        self, answer: str, refusal: Optional[Dict[str, str]],
+    ) -> str:
+        """Keep prose that states the refusal honestly; replace anything else.
+
+        Only for a broad valuation question about an analysed company; the
+        caller has checked both.
+        """
+        lower = answer.lower()
+        states_refusal = any(
+            phrase in lower for phrase in (
+                "not rated", "no rating", "does not publish", "not published",
+            )
+        )
+        unsafe = (
+            not answer
+            or not states_refusal
+            or bool(self._OWN_RATING_CLAIM.search(answer))
+            or bool(self._PRICED_VALUE_CLAIM.search(answer))
+        )
+        if not unsafe:
+            unsafe = not self._answer_covers_external_benchmark(
+                answer, self._current_external_benchmark()
+            )
+        return self._safe_no_model_answer(refusal) if unsafe else answer
+
+    def _safe_no_model_answer(self, refusal: Optional[Dict[str, str]]) -> str:
+        """Deterministic answer for a run that produced no valuation model."""
+        note = plain_refusal_note(
+            (refusal or {}).get("kind"), (refusal or {}).get("reason")
+        )
+        answer = f"{self.ticker}: NOT RATED. {note}"
+        rendered = render_external_benchmark_compact(self._current_external_benchmark())
+        if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
+            answer += (
+                "\n\nThe Street's view, shown as a benchmark and not as VYNN's "
+                "rating:\n" + rendered
+            )
         return answer
 
     def _current_external_benchmark(self) -> Dict[str, object]:
@@ -363,6 +431,27 @@ class SupervisorWorkflowRunner:
         withheld = bool(metrics.get("point_estimate_withheld"))
         lower = answer.lower()
         unsafe_valuation = not answer
+
+        # No model at all: the methodology declined to value this instrument
+        # (Exxon: commodity cycle; a fund; an insurer) or the build failed.
+        # Neither is a published headline, yet this used to fall through to
+        # the published branch below and print "audited report headline:
+        # published without a point headline" for a question it never
+        # answered.
+        if model is None:
+            refusal = self._valuation_refusal()
+            financial = getattr(self.state, "financial_data", None)
+            has_financials = bool(getattr(financial, "raw_data", None))
+            # A valuation question about a company that was analysed and
+            # got no model: answer it deterministically. A price, news or
+            # crypto answer has no model either and must stay untouched.
+            if require_full_benchmark and has_financials:
+                return self._guard_no_model_answer(answer, refusal)
+            if refusal and (
+                self._OWN_RATING_CLAIM.search(answer)
+                or self._PRICED_VALUE_CLAIM.search(answer)
+            ):
+                return self._safe_no_model_answer(refusal)
 
         if withheld:
             unsafe_valuation = unsafe_valuation or not (
