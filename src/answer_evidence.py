@@ -128,8 +128,14 @@ _UNIT_AFTER = re.compile(
 # Explicit rating and valuation terms in the other languages answers come back
 # in; not 信用评级 (a credit rating) or 公允价值变动 (fair-value accounting).
 _OTHER_LANGUAGE_CLAIM = re.compile(
-    r"目标价|目標價|目标股价|目標株価|公允价值(?!变动|计量|变化)|合理价值|合理估值|内在价值|(?<!信用)评级|評級|"
-    r"上涨空间|上行空间|下跌空间|下行空间|低估|高估|割安|割高|適正価格|"
+    # value and target terms count with a figure, like their English twins: not
+    # "无法据此量化…内在价值" (intrinsic value cannot be quantified from this)
+    # (figure and term in one clause; 公允价值变动 is fair-value accounting)
+    r"(?:目标价|目標價|目标股价|目標株価|公允价值(?!变动|计量|变化)|合理价值|合理估值|内在价值|適正価格|"
+    r"上涨空间|上行空间|下跌空间|下行空间)[^。！？，,；;\n]{0,20}?\d"
+    r"|\d[^。！？，,；;\n]{0,12}?(?:目标价|目標價|目标股价|目標株価|公允价值(?!变动|计量|变化)|合理价值|"
+    r"合理估值|内在价值|適正価格)|"
+    r"(?<!信用)评级|評級|低估|高估|割安|割高|"
     r"\b(?:precio\s+objetivo|objetivo\s+de\s+precio|pre[cç]o[-\s]alvo|prix\s+cible|kursziel|"
     r"valor\s+(?:justo|razonable|intr[ií]nseco)|juste\s+valeur|fairer\s+wert|"
     r"infravalorad\w*|sobrevalorad\w*|subvalorizad\w*|sous-[ée]valu\w*|sur[ée]valu\w*|"

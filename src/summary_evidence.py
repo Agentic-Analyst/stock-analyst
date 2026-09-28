@@ -296,6 +296,28 @@ def plain_refusal_note(kind: Any, reason: Any = None) -> str:
     )
 
 
+# The same sentences for a question asked in Chinese, keyed like _PLAIN_REFUSALS.
+_PLAIN_REFUSALS_ZH = {
+    "commodity_cycle": "其现金流随大宗商品价格波动，基于当前价格的现金流模型更像是押注商品价格，而不是估值",
+    "reit": "它是房地产投资信托（REIT），价值取决于其物业与运营资金（FFO），而非公司自由现金流",
+    "insurance": "它是保险公司，价值体现在准备金、浮存金和资本上，而非公司自由现金流",
+    "fund": "它是基金，价值取决于持仓与资产净值，而非现金流",
+    "crypto": "它是加密资产，没有可以折现的现金流",
+    "unsupported_asset": "它不是上市运营公司",
+    "bank_valuation_input_gap": "它是银行，而银行估值所需的账面价值与回报率数据未能同时获得",
+}
+
+
+def plain_refusal_note_zh(kind: Any) -> str:
+    """plain_refusal_note in Chinese: why no rating or fair value exists for this run."""
+    plain = _PLAIN_REFUSALS_ZH.get(str(kind or "").strip().lower())
+    if plain:
+        return f"不发布评级或公允价值：{plain}。"
+    if kind:
+        return "不发布评级或公允价值，因为该标的超出估值方法的适用范围。"
+    return "不发布评级或公允价值，因为本次运行没有生成估值模型。"
+
+
 # The engine's own figures, as analysis_tools.valuation_publication_boundary
 # prints them for a corporate valuation: "The model is +94% from the market",
 # "37-analyst target benchmark is +46%", "finnhub rates it HOLD (20 ratings)".
