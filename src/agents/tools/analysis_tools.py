@@ -1289,7 +1289,83 @@ def _valuation_refusal(state) -> Optional[dict]:
     return {"kind": str(kind), "reason": str(suitability.get("reason") or "")}
 
 
-def _refusal_result(ticker: str, refusal: dict, *, what: str) -> str:
+_PRICE_KEYS = ("currency", "latest_price", "previous_close", "day_change_pct", "period",
+               "period_pct_change", "period_high", "period_low")
+_TECHNICAL_KEYS = ("rsi_14", "sma_50", "sma_200", "above_sma_50", "above_sma_200", "macd",
+                   "macd_signal", "macd_bullish", "bollinger_upper", "bollinger_lower")
+
+
+async def market_evidence(ticker: str, state=None) -> dict:
+    """The price and its trend, the technicals and the news, for a valuation answer.
+
+    write_report used to hand the model its headline and a news sentiment and
+    nothing else, though the run had analysed the news (catalysts, risks) and
+    the price is one fast fetch away. Whether an answer described the price
+    trend, the technicals or the catalysts depended on the model happening to
+    call get_prices, get_technicals and analyze_news as well: MSFT's answer
+    once said "no price quote or technical-indicator readings were returned".
+    Every part is best-effort; a missing part is simply absent.
+    """
+    import asyncio
+    import json as _json
+    from .data_tools import GetPricesTool, GetTechnicalsTool
+
+    def body(raw, keys):
+        if isinstance(raw, BaseException):
+            return None
+        try:
+            data = _json.loads(raw)
+        except Exception:
+            return None
+        if not isinstance(data, dict) or data.get("status") != "ok":
+            return None
+        picked = {key: data[key] for key in keys if data.get(key) is not None}
+        return picked or None
+
+    # The listing the valuation ran on. ensure_state_for_ticker may have moved a
+    # depositary receipt to its home line (TM -> 7203.T); the figures beside this
+    # evidence are that line's, so its price and currency are the ones to show.
+    symbol = getattr(state, "ticker", None) or ticker
+    evidence: dict = {}
+    prices, technicals = await asyncio.gather(
+        GetPricesTool().execute(symbol, "1y"), GetTechnicalsTool().execute(symbol),
+        return_exceptions=True,
+    )
+    price = body(prices, _PRICE_KEYS)
+    if price:
+        evidence["price"] = price
+    technical = body(technicals, _TECHNICAL_KEYS)
+    if technical:
+        # The technicals are computed on the price series get_prices returns,
+        # in the same (quote) currency.
+        if price and price.get("currency"):
+            technical["currency"] = price["currency"]
+        evidence["technicals"] = technical
+    news = getattr(state, "news_analysis", None) if state is not None else None
+    analysed = bool(state is not None and getattr(state, "is_news_analyzed", lambda: False)() and news)
+    if analysed:
+        evidence["news"] = {
+            "articles_analyzed": getattr(news, "articles_count", None),
+            "top_catalysts": (getattr(news, "catalysts", None) or [])[:3],
+            "top_risks": (getattr(news, "risks", None) or [])[:3],
+            **_bounded_news_payload(news, sentiment_key="news_sentiment", freshness_key="news_freshness"),
+        }
+    return evidence
+
+
+def _flat_evidence(evidence: Optional[dict], exclude=()) -> dict:
+    """market_evidence as tool-result fields: price, technicals, and the news keys.
+
+    `exclude` names keys the result already carries (write_report publishes its
+    own bounded news sentiment), which must not be passed twice.
+    """
+    evidence = evidence or {}
+    flat = {key: evidence[key] for key in ("price", "technicals") if evidence.get(key)}
+    flat.update(evidence.get("news") or {})
+    return {key: value for key, value in flat.items() if key not in set(exclude)}
+
+
+def _refusal_result(ticker: str, refusal: dict, *, what: str, evidence: Optional[dict] = None) -> str:
     """A refusal is a decision, not a failure: the model must not retry it."""
     import json as _json
     from src.summary_evidence import plain_refusal_note
@@ -1303,6 +1379,7 @@ def _refusal_result(ticker: str, refusal: dict, *, what: str) -> str:
         "ticker": ticker,
         "refusal": refusal["kind"],
         "detail": refusal["reason"],
+        **_flat_evidence(evidence),
     }, ensure_ascii=False, default=str)
 
 
@@ -1332,7 +1409,8 @@ class BuildModelTool(_CtxTool):
         if not state.is_model_generated():
             refusal = _valuation_refusal(state)
             if refusal:
-                return _refusal_result(ticker, refusal, what="valuation model")
+                return _refusal_result(ticker, refusal, what="valuation model",
+                                       evidence=await market_evidence(ticker, state))
             return tool_error(f"Could not build the valuation model for {ticker}.",
                               ticker=ticker, detail=state.last_error)
         vm = state.financial_model.valuation_metrics if state.financial_model else {}
@@ -1558,6 +1636,7 @@ class BuildModelTool(_CtxTool):
             current_price=current_price,
             upside_vs_market=upside_out,
             excel_path=state.financial_model.excel_path if state.financial_model else None,
+            **_flat_evidence(await market_evidence(ticker, state)),
             # What the methods actually support when they refuse to agree.
             **withheld_payload,
             # Publish the legs and the confidence band so the answer can show a
@@ -1733,7 +1812,8 @@ class WriteReportTool(_CtxTool):
         if state.is_financial_data_collected() and not state.is_model_generated():
             refusal = _valuation_refusal(state)
             if refusal:
-                return _refusal_result(ticker, refusal, what="valuation report")
+                return _refusal_result(ticker, refusal, what="valuation report",
+                                       evidence=await market_evidence(ticker, state))
         if not (state.is_financial_data_collected() and state.is_model_generated() and state.is_news_analyzed()):
             return tool_error(f"Could not gather all prerequisites for the report on {ticker}.",
                               ticker=ticker, detail=state.last_error)
@@ -1905,6 +1985,7 @@ class WriteReportTool(_CtxTool):
             **({"benchmark_reconciliation": benchmark_reconciliation}
                if benchmark_reconciliation else {}),
             **news_payload,
+            **_flat_evidence(await market_evidence(ticker, state), exclude=news_payload),
             # The rating the report published, so the answer cannot contradict
             # the document the user downloads.
             **bounded_headline,
@@ -1912,7 +1993,10 @@ class WriteReportTool(_CtxTool):
             **({"valuation_confidence": band} if band else {}),
             **({"data_quality_warning": warning} if warning else {}),
             note=("Full report generated (downloadable). Summarize its findings for "
-                  "the user. When `fair_value_withheld` is true, state the supplied "
+                  "the user. The `price`, `technicals`, `top_catalysts` and `top_risks` "
+                  "fields are this run's market evidence: use them for the price trend, "
+                  "the levels and what supports or threatens the case. "
+                  "When `fair_value_withheld` is true, state the supplied "
                   "`fair_value_withheld_reason`; do not substitute dispersion as the "
                   "reason and do not turn range endpoints into scenario targets. "
                   "When benchmark_reconciliation is present, surface its dated human-"

@@ -65,6 +65,18 @@ def _offline_reference_data(monkeypatch, tmp_path):
     fake_yf.Ticker = _NoTicker
     monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
 
+    # Price fetches retry with backoff; against the failing module above that is
+    # only waiting. The valuation tools fetch prices for their market evidence.
+    # The package is importable under both names (src.agents.… and agents.…),
+    # and a test may load either later, so patch both now.
+    import importlib
+    for name in ("src.agents.tools.yf_resilience", "agents.tools.yf_resilience"):
+        try:
+            module = importlib.import_module(name)
+        except Exception:
+            continue
+        monkeypatch.setattr(module, "_BASE_DELAY", 0.0)
+
     country_risk._reset_memo()
     sovereign_rates._reset_memo()
     yield
