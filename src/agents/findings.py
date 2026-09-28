@@ -186,7 +186,7 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
 
     elif tool == "get_technicals":
         rsi = _num(result.get("rsi_14"))
-        if rsi:
+        if rsi is not None:   # an RSI of 0 is a reading, not a missing value
             add("technical", "RSI (14)", f"{rsi:.0f}")
 
     elif tool == "get_global_news":

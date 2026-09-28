@@ -1191,6 +1191,53 @@ class _CtxTool(Tool):
         self.ctx = ctx
 
 
+def listing_figures(basic: dict, market: dict) -> dict:
+    """The price and market cap as the listing trades, with the model's currency beside them.
+
+    key_metrics keeps `current_price` in the currency the company REPORTS in
+    (the valuation works in it) and `market_cap` in the currency the listing
+    TRADES in. This tool used to return both under the reporting currency:
+    Shell's London line came out as "current_price 47.80 USD" beside
+    get_prices' 3,611 GBp, and a market cap of 206 billion labelled USD that
+    was in pounds (it is $272.7 billion). An answer quoted "a market
+    capitalization of about $206 billion", and the findings card said the same.
+
+    The converted figures exist only when the scraper had an exchange rate;
+    without one it leaves them in the listing currency, so they are not
+    offered as reporting-currency figures then.
+    """
+    reporting = basic.get("currency")
+    listing = basic.get("listing_currency") or reporting
+    price = market.get("current_price_listing")
+    if price is None and market.get("current_price_currency") in (None, listing):
+        price = market.get("current_price")
+    figures = {"currency": listing, "current_price": price, "market_cap": market.get("market_cap")}
+    if not (reporting and listing and reporting != listing):
+        return figures
+    rate = market.get("fx_listing_to_financial")
+    figures["reporting_currency"] = reporting
+    if rate is None:
+        figures["currency_note"] = (
+            f"current_price and market_cap are in {listing}, the currency this listing trades in. "
+            f"The company reports in {reporting}; no exchange rate was available, so no converted "
+            "figures are given."
+        )
+        return figures
+    figures.update(
+        current_price_in_reporting_currency=market.get("current_price"),
+        market_cap_in_reporting_currency=market.get("market_cap_financial"),
+        fx_listing_to_reporting=rate,
+        currency_note=(
+            f"current_price and market_cap are in {listing}, the currency this listing trades in. "
+            f"The company reports in {reporting}; the *_in_reporting_currency figures are the same "
+            f"values converted at {rate:.4f}, which is what the valuation model uses. Quote the "
+            f"{listing} figures as the market price; never present a converted figure as the "
+            "listing's price."
+        ),
+    )
+    return figures
+
+
 class GetFinancialsTool(_CtxTool):
     name = "get_financials"
     description = (
@@ -1217,13 +1264,11 @@ class GetFinancialsTool(_CtxTool):
         return tool_ok(
             ticker=ticker,
             company_name=state.company_name,
-            currency=basic.get("currency"),
             sector=basic.get("sector"),
             industry=basic.get("industry"),
-            current_price=market.get("current_price"),
-            market_cap=market.get("market_cap"),
             trailing_pe=market.get("trailing_pe"),
             note="Financial data collected and saved. You can now build_model or write_report.",
+            **listing_figures(basic, market),
         )
 
 

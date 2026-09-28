@@ -188,8 +188,10 @@ class TestToolsReportTheirCurrency:
                                    "analysis_tools.py"), encoding="utf-8").read()
         # build_model and write_report both derive it from the scraped listing.
         assert source.count("currency=_listing_currency(state)") == 2
-        # get_financials reads it straight off basic_info.
-        assert 'currency=basic.get("currency")' in source
+        # get_financials publishes the currency its price and market cap are in:
+        # the listing's, like the two above (listing_figures; its behaviour is
+        # tested in test_rsi_currency_published_figures.py).
+        assert "**listing_figures(basic, market)" in source
 
     def test_listing_currency_helper_tolerates_missing_state(self):
         from src.agents.tools.analysis_tools import _listing_currency

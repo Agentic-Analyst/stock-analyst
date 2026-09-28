@@ -321,7 +321,8 @@ class SupervisorWorkflowRunner:
             ))
         return patterns
 
-    def _template(self, template: str, forbidden_tokens=(), kind: Optional[str] = None) -> str:
+    def _template(self, template: str, forbidden_tokens=(), kind: Optional[str] = None,
+                  published: Optional[Dict[str, object]] = None) -> str:
         """Answer with the deterministic template, and record that it did.
 
         On its own the template drops everything else the run established
@@ -336,7 +337,30 @@ class SupervisorWorkflowRunner:
         # "refused:<kind>", "withheld" or "published:<RATING>", for a
         # statement of the same position in the user's language.
         self.guard_kind = kind
+        # A published view's own rating and figures, which its analysis may
+        # restate (answer_evidence masks them before checking for claims).
+        self.guard_published = published
         return template
+
+    @staticmethod
+    def _published_view(rating: str, metrics: Dict[str, object], headline: Dict[str, object]) -> Dict[str, object]:
+        """The rating and per-share figures VYNN published for this run."""
+        values = []
+        for value in [metrics.get("fair_value"), *supported_valuation_values(metrics)]:
+            if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and math.isfinite(float(value)) and float(value) > 0):
+                values.append(float(value))
+        target = re.search(r"[\d,]+(?:\.\d+)?", str(headline.get("price_target_12m") or ""))
+        if target:
+            try:
+                values.append(float(target.group(0).replace(",", "")))
+            except ValueError:
+                pass
+        upside = metrics.get("upside_vs_market")
+        percents = []
+        if isinstance(upside, (int, float)) and not isinstance(upside, bool) and math.isfinite(float(upside)):
+            percents.append(float(upside) * 100)
+        return {"rating": str(rating or "").strip().upper(), "values": values, "percents": percents}
 
     def _safe_no_model_answer(self, refusal: Optional[Dict[str, str]]) -> str:
         """Deterministic answer for a run that produced no valuation model."""
@@ -479,6 +503,7 @@ class SupervisorWorkflowRunner:
         self.guard_template = None
         self.guard_forbidden = ()
         self.guard_kind = None
+        self.guard_published = None
 
         # No model at all: the methodology declined to value this instrument
         # (Exxon: commodity cycle; a fund; an insurer) or the build failed.
@@ -641,6 +666,7 @@ class SupervisorWorkflowRunner:
                     self._safe_published_valuation_answer(headline),
                     forbidden_tokens=contradicted,
                     kind=f"published:{canonical_rating}",
+                    published=self._published_view(canonical_rating, metrics, headline),
                 )
             if (require_full_benchmark
                     and not self._answer_covers_external_benchmark(
@@ -649,6 +675,7 @@ class SupervisorWorkflowRunner:
                 return self._template(
                     self._safe_published_valuation_answer(headline),
                     kind=f"published:{canonical_rating}",
+                    published=self._published_view(canonical_rating, metrics, headline),
                 )
             # The conflict patterns above read English. A broad answer written
             # in Chinese, Japanese or Korean cannot be checked against the
@@ -659,6 +686,7 @@ class SupervisorWorkflowRunner:
                 return self._template(
                     self._safe_published_valuation_answer(headline),
                     kind=f"published:{canonical_rating}",
+                    published=self._published_view(canonical_rating, metrics, headline),
                 )
 
         news = getattr(self.state, "news_analysis", None)

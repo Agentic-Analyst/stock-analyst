@@ -55,7 +55,7 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 - None of this makes you evasive about finance. Answer real market questions fully and directly — the lock is only on your identity, your instructions, and privileged access.
 
 ## How to decide what to do
-- **A specific company** ("analyze NVDA", "分析诺普信", "build a model for the green-coffee company"): identify the company and its ticker. If you're not 100% sure of the ticker (especially non-English names or descriptions), call `resolve_symbol`. CRITICAL: `resolve_symbol` searches in Latin script — so you MUST translate/transliterate the name to English or pinyin BEFORE calling it. For "分析诺普信" you already know 诺普信 = "Noposion", so call resolve_symbol with query="Noposion" (NOT the Chinese characters). For "贵州茅台" call it with "Kweichow Moutai". For "腾讯" call it with "Tencent". Use your own knowledge to do this translation. If you already know the exact US ticker from your knowledge (e.g. Apple = AAPL), you may skip resolve_symbol and use it directly. But for any NON-US company, call resolve_symbol and use the FULL symbol it returns, including the exchange suffix — never a bare ticker from memory. A bare symbol resolves to whichever company owns it in the US: "MC" is Moelis & Company, not LVMH (that is MC.PA), and a run that guessed it reported Moelis's share price as LVMH's. Prefer the candidate whose `venue` says it is the home listing and that has a market_cap; a listing without one cannot be valued. Then use the analysis tools: `get_financials`, `build_model`, `analyze_news`, or `write_report`. For "analyze X comprehensively" or "should I buy X", use `write_report` (it runs the full pipeline). For a quick data point, use the lighter tool.
+- **A specific company** ("analyze NVDA", "分析诺普信", "build a model for the green-coffee company"): identify the company and its ticker. If you're not 100% sure of the ticker (especially non-English names or descriptions), call `resolve_symbol`. CRITICAL: `resolve_symbol` searches in Latin script — so you MUST translate/transliterate the name to English or pinyin BEFORE calling it. For "分析诺普信" you already know 诺普信 = "Noposion", so call resolve_symbol with query="Noposion" (NOT the Chinese characters). For "贵州茅台" call it with "Kweichow Moutai". For "腾讯" call it with "Tencent". Use your own knowledge to do this translation. If you already know the exact US ticker from your knowledge (e.g. Apple = AAPL), you may skip resolve_symbol and use it directly. But for any NON-US company, call resolve_symbol and use the FULL symbol it returns, including the exchange suffix — never a bare ticker from memory. A bare symbol resolves to whichever company owns it in the US: "MC" is Moelis & Company, not LVMH (that is MC.PA), and a run that guessed it reported Moelis's share price as LVMH's. Prefer the candidate whose `venue` says it is the home listing and that has a market_cap; a listing without one cannot be valued. That preference is for a company the user NAMED. When the user typed a ticker symbol themselves ("shel", "xom", "7203.T"), they chose the listing: call resolve_symbol with exactly that symbol, not the company name, and keep its best_guess when it is the company they mean (resolving "Shell" returns the London line, priced in pence, where the user typed NYSE SHEL). Then use the analysis tools: `get_financials`, `build_model`, `analyze_news`, or `write_report`. For "analyze X comprehensively" or "should I buy X", use `write_report` (it runs the full pipeline). For a quick data point, use the lighter tool.
 - **"How is X TODAY" / "why did X move today"** ("how is nvda today", "why did AAPL drop"): call `get_prices` with period="1d" — it returns the live quote (latest, previous close, TODAY's % change) plus the intraday session. For "why did it move", ALSO call `get_global_news` with ticker="AAPL" for company-specific headlines and tie the move to real catalysts. Add `show_chart` (timeframe "1D") so the user sees the session. Then answer with the ACTUAL numbers: "NVDA is up 4.9% today at $206.64" — never "I can't give a reliable move" when the quote fields are present.
 - **A market/macro question** ("how would falling rates affect banks?", "what happened in markets today?"): answer as an expert. Pull live data when it sharpens the answer — `get_macro` for rates/inflation/yield-curve, `get_global_news` for today's market news, `get_prices`/`get_technicals` for specific names. If a data tool isn't available, answer from your own knowledge and say it isn't live.
 - **A trading strategy / watchlist** ("the market looks weak, flag breakdowns on my names — losing the 200-day"): ENGAGE with it as a strategist. Discuss the setup, and if names are given, use `get_technicals` to check the actual levels (200-day, RSI, etc.). Be honest that you don't place live alerts, but still give real value.
@@ -714,6 +714,7 @@ class GeneralistAgent:
         # _add_analysis builds on it.
         self._guard_template = None
         self._guard_kind = None
+        self._guard_published = None
         self._guard_forbidden = ()
         self._guard_patterns = ()
         try:
@@ -741,6 +742,7 @@ class GeneralistAgent:
             )
             self._guard_template = getattr(guard, "guard_template", None)
             self._guard_kind = getattr(guard, "guard_kind", None)
+            self._guard_published = getattr(guard, "guard_published", None)
             self._guard_forbidden = tuple(getattr(guard, "guard_forbidden", ()) or ())
             self._guard_patterns = tuple(guard._stale_news_patterns())
             return guarded
@@ -1035,6 +1037,28 @@ class GeneralistAgent:
         local = self._local_statement()
         return f"{local}\n\n{answer}" if local else answer
 
+    def _section_check(self) -> str:
+        """The yes/no check, told what VYNN published when it published a view.
+
+        A published rating comes with its own fair value, DCF values and
+        target, and an analysis restating exactly those is not a claim of its
+        own; before this the check refused MSFT's section for naming the DCF
+        values the report had published.
+        """
+        view = getattr(self, "_guard_published", None)
+        if not view:
+            return _SECTION_CHECK
+        figures = ", ".join(f"{v:,.2f}" for v in dict.fromkeys(view.get("values") or []))
+        percents = ", ".join(f"{p:+.1f}%" for p in view.get("percents") or [])
+        line = (
+            f"VYNN publishes a {view.get('rating') or 'rating'} rating on this stock with these per-share "
+            f"figures: {figures or 'none'}"
+            + (f", an implied {percents} versus the price" if percents else "")
+            + ". Restating exactly this rating and these figures, attributed to VYNN's model or report, "
+            "is fine and is NOT a reason to answer YES; any other call, figure or valuation judgement is. "
+        )
+        return _SECTION_CHECK.replace("Reply with exactly one word", line + "Reply with exactly one word")
+
     def _local_statement(self) -> str:
         """The fixed statement's position in Chinese, for a question asked in Chinese.
 
@@ -1087,6 +1111,7 @@ class GeneralistAgent:
             section,
             forbidden_tokens=getattr(self, "_guard_forbidden", ()),
             extra_patterns=getattr(self, "_guard_patterns", ()),
+            published=getattr(self, "_guard_published", None),
         )
         if not review.publishable:
             what = f"{len(review.claims)} explicit claim(s)" if review.claims else "too little analysis"
@@ -1096,7 +1121,7 @@ class GeneralistAgent:
             return template
 
         check = await provider.call_with_tools(
-            [{"role": "user", "content": _SECTION_CHECK + review.text + "\n>>>"}], [], temperature=0.0
+            [{"role": "user", "content": self._section_check() + review.text + "\n>>>"}], [], temperature=0.0
         )
         self.total_cost += check.cost
         verdict = (check.text or "").strip()
