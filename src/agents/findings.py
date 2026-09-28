@@ -98,7 +98,11 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
     pick an icon/tone, `label` is the caption, `value` is the headline fact.
     Empty list when the tool produced nothing worth interrupting for.
     """
-    if not isinstance(result, dict) or result.get("status") == "error":
+    # "not_applicable" is a tool declining the job (build_model and
+    # write_report on a company the method does not value): nothing was
+    # produced. It used to fall through to "Report ready: Generated" while
+    # the reports folder stayed empty.
+    if not isinstance(result, dict) or result.get("status") in ("error", "not_applicable"):
         return []
 
     out: List[Dict[str, str]] = []
