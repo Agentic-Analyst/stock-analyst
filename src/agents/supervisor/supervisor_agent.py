@@ -122,6 +122,14 @@ from src.summary_evidence import (
     model_view_summary, plain_rating_note, plain_refusal_note,
     unsuitable_method_note,
 )
+
+_CJK_CHAR = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+
+
+def _mostly_cjk(text: str) -> bool:
+    """True when an answer is written in Chinese, Japanese or Korean."""
+    letters = sum(1 for ch in str(text or "") if ch.isalpha())
+    return bool(letters) and len(_CJK_CHAR.findall(str(text or ""))) / letters >= 0.3
 import yfinance as yf
 
 from dotenv import load_dotenv
@@ -295,7 +303,10 @@ class SupervisorWorkflowRunner:
             )
         if not unsafe:
             return answer
-        return self._template(self._safe_no_model_answer(refusal))
+        return self._template(
+            self._safe_no_model_answer(refusal),
+            kind=f"refused:{(refusal or {}).get('kind') or ''}",
+        )
 
     def _stale_news_patterns(self):
         """Sentiment claims the news behind this run cannot support."""
@@ -310,7 +321,7 @@ class SupervisorWorkflowRunner:
             ))
         return patterns
 
-    def _template(self, template: str, forbidden_tokens=()) -> str:
+    def _template(self, template: str, forbidden_tokens=(), kind: Optional[str] = None) -> str:
         """Answer with the deterministic template, and record that it did.
 
         On its own the template drops everything else the run established
@@ -322,6 +333,9 @@ class SupervisorWorkflowRunner:
         """
         self.guard_template = template
         self.guard_forbidden = tuple(forbidden_tokens)
+        # "refused:<kind>", "withheld" or "published:<RATING>", for a
+        # statement of the same position in the user's language.
+        self.guard_kind = kind
         return template
 
     def _safe_no_model_answer(self, refusal: Optional[Dict[str, str]]) -> str:
@@ -464,6 +478,7 @@ class SupervisorWorkflowRunner:
         withheld_point_tokens = []
         self.guard_template = None
         self.guard_forbidden = ()
+        self.guard_kind = None
 
         # No model at all: the methodology declined to value this instrument
         # (Exxon: commodity cycle; a fund; an insurer) or the build failed.
@@ -484,7 +499,10 @@ class SupervisorWorkflowRunner:
                 self._OWN_RATING_CLAIM.search(answer)
                 or self._PRICED_VALUE_CLAIM.search(answer)
             ):
-                return self._template(self._safe_no_model_answer(refusal))
+                return self._template(
+                    self._safe_no_model_answer(refusal),
+                    kind=f"refused:{(refusal or {}).get('kind') or ''}",
+                )
 
         if withheld:
             unsafe_valuation = unsafe_valuation or not (
@@ -622,12 +640,26 @@ class SupervisorWorkflowRunner:
                 return self._template(
                     self._safe_published_valuation_answer(headline),
                     forbidden_tokens=contradicted,
+                    kind=f"published:{canonical_rating}",
                 )
             if (require_full_benchmark
                     and not self._answer_covers_external_benchmark(
                         answer, self._current_external_benchmark()
                     )):
-                return self._template(self._safe_published_valuation_answer(headline))
+                return self._template(
+                    self._safe_published_valuation_answer(headline),
+                    kind=f"published:{canonical_rating}",
+                )
+            # The conflict patterns above read English. A broad answer written
+            # in Chinese, Japanese or Korean cannot be checked against the
+            # headline ("报告评级为卖出" passed while the report said HOLD), so
+            # it gets the headline itself; the chat agent adds the analysis,
+            # whose checks read any language.
+            if require_full_benchmark and _mostly_cjk(answer):
+                return self._template(
+                    self._safe_published_valuation_answer(headline),
+                    kind=f"published:{canonical_rating}",
+                )
 
         news = getattr(self.state, "news_analysis", None)
         freshness = getattr(news, "freshness", {}) or {}
@@ -644,6 +676,7 @@ class SupervisorWorkflowRunner:
             return self._template(
                 self._safe_withheld_valuation_answer(),
                 forbidden_tokens=withheld_point_tokens,
+                kind="withheld",
             )
         if unsafe_news:
             # Remove unsupported sentiment sentences while preserving grounded
@@ -678,6 +711,7 @@ class SupervisorWorkflowRunner:
                 return self._template(
                     self._safe_withheld_valuation_answer(),
                     forbidden_tokens=withheld_point_tokens,
+                    kind="withheld",
                 )
         return answer
     
