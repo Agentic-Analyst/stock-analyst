@@ -382,6 +382,32 @@ class GetPricesTool(Tool):
 # ---------------------------------------------------------------------------
 # get_technicals — RSI/MACD/SMA/Bollinger (computed locally from yfinance)
 # ---------------------------------------------------------------------------
+def wilder_rsi(closes, period: int = 14) -> Optional[float]:
+    """RSI as Wilder defined it, the figure every broker and chart shows.
+
+    The average gain and loss are seeded with the simple mean of the first
+    `period` moves, then smoothed: avg = (avg * (period - 1) + move) / period.
+    This used to take a plain 14-day rolling mean instead (Cutler's variant),
+    which swings far harder: after three weeks of mostly falling closes
+    Realty Income read 4.8 where Wilder's RSI(14) is 17.4, and NVDA and TSLA
+    were off by around ten points in each direction.
+    """
+    values = [float(v) for v in closes]
+    if len(values) <= period:
+        return None
+    moves = [b - a for a, b in zip(values, values[1:])]
+    gains = [max(m, 0.0) for m in moves]
+    losses = [max(-m, 0.0) for m in moves]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for gain, loss in zip(gains[period:], losses[period:]):
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+    return 100 - 100 / (1 + avg_gain / avg_loss)
+
+
 class GetTechnicalsTool(Tool):
     name = "get_technicals"
     description = (
@@ -424,12 +450,7 @@ class GetTechnicalsTool(Tool):
             close = df["Close"]
             last = float(close.iloc[-1])
 
-            # RSI(14)
-            delta = close.diff()
-            gain = delta.clip(lower=0).rolling(14).mean()
-            loss = (-delta.clip(upper=0)).rolling(14).mean()
-            rs = gain / loss
-            rsi = float((100 - 100 / (1 + rs)).iloc[-1]) if loss.iloc[-1] != 0 else 100.0
+            rsi = wilder_rsi(close.dropna().tolist(), 14)
 
             sma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else None
             sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
@@ -446,7 +467,7 @@ class GetTechnicalsTool(Tool):
 
             return {
                 "latest_close": round(last, 2),
-                "rsi_14": round(rsi, 1),
+                "rsi_14": round(rsi, 1) if rsi is not None else None,
                 "sma_50": round(sma50, 2) if sma50 else None,
                 "sma_200": round(sma200, 2) if sma200 else None,
                 "above_sma_50": (last > sma50) if sma50 else None,

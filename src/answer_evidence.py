@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Iterable, List, Pattern, Sequence
+from typing import Iterable, List, Optional, Pattern, Sequence
 
 _DASHES = dict.fromkeys(map(ord, "‐‑‒–—―−﹣－"), "-")
 _APOSTROPHES = dict.fromkeys(map(ord, "‘’ʼ＇`´"), "'")
@@ -53,7 +53,7 @@ _RATING_WORDS = r"(?:strong\s+)?(?:buy|hold|sell|accumulate|outperform|underperf
 # verdict. Not its other senses: "adults with obesity or overweight", "the
 # equal-weight S&P 500", "investors are net underweight Chinese equities",
 # "rates hold near current levels", "Earnings call: positive".
-_RATING_CLAIM = re.compile(
+_RATING_CORE = (
     r"(?<![-\w])(?:strong[-\s]+(?:buy|sell)|top\s+pick|(?:market|sector)\s+perform)(?![-\w])"
     r"|(?<![-\w])(?<!obesity or )(?<!obese or )(?<!net )(?:overweight|underweight)(?![-\w])"
     r"(?!\s+(?:or\s+obes|and\s+obes|adults|patients|people|individuals|children|with\b))"
@@ -65,9 +65,20 @@ _RATING_CLAIM = re.compile(
     r"\b(?:rating|stance|verdict|recommendation|call|my\s+take|our\s+take|bottom\s+line)\s*[:：]\s*"
     rf"(?:{_RATING_WORDS}|avoid|neutral|positive|negative|bullish|bearish)\b"
     rf"|^\W*{_RATING_WORDS}\W*$"
-    r"|\b(?:my|our)\s+(?:rating|recommendation|price\s+target|target\s+price|fair\s+value|pick|verdict|stance)\b"
-    r"|\b(?:i|we)\s+(?:would\s+|'d\s+)?(?:rate|recommend)\b"
-    r"|\b(?:i|we)\s*(?:am|are|'m|'re|remain|stay|would\s+be|'d\s+be)\s+(?:\w+\s+)?(?:overweight|underweight|equal[-\s]weight)\b",
+    r"|\b(?:i|we)\s*(?:am|are|'m|'re|remain|stay|would\s+be|'d\s+be)\s+(?:\w+\s+)?(?:overweight|underweight|equal[-\s]weight)\b"
+)
+_RATING_CLAIM = re.compile(
+    _RATING_CORE
+    + r"|\b(?:my|our)\s+(?:rating|recommendation|price\s+target|target\s+price|fair\s+value|pick|verdict|stance)\b"
+    + r"|\b(?:i|we)\s+(?:would\s+|'d\s+)?(?:rate|recommend)\b",
+    re.I | re.M,
+)
+# For a published view, "our rating" and "we rate it" restate VYNN's own call;
+# they count only with a rating word the published one does not account for.
+_PUBLISHED_RATING_CLAIM = re.compile(
+    _RATING_CORE
+    + rf"|\b(?:my|our)\s+(?:rating|recommendation|pick|verdict|stance|call)\b[^.\n]{{0,30}}?{_RATING_WORDS}(?![-\w])"
+    + rf"|\b(?:i|we)\s+(?:would\s+|'d\s+)?(?:rate|recommend)\b[^.\n]{{0,30}}?{_RATING_WORDS}(?![-\w])",
     re.I | re.M,
 )
 _AGGREGATE = r"(?:billion|million|trillion|bn|mn|[mbk]\b)"
@@ -78,7 +89,12 @@ _PER_SHARE = (
     r"|(?<![\d,.])\d[\d,]*(?:\.\d+)?\s?(?:美元|港元|元|日元|欧元)(?![亿万])"
 )
 _PCT = r"(?<![\d,.])\d[\d,]*(?:\.\d+)?\s?%"
-_NOT_AGGREGATE = rf"(?<![\d,.])\d[\d,]*(?:\.\d+)?(?![\d,]|\.\d)(?!\s*{_AGGREGATE})"
+# A standalone figure: not an aggregate, not a period ("12-month"), and not cut
+# off by the comma after it ("a fair value of 180, per the model").
+_NOT_AGGREGATE = (
+    rf"(?<![\d,.])\d[\d,]*(?:\.\d+)?(?!\d|[.,]\d)(?!\s*{_AGGREGATE})"
+    r"(?!\s*-?\s*(?:months?|years?|yrs?|days?|weeks?|quarters?)\b)"
+)
 _VALUE_CLAIM = re.compile(
     r"\b(?:under|over)[-\s]?valued\b"
     # overpriced about the stock, not "catastrophe risk the industry had underpriced"
@@ -90,6 +106,21 @@ _VALUE_CLAIM = re.compile(
     rf"|\b(?:fair|intrinsic)[-\s]?value\b[^.\n]{{0,40}}?{_NOT_AGGREGATE}"
     rf"|{_NOT_AGGREGATE}[^.\n]{{0,25}}?\b(?:fair|intrinsic)[-\s]?value\b"
     r"|\bprice\s+(?:targets?|objectives?)\b|\btarget\s+prices?\b|\b(?-i:PTs?)\s*(?::|of|at|\$|~)"
+    r"|\bworth\s+(?:about|around|roughly|approximately|~)?\s*[$€£¥₹]\s?\d[\d,]*(?:\.\d+)?"
+    rf"(?![\d,.]*\s*{_AGGREGATE})",
+    re.I,
+)
+_TARGET_WORDS = r"(?:price\s+(?:targets?|objectives?)|target\s+prices?)"
+_PUBLISHED_VALUE_CLAIM = re.compile(
+    r"\b(?:under|over)[-\s]?valued\b"
+    r"|\b(?:stock|shares|it|name|equity|company|(?-i:[A-Z][\w&.'-]*))\s+(?:is|are|was|were|looks?|seems?|"
+    r"appears?|remains?|trades?|traded|became|becomes|now)\s+(?:\w+\s+){0,2}(?:under|over)[-\s]?priced\b"
+    r"|\b(?:under|over)[-\s]?priced\s+(?:stock|shares|name|equity)\b"
+    r"|\b(?:fairly|fully|richly|attractively|reasonably|cheaply)\s+valued\b"
+    rf"|\b(?:fair|intrinsic)[-\s]?value\b[^.\n]{{0,40}}?{_NOT_AGGREGATE}"
+    rf"|{_NOT_AGGREGATE}[^.\n]{{0,25}}?\b(?:fair|intrinsic)[-\s]?value\b"
+    rf"|\b{_TARGET_WORDS}\b[^.\n]{{0,40}}?{_NOT_AGGREGATE}|{_NOT_AGGREGATE}[^.\n]{{0,25}}?\b{_TARGET_WORDS}\b"
+    r"|\b(?-i:PTs?)\s*(?::|of|at|\$|~)\s*\d"
     r"|\bworth\s+(?:about|around|roughly|approximately|~)?\s*[$€£¥₹]\s?\d[\d,]*(?:\.\d+)?"
     rf"(?![\d,.]*\s*{_AGGREGATE})",
     re.I,
@@ -143,6 +174,54 @@ _OTHER_LANGUAGE_CLAIM = re.compile(
     r"infraponderar)\b",
     re.I,
 )
+_ZH_RATING_WORDS = {"STRONG BUY": "强烈买入", "BUY": "买入", "HOLD": "持有", "SELL": "卖出", "STRONG SELL": "强烈卖出"}
+_PUBLISHED_OTHER_LANGUAGE_CLAIM = re.compile(
+    _OTHER_LANGUAGE_CLAIM.pattern.replace(
+        r"(?<!信用)评级|評級|",
+        r"(?<!信用)(?:评级|評級)[^。！？\n]{0,6}?(?:强烈买入|买入|卖出|持有|增持|减持|强烈卖出)"
+        r"|(?:强烈买入|买入|卖出|持有|增持|减持|强烈卖出)[^。！？\n]{0,4}?(?:评级|評級)|",
+    ),
+    re.I,
+)
+assert _PUBLISHED_OTHER_LANGUAGE_CLAIM.pattern != _OTHER_LANGUAGE_CLAIM.pattern
+
+_ANY_RATING_PHRASE = re.compile(
+    r"(?<![-\w])(?:strong[-\s]+(?:buy|sell)|buy|hold|sell|accumulate|outperform|underperform|"
+    r"overweight|underweight)(?![-\w])",
+    re.I,
+)
+_NUMBER_TOKEN = re.compile(
+    r"(?:(?:[$€£¥₹]|\b(?:USD|EUR|GBP|US\$))\s?)?(?<![\d,.])(\d[\d,]*(?:\.\d+)?)(?!\d|[.,]\d)(\s?%)?"
+)
+_MASK = "‹published›"
+
+
+def _mask_published(plain: str, published: dict) -> str:
+    """Replace a published view's own rating and figures, so only the rest is checked."""
+    rating = " ".join(str(published.get("rating") or "").upper().replace("-", " ").split())
+    values = [float(v) for v in published.get("values") or []]
+    percents = [float(v) for v in published.get("percents") or []]
+
+    def rating_word(match):
+        phrase = " ".join(match.group(0).upper().replace("-", " ").split())
+        return _MASK if rating and phrase == rating else match.group(0)
+
+    plain = _ANY_RATING_PHRASE.sub(rating_word, plain)
+    if _ZH_RATING_WORDS.get(rating):
+        plain = plain.replace(_ZH_RATING_WORDS[rating], _MASK)
+
+    def figure(match):
+        try:
+            number = float(match.group(1).replace(",", ""))
+        except ValueError:
+            return match.group(0)
+        if match.group(2):
+            return _MASK if any(abs(abs(number) - abs(p)) <= 0.5 for p in percents) else match.group(0)
+        return _MASK if any(abs(number - v) <= max(0.01, abs(v) * 0.005) for v in values) else match.group(0)
+
+    return _NUMBER_TOKEN.sub(figure, plain)
+
+
 # What only repeats the fixed statement, which states it authoritatively:
 # the rating status, and the Street's ratings, targets and rating actions.
 _RESTATEMENT = re.compile(
@@ -212,11 +291,28 @@ def _scenario_value(plain: str) -> bool:
     return False
 
 
-def makes_claim(text: str, forbidden_tokens: Sequence[str] = ()) -> bool:
-    """True when the text explicitly states what only a published rating may."""
+def makes_claim(
+    text: str,
+    forbidden_tokens: Sequence[str] = (),
+    published: Optional[dict] = None,
+) -> bool:
+    """True when the text explicitly states what only a published rating may.
+
+    `published` is the view VYNN published for this run (rating, per-share
+    figures, upside). Its own rating and figures may be restated; the check
+    runs on what is left once they are masked, so a different rating, another
+    figure or a valuation verdict still counts.
+    """
     plain = _normalize(text)
-    if (_RATING_CLAIM.search(plain) or _VALUE_CLAIM.search(plain) or _PRICED_CLAIM.search(plain)
-            or _OTHER_LANGUAGE_CLAIM.search(plain) or _scenario_value(plain)):
+    if published:
+        plain = _mask_published(plain, published)
+        hit = (_PUBLISHED_RATING_CLAIM.search(plain) or _PUBLISHED_VALUE_CLAIM.search(plain)
+               or _PRICED_CLAIM.search(plain) or _PUBLISHED_OTHER_LANGUAGE_CLAIM.search(plain)
+               or _scenario_value(plain))
+    else:
+        hit = (_RATING_CLAIM.search(plain) or _VALUE_CLAIM.search(plain) or _PRICED_CLAIM.search(plain)
+               or _OTHER_LANGUAGE_CLAIM.search(plain) or _scenario_value(plain))
+    if hit:
         return True
     # A withheld or contradicted figure as a whole number: "318.7" is in
     # "$318.70", the 200-day average, and must not match there.
@@ -299,9 +395,11 @@ def review_section(
     *,
     forbidden_tokens: Iterable[str] = (),
     extra_patterns: Sequence[Pattern[str]] = (),
+    published: Optional[dict] = None,
 ) -> SectionReview:
     """Strip what repeats the fixed statement, then list every explicit claim left."""
     tokens = tuple(token for token in forbidden_tokens if token)
+    view = published
     review = SectionReview()
     lines = str(section or "").replace("\r\n", "\n").split("\n")
 
@@ -351,13 +449,13 @@ def review_section(
             units = [line]
         else:
             units = _sentences(_LINE_PREFIX.match(line).group(2))
-        review.claims.extend(unit.strip() for unit in units if makes_claim(unit, tokens))
+        review.claims.extend(unit.strip() for unit in units if makes_claim(unit, tokens, view))
         if _is_structural(line) and index + 1 < len(published):
             pair = f"{line} {published[index + 1]}"
-            if makes_claim(pair, tokens):
+            if makes_claim(pair, tokens, view):
                 review.claims.append(pair.strip())
     table = " ".join(line for line in published if line.lstrip().startswith("|"))
-    if table and makes_claim(table, tokens) and not review.claims:
+    if table and makes_claim(table, tokens, view) and not review.claims:
         review.claims.append(table[:200])
 
     review.text = text if _letters(text) >= _MIN_SECTION_LETTERS else ""
