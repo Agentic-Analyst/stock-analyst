@@ -1251,7 +1251,10 @@ def _refusal_result(ticker: str, refusal: dict, *, what: str) -> str:
     return _json.dumps({
         "status": "not_applicable",
         "note": f"No {what} for {ticker}. {plain_refusal_note(refusal['kind'])} "
-                "Answer with the price, the news and the Street's view instead.",
+                "Do not give a buy, hold or sell call or a fair value of your own. "
+                "Answer with what the run found instead: the price and its trend, "
+                "the technicals, the news with its catalysts and risks, and the "
+                "Street's view as a benchmark.",
         "ticker": ticker,
         "refusal": refusal["kind"],
         "detail": refusal["reason"],

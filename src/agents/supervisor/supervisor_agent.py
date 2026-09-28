@@ -293,7 +293,36 @@ class SupervisorWorkflowRunner:
             unsafe = not self._answer_covers_external_benchmark(
                 answer, self._current_external_benchmark()
             )
-        return self._safe_no_model_answer(refusal) if unsafe else answer
+        if not unsafe:
+            return answer
+        return self._template(self._safe_no_model_answer(refusal))
+
+    def _stale_news_patterns(self):
+        """Sentiment claims the news behind this run cannot support."""
+        patterns = [re.compile(r"overall sentiment", re.I)]
+        news = getattr(self.state, "news_analysis", None)
+        freshness = getattr(news, "freshness", {}) or {}
+        if freshness.get("status") != "fresh":
+            patterns.append(re.compile(
+                r"news sentiment\s+(?:has\s+)?(?:is|was|remains?|turned|became|looks)\s+"
+                r"(?:strongly\s+)?(?:bullish|bearish)",
+                re.I,
+            ))
+        return patterns
+
+    def _template(self, template: str, forbidden_tokens=()) -> str:
+        """Answer with the deterministic template, and record that it did.
+
+        On its own the template drops everything else the run established
+        (the price and trend, the news with its catalysts and risks, a bull
+        and bear case). The chat agent reads `guard_template` to ask the model
+        for that analysis without any call and puts it around the template
+        (GeneralistAgent._add_analysis); `guard_forbidden` holds figures the
+        section must not repeat. Every other caller gets the template as is.
+        """
+        self.guard_template = template
+        self.guard_forbidden = tuple(forbidden_tokens)
+        return template
 
     def _safe_no_model_answer(self, refusal: Optional[Dict[str, str]]) -> str:
         """Deterministic answer for a run that produced no valuation model."""
@@ -431,6 +460,10 @@ class SupervisorWorkflowRunner:
         withheld = bool(metrics.get("point_estimate_withheld"))
         lower = answer.lower()
         unsafe_valuation = not answer
+        # A withheld run's internal point figures, as they would be printed.
+        withheld_point_tokens = []
+        self.guard_template = None
+        self.guard_forbidden = ()
 
         # No model at all: the methodology declined to value this instrument
         # (Exxon: commodity cycle; a fund; an insurer) or the build failed.
@@ -451,7 +484,7 @@ class SupervisorWorkflowRunner:
                 self._OWN_RATING_CLAIM.search(answer)
                 or self._PRICED_VALUE_CLAIM.search(answer)
             ):
-                return self._safe_no_model_answer(refusal)
+                return self._template(self._safe_no_model_answer(refusal))
 
         if withheld:
             unsafe_valuation = unsafe_valuation or not (
@@ -486,15 +519,20 @@ class SupervisorWorkflowRunner:
             for key in ("fair_value", "average_price"):
                 value = metrics.get(key)
                 if (isinstance(value, (int, float)) and not isinstance(value, bool)
-                        and round(float(value), 2) not in endpoints
-                        and f"{float(value):,.2f}" in answer):
-                    unsafe_valuation = True
+                        and round(float(value), 2) not in endpoints):
+                    withheld_point_tokens += [
+                        f"{float(value):,.2f}", f"{float(value):.2f}", f"{float(value):,.1f}",
+                        f"{float(value):.1f}",
+                    ]
+                    if f"{float(value):,.2f}" in answer:
+                        unsafe_valuation = True
             upside = metrics.get("upside_vs_market")
             if isinstance(upside, (int, float)) and not isinstance(upside, bool):
                 for rendered in (
                     f"{float(upside) * 100:.1f}%",
                     f"{float(upside) * 100:.2f}%",
                 ):
+                    withheld_point_tokens += [rendered, rendered.replace("-", "\u2212")]
                     if rendered in answer:
                         unsafe_valuation = True
             # A withheld result without the market/model reconciliation is not
@@ -576,48 +614,71 @@ class SupervisorWorkflowRunner:
                 > max(0.05, abs(canonical_target) * 0.005)
             )
             if rating_conflict or fair_conflict or target_conflict:
-                return self._safe_published_valuation_answer(headline)
+                contradicted = [
+                    f"{claim:,.2f}" for claim, conflict in (
+                        (fair_claim, fair_conflict), (target_claim, target_conflict),
+                    ) if conflict and claim is not None
+                ]
+                return self._template(
+                    self._safe_published_valuation_answer(headline),
+                    forbidden_tokens=contradicted,
+                )
             if (require_full_benchmark
                     and not self._answer_covers_external_benchmark(
                         answer, self._current_external_benchmark()
                     )):
-                return self._safe_published_valuation_answer(headline)
+                return self._template(self._safe_published_valuation_answer(headline))
 
         news = getattr(self.state, "news_analysis", None)
         freshness = getattr(news, "freshness", {}) or {}
         unsafe_news = False
         if freshness.get("status") != "fresh":
             unsafe_news = bool(re.search(
-                r"news sentiment\s+(?:is|was|remains?)\s+"
+                r"news sentiment\s+(?:has\s+)?(?:is|was|remains?|turned|became|looks)\s+"
                 r"(?:strongly\s+)?(?:bullish|bearish)",
                 lower,
             ))
         unsafe_news = unsafe_news or "overall sentiment" in lower
 
         if unsafe_valuation and withheld:
-            return self._safe_withheld_valuation_answer()
+            return self._template(
+                self._safe_withheld_valuation_answer(),
+                forbidden_tokens=withheld_point_tokens,
+            )
         if unsafe_news:
             # Remove unsupported sentiment sentences while preserving grounded
             # valuation and external-benchmark content. If nothing safe remains,
             # fail closed to the deterministic valuation answer when available.
-            kept = []
-            for sentence in re.split(r"(?<=[.!?])\s+|\n+", answer):
+            # Line by line: joining every kept sentence into one string used to
+            # flatten a whole answer's bullets and paragraphs into one line.
+            def stale_claim(sentence: str) -> bool:
                 sentence_lower = sentence.lower()
-                stale_claim = (
+                return (
                     "overall sentiment" in sentence_lower
                     or bool(re.search(
-                        r"news sentiment\s+(?:is|was|remains?)\s+"
+                        r"news sentiment\s+(?:has\s+)?(?:is|was|remains?|turned|became|looks)\s+"
                         r"(?:strongly\s+)?(?:bullish|bearish)",
                         sentence_lower,
                     ))
                 )
-                if sentence.strip() and not stale_claim:
-                    kept.append(sentence.strip())
-            sanitized = " ".join(kept).strip()
+
+            kept_lines = []
+            for line in answer.split("\n"):
+                parts = [part for part in re.split(r"(?<=[.!?])\s+", line) if part.strip()]
+                if not parts:
+                    kept_lines.append("")
+                    continue
+                good = [part for part in parts if not stale_claim(part)]
+                if good:
+                    kept_lines.append(" ".join(part.rstrip() for part in good))
+            sanitized = re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
             if sanitized:
                 return sanitized
             if withheld:
-                return self._safe_withheld_valuation_answer()
+                return self._template(
+                    self._safe_withheld_valuation_answer(),
+                    forbidden_tokens=withheld_point_tokens,
+                )
         return answer
     
     def __init__(self,

@@ -143,5 +143,6 @@ def test_the_language_check_runs_after_the_report_step_and_before_the_guard():
     source = (Path(__file__).resolve().parents[1] / "src" / "agents" / "generalist_agent.py").read_text()
     report = source.index("final_text = await self._ensure_report_if_requested(")
     language = source.index("final_text = await self._ensure_answer_language(", report)
-    guard = source.index("final_text = self._guard_final_answer(final_text)", language)
-    assert report < language < guard
+    guard = source.index("guarded = self._guard_final_answer(final_text)", language)
+    analysis = source.index("final_text = await self._add_analysis(", guard)
+    assert report < language < guard < analysis
