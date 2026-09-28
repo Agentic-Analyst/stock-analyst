@@ -732,7 +732,7 @@ class GeneralistAgent:
             _rd = json.loads(result_json)
             _status = _rd.get("status", "ok")
             _note = _rd.get("note") or _rd.get("error") or ""
-            self._log(f"[SUPERVISOR]    ↳ {name}: {_status}{(' — ' + str(_note)[:120]) if _note else ''}")
+            self._log(f"[SUPERVISOR]    ↳ {name}: {_status}{(' — ' + str(_note)[:220]) if _note else ''}")
             # Surface the FACTS this tool just established so the waiting user
             # sees real numbers arriving instead of a spinner. Same marker
             # channel as [CHART_DIRECTIVE]: api-runner lifts these out and

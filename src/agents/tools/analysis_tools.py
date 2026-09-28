@@ -1227,6 +1227,37 @@ class GetFinancialsTool(_CtxTool):
         )
 
 
+def _valuation_refusal(state) -> Optional[dict]:
+    """The methodology's reason when it declines to value this instrument."""
+    financial = getattr(state, "financial_data", None)
+    raw = getattr(financial, "raw_data", None)
+    if not isinstance(raw, dict) or not raw:
+        return None
+    try:
+        from src.valuation_methodology import assess_valuation_methodology
+        suitability = assess_valuation_methodology(raw)
+    except Exception:
+        return None
+    kind = suitability.get("specialized_service")
+    if not kind:
+        return None
+    return {"kind": str(kind), "reason": str(suitability.get("reason") or "")}
+
+
+def _refusal_result(ticker: str, refusal: dict, *, what: str) -> str:
+    """A refusal is a decision, not a failure: the model must not retry it."""
+    import json as _json
+    from src.summary_evidence import plain_refusal_note
+    return _json.dumps({
+        "status": "not_applicable",
+        "note": f"No {what} for {ticker}. {plain_refusal_note(refusal['kind'])} "
+                "Answer with the price, the news and the Street's view instead.",
+        "ticker": ticker,
+        "refusal": refusal["kind"],
+        "detail": refusal["reason"],
+    }, ensure_ascii=False, default=str)
+
+
 class BuildModelTool(_CtxTool):
     name = "build_model"
     description = (
@@ -1251,6 +1282,9 @@ class BuildModelTool(_CtxTool):
         state = await model_generation_agent(state)
         self.ctx.state = state
         if not state.is_model_generated():
+            refusal = _valuation_refusal(state)
+            if refusal:
+                return _refusal_result(ticker, refusal, what="valuation model")
             return tool_error(f"Could not build the valuation model for {ticker}.",
                               ticker=ticker, detail=state.last_error)
         vm = state.financial_model.valuation_metrics if state.financial_model else {}
@@ -1648,6 +1682,10 @@ class WriteReportTool(_CtxTool):
                 if not state.is_news_analyzed():
                     state = await news_analysis_agent(state); self.ctx.state = state
 
+        if state.is_financial_data_collected() and not state.is_model_generated():
+            refusal = _valuation_refusal(state)
+            if refusal:
+                return _refusal_result(ticker, refusal, what="valuation report")
         if not (state.is_financial_data_collected() and state.is_model_generated() and state.is_news_analyzed()):
             return tool_error(f"Could not gather all prerequisites for the report on {ticker}.",
                               ticker=ticker, detail=state.last_error)

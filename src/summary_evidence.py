@@ -241,6 +241,60 @@ _PLAIN_METHOD_NOTES = (
      "separate businesses"),
 )
 
+# Why the engine declines to value an instrument at all, keyed by the
+# methodology's ``specialized_service``. The engine's own reason is written for
+# an auditor ("a normalized commodity price deck, mid-cycle volumes and
+# margins, reserve or resource life..."); this is the sentence a user reads.
+_PLAIN_REFUSALS = {
+    "commodity_cycle": (
+        "its cash flows follow commodity prices, so a cash-flow model built on "
+        "today's prices would be a bet on the commodity price rather than a "
+        "valuation"
+    ),
+    "reit": (
+        "it is a real-estate investment trust, which is valued on its properties "
+        "and funds from operations rather than on corporate free cash flow"
+    ),
+    "insurance": (
+        "it is an insurer, whose value sits in reserves, float and capital "
+        "rather than in corporate free cash flow"
+    ),
+    "fund": (
+        "it is a fund, which is valued on its holdings and net asset value "
+        "rather than on cash flows"
+    ),
+    "crypto": "it is a crypto asset with no cash flows to discount",
+    "unsupported_asset": "it is not a listed operating company",
+    "bank_valuation_input_gap": (
+        "it is a bank and the book-value and return inputs a bank valuation "
+        "needs are not both available"
+    ),
+}
+
+
+def plain_refusal_note(kind: Any, reason: Any = None) -> str:
+    """Why no rating or fair value exists for this run, in one plain sentence.
+
+    ``kind`` is the methodology's ``specialized_service``; ``reason`` is its
+    auditor-facing text, used only when the kind is unknown. A run with no
+    model and no refusal (a build failure) gets a sentence that says so
+    rather than "published without a point headline".
+    """
+    plain = _PLAIN_REFUSALS.get(str(kind or "").strip().lower())
+    if plain:
+        return f"No rating or fair value is published: {plain}."
+    if kind:
+        detail = " ".join(str(reason or "").split())
+        return (
+            "No rating or fair value is published, because this instrument is "
+            "outside the valuation method's scope"
+            + (f": {detail}" if detail else ".")
+        )
+    return (
+        "No rating or fair value is published, because no valuation model was "
+        "produced in this run."
+    )
+
 
 # The engine's own figures, as analysis_tools.valuation_publication_boundary
 # prints them for a corporate valuation: "The model is +94% from the market",
