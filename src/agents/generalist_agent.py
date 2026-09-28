@@ -100,7 +100,7 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 - A request for a REPORT on a single listed company is a request to call `write_report`: "write / generate / build / prepare a report", "research report", "full report", "analysis report", "写报告". Calling build_model or get_financials alone does not satisfy it, and neither does describing what a report would say. If you end a turn on such a request without having called write_report, the harness runs it for you and asks you to rewrite your answer — do not make it. The exceptions above stand: no reports for coins, indices, screeners or peer comparisons, and a declined offer ("no report, just the price") is not a request.
 
 ## Language
-- Reply in the SAME language the user wrote in. If they ask in Chinese, answer in Chinese; Japanese, answer in Japanese; and so on. Match their language naturally for your conversational reply.
+- Reply in the SAME language the user's message is written in. A message written in English gets an English answer, whatever language the examples in these instructions or the data you fetched are in. Only answer in Chinese, Japanese or Korean when the user's own message is written in that script. If you cannot tell, answer in English.
 - If the user asks for a full report AND wants it in a specific language (e.g. "分析英伟达并用中文写报告" / "analyze NVDA, report in Chinese"), pass that language to `write_report` via `output_language` (e.g. output_language="Chinese") so the report itself is written in that language. Keep numbers, tickers, and currency values unchanged.
 
 ## Your memory is the PAST; the tools are the PRESENT
@@ -260,16 +260,82 @@ def wants_report(prompt: Optional[str]) -> bool:
     return False
 
 
-def report_language(prompt: Optional[str]) -> str:
-    """The language a CJK request was written in, for write_report's output_language."""
-    text = prompt or ""
+_CJK_CHAR = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+# Letters of the scripts the product sees; digits, tickers and punctuation
+# say nothing about the language a text is written in.
+_LETTER = re.compile(
+    r"[A-Za-z\u00c0-\u024f\u0370-\u03ff\u0400-\u04ff\u0590-\u06ff"
+    r"\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]"
+)
+# The share of a text's letters that must be Chinese, Japanese or Korean
+# before the text counts as written in that language. One company name in
+# an English sentence ("analyze 腾讯 for me") is an English request.
+_CJK_LANGUAGE_SHARE = 0.30
+_EXPLICIT_REPORT_LANGUAGE = re.compile(
+    r"\b(?:in|into)\s+(chinese|mandarin|japanese|korean)\b|"
+    r"(用中文|中文写|中文报告|中文回答|日本語で|日文|한국어로|韩文|韓文)",
+    re.I,
+)
+
+
+def _cjk_share(text: Optional[str]) -> float:
+    letters = _LETTER.findall(text or "")
+    if not letters:
+        return 0.0
+    return sum(1 for ch in letters if _CJK_CHAR.match(ch)) / len(letters)
+
+
+def _cjk_language(text: str) -> str:
     if re.search(r"[\u3040-\u30ff]", text):
         return "Japanese"
     if re.search(r"[\uac00-\ud7af]", text):
         return "Korean"
-    if re.search(r"[\u4e00-\u9fff]", text):
+    return "Chinese"
+
+
+def prompt_language(prompt: Optional[str]) -> str:
+    """"Chinese"/"Japanese"/"Korean" when the message is written in that script, else ""."""
+    text = prompt or ""
+    if _cjk_share(text) < _CJK_LANGUAGE_SHARE:
+        return ""
+    return _cjk_language(text)
+
+
+def report_language(prompt: Optional[str]) -> str:
+    """The language write_report should write in, or "" for the default.
+
+    Either the request is written in a CJK language, or it asks for one in
+    so many words. A single CJK company name inside an English request used
+    to switch the whole report into Chinese.
+    """
+    text = prompt or ""
+    explicit = _EXPLICIT_REPORT_LANGUAGE.search(text)
+    if explicit:
+        word = (explicit.group(1) or explicit.group(2) or "").lower()
+        if word in ("japanese",) or "日" in word:
+            return "Japanese"
+        if word in ("korean",) or "한" in word or "韩" in word or "韓" in word:
+            return "Korean"
         return "Chinese"
-    return ""
+    return prompt_language(text)
+
+
+def answer_language_mismatch(prompt: Optional[str], answer: Optional[str]) -> bool:
+    """True when the answer is in a CJK language and the message is not, or the reverse.
+
+    A user wrote "NSE stock analysis" and gpt-5.4-mini replied in Chinese:
+    "你是想分析哪只在 NSE 上市的股票？". Nothing in the run checked the
+    answer's language against the message's. Within the Latin-script
+    languages the two cannot be told apart cheaply, so only the CJK/non-CJK
+    boundary is checked; that is the failure that reached users.
+    """
+    if not (answer or "").strip():
+        return False
+    prompt_cjk = _cjk_share(prompt) >= _CJK_LANGUAGE_SHARE
+    answer_share = _cjk_share(answer)
+    if not prompt_cjk:
+        return answer_share >= _CJK_LANGUAGE_SHARE
+    return answer_share < 0.05 and len(_LETTER.findall(answer or "")) >= 40
 
 
 class GeneralistAgent:
@@ -493,6 +559,7 @@ class GeneralistAgent:
             # The one request the model may not decline by omission.
             if final_text and run_status == "completed":
                 final_text = await self._ensure_report_if_requested(messages, provider, final_text, final_raw, tool_defs)
+                final_text = await self._ensure_answer_language(messages, provider, final_text, tool_defs)
                 # The generalist is the production chat path.  The legacy
                 # supervisor already had a deterministic publication guard,
                 # but this newer path emitted the LLM's summary directly.  A
@@ -818,6 +885,45 @@ class GeneralistAgent:
                 return resp.text
         except Exception as e:
             self._log(f"[SUPERVISOR] ⚠️ Could not restate the answer after writing the report: {e}")
+        return final_text
+
+    async def _ensure_answer_language(self, messages: list, provider, final_text: str,
+                                      tool_defs=None) -> str:
+        """Rewrite an answer that came back in the wrong language, once.
+
+        The prompt asks for the user's language, and a small model still
+        answered an English question in Chinese. The check is deterministic;
+        the rewrite is one more text turn with the draft in the transcript,
+        so every number and fact is in front of the model. If the rewrite
+        is still wrong, or fails, the draft is kept: a wrong-language answer
+        beats no answer, and the log says what happened either way.
+        """
+        if not answer_language_mismatch(self.user_prompt, final_text):
+            return final_text
+        wanted = prompt_language(self.user_prompt) or (
+            "the language the user's message is written in (English for an English message)"
+        )
+        self._log(f"[SUPERVISOR] 🌐 The draft answer is not in the user's language — rewriting it in {wanted}.")
+        retry = list(messages)
+        retry.append({"role": "assistant", "content": final_text})
+        retry.append({
+            "role": "user",
+            "content": (
+                "[HARNESS NOTE — not from the user. Your answer above is not in the "
+                f"language the user's message is written in. Rewrite it in {wanted}, "
+                "keeping every number, ticker, name and fact exactly as they are. "
+                "Output only the rewritten answer. Do not call any tool.]"
+            ),
+        })
+        try:
+            resp = await self._text_only_turn(retry, provider, tool_defs)
+            self.total_cost += resp.cost
+            text = (resp.text or "").strip()
+            if text and not answer_language_mismatch(self.user_prompt, text):
+                return text
+            self._log("[SUPERVISOR] ⚠️ The rewrite was still not in the user's language — keeping the draft.")
+        except Exception as e:
+            self._log(f"[SUPERVISOR] ⚠️ Could not rewrite the answer in the user's language: {e}")
         return final_text
 
     async def _text_only_turn(self, messages: list, provider, tool_defs=None):
