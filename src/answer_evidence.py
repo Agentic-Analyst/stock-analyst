@@ -242,6 +242,32 @@ _RESTATEMENT = re.compile(
     re.I,
 )
 
+# A broker's rating action, as the news and the Street write it: "BMO lowered
+# its target while maintaining an Outperform rating", "Jefferies reiterated its
+# Buy", "BMO's Outperform rating", "rated Overweight by Morgan Stanley". The
+# rating is capitalised or followed by "rating", so "kept a buy-the-dip
+# mentality" and "maintained a hold on the merger" are not ratings. It read as
+# VYNN's own call ("Outperform rating") and the whole analysis was dropped.
+_BROKER_RATING = (
+    r"(?:(?-i:(?:Strong\s+)?(?:Buy|Hold|Sell|Outperform|Underperform|Overweight|Underweight|Neutral|"
+    r"Equal[-\s]?[Ww]eight|Market\s+Perform|Sector\s+Perform|Accumulate|Reduce))(?![-\w])"
+    r"(?:\s+rating)?"
+    rf"|{_RATING_WORDS}\s+rating\b|neutral\s+rating\b)"
+)
+_RATING_ACTION = re.compile(
+    r"\b(?:maintain(?:ed|ing|s)?|reiterat(?:ed|ing|es|e)|kept|keep(?:ing|s)?|retain(?:ed|ing|s)?|"
+    r"(?:re)?affirm(?:ed|ing|s)?|held|holding|holds|initiat(?:ed|ing|es|e)|start(?:ed|ing|s)?|"
+    r"assum(?:ed|ing|es|e)|resum(?:ed|ing|es|e)|upgrad(?:ed|ing|es|e)|downgrad(?:ed|ing|es|e))\s+"
+    rf"(?:(?:its|their|his|her|the|an?)\s+)?(?:\w+\s+)?(?:to\s+(?:an?\s+)?)?{_BROKER_RATING}"
+    rf"|\b(?-i:[A-Z][\w&.'-]*)'s\s+(?:\w+\s+)?{_BROKER_RATING}"
+    rf"|{_BROKER_RATING}\s+(?:from|by)\s+(?-i:[A-Z])"
+    rf"|\brated\s+(?:an?\s+)?{_BROKER_RATING}\s+by\s+(?-i:[A-Z])",
+    re.I,
+)
+# ...but never VYNN's own: "we maintain an Outperform rating" is a call, and a
+# section making one gets the fixed statement alone.
+_FIRST_PERSON = re.compile(r"\b(?:we|our|ours|my|us|vynn)\b|\b(?-i:I)\b", re.I)
+
 _SENTENCE_END = re.compile(
     r"(?<=[.!?])\s+|(?<=[.!?][*_)\"'”’])\s+|(?<=[.!?]\*\*)\s+|(?<=[。！？])"
 )
@@ -325,7 +351,9 @@ def makes_claim(
 def restates(text: str, extra_patterns: Sequence[Pattern[str]] = ()) -> bool:
     """True when the text only repeats the fixed statement, or claims unsupported sentiment."""
     plain = _normalize(text)
-    return bool(_RESTATEMENT.search(plain)) or any(p.search(plain) for p in extra_patterns)
+    return (bool(_RESTATEMENT.search(plain))
+            or bool(_RATING_ACTION.search(plain) and not _FIRST_PERSON.search(plain))
+            or any(p.search(plain) for p in extra_patterns))
 
 
 def _letters(text: str) -> int:
