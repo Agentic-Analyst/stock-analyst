@@ -198,12 +198,25 @@ def test_withheld_figures_are_caught_in_their_rounded_prints():
     assert makes_claim("It sits −44.0% from the market.", tokens)
 
 
+# These guard against backtracking that grows with the square of the input,
+# which takes seconds to minutes; about 1.4s on a laptop, and CI runs twice as
+# slow, so the budget leaves room for the machine but not for a blowup.
 def test_pathological_input_stays_fast():
     started = time.monotonic()
     review_section("1," * 100_000 + " upside")
     review_section("$1. " * 50_000)
     review_section("Refining margins were strong this quarter. " * 5_000)
-    assert time.monotonic() - started < 3.0
+    assert time.monotonic() - started < 6.0
+
+
+def test_a_long_capitalised_token_stays_fast():
+    # Every capital inside "A'A'A..." started a scan to its end: two minutes
+    # for one section before the capitalised-word patterns were anchored.
+    started = time.monotonic()
+    review_section("A'" * 100_000 + "s")
+    review_section("Buy " + "A'" * 50_000 + "s")
+    review_section("BMO's " + "A" * 100_000 + "'s Buy rating")
+    assert time.monotonic() - started < 6.0
 
 
 # From the third review (2026-09-28): real claims just outside the obvious

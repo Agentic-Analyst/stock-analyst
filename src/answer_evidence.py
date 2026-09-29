@@ -41,6 +41,13 @@ _INVISIBLE = dict.fromkeys(
 )
 
 
+# A capitalised word before a verb or a possessive is matched from its start
+# only (the lookbehind) and possessively ("*+", Python 3.11): it never contains
+# the space or apostrophe that follows it, so nothing is given back. Otherwise
+# every capital inside a 200,000-character run of "A'A'A" started a scan to
+# its end, and one section took two minutes.
+
+
 def _normalize(text: str) -> str:
     """One spelling for matching: NFKC, ASCII hyphens and apostrophes, no invisibles or emphasis."""
     text = unicodedata.normalize("NFKC", str(text or ""))
@@ -98,7 +105,7 @@ _NOT_AGGREGATE = (
 _VALUE_CLAIM = re.compile(
     r"\b(?:under|over)[-\s]?valued\b"
     # overpriced about the stock, not "catastrophe risk the industry had underpriced"
-    r"|\b(?:stock|shares|it|name|equity|company|(?-i:[A-Z][\w&.'-]*))\s+(?:is|are|was|were|looks?|seems?|"
+    r"|\b(?:stock|shares|it|name|equity|company|(?<![\w&.'-])(?-i:[A-Z][\w&.'-]*+))\s+(?:is|are|was|were|looks?|seems?|"
     r"appears?|remains?|trades?|traded|became|becomes|now)\s+(?:\w+\s+){0,2}(?:under|over)[-\s]?priced\b"
     r"|\b(?:under|over)[-\s]?priced\s+(?:stock|shares|name|equity)\b"
     r"|\b(?:fairly|fully|richly|attractively|reasonably|cheaply)\s+valued\b"
@@ -113,7 +120,7 @@ _VALUE_CLAIM = re.compile(
 _TARGET_WORDS = r"(?:price\s+(?:targets?|objectives?)|target\s+prices?)"
 _PUBLISHED_VALUE_CLAIM = re.compile(
     r"\b(?:under|over)[-\s]?valued\b"
-    r"|\b(?:stock|shares|it|name|equity|company|(?-i:[A-Z][\w&.'-]*))\s+(?:is|are|was|were|looks?|seems?|"
+    r"|\b(?:stock|shares|it|name|equity|company|(?<![\w&.'-])(?-i:[A-Z][\w&.'-]*+))\s+(?:is|are|was|were|looks?|seems?|"
     r"appears?|remains?|trades?|traded|became|becomes|now)\s+(?:\w+\s+){0,2}(?:under|over)[-\s]?priced\b"
     r"|\b(?:under|over)[-\s]?priced\s+(?:stock|shares|name|equity)\b"
     r"|\b(?:fairly|fully|richly|attractively|reasonably|cheaply)\s+valued\b"
@@ -259,7 +266,7 @@ _RATING_ACTION = re.compile(
     r"(?:re)?affirm(?:ed|ing|s)?|held|holding|holds|initiat(?:ed|ing|es|e)|start(?:ed|ing|s)?|"
     r"assum(?:ed|ing|es|e)|resum(?:ed|ing|es|e)|upgrad(?:ed|ing|es|e)|downgrad(?:ed|ing|es|e))\s+"
     rf"(?:(?:its|their|his|her|the|an?)\s+)?(?:\w+\s+)?(?:to\s+(?:an?\s+)?)?{_BROKER_RATING}"
-    rf"|\b(?-i:[A-Z][\w&.'-]*)'s\s+(?:\w+\s+)?{_BROKER_RATING}"
+    rf"|(?<![\w&.-])(?-i:[A-Z][\w&.-]*+)'s\s+(?:\w+\s+)?{_BROKER_RATING}"
     rf"|{_BROKER_RATING}\s+(?:from|by)\s+(?-i:[A-Z])"
     rf"|\brated\s+(?:an?\s+)?{_BROKER_RATING}\s+by\s+(?-i:[A-Z])",
     re.I,
@@ -267,6 +274,10 @@ _RATING_ACTION = re.compile(
 # ...but never VYNN's own: "we maintain an Outperform rating" is a call, and a
 # section making one gets the fixed statement alone.
 _FIRST_PERSON = re.compile(r"\b(?:we|our|ours|my|us|vynn)\b|\b(?-i:I)\b", re.I)
+# Every rating the pattern knows contains one of these. Checked first, as plain
+# substrings: the pattern tries its rating alternatives at every character,
+# and pathological input (a 200,000-character "sentence") must stay fast.
+_RATING_HINTS = ("buy", "hold", "sell", "perform", "weight", "neutral", "accumulate", "reduce")
 
 _SENTENCE_END = re.compile(
     r"(?<=[.!?])\s+|(?<=[.!?][*_)\"'”’])\s+|(?<=[.!?]\*\*)\s+|(?<=[。！？])"
@@ -351,9 +362,13 @@ def makes_claim(
 def restates(text: str, extra_patterns: Sequence[Pattern[str]] = ()) -> bool:
     """True when the text only repeats the fixed statement, or claims unsupported sentiment."""
     plain = _normalize(text)
-    return (bool(_RESTATEMENT.search(plain))
-            or bool(_RATING_ACTION.search(plain) and not _FIRST_PERSON.search(plain))
-            or any(p.search(plain) for p in extra_patterns))
+    if _RESTATEMENT.search(plain):
+        return True
+    lowered = plain.lower()
+    if (any(hint in lowered for hint in _RATING_HINTS)
+            and _RATING_ACTION.search(plain) and not _FIRST_PERSON.search(plain)):
+        return True
+    return any(p.search(plain) for p in extra_patterns)
 
 
 def _letters(text: str) -> int:
