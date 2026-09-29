@@ -153,18 +153,31 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
                 "adjusted close")
 
     elif tool == "get_financials":
-        add("company", result.get("company_name") or "Company",
-            _money(result.get("market_cap"), ccy), "market cap")
+        # A company valued on its home listing but asked about by its US line
+        # (listing_view): the card shows the line the user asked about.
+        us = result.get("listing_view") if isinstance(result.get("listing_view"), dict) else {}
+        if us.get("market_cap"):
+            add("company", result.get("company_name") or "Company",
+                _money(us.get("market_cap"), "USD"), f"market cap · {us.get('ticker')}")
+        else:
+            add("company", result.get("company_name") or "Company",
+                _money(result.get("market_cap"), ccy), "market cap")
         pe = _num(result.get("trailing_pe"))
         if pe:
             add("metric", "Trailing P/E", f"{pe:.1f}x")
 
     elif tool == "build_model":
-        fv = _money(result.get("fair_value"), ccy)
-        up = _pct(result.get("upside_vs_market"))
-        method = result.get("valuation_method")
-        add("valuation", "Fair value", fv,
-            f"{up} vs market" if up else (method or None))
+        us = result.get("listing_view") if isinstance(result.get("listing_view"), dict) else {}
+        if us.get("fair_value"):
+            up = _pct(us.get("upside"))
+            add("valuation", "Fair value", _money(us.get("fair_value"), "USD"),
+                f"per {us.get('ticker')} share" + (f" · {up} vs market" if up else ""))
+        else:
+            fv = _money(result.get("fair_value"), ccy)
+            up = _pct(result.get("upside_vs_market"))
+            method = result.get("valuation_method")
+            add("valuation", "Fair value", fv,
+                f"{up} vs market" if up else (method or None))
 
     elif tool == "analyze_news":
         n = _num(result.get("articles_analyzed"))
@@ -197,7 +210,9 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
             add("news", "Latest headline", (title or "")[:90] or None)
 
     elif tool == "write_report":
-        fv = _money(result.get("fair_value"), ccy)
+        us = result.get("listing_view") if isinstance(result.get("listing_view"), dict) else {}
+        fv = (_money(us.get("fair_value"), "USD") if us.get("fair_value")
+              else _money(result.get("fair_value"), ccy))
         add("report", "Report ready", fv, "full analyst report generated")
         if not fv:
             out.clear()

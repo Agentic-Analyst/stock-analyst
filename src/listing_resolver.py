@@ -163,6 +163,12 @@ def same_company(a: object, b: object) -> bool:
     smaller, larger = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
     if not smaller <= larger:
         return False
+    # A one-word name must match exactly. The half-subset rule accepted
+    # "Unilever" as "Hindustan Unilever" and "Siemens" as "Siemens Energy": the
+    # extra word is exactly what makes a subsidiary or a spin-off another
+    # company, and Unilever's US line was valued as its Indian subsidiary.
+    if len(smaller) == 1:
+        return smaller == larger
     return len(smaller) / len(larger) >= 0.5
 
 
@@ -261,7 +267,14 @@ def is_home_listing(info: dict, symbol: str) -> bool:
     country = info.get("country")
     if not country:
         return False
-    return _SUFFIX_COUNTRY.get(venue_suffix(symbol), _US_COUNTRY) == country
+    suffix = venue_suffix(symbol)
+    if _SUFFIX_COUNTRY.get(suffix, _US_COUNTRY) == country:
+        return True
+    # Hong Kong is the home market of the mainland companies listed there
+    # (Alibaba, JD, Baidu, Tencent), whose domicile Yahoo reports as China.
+    # Their US shares convert into the Hong Kong ones. A mainland A-share line,
+    # where one exists, still ranks first on the currency tiebreak.
+    return suffix == "HK" and country == "China"
 
 
 def rank_key(info: dict, symbol: str) -> tuple:
@@ -339,7 +352,11 @@ def better_listing(ticker: str, info: dict) -> Optional[Tuple[str, str]]:
                 continue
             # Loose screen only — snippets are truncated. The authoritative
             # check happens below, against the candidate's own longName.
-            if not names_might_match(name, quote.get("shortname") or quote.get("longname")):
+            # Either snippet may carry the name: Hong Kong's short names are
+            # trading codes ("BABA-W" for Alibaba's 9988.HK), and reading only
+            # that one dropped the company's home listing from the candidates.
+            if not (names_might_match(name, quote.get("shortname"))
+                    or names_might_match(name, quote.get("longname"))):
                 continue
             candidates.setdefault(symbol, quote)
 
@@ -353,6 +370,13 @@ def better_listing(ticker: str, info: dict) -> Optional[Tuple[str, str]]:
             continue
         cand_name = cand_info.get("longName") or cand_info.get("shortName")
         if not same_company(name, cand_name):
+            continue
+        # The issuer's domicile is reported identically on every venue (see the
+        # module note), so a candidate domiciled elsewhere is another company
+        # sharing a word of the name. Hindustan Unilever (India) outranked
+        # Unilever's own London line on the currency tiebreak.
+        country, cand_country = info.get("country"), cand_info.get("country")
+        if country and cand_country and country != cand_country:
             continue
         ranked.append((rank_key(cand_info, symbol), symbol, cand_name or name))
 

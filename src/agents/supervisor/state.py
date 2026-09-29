@@ -146,6 +146,9 @@ class FinancialState:
     # sections, emphasis. Steers structure and tone only; every figure still
     # comes from the model and the calculator.
     report_brief: str = ""
+    # The US line the answer is stated in when the valuation ran on the home
+    # listing (src/listing_view.py): its ticker, price and the receipt ratio.
+    listing_view: Optional[Dict[str, Any]] = None
 
     # Analysis base path (where all outputs are saved)
     analysis_path: Optional[str] = None

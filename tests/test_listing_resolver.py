@@ -497,3 +497,132 @@ class TestCompanyLabel:
         assert 'payload["company"] = name' in source
         # Name and currency resolve together in one lookup.
         assert "listing_identity" in source
+
+
+# ---------------------------------------------------------------------------
+# The same issuer, not a company sharing its brand (2026-09-28)
+# ---------------------------------------------------------------------------
+# Captured from the live API, trimmed. Unilever's US line trades in dollars
+# over euro books, so the currency swap looked for a better listing and took
+# Hindustan Unilever: "Unilever" is half of "Hindustan Unilever", and INR over
+# INR outranked Unilever's own London line on the currency tiebreak.
+
+UNILEVER_NYSE = {
+    "longName": "Unilever PLC", "country": "United Kingdom", "currency": "USD",
+    "financialCurrency": "EUR", "exchange": "NYQ", "market": "us_market",
+    "marketCap": 134643638272, "currentPrice": 62.53, "averageVolume": 3922760,
+}
+UNILEVER_LSE = {
+    "longName": "Unilever PLC", "country": "United Kingdom", "currency": "GBp",
+    "financialCurrency": "EUR", "exchange": "LSE", "market": "gb_market",
+    "marketCap": 100578992128, "currentPrice": 4671.0, "averageVolume": 3100000,
+}
+HINDUSTAN_UNILEVER = {
+    "longName": "Hindustan Unilever Limited", "country": "India", "currency": "INR",
+    "financialCurrency": "INR", "exchange": "NSI", "market": "in_market",
+    "marketCap": 4454825328640, "currentPrice": 1896.0, "averageVolume": 1500000,
+}
+ALIBABA_NYSE = {
+    "longName": "Alibaba Group Holding Limited", "country": "China", "currency": "USD",
+    "financialCurrency": "CNY", "exchange": "NYQ", "market": "us_market",
+    "marketCap": 270417412096, "currentPrice": 108.76, "averageVolume": 11528584,
+}
+ALIBABA_HK = {
+    "longName": "Alibaba Group Holding Limited", "country": "China", "currency": "HKD",
+    "financialCurrency": "CNY", "exchange": "HKG", "market": "hk_market",
+    "marketCap": 2142254792704, "currentPrice": 107.7, "averageVolume": 60000000,
+}
+ALIBABA_SDR = {  # a Singapore depository receipt Yahoo does not mark as one
+    "longName": "Alibaba Group Holding Limited", "country": "China", "currency": "SGD",
+    "financialCurrency": "CNY", "exchange": "SES", "market": "sg_market",
+    "marketCap": 69419401216, "currentPrice": 3.5, "averageVolume": 90000000,
+}
+
+
+def _every_query_returns(universe, quotes):
+    class _Search:
+        def __init__(self, query, max_results=8):
+            self.quotes = quotes
+
+    class _Ticker:
+        def __init__(self, symbol):
+            self.info = universe.get(symbol, {})
+
+    module = types.ModuleType("yfinance")
+    module.Search, module.Ticker = _Search, _Ticker
+    return module
+
+
+class TestSameIssuer:
+    def test_a_one_word_name_is_not_a_company_carrying_it(self):
+        assert same_company("Unilever PLC", "Hindustan Unilever Limited") is False
+        assert same_company("Siemens Aktiengesellschaft", "Siemens Energy AG") is False
+
+    def test_a_one_word_name_still_matches_its_own_venues(self):
+        assert same_company("Unilever PLC", "UNILEVER PLC ADR") is True
+        assert same_company("Nestlé S.A.", "Nestle SA Reg") is True
+
+    def test_a_listing_of_another_domicile_is_another_company(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "yfinance", _every_query_returns(
+            {"HINDUNILVR.NS": HINDUSTAN_UNILEVER, "ULVR.L": UNILEVER_LSE},
+            [{"symbol": "HINDUNILVR.NS", "quoteType": "EQUITY", "shortname": "Hindustan Unilever Limited"},
+             {"symbol": "ULVR.L", "quoteType": "EQUITY", "shortname": "UNILEVER PLC ORD 3 1/9P"}],
+        ))
+        # Without the name rule the Indian line also fails on domicile, and the
+        # other way round: each check alone is enough.
+        assert better_listing("UL", UNILEVER_NYSE) == ("ULVR.L", "Unilever PLC")
+
+    def test_a_candidate_is_found_by_its_long_name_when_the_short_one_is_a_code(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "yfinance", _every_query_returns(
+            {"9988.HK": ALIBABA_HK, "HBBD.SI": ALIBABA_SDR},
+            [{"symbol": "9988.HK", "quoteType": "EQUITY", "shortname": "BABA-W",
+              "longname": "Alibaba Group Holding Limited"},
+             {"symbol": "HBBD.SI", "quoteType": "EQUITY", "shortname": "h Alibaba HK SDR 5to1",
+              "longname": "Alibaba Group Holding Limited"}],
+        ))
+        assert better_listing("BABA", ALIBABA_NYSE)[0] == "9988.HK"
+
+
+class TestHongKongIsHomeForMainlandIssuers:
+    def test_a_mainland_company_is_at_home_in_hong_kong(self):
+        assert is_home_listing(ALIBABA_HK, "9988.HK") is True
+
+    def test_a_foreign_company_is_not(self):
+        assert is_home_listing({"country": "United Kingdom"}, "0005.HK") is False
+
+    def test_the_a_share_line_still_ranks_first(self):
+        a_share = {"country": "China", "currency": "CNY", "financialCurrency": "CNY",
+                   "exchange": "SHZ", "market": "cn_market", "averageVolume": 1}
+        h_share = {"country": "China", "currency": "HKD", "financialCurrency": "CNY",
+                   "exchange": "HKG", "market": "hk_market", "averageVolume": 10**9}
+        assert rank_key(a_share, "002594.SZ") > rank_key(h_share, "1211.HK")
+
+
+class TestEachIdentityCheckOnItsOwn:
+    def test_the_domicile_check_alone_rejects_a_same_named_foreign_line(self, monkeypatch):
+        # The name matches; only the domicile tells them apart. On INR over INR
+        # it would outrank the London line.
+        namesake = dict(HINDUSTAN_UNILEVER, longName="Unilever PLC")
+        monkeypatch.setitem(sys.modules, "yfinance", _every_query_returns(
+            {"UNI.NS": namesake, "ULVR.L": UNILEVER_LSE},
+            [{"symbol": "UNI.NS", "quoteType": "EQUITY", "shortname": "Unilever PLC"},
+             {"symbol": "ULVR.L", "quoteType": "EQUITY", "shortname": "Unilever PLC"}],
+        ))
+        assert better_listing("UL", UNILEVER_NYSE)[0] == "ULVR.L"
+
+    def test_the_name_check_alone_rejects_a_same_country_company_carrying_the_brand(self, monkeypatch):
+        siemens_adr = {"longName": "Siemens Aktiengesellschaft", "country": "Germany",
+                       "currency": "USD", "financialCurrency": "EUR", "exchange": "PNK",
+                       "marketCap": 1, "currentPrice": 1.0}
+        energy = {"longName": "Siemens Energy AG", "country": "Germany", "currency": "EUR",
+                  "financialCurrency": "EUR", "exchange": "GER", "market": "de_market",
+                  "marketCap": 119867547648, "currentPrice": 140.0, "averageVolume": 9000000}
+        siemens = {"longName": "Siemens Aktiengesellschaft", "country": "Germany", "currency": "EUR",
+                   "financialCurrency": "EUR", "exchange": "GER", "market": "de_market",
+                   "marketCap": 217264570368, "currentPrice": 270.0, "averageVolume": 1500000}
+        monkeypatch.setitem(sys.modules, "yfinance", _every_query_returns(
+            {"ENR.DE": energy, "SIE.DE": siemens},
+            [{"symbol": "ENR.DE", "quoteType": "EQUITY", "shortname": "Siemens Energy AG"},
+             {"symbol": "SIE.DE", "quoteType": "EQUITY", "shortname": "Siemens AG"}],
+        ))
+        assert better_listing("SIEGY", siemens_adr)[0] == "SIE.DE"
