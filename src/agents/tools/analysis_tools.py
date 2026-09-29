@@ -121,16 +121,17 @@ class AgentContext:
         self._asked_listing[home["symbol"]] = {"symbol": ticker, "info": info, "ratio": home["ratio"]}
         return home["symbol"]
 
-    def _build_listing_view(self, state, symbol: str) -> Optional[dict]:
+    def _typed(self, symbol: str) -> bool:
+        """Whether the user's message names this exact symbol ("7203.T")."""
         import re
+        return bool(symbol) and bool(re.search(
+            rf"(?<![A-Za-z0-9.]){re.escape(symbol)}(?![A-Za-z0-9])", self.user_prompt or "", re.I))
+
+    def _build_listing_view(self, state, symbol: str) -> Optional[dict]:
         from src.listing_resolver import venue_suffix
         from src.listing_view import build_view, us_line_for
 
-        if not venue_suffix(symbol):
-            return None
-        typed = re.search(rf"(?<![A-Za-z0-9.]){re.escape(symbol)}(?![A-Za-z0-9])",
-                          self.user_prompt or "", re.I)
-        if typed:
+        if not venue_suffix(symbol) or self._typed(symbol):
             return None
         km = state.financial_data.key_metrics if getattr(state, "financial_data", None) else {}
         basic = (km.get("basic_info") or {}) if isinstance(km, dict) else {}
@@ -238,6 +239,32 @@ class AgentContext:
         except Exception:
             info = {}
 
+        # A company named rather than typed and resolved to a foreign listing
+        # is valued on its US line when that line reports to the SEC as a US
+        # company (src/sec_filer.py): Shopify's main market is New York, not
+        # Toronto. A foreign ticker the user typed is valued as typed.
+        if info and "." in ticker and not self._typed(ticker):
+            try:
+                from src.listing_view import us_line_for
+                from src.sec_filer import files_as_us_company
+                if ticker not in self._us_lines:
+                    self._us_lines[ticker] = us_line_for(
+                        info.get("longName") or info.get("shortName"), info.get("country"),
+                        info.get("sharesOutstanding"), info.get("impliedSharesOutstanding"))
+                us = self._us_lines[ticker]
+                us_filer = bool(us) and bool(files_as_us_company(us["symbol"]))
+            except Exception:
+                us, us_filer = None, False
+            if us_filer:
+                print(
+                    f"[SUPERVISOR] ↪ {info.get('longName') or ticker} reports to the SEC as a US "
+                    f"company; valuing its US line {us['symbol']} instead of {ticker}."
+                )
+                self._listing_cache[ticker] = us["symbol"]
+                ticker = us["symbol"]
+                company_name = company_name or info.get("longName")
+                info = us["info"]
+
         # The US line of a company whose home market is elsewhere is valued on
         # the home line and the answer is stated back per US share: regressed
         # on the S&P 500, which it barely moves with, a foreign company's US
@@ -275,6 +302,13 @@ class AgentContext:
         mismatch = (info.get("currency") and info.get("financialCurrency")
                     and info.get("currency") != info.get("financialCurrency")
                     and "." not in ticker)
+        if mismatch:
+            # A US filer is valued on its US line whatever it reports in.
+            try:
+                from src.sec_filer import files_as_us_company
+                mismatch = not files_as_us_company(ticker)
+            except Exception:
+                pass
         if info and mismatch and is_analyzable(info):
             cand = {}
             try:

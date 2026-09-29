@@ -207,8 +207,9 @@ def home_line_for(ticker: str, info: dict,
     Only a line the answer can be converted back from qualifies: the same
     issuer on its home exchange, quoted in a unit the scraper reads, with a
     clean receipt ratio, a price that agrees with it, and an exchange rate the
-    scraper can convert its price with. Anything less keeps the ticker's
-    existing handling. Never raises.
+    scraper can convert its price with. A company filing with the SEC as a US
+    company stays on its US line. Anything less keeps the ticker's existing
+    handling. Never raises.
     """
     try:
         info = info or {}
@@ -216,6 +217,11 @@ def home_line_for(ticker: str, info: dict,
             return None
         country = info.get("country")
         if not country or country == _US_COUNTRY or country not in _HOME_COUNTRIES:
+            return None
+        # A company that reports to the SEC as a US company (Yum China, Waste
+        # Connections, Shopify) trades mainly here and is valued here.
+        from src.sec_filer import files_as_us_company
+        if files_as_us_company(ticker):
             return None
         upgrade = better_listing(ticker, info)
         if not upgrade:

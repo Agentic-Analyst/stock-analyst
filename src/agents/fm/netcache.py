@@ -18,7 +18,8 @@ import tempfile
 import time
 from typing import Any, Optional
 
-_UA = "VYNN/1.0 (+https://vynn.ai; reference data)"
+# vynnai.com: vynn.ai is another company's domain.
+_UA = "VYNN/1.0 (+https://vynnai.com; reference data)"
 
 
 def http_get(url: str, timeout: float = 8.0) -> bytes:
