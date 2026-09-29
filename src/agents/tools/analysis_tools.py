@@ -774,20 +774,9 @@ from src.currency import currency_symbol  # noqa: E402
 # What "mega-cap" means, in USD. Roughly the top ~40 companies on earth.
 _MEGACAP_USD = 200e9
 
-# Units of local currency per USD, for the handful of markets this product
-# actually reaches. Deliberately a STATIC table and not a live FX call: this is
-# a sanity rail, so a network hiccup must never change whether a valuation is
-# flagged, and an order-of-magnitude figure is all a "is this a mega-cap?"
-# question needs. Rates need only be right to ~20% for the threshold to sort
-# companies correctly.
-_USD_PER_UNIT = {
-    "USD": 1.0, "EUR": 1.08, "GBP": 1.27, "CHF": 1.12, "CAD": 0.73,
-    "AUD": 0.66, "JPY": 0.0067, "CNY": 0.14, "HKD": 0.128, "TWD": 0.031,
-    "KRW": 0.00072, "INR": 0.0113, "SGD": 0.74, "SEK": 0.093, "NOK": 0.091,
-    "DKK": 0.145, "BRL": 0.18, "MXN": 0.050, "ZAR": 0.054, "ILS": 0.27,
-    "THB": 0.028, "IDR": 0.000062, "MYR": 0.22, "PHP": 0.017, "VND": 0.000040,
-    "TRY": 0.029, "PLN": 0.25, "SAR": 0.267, "AED": 0.272,
-}
+# USD per unit of local currency, static and approximate: see
+# src/listing_resolver.py, which shares it for sizing listings.
+from src.listing_resolver import USD_PER_UNIT as _USD_PER_UNIT  # noqa: E402
 
 
 def _megacap_threshold(currency):

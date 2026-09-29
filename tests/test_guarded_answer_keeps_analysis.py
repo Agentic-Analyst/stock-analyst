@@ -198,12 +198,25 @@ def test_withheld_figures_are_caught_in_their_rounded_prints():
     assert makes_claim("It sits −44.0% from the market.", tokens)
 
 
+# These guard against backtracking that grows with the square of the input,
+# which takes seconds to minutes; about 1.4s on a laptop, and CI runs twice as
+# slow, so the budget leaves room for the machine but not for a blowup.
 def test_pathological_input_stays_fast():
     started = time.monotonic()
     review_section("1," * 100_000 + " upside")
     review_section("$1. " * 50_000)
     review_section("Refining margins were strong this quarter. " * 5_000)
-    assert time.monotonic() - started < 3.0
+    assert time.monotonic() - started < 6.0
+
+
+def test_a_long_capitalised_token_stays_fast():
+    # Every capital inside "A'A'A..." started a scan to its end: two minutes
+    # for one section before the capitalised-word patterns were anchored.
+    started = time.monotonic()
+    review_section("A'" * 100_000 + "s")
+    review_section("Buy " + "A'" * 50_000 + "s")
+    review_section("BMO's " + "A" * 100_000 + "'s Buy rating")
+    assert time.monotonic() - started < 6.0
 
 
 # From the third review (2026-09-28): real claims just outside the obvious
@@ -276,6 +289,15 @@ def test_an_ordinary_idiom_does_not_sink_a_section(text):
     "JPMorgan raised its price target to $600 after the beat.",
     "Goldman Sachs upgraded the shares to Buy on Tuesday.",
     "Morgan Stanley named it a top pick for 2026.",
+    # The rating actions that read as VYNN's own call ("an Outperform rating")
+    # and dropped the whole analysis: gate26, Delta Air Lines.
+    "Other coverage noted BMO lowered its target while maintaining an Outperform rating, and Delta's "
+    "concern about competitive effects of China-U.S. flight-cap policy and unequal Russian airspace access.",
+    "Jefferies reiterated its Buy rating after the call.",
+    "Barclays kept its Overweight rating.",
+    "BMO's Outperform rating stands despite the cut.",
+    "The stock is rated Overweight by Morgan Stanley.",
+    "Evercore ISI maintains an Outperform on the shares.",
 ])
 def test_a_brokers_rating_action_is_left_out_as_the_streets_view(text):
     review = review_section(XOM_SECTION + "\n\n" + text)
@@ -623,3 +645,25 @@ def test_a_declined_report_is_not_announced_as_generated():
     assert extract_findings("build_model", declined) == []
     # A report that was written still gets its card.
     assert extract_findings("write_report", {"status": "success"})[0]["value"] == "Generated"
+
+
+
+@pytest.mark.parametrize("text", [
+    "We maintain an Outperform rating.",
+    "VYNN maintains a Buy rating on the shares.",
+    "I would keep a Buy rating here.",
+    "Our view: we reiterate an Overweight rating.",
+])
+def test_a_rating_action_in_the_first_person_is_still_a_call(text):
+    review = review_section(XOM_SECTION + "\n\n" + text)
+    assert not review.publishable and review.claims
+
+
+@pytest.mark.parametrize("text", [
+    "Investors kept a buy-the-dip mentality through the drawdown.",
+    "Regulators maintained a hold on the merger review.",
+    "The Fed held its benchmark rate steady.",
+])
+def test_an_action_verb_near_a_rating_word_is_not_a_rating_action(text):
+    review = review_section(XOM_SECTION + "\n\n" + text)
+    assert review.publishable and text in review.text
