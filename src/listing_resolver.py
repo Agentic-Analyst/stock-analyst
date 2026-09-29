@@ -56,6 +56,11 @@ _NOISE = {
     "aktiebolag", "naamloze", "vennootschap",
 }
 
+# Legal forms of more than one word. "Public" alone can be the name (Public
+# Bank Berhad), so it goes only inside these: Vodafone's legal name is "Vodafone
+# Group Public Limited Company", which otherwise never equals "Vodafone".
+_LEGAL_PHRASES = re.compile(r"\bpublic\s+(?:limited\s+company|company\s+limited|company)\b")
+
 # OTC Markets tiers. A PNK-only test misses OTCQX and OTCID, which is where two
 # of the most-traded ADRs in the US sit: Roche (RHHBY, OQX) and Nestlé
 # (NSRGY, OID).
@@ -96,6 +101,35 @@ _REGIONAL_SUFFIXES = {"SG", "MU", "HM", "DU", "HA", "BE", "F"}
 
 _MAX_CANDIDATES = 6  # bounds the .info calls on the failure path
 
+# USD per unit of local currency, for the markets this product reaches.
+# Deliberately STATIC, not a live FX call: it only sizes things to an order of
+# magnitude (is this a mega-cap? is this company a tenth the size of that one?),
+# so a network hiccup must never change the answer, and rates need only be
+# right to ~20%.
+USD_PER_UNIT = {
+    "USD": 1.0, "EUR": 1.08, "GBP": 1.27, "CHF": 1.12, "CAD": 0.73,
+    "AUD": 0.66, "JPY": 0.0067, "CNY": 0.14, "HKD": 0.128, "TWD": 0.031,
+    "KRW": 0.00072, "INR": 0.0113, "SGD": 0.74, "SEK": 0.093, "NOK": 0.091,
+    "DKK": 0.145, "BRL": 0.18, "MXN": 0.050, "ZAR": 0.054, "ILS": 0.27,
+    "THB": 0.028, "IDR": 0.000062, "MYR": 0.22, "PHP": 0.017, "VND": 0.000040,
+    "TRY": 0.029, "PLN": 0.25, "SAR": 0.267, "AED": 0.272,
+}
+
+
+def usd_market_cap(info: dict) -> Optional[float]:
+    """
+    A listing's market cap in dollars, roughly (USD_PER_UNIT), or None.
+
+    Yahoo states a pence line's market cap in pounds (see the module note), and
+    agorot and cents lines in their major units.
+    """
+    cap = (info or {}).get("marketCap")
+    currency = (info or {}).get("currency")
+    rate = USD_PER_UNIT.get({"GBp": "GBP", "ILA": "ILS", "ZAc": "ZAR"}.get(currency, currency))
+    if not isinstance(cap, (int, float)) or isinstance(cap, bool) or cap <= 0 or rate is None:
+        return None
+    return float(cap) * rate
+
 
 def _fold(text: object) -> str:
     """
@@ -110,20 +144,65 @@ def _fold(text: object) -> str:
     return folded.lower()
 
 
-def _tokens(name: object) -> set:
-    """Noise-stripped token set for company-name matching."""
+def _token_list(name: object) -> list:
+    """Noise-stripped tokens for company-name matching, in the name's order."""
     folded = _fold(name)
     # Collapse dotted corporate forms BEFORE splitting so "S.A." becomes the
     # noise word "sa" rather than the single letters "s" and "a", which survive
     # the noise filter and can match between unrelated companies.
     folded = folded.replace(".", "")
     folded = re.sub(r"[^a-z0-9 ]+", " ", folded)
+    folded = _LEGAL_PHRASES.sub(" ", folded)
     words = [t for t in folded.split() if len(t) > 1]
-    tokens = {t for t in words if t not in _NOISE}
+    tokens = [t for t in words if t not in _NOISE]
     # Some real names consist ENTIRELY of structure words — "Societe Generale"
     # is a bank, not a legal form. Returning an empty set there would make the
     # company unable to match even itself, so fall back to the raw words.
-    return tokens or set(words)
+    return tokens or words
+
+
+def _tokens(name: object) -> set:
+    """Noise-stripped token set for company-name matching."""
+    return set(_token_list(name))
+
+
+# Words that mark a local subsidiary or affiliate carrying the parent's brand:
+# "Hyundai Motor India", "PT Unilever Indonesia", "Hindustan Unilever",
+# "Carlsberg Brewery Malaysia", "Walmart de México". A query that names the
+# country itself ("Nestle India") keeps it.
+_COUNTRY_MARKERS = frozenset({
+    "india", "indian", "hindustan", "bharat", "indonesia", "indonesian", "malaysia",
+    "malaysian", "nigeria", "nigerian", "pakistan", "bangladesh", "lanka", "kenya",
+    "ghana", "egypt", "morocco", "thailand", "thai", "philippines", "vietnam",
+    "brasil", "brazil", "argentina", "chile", "peru", "colombia", "mexico",
+    "turkey", "turkiye",
+})
+
+
+def name_match(query: object, name: object) -> tuple:
+    """
+    (the listing's name is exactly the query, it contains every word of it).
+
+    Venue ranking alone let another company carrying the brand win: "Unilever"
+    resolved to PT Unilever Indonesia, "Siemens" to Siemens Energy, "ABB" to
+    Abbott, "Linde" to Lindex. An exact name is strong evidence and ranks above
+    venue. A partial one is not: BMW's legal name is Bayerische Motoren Werke
+    and Santander's is Banco Santander, so "contains the query" favoured BMW
+    Industries (India) and a Canadian depositary receipt.
+    """
+    q, n = _token_list(query), _token_list(name)
+    if not q or not n or not set(q) <= set(n):
+        return (0, 0)
+    return (int(set(n) == set(q)), 1)
+
+
+def adds_country(query: object, name: object) -> bool:
+    """
+    Whether the name carries a country the query did not name: the mark of a
+    local subsidiary or affiliate ("Hyundai Motor India", "Maruti Suzuki
+    India", "Delta Electronics (Thailand)"). "Nestle India" asked for keeps it.
+    """
+    return bool((set(_token_list(name)) - set(_token_list(query))) & _COUNTRY_MARKERS)
 
 
 def names_might_match(a: object, b: object) -> bool:
@@ -277,6 +356,24 @@ def is_home_listing(info: dict, symbol: str) -> bool:
     return suffix == "HK" and country == "China"
 
 
+def venue_rank(info: dict, symbol: str) -> int:
+    """Venue quality: a listing not on OTC, a share rather than a receipt, at home."""
+    score = 0
+    if not is_otc(info):
+        score += 400
+    if not is_depositary(info, symbol):
+        score += 200
+    if is_home_listing(info, symbol):
+        score += 100
+    return score
+
+
+def currency_match(info: dict) -> bool:
+    """Whether the listing trades in the currency it reports in."""
+    ccy, fccy = info.get("currency"), info.get("financialCurrency")
+    return bool(ccy and fccy and ccy == fccy)
+
+
 def rank_key(info: dict, symbol: str) -> tuple:
     """
     Sort key for candidate listings, best first (use reverse=True).
@@ -286,17 +383,8 @@ def rank_key(info: dict, symbol: str) -> tuple:
     is last and worth little, because on its own it prefers OTC pink sheets to
     the Amsterdam primary.
     """
-    score = 0
-    if not is_otc(info):
-        score += 400
-    if not is_depositary(info, symbol):
-        score += 200
-    if is_home_listing(info, symbol):
-        score += 100
-    ccy, fccy = info.get("currency"), info.get("financialCurrency")
-    if ccy and fccy and ccy == fccy:
-        score += 10
-    return (score, info.get("averageVolume") or 0)
+    return (venue_rank(info, symbol) + (10 if currency_match(info) else 0),
+            info.get("averageVolume") or 0)
 
 
 def _enrichment_order(candidates: dict) -> list:

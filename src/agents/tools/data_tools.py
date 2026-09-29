@@ -77,8 +77,9 @@ class ResolveSymbolTool(Tool):
             )
 
         from src.listing_resolver import (
-            _enrichment_order, _search_queries, is_depositary, is_home_listing,
-            is_otc, names_might_match, rank_key, venue_suffix,
+            _enrichment_order, _search_queries, _tokens, adds_country, currency_match, is_analyzable,
+            is_depositary, is_home_listing, is_otc, name_match, names_might_match, usd_market_cap,
+            venue_rank, venue_suffix,
         )
 
         def _search(q: str) -> List[dict]:
@@ -93,6 +94,8 @@ class ResolveSymbolTool(Tool):
                     out.append({
                         "ticker": sym,
                         "name": quote.get("shortname") or quote.get("longname") or "",
+                        # Hong Kong's short names are trading codes ("BABA-W").
+                        "_longname": quote.get("longname") or "",
                         "exchange": quote.get("exchDisp") or quote.get("exchange") or "",
                         "type": quote.get("quoteType") or quote.get("typeDisp") or "",
                     })
@@ -132,6 +135,8 @@ class ResolveSymbolTool(Tool):
 
         def _annotate(cand: dict) -> dict:
             """Publish the venue facts the model needs to choose for itself."""
+            cand.pop("_longname", None)
+            cand.pop("_pos", None)
             info, sym = cand.pop("_info", {}) or {}, cand["ticker"]
             if not info:
                 return cand
@@ -156,11 +161,13 @@ class ResolveSymbolTool(Tool):
             return cand
 
         # The model's own query first: it is usually already the brand name, and
-        # that path stays a single search.
+        # that path stays a single search. Each candidate keeps Yahoo's order
+        # (_pos), a popularity signal the ranking uses among equals.
         seen, candidates = set(), []
         for c in await asyncio.to_thread(_search, query):
             if c["ticker"] not in seen:
                 seen.add(c["ticker"])
+                c["_pos"] = len(candidates)
                 candidates.append(c)
 
         # Keep only equities. The responses also carry ETFs, indices, mutual
@@ -177,8 +184,85 @@ class ResolveSymbolTool(Tool):
         # alone hands back a company the user did not ask for.
         wanted = query.upper()
 
-        def _sort_key(c):
-            return (c["ticker"].upper() == wanted,) + rank_key(c.get("_info") or {}, c["ticker"])
+        def _name(c):
+            return (c.get("_info") or {}).get("longName") or c.get("_longname") or c["name"]
+
+        # Two questions, in order: which company the query means, then which
+        # of its lines. One key for both let a line's currency pick the
+        # company: Ping An Bank's Shenzhen line trades in its reporting
+        # currency and outranked Ping An Insurance, which Yahoo lists first.
+        #
+        # A company's lines: the symbol typed; venue quality; one that can be
+        # valued (Meituan's renminbi counter has no market cap); one that
+        # trades (Diageo's dollar line in London, 1,450 shares a day); the
+        # currency tiebreak (a mainland A-share over its Hong Kong line);
+        # volume.
+        #
+        # The companies: the one whose line was typed; one whose name is
+        # exactly the query (venue alone handed "Siemens" to Siemens Energy and
+        # "ABB" to Abbott), from Yahoo's own data and not a search snippet, and
+        # unless another company carrying the query dwarfs it (without its
+        # legal forms Delta Corp, $0.2B, is exactly "Delta", beside Delta Air
+        # Lines, $55B) or, with a size missing, Yahoo lists it first (Reliance
+        # Industries' NSE line has no market cap; "Reliance, Inc." is exactly
+        # "Reliance"); the venue of its best line; not one adding a country the
+        # query did not name when a company carrying the brand without one is
+        # at least a tenth its size ("Suzuki": not Maruti Suzuki India; for
+        # "Maruti Suzuki" it is the company); then Yahoo's order, which knows
+        # "BMW" is BMW AG and "Delta" is Delta Air Lines.
+        def _rank(cands):
+            def info(c):
+                return c.get("_info") or {}
+
+            groups = {}
+            for c in cands:
+                groups.setdefault(frozenset(_tokens(_name(c))), []).append(c)
+
+            for lines in groups.values():
+                most = max((info(c).get("averageVolume") or 0) for c in lines)
+                lines.sort(key=lambda c: (
+                    c["ticker"].upper() == wanted, venue_rank(info(c), c["ticker"]),
+                    is_analyzable(info(c)),
+                    not (most and (info(c).get("averageVolume") or 0) * 20 < most),
+                    currency_match(info(c)), info(c).get("averageVolume") or 0,
+                ), reverse=True)
+
+            def name(key):
+                return _name(groups[key][0])
+
+            def cap(key):
+                return max((usd_market_cap(info(c)) or 0 for c in groups[key]), default=0) or None
+
+            def pos(key):
+                return min(c.get("_pos", 999) for c in groups[key])
+
+            def sized(other, mine, bigger):
+                if cap(other) and cap(mine):
+                    return bigger(cap(other), cap(mine))
+                return pos(other) < pos(mine)
+
+            contains = {key: bool(name_match(query, name(key))[1]) for key in groups}
+
+            def exact(key):
+                if not (name_match(query, name(key))[0]
+                        and any(info(c).get("longName") for c in groups[key])):
+                    return False
+                return not any(sized(o, key, lambda theirs, mine: theirs > 10 * mine)
+                               for o in groups if o != key and contains[o])
+
+            def affiliate(key):
+                if not (contains[key] and adds_country(query, name(key))):
+                    return False
+                return any(sized(o, key, lambda theirs, mine: theirs * 10 >= mine)
+                           for o in groups
+                           if o != key and contains[o] and not adds_country(query, name(o)))
+
+            order = sorted(groups, key=lambda key: (
+                any(c["ticker"].upper() == wanted for c in groups[key]), exact(key),
+                venue_rank(info(groups[key][0]), groups[key][0]["ticker"]), not affiliate(key),
+                -pos(key),
+            ), reverse=True)
+            return [c for key in order for c in groups[key]]
 
         # Spend the enrichment budget on the most promising symbols rather than
         # on Yahoo's first six, which for a legal-name query are all regional
@@ -187,7 +271,7 @@ class ResolveSymbolTool(Tool):
         by_symbol = {c["ticker"]: c for c in equities}
         preferred = [by_symbol[t] for t in _enrichment_order(by_symbol)]
         enriched = await _enrich(preferred[:6])
-        ranked = sorted(enriched, key=_sort_key, reverse=True)
+        ranked = _rank(enriched)
 
         # Retry unless we already have the company's HOME listing. Merely finding
         # something tradeable is not enough: the de-accented "Nestle S.A." returns
@@ -205,19 +289,22 @@ class ResolveSymbolTool(Tool):
             for alt in _search_queries(query)[1:]:
                 extra = [c for c in await asyncio.to_thread(_search, alt)
                          if c["ticker"] not in seen and _is_equity(c)
-                         and names_might_match(query, c["name"])]
+                         and (names_might_match(query, c["name"])
+                              or names_might_match(query, c["_longname"]))]
                 if not extra:
                     continue
                 for c in extra:
                     seen.add(c["ticker"])
+                    c["_pos"] = len(seen)
                 # Only the new arrivals need a lookup; `ranked` already carries
                 # its own.
-                ranked = sorted(ranked + await _enrich(extra[:6]),
-                                key=_sort_key, reverse=True)
+                ranked = _rank(ranked + await _enrich(extra[:6]))
                 if any(_good(c) for c in ranked):
                     break
 
-        ranked = [_annotate(c) for c in ranked] + others
+        # Internal fields never reach the model, from any result type.
+        ranked = [{k: v for k, v in c.items() if not k.startswith("_")}
+                  for c in [_annotate(c) for c in ranked] + others]
 
         if not ranked:
             return tool_ok(
@@ -231,9 +318,10 @@ class ResolveSymbolTool(Tool):
             query=query,
             candidates=ranked[:6],
             best_guess=ranked[0]["ticker"],
-            note=("Candidates are ordered by venue quality: a company's home listing "
-                  "first, then cross-listings, then depositary receipts and OTC lines. "
-                  "best_guess is the top of that order. Read the `venue` field before "
+            note=("Candidates are ordered by how closely the company name matches the "
+                  "query, then by venue quality: a company's home listing first, then "
+                  "cross-listings, then depositary receipts and OTC lines. best_guess is "
+                  "the top of that order. Read the `venue` field before "
                   "overriding it, and prefer a listing with a market_cap — one without "
                   "cannot be valued. Always pass the FULL symbol including its exchange "
                   "suffix (MC.PA, not MC): a bare ticker resolves to whichever company "
