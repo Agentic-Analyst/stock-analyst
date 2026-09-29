@@ -64,6 +64,106 @@ class AgentContext:
         # Requested ticker -> the listing we actually analyze, so a repeated
         # request for a bad line doesn't re-run the search over the network.
         self._listing_cache = {}
+        # Valued home listing -> the US line the user asked for, recorded when
+        # ensure_state_for_ticker moves one (see src/listing_view.py).
+        self._asked_listing = {}
+        # Valued ticker -> the US line found for a named company (or None),
+        # looked up once; (valued ticker, US ticker) -> the view built on it.
+        # A failed view is not kept: it is retried when the next tool asks.
+        self._us_lines = {}
+        self._views = {}
+
+    def listing_view(self, state) -> Optional[dict]:
+        """
+        The listing the answer is stated in, when the valuation ran on another.
+
+        A US line moved to its home listing is stated back per US share. A
+        company that was named rather than typed and is valued on a foreign
+        listing is stated per share of its US-exchange line, when it has one:
+        a user asking about Toyota reads TM in dollars. A home ticker the user
+        typed ("7203.T") is answered as typed. Left on the state for the
+        answer templates. Never raises.
+        """
+        symbol = getattr(state, "ticker", None)
+        view = None
+        if symbol:
+            try:
+                view = self._build_listing_view(state, symbol)
+            except Exception:
+                view = None
+        try:
+            state.listing_view = view
+        except Exception:
+            pass
+        return view
+
+    def home_listing_of(self, ticker: str) -> Optional[str]:
+        """
+        The listing a US line is valued on, when ensure_state_for_ticker would
+        move it; the line is remembered as the one asked about. None when it
+        would stay. Never raises; one network lookup when not yet known.
+        """
+        ticker = (ticker or "").strip().upper()
+        if ticker in self._listing_cache:
+            return self._listing_cache[ticker]
+        if not ticker or "." in ticker:
+            return None
+        try:
+            import yfinance as yf
+            from src.listing_view import home_line_for
+            info = yf.Ticker(ticker).info or {}
+            home = home_line_for(ticker, info)
+        except Exception:
+            return None
+        if not home:
+            return None
+        self._listing_cache[ticker] = home["symbol"]
+        self._asked_listing[home["symbol"]] = {"symbol": ticker, "info": info, "ratio": home["ratio"]}
+        return home["symbol"]
+
+    def _typed(self, symbol: str) -> bool:
+        """Whether the user's message names this exact symbol ("7203.T")."""
+        import re
+        return bool(symbol) and bool(re.search(
+            rf"(?<![A-Za-z0-9.]){re.escape(symbol)}(?![A-Za-z0-9])", self.user_prompt or "", re.I))
+
+    def _build_listing_view(self, state, symbol: str) -> Optional[dict]:
+        from src.listing_resolver import venue_suffix
+        from src.listing_view import build_view, us_line_for
+
+        if not venue_suffix(symbol) or self._typed(symbol):
+            return None
+        km = state.financial_data.key_metrics if getattr(state, "financial_data", None) else {}
+        basic = (km.get("basic_info") or {}) if isinstance(km, dict) else {}
+        market = (km.get("market_data") or {}) if isinstance(km, dict) else {}
+        # The price the model compared its values against, in the statements'
+        # currency. Unconverted (no exchange rate), it cannot anchor a dollar view.
+        if market.get("current_price_currency") != basic.get("currency"):
+            return None
+        asked = self._asked_listing.get(symbol)
+        if asked is None:
+            if symbol not in self._us_lines:
+                self._us_lines[symbol] = us_line_for(
+                    basic.get("long_name") or getattr(state, "company_name", None),
+                    basic.get("country"),
+                    market.get("shares_outstanding_basic"),
+                    market.get("shares_outstanding_implied"))
+            asked = self._us_lines[symbol]
+        if not asked:
+            return None
+        key = (symbol, asked["symbol"])
+        if key not in self._views:
+            from src.listing_resolver import is_home_listing
+            home_market = asked.get("home_market")
+            if home_market is None:
+                home_market = is_home_listing({"country": basic.get("country")}, symbol)
+            view = build_view(asked["symbol"], asked["info"], asked["ratio"], home_symbol=symbol,
+                              reporting_currency=basic.get("currency"),
+                              home_price=market.get("current_price"), home_market=home_market)
+            if not view:
+                return None
+            self._views[key] = view
+        return self._views[key]
 
     def ensure_base_logger(self):
         """
@@ -97,7 +197,8 @@ class AgentContext:
         Reuses the state if the same ticker is requested again.
         """
         from src.agents.supervisor.state import FinancialState
-        from src.listing_resolver import better_listing, is_analyzable
+        from src.listing_resolver import better_listing, is_analyzable, is_home_listing
+        from src.listing_view import receipt_ratio, trades_at_scale
         from path_utils import get_analysis_path, ensure_analysis_paths
         from logger import setup_logger
 
@@ -138,6 +239,59 @@ class AgentContext:
         except Exception:
             info = {}
 
+        # A company named rather than typed and resolved to a foreign listing
+        # is valued on its US line when that line reports to the SEC as a US
+        # company (src/sec_filer.py): Shopify's main market is New York, not
+        # Toronto. A foreign ticker the user typed is valued as typed.
+        if info and "." in ticker and not self._typed(ticker):
+            try:
+                from src.listing_view import us_line_for
+                from src.sec_filer import files_as_us_company
+                if ticker not in self._us_lines:
+                    self._us_lines[ticker] = us_line_for(
+                        info.get("longName") or info.get("shortName"), info.get("country"),
+                        info.get("sharesOutstanding"), info.get("impliedSharesOutstanding"))
+                us = self._us_lines[ticker]
+                us_filer = bool(us) and bool(files_as_us_company(us["symbol"]))
+            except Exception:
+                us, us_filer = None, False
+            if us_filer:
+                print(
+                    f"[SUPERVISOR] ↪ {info.get('longName') or ticker} reports to the SEC as a US "
+                    f"company; valuing its US line {us['symbol']} instead of {ticker}."
+                )
+                self._listing_cache[ticker] = us["symbol"]
+                ticker = us["symbol"]
+                company_name = company_name or info.get("longName")
+                info = us["info"]
+
+        # The US line of a company whose home market is elsewhere is valued on
+        # the home line and the answer is stated back per US share: regressed
+        # on the S&P 500, which it barely moves with, a foreign company's US
+        # line reads as low risk (AstraZeneca's NYSE beta 0.50 against 0.96 in
+        # London). home_line_for returns only a line the answer can be
+        # converted back from; otherwise the rules below apply as before.
+        home = None
+        if info and "." not in ticker:
+            try:
+                from src.listing_view import home_line_for
+                home = home_line_for(ticker, info)
+            except Exception:
+                home = None
+        if home:
+            print(
+                f"[SUPERVISOR] ↪ {ticker} is the US line of {home['name']}; valuing its home "
+                f"listing {home['symbol']} (one {ticker} share = {home['ratio']:g} "
+                f"{home['symbol']} shares) and stating the result per {ticker} share."
+            )
+            self._listing_cache[ticker] = home["symbol"]
+            self._asked_listing[home["symbol"]] = {
+                "symbol": ticker, "info": info, "ratio": home["ratio"],
+            }
+            ticker = home["symbol"]
+            company_name = company_name or home["name"]
+            info = home["info"]
+
         # A depositary receipt trades in one currency and reports in another.
         # Toyota's ADR (TM) quotes in dollars over yen financials, and the model
         # divided yen equity by 1.3B ADRs against a $197 price — value per share
@@ -148,7 +302,15 @@ class AgentContext:
         mismatch = (info.get("currency") and info.get("financialCurrency")
                     and info.get("currency") != info.get("financialCurrency")
                     and "." not in ticker)
+        if mismatch:
+            # A US filer is valued on its US line whatever it reports in.
+            try:
+                from src.sec_filer import files_as_us_company
+                mismatch = not files_as_us_company(ticker)
+            except Exception:
+                pass
         if info and mismatch and is_analyzable(info):
+            cand = {}
             try:
                 upgrade = better_listing(ticker, info)
                 if upgrade:
@@ -156,15 +318,34 @@ class AgentContext:
                     cand = yf.Ticker(upgrade[0]).info or {}
                     if cand.get("currency") != cand.get("financialCurrency"):
                         upgrade = None      # would not resolve the mismatch
+                    # The company's home market, or a line it is actually
+                    # traded on, not any line that happens to trade in the
+                    # reporting currency: Spotify (NYSE, EUR books) went to a
+                    # Frankfurt cross-listing trading 430 shares a day, 639.DE,
+                    # and was regressed on the DAX. Stellantis is registered in
+                    # the Netherlands and trades mostly in Milan.
+                    elif not (is_home_listing(cand, upgrade[0]) or trades_at_scale(cand, info)):
+                        upgrade = None
             except Exception:
                 upgrade = None
             if upgrade:
                 better_symbol, better_name = upgrade
+                home_market = is_home_listing(cand, better_symbol)
                 print(
                     f"[SUPERVISOR] ↪ {ticker} trades in {info.get('currency')} but reports in "
-                    f"{info.get('financialCurrency')}; analyzing the home listing {better_symbol} instead."
+                    f"{info.get('financialCurrency')}; analyzing the "
+                    f"{'home' if home_market else 'main'} listing {better_symbol} instead."
                 )
                 self._listing_cache[ticker] = better_symbol
+                # With a clean receipt ratio the answer is stated back per US
+                # share, as for a line home_line_for moved.
+                ratio = receipt_ratio(
+                    (cand.get("sharesOutstanding"), info.get("sharesOutstanding")),
+                    (cand.get("impliedSharesOutstanding"), info.get("impliedSharesOutstanding")),
+                )
+                if ratio:
+                    self._asked_listing[better_symbol] = {"symbol": ticker, "info": info, "ratio": ratio,
+                                                          "home_market": home_market}
                 ticker = better_symbol
                 company_name = company_name or better_name
                 try:
@@ -190,6 +371,11 @@ class AgentContext:
                     info = yf.Ticker(ticker).info or {}
                 except Exception:
                     pass
+
+        # A move can land on the listing already being analysed (AZN after
+        # AZN.L): keep that state and the model built on it.
+        if self.state is not None and self.ticker == ticker:
+            return self.state
 
         # Resolve company name (best-effort).
         if not company_name:
@@ -1262,14 +1448,63 @@ class GetFinancialsTool(_CtxTool):
         basic = km.get("basic_info", {}) if isinstance(km, dict) else {}
         market = km.get("market_data", {}) if isinstance(km, dict) else {}
         return tool_ok(
-            ticker=ticker,
+            ticker=getattr(state, "ticker", None) or ticker,
             company_name=state.company_name,
             sector=basic.get("sector"),
             industry=basic.get("industry"),
             trailing_pe=market.get("trailing_pe"),
             note="Financial data collected and saved. You can now build_model or write_report.",
             **listing_figures(basic, market),
+            **_listing_view_payload(_view_for(self.ctx, state), street=_street_of(state)),
         )
+
+
+def _view_for(ctx, state) -> Optional[dict]:
+    """The context's listing view for this state; None for a context without one."""
+    compute = getattr(ctx, "listing_view", None)
+    if not callable(compute):
+        return None
+    try:
+        return compute(state)
+    except Exception:
+        return None
+
+
+def _street_of(state) -> Optional[dict]:
+    """The Street's mean target and its currency, from the run's expectations."""
+    try:
+        raw = state.financial_data.raw_data if state.financial_data else {}
+        expectations = (raw or {}).get("external_expectations") or {}
+        return {"currency": expectations.get("currency"),
+                "target_mean": (expectations.get("price_target") or {}).get("mean")}
+    except Exception:
+        return None
+
+
+def _listing_view_payload(view: Optional[dict], metrics: Optional[dict] = None,
+                          headline: Optional[dict] = None, street: Optional[dict] = None) -> dict:
+    """The user's listing, for a result about a company valued on another one.
+
+    With the valuation metrics (and the report's headline) it carries the
+    per-share figures converted per US share; with the Street's view, its mean
+    target per US share.
+    """
+    if not view:
+        return {}
+    from src.listing_view import view_figures
+    payload = dict(view)
+    payload.update(view_figures(view, metrics or {}, headline, street))
+    ratio = view["home_shares_per_share"]
+    where = "home" if view.get("home_market", True) else "main"
+    payload["note"] = (
+        f"The user's listing is {view['ticker']} ({view['exchange']}), in US dollars. The company "
+        f"is valued on its {where} listing {view['home_ticker']}, and this result's other per-share "
+        f"figures (fair value, prices, ranges, targets) are per {view['home_ticker']} share in "
+        f"{view['reporting_currency']}. One {view['ticker']} share represents {ratio:g} "
+        f"{view['home_ticker']} share{'' if ratio == 1 else 's'}. Quote the price and every "
+        f"per-share value per {view['ticker']} share, from these fields."
+    )
+    return {"listing_view": payload}
 
 
 def _valuation_refusal(state) -> Optional[dict]:
@@ -1289,9 +1524,9 @@ def _valuation_refusal(state) -> Optional[dict]:
     return {"kind": str(kind), "reason": str(suitability.get("reason") or "")}
 
 
-_PRICE_KEYS = ("currency", "latest_price", "previous_close", "day_change_pct", "period",
+_PRICE_KEYS = ("ticker", "currency", "latest_price", "previous_close", "day_change_pct", "period",
                "period_pct_change", "period_high", "period_low")
-_TECHNICAL_KEYS = ("rsi_14", "sma_50", "sma_200", "above_sma_50", "above_sma_200", "macd",
+_TECHNICAL_KEYS = ("ticker", "rsi_14", "sma_50", "sma_200", "above_sma_50", "above_sma_200", "macd",
                    "macd_signal", "macd_bullish", "bollinger_upper", "bollinger_lower")
 
 
@@ -1325,7 +1560,11 @@ async def market_evidence(ticker: str, state=None) -> dict:
     # The listing the valuation ran on. ensure_state_for_ticker may have moved a
     # depositary receipt to its home line (TM -> 7203.T); the figures beside this
     # evidence are that line's, so its price and currency are the ones to show.
-    symbol = getattr(state, "ticker", None) or ticker
+    # With a listing view (src/listing_view.py) the answer is stated in the
+    # user's US line, so its price and technicals are the ones to show.
+    view = getattr(state, "listing_view", None) if state is not None else None
+    symbol = ((view.get("ticker") if isinstance(view, dict) else None)
+              or getattr(state, "ticker", None) or ticker)
     evidence: dict = {}
     prices, technicals = await asyncio.gather(
         GetPricesTool().execute(symbol, "1y"), GetTechnicalsTool().execute(symbol),
@@ -1365,7 +1604,8 @@ def _flat_evidence(evidence: Optional[dict], exclude=()) -> dict:
     return {key: value for key, value in flat.items() if key not in set(exclude)}
 
 
-def _refusal_result(ticker: str, refusal: dict, *, what: str, evidence: Optional[dict] = None) -> str:
+def _refusal_result(ticker: str, refusal: dict, *, what: str, evidence: Optional[dict] = None,
+                    view: Optional[dict] = None, street: Optional[dict] = None) -> str:
     """A refusal is a decision, not a failure: the model must not retry it."""
     import json as _json
     from src.summary_evidence import plain_refusal_note
@@ -1380,6 +1620,7 @@ def _refusal_result(ticker: str, refusal: dict, *, what: str, evidence: Optional
         "refusal": refusal["kind"],
         "detail": refusal["reason"],
         **_flat_evidence(evidence),
+        **_listing_view_payload(view, street=street),
     }, ensure_ascii=False, default=str)
 
 
@@ -1409,8 +1650,11 @@ class BuildModelTool(_CtxTool):
         if not state.is_model_generated():
             refusal = _valuation_refusal(state)
             if refusal:
-                return _refusal_result(ticker, refusal, what="valuation model",
-                                       evidence=await market_evidence(ticker, state))
+                view = _view_for(self.ctx, state)
+                return _refusal_result(getattr(state, "ticker", None) or ticker, refusal,
+                                       what="valuation model",
+                                       evidence=await market_evidence(ticker, state), view=view,
+                                       street=_street_of(state))
             return tool_error(f"Could not build the valuation model for {ticker}.",
                               ticker=ticker, detail=state.last_error)
         vm = state.financial_model.valuation_metrics if state.financial_model else {}
@@ -1627,8 +1871,11 @@ class BuildModelTool(_CtxTool):
         except Exception:
             benchmark_reconciliation = None
 
+        view = _view_for(self.ctx, state)
         return tool_ok(
-            ticker=ticker,
+            # The listing the figures below are for (a US line moved to its
+            # home listing is in listing_view).
+            ticker=getattr(state, "ticker", None) or ticker,
             model_type=state.financial_model.model_type if state.financial_model else None,
             currency=_listing_currency(state),
             **_listing_price_note(state),
@@ -1637,6 +1884,7 @@ class BuildModelTool(_CtxTool):
             upside_vs_market=upside_out,
             excel_path=state.financial_model.excel_path if state.financial_model else None,
             **_flat_evidence(await market_evidence(ticker, state)),
+            **_listing_view_payload(view, vm, street=_street_of(state)),
             # What the methods actually support when they refuse to agree.
             **withheld_payload,
             # Publish the legs and the confidence band so the answer can show a
@@ -1812,8 +2060,11 @@ class WriteReportTool(_CtxTool):
         if state.is_financial_data_collected() and not state.is_model_generated():
             refusal = _valuation_refusal(state)
             if refusal:
-                return _refusal_result(ticker, refusal, what="valuation report",
-                                       evidence=await market_evidence(ticker, state))
+                view = _view_for(self.ctx, state)
+                return _refusal_result(getattr(state, "ticker", None) or ticker, refusal,
+                                       what="valuation report",
+                                       evidence=await market_evidence(ticker, state), view=view,
+                                       street=_street_of(state))
         if not (state.is_financial_data_collected() and state.is_model_generated() and state.is_news_analyzed()):
             return tool_error(f"Could not gather all prerequisites for the report on {ticker}.",
                               ticker=ticker, detail=state.last_error)
@@ -1968,8 +2219,9 @@ class WriteReportTool(_CtxTool):
             na, sentiment_key="news_sentiment", freshness_key="news_freshness"
         )
 
+        view = _view_for(self.ctx, state)
         return tool_ok(
-            ticker=ticker,
+            ticker=getattr(state, "ticker", None) or ticker,
             report_path=state.report.report_path,
             content_length=len(state.report.content) if state.report.content else 0,
             currency=_listing_currency(state),
@@ -1986,6 +2238,7 @@ class WriteReportTool(_CtxTool):
                if benchmark_reconciliation else {}),
             **news_payload,
             **_flat_evidence(await market_evidence(ticker, state), exclude=news_payload),
+            **_listing_view_payload(view, vm, bounded_headline, _street_of(state)),
             # The rating the report published, so the answer cannot contradict
             # the document the user downloads.
             **bounded_headline,
@@ -2040,12 +2293,12 @@ class ReadReportTool(_CtxTool):
         if not ticker or ticker in ("CHAT", "PENDING", "UNKNOWN", "NONE", "N/A"):
             return tool_error("read_report needs a real ticker.", ticker=ticker)
 
-        def _read():
+        def _read(symbol):
             from path_utils import get_latest_analysis_path
-            base = get_latest_analysis_path(self.ctx.email, ticker)
+            base = get_latest_analysis_path(self.ctx.email, symbol)
             if not base:
                 return None
-            candidate = base / f"{ticker}_Professional_Analysis_Report.md"
+            candidate = base / f"{symbol}_Professional_Analysis_Report.md"
             if candidate.exists():
                 return base, candidate.read_text(encoding="utf-8", errors="ignore")
             # Fallback: any *Report*.md in the folder (filename conventions may vary).
@@ -2054,8 +2307,16 @@ class ReadReportTool(_CtxTool):
                     return base, p.read_text(encoding="utf-8", errors="ignore")
             return None
 
+        folder = ticker
         try:
-            loaded = await asyncio.to_thread(_read)
+            loaded = await asyncio.to_thread(_read, ticker)
+            if not loaded:
+                # A US line is valued, and its report filed, under its home
+                # listing (AZN under AZN.L).
+                home = await asyncio.to_thread(self.ctx.home_listing_of, ticker)
+                if home:
+                    loaded = await asyncio.to_thread(_read, home)
+                    folder = home
         except Exception as e:
             return tool_error(f"Could not read the report for {ticker}: {e}", ticker=ticker)
         if not loaded:
@@ -2064,10 +2325,13 @@ class ReadReportTool(_CtxTool):
                 ticker=ticker,
             )
         base, content = loaded
-        state = _rehydrate_report_guard_state(base, ticker, content)
+        state = _rehydrate_report_guard_state(base, folder, content)
+        state.ticker = folder
+        # The follow-up is answered in the user's listing, like the first run.
+        view = _view_for(self.ctx, state)
         basic = getattr(state.financial_data, "key_metrics", {}).get("basic_info", {})
         self.ctx.report_guard_state = state
-        self.ctx.report_guard_ticker = ticker
+        self.ctx.report_guard_ticker = folder
         self.ctx.report_guard_company_name = (
             basic.get("long_name") or basic.get("short_name") or ticker
         )
@@ -2112,8 +2376,9 @@ class ReadReportTool(_CtxTool):
         MAX = 24000
         truncated = len(content) > MAX
         return tool_ok(
-            ticker=ticker,
+            ticker=folder,
             publication=publication,
+            **_listing_view_payload(view, metrics, headline, _street_of(state)),
             news_freshness=getattr(state.news_analysis, "freshness", {}) or {
                 "status": "unavailable"
             },

@@ -147,7 +147,10 @@ class SupervisorWorkflowRunner:
         financial = getattr(self.state, "financial_data", None)
         key_metrics = getattr(financial, "key_metrics", {}) or {}
         basic = key_metrics.get("basic_info", {}) or {}
-        currency = basic.get("listing_currency") or basic.get("currency") or "USD"
+        # The figures are in the statements' currency (the scraper converts the
+        # price to it); the listing's own currency labelled AstraZeneca's dollar
+        # range in pounds.
+        currency = basic.get("currency") or basic.get("listing_currency") or "USD"
         try:
             from src.currency import currency_symbol
             symbol = currency_symbol(currency)
@@ -218,8 +221,43 @@ class SupervisorWorkflowRunner:
                 "Human-analyst and market benchmark reconciliation"
                 if has_human_benchmark else "Market benchmark reconciliation"
             )
-            answer += f"\n\n{label}:\n{rendered}"
-        return answer
+            answer += f"\n\n{label}{self._benchmark_basis()}:\n{rendered}"
+        lead = self._listing_lead("withheld", metrics, benchmark=benchmark)
+        return f"{lead}\n\n{answer}" if lead else answer
+
+    def _listing_lead(self, kind: str, metrics: Optional[Dict[str, object]] = None,
+                      headline: Optional[Dict[str, object]] = None,
+                      benchmark: Optional[Dict[str, object]] = None) -> str:
+        """The answer's opening in the user's US line, when the valuation ran on
+        the home listing (src/listing_view.py); empty otherwise."""
+        view = getattr(getattr(self, "state", None), "listing_view", None)
+        if not isinstance(view, dict):
+            return ""
+        try:
+            from src.listing_view import lead_paragraph, view_figures
+            financial = getattr(self.state, "financial_data", None)
+            basic = ((getattr(financial, "key_metrics", {}) or {}).get("basic_info") or {})
+            company = basic.get("long_name") or getattr(self.state, "company_name", None)
+            figures = view_figures(view, {} if kind == "refused" else (metrics or {}),
+                                   headline, benchmark)
+            return lead_paragraph(view, company=company, kind=kind, figures=figures)
+        except Exception:
+            return ""
+
+    def _benchmark_basis(self) -> str:
+        """
+        The share the Street block's per-share figures are for, when the answer
+        is stated in another whose figures differ (src/listing_view.py): its
+        targets are per home-listing share. Empty otherwise.
+        """
+        view = getattr(getattr(self, "state", None), "listing_view", None)
+        try:
+            from src.listing_view import figures_differ
+            if isinstance(view, dict) and figures_differ(view):
+                return f" (per {view['home_ticker']} share, in {view['reporting_currency']})"
+        except Exception:
+            pass
+        return ""
 
     def _safe_published_valuation_answer(self, headline: Dict[str, object]) -> str:
         """Deterministic complete answer for an audited published headline."""
@@ -228,7 +266,10 @@ class SupervisorWorkflowRunner:
         financial = getattr(self.state, "financial_data", None)
         key_metrics = getattr(financial, "key_metrics", {}) or {}
         basic = key_metrics.get("basic_info", {}) or {}
-        currency = basic.get("listing_currency") or basic.get("currency") or "USD"
+        # The figures are in the statements' currency (the scraper converts the
+        # price to it); the listing's own currency labelled AstraZeneca's dollar
+        # range in pounds.
+        currency = basic.get("currency") or basic.get("listing_currency") or "USD"
         try:
             from src.currency import currency_symbol
             symbol = currency_symbol(currency)
@@ -247,8 +288,9 @@ class SupervisorWorkflowRunner:
         benchmark = self._current_external_benchmark()
         rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
-            answer += "\n\nExternal benchmark reconciliation:\n" + rendered
-        return answer
+            answer += f"\n\nExternal benchmark reconciliation{self._benchmark_basis()}:\n" + rendered
+        lead = self._listing_lead("published", metrics, headline, benchmark)
+        return f"{lead}\n\n{answer}" if lead else answer
 
     def _valuation_refusal(self) -> Optional[Dict[str, str]]:
         """The methodology's reason when it declines to value this instrument."""
@@ -343,8 +385,13 @@ class SupervisorWorkflowRunner:
         return template
 
     @staticmethod
-    def _published_view(rating: str, metrics: Dict[str, object], headline: Dict[str, object]) -> Dict[str, object]:
-        """The rating and per-share figures VYNN published for this run."""
+    def _published_view(rating: str, metrics: Dict[str, object], headline: Dict[str, object],
+                        view: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+        """The rating and per-share figures VYNN published for this run.
+
+        With a listing view (src/listing_view.py) the same figures stated per
+        US share are published too, and so is their upside against the US price.
+        """
         values = []
         for value in [metrics.get("fair_value"), *supported_valuation_values(metrics)]:
             if (isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -360,6 +407,23 @@ class SupervisorWorkflowRunner:
         percents = []
         if isinstance(upside, (int, float)) and not isinstance(upside, bool) and math.isfinite(float(upside)):
             percents.append(float(upside) * 100)
+        if isinstance(view, dict):
+            try:
+                from src.listing_view import figures_differ, per_us_share, view_figures
+                converted = [c for c in (per_us_share(view, value) for value in values) if c]
+                figures = view_figures(view, metrics, headline)
+                if figures.get("price_target_12m"):
+                    converted.append(float(figures["price_target_12m"]))
+                us_percents = ([float(figures["upside"]) * 100]
+                               if isinstance(figures.get("upside"), (int, float)) else [])
+                # Where the per-home-share figures differ, restating one could
+                # only be quoting it against the wrong share.
+                if figures_differ(view):
+                    values, percents = converted, us_percents
+                else:
+                    values, percents = values + converted, percents + us_percents
+            except Exception:
+                pass
         return {"rating": str(rating or "").strip().upper(), "values": values, "percents": percents}
 
     def _safe_no_model_answer(self, refusal: Optional[Dict[str, str]]) -> str:
@@ -368,13 +432,15 @@ class SupervisorWorkflowRunner:
             (refusal or {}).get("kind"), (refusal or {}).get("reason")
         )
         answer = f"{self.ticker}: NOT RATED. {note}"
-        rendered = render_external_benchmark_compact(self._current_external_benchmark())
+        benchmark = self._current_external_benchmark()
+        rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
             answer += (
-                "\n\nThe Street's view, shown as a benchmark and not as VYNN's "
-                "rating:\n" + rendered
+                f"\n\nThe Street's view{self._benchmark_basis()}, shown as a benchmark and not as "
+                "VYNN's rating:\n" + rendered
             )
-        return answer
+        lead = self._listing_lead("refused", benchmark=benchmark)
+        return f"{lead}\n\n{answer}" if lead else answer
 
     def _current_external_benchmark(self) -> Dict[str, object]:
         """Build the one point-in-time benchmark used by prompts and guards."""
@@ -556,6 +622,11 @@ class SupervisorWorkflowRunner:
             # The internal midpoint is an audit value, not a publishable point.
             # Range endpoints remain allowed, so reject only distinct midpoint
             # fields and their implied-return percentage.
+            def printed(token: str) -> bool:
+                """The figure as a whole number: 8.0% is not inside 18.0%."""
+                return bool(re.search(
+                    rf"(?<![\d.,]){re.escape(token)}(?!\d|[.,]\d)", answer))
+
             endpoints = {
                 round(value, 2) for value in supported_valuation_values(metrics)
             }
@@ -567,7 +638,7 @@ class SupervisorWorkflowRunner:
                         f"{float(value):,.2f}", f"{float(value):.2f}", f"{float(value):,.1f}",
                         f"{float(value):.1f}",
                     ]
-                    if f"{float(value):,.2f}" in answer:
+                    if printed(f"{float(value):,.2f}"):
                         unsafe_valuation = True
             upside = metrics.get("upside_vs_market")
             if isinstance(upside, (int, float)) and not isinstance(upside, bool):
@@ -576,8 +647,45 @@ class SupervisorWorkflowRunner:
                     f"{float(upside) * 100:.2f}%",
                 ):
                     withheld_point_tokens += [rendered, rendered.replace("-", "\u2212")]
-                    if rendered in answer:
+                    if printed(rendered):
                         unsafe_valuation = True
+            # Stated in the user's US line (src/listing_view.py), the midpoint
+            # per US share and its upside against the US price are as
+            # unpublishable. Where a per-home-share figure differs from the
+            # same figure per US share (Shell: dollars per London share are
+            # half the dollars per NYSE share), the home range cannot appear
+            # in the answer either: nothing says which share it would be
+            # quoted against. Never lets the guard fail.
+            try:
+                from src.listing_view import figures_differ, per_us_share
+                view = getattr(self.state, "listing_view", None)
+                if isinstance(view, dict):
+                    us_endpoints = {
+                        per_us_share(view, value)
+                        for value in supported_valuation_values(metrics)
+                    }
+                    for key in ("fair_value", "average_price"):
+                        converted = per_us_share(view, metrics.get(key))
+                        if not converted or converted in us_endpoints:
+                            continue
+                        withheld_point_tokens += [
+                            f"{converted:,.2f}", f"{converted:.2f}", f"{converted:,.1f}",
+                            f"{converted:.1f}",
+                        ]
+                        if printed(f"{converted:,.2f}"):
+                            unsafe_valuation = True
+                        us_upside = (converted / view["price"] - 1) * 100
+                        for rendered in (f"{us_upside:.1f}%", f"{us_upside:.2f}%"):
+                            withheld_point_tokens += [rendered, rendered.replace("-", "\u2212")]
+                            if printed(rendered):
+                                unsafe_valuation = True
+                    if figures_differ(view):
+                        for value in endpoints:
+                            withheld_point_tokens += [f"{value:,.2f}", f"{value:.2f}"]
+                            if printed(f"{value:,.2f}") or printed(f"{value:.2f}"):
+                                unsafe_valuation = True
+            except Exception:
+                pass
             # A withheld result without the market/model reconciliation is not
             # an explanation; it is merely a disclaimer.  When the workbook
             # produced a reverse-DCF diagnostic, require the answer to surface
@@ -633,12 +741,34 @@ class SupervisorWorkflowRunner:
                 r"(?:[A-Z]{3}\s+)?[$€£¥₹]?\s*([\d,]+(?:\.\d+)?)"
             )
             canonical_fair = metrics.get("fair_value")
+            # Stated in the user's US line (src/listing_view.py), the fair
+            # value and target per US share are the published ones too. Where
+            # they differ from the per-home-share figures, only they are: a
+            # per-London-share dollar figure quoted beside the NYSE price is
+            # wrong by the receipt ratio, and nothing in the prose says which
+            # share a figure is for.
+            try:
+                from src.listing_view import figures_differ, per_us_share, view_figures
+                view = getattr(self.state, "listing_view", None)
+                us_fair = per_us_share(view, canonical_fair)
+                us_target = view_figures(view, metrics, headline).get("price_target_12m")
+                us_only = figures_differ(view)
+            except Exception:
+                us_fair, us_target, us_only = None, None, False
+
+            def restates(claim, canonical, per_us):
+                """Within half a percent of the published figure."""
+                return any(
+                    figure is not None and abs(claim - float(figure))
+                    <= max(0.05, abs(float(figure)) * 0.005)
+                    for figure in ((per_us,) if us_only else (canonical, per_us))
+                )
+
             fair_conflict = bool(
                 fair_claim is not None
                 and isinstance(canonical_fair, (int, float))
                 and not isinstance(canonical_fair, bool)
-                and abs(fair_claim - float(canonical_fair))
-                > max(0.05, abs(float(canonical_fair)) * 0.005)
+                and not restates(fair_claim, canonical_fair, us_fair)
             )
 
             target_claim = explicit_claim(
@@ -653,8 +783,7 @@ class SupervisorWorkflowRunner:
                 canonical_target = float(target_number.group(0).replace(",", ""))
             target_conflict = bool(
                 target_claim is not None and canonical_target is not None
-                and abs(target_claim - canonical_target)
-                > max(0.05, abs(canonical_target) * 0.005)
+                and not restates(target_claim, canonical_target, us_target)
             )
             if rating_conflict or fair_conflict or target_conflict:
                 contradicted = [
@@ -666,7 +795,8 @@ class SupervisorWorkflowRunner:
                     self._safe_published_valuation_answer(headline),
                     forbidden_tokens=contradicted,
                     kind=f"published:{canonical_rating}",
-                    published=self._published_view(canonical_rating, metrics, headline),
+                    published=self._published_view(canonical_rating, metrics, headline,
+                                                   getattr(self.state, "listing_view", None)),
                 )
             if (require_full_benchmark
                     and not self._answer_covers_external_benchmark(
@@ -675,7 +805,8 @@ class SupervisorWorkflowRunner:
                 return self._template(
                     self._safe_published_valuation_answer(headline),
                     kind=f"published:{canonical_rating}",
-                    published=self._published_view(canonical_rating, metrics, headline),
+                    published=self._published_view(canonical_rating, metrics, headline,
+                                                   getattr(self.state, "listing_view", None)),
                 )
             # The conflict patterns above read English. A broad answer written
             # in Chinese, Japanese or Korean cannot be checked against the
@@ -686,7 +817,8 @@ class SupervisorWorkflowRunner:
                 return self._template(
                     self._safe_published_valuation_answer(headline),
                     kind=f"published:{canonical_rating}",
-                    published=self._published_view(canonical_rating, metrics, headline),
+                    published=self._published_view(canonical_rating, metrics, headline,
+                                                   getattr(self.state, "listing_view", None)),
                 )
 
         news = getattr(self.state, "news_analysis", None)

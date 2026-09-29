@@ -121,4 +121,4 @@ def test_both_valuation_tools_attach_the_evidence():
     source = open(os.path.join(_ROOT, "src", "agents", "tools", "analysis_tools.py"), encoding="utf-8").read()
     assert "**_flat_evidence(await market_evidence(ticker, state), exclude=news_payload)," in source   # write_report
     assert "**_flat_evidence(await market_evidence(ticker, state))," in source                         # build_model
-    assert source.count("evidence=await market_evidence(ticker, state))") == 2                         # both refusals
+    assert source.count("evidence=await market_evidence(ticker, state), view=view,") == 2              # both refusals
