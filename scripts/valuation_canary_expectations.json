@@ -33,8 +33,11 @@
     "why": "DCF-only, about -38% vs market; Street at the market. Published with a confidence alert since 2026-10-02 (was withheld)."
   },
   "AMZN": {
-    "status": "FLAGGED",
-    "why": "DCF about -34% vs market while the Street is +32%; model and Street point opposite ways. Published with a confidence alert since 2026-10-02 (was withheld)."
+    "status": [
+      "FLAGGED",
+      "WITHHELD"
+    ],
+    "why": "DCF about -29% vs market while the Street is +31%: model and Street point opposite ways, so it publishes with a confidence alert whenever its statements are current. Range only while they are not. On 2026-10-02 the provider had Amazon's June-2026 income statement but no balance sheet or cash flow for that quarter, so the last complete quarter (2026-03-31) was past the 150-day limit and the annual filing (2025-12-31) past the 200-day limit. The engine before 2026-10-02 carried the same statements blocker behind its Street reason, where a reader of the first sentence never saw it; the first pre-deploy gate run found it."
   },
   "PYPL": {
     "status": "FLAGGED",

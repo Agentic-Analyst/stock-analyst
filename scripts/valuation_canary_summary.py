@@ -239,9 +239,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("candidate", type=Path)
     parser.add_argument("--baseline", type=Path)
-    # The nightly basket publishes 11 of 16 today: five the Street
-    # corroborates (NVDA, GOOGL, MSFT, CRH, TEX) and six published with a
-    # confidence alert (META, TSLA, AMD, AAPL, AMZN, PYPL); 12 when Booking
+    # The nightly basket publishes 10 to 12 of 16: five the Street
+    # corroborates (NVDA, GOOGL, MSFT, CRH, TEX), five published with a
+    # confidence alert (META, TSLA, AMD, AAPL, PYPL), Amazon with an alert
+    # once the provider's statements for it are current, and Booking when it
     # clears its boundary. At 0.55 the floor fails once fewer than 9 of 16
     # judged equities publish: it catches a collapse, not a single flip, which
     # is the --expect check's job before a deploy. (Before 2026-10-02 a name
