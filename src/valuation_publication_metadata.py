@@ -182,6 +182,15 @@ def build_publication_metadata(
         }
     range_low = _finite(reliability.get("range_low"), positive=True)
     range_high = _finite(reliability.get("range_high"), positive=True)
+    # A published answer the Street does not back carries its alert, with the
+    # sentence every surface shows, so the dashboard states it without
+    # importing this engine. Never present beside a withheld point estimate.
+    from src.confidence_alert import alert_label, alert_sentence, normalize_alert
+    alert = None if withheld else normalize_alert(reliability.get("confidence_alert"))
+    confidence_alert = (
+        {**alert, "text": alert_sentence(alert), "label": alert_label(alert)}
+        if alert else None
+    )
     support_shape = (
         "single_estimate"
         if range_low is not None and range_high is not None
@@ -207,6 +216,7 @@ def build_publication_metadata(
             "conclusion."
             if withheld else None
         ),
+        "confidence_alert": confidence_alert,
         "valuation_confidence": reliability.get("band"),
         "valuation_method_inputs": method_inputs,
         "range_low": range_low,
@@ -252,6 +262,7 @@ def fail_closed_publication_metadata(error: Exception) -> Dict[str, Any]:
             "The deterministic valuation publication check did not complete; "
             "the model remains available for audit but no point fair value may be published."
         ),
+        "confidence_alert": None,
         "valuation_confidence": None,
         "valuation_method_inputs": None,
         "range_low": None,

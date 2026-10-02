@@ -211,10 +211,11 @@ class RecommendationCalculator:
                 model_direction and any(direction != model_direction for direction in external_directions)
             )
             if conflicts:
+                # The Street points another way. That used to remove the
+                # rating ("NOT RATED"). The model's answer now stands, at low
+                # confidence, with an alert that states both positions; the
+                # benchmark never changes the rating itself.
                 consensus_alignment = "conflicting"
-                rating_available = False
-                rating = "NOT RATED"
-                rating_confidence = None
             elif model_direction and non_neutral and all(
                 direction == model_direction for direction in non_neutral
             ):
@@ -229,6 +230,39 @@ class RecommendationCalculator:
         if rating_available and reliability_band == "single-method":
             rating_confidence = "low"
 
+        # A sound model the Street does not back is still VYNN's answer: it
+        # is published with a confidence alert (src/confidence_alert.py). The
+        # publication boundary supplies the alert when it ran; a conflict seen
+        # only here builds the same one from the same benchmark.
+        from src.confidence_alert import (
+            UNCONFIRMED, alert_sentence, build_street_alert, normalize_alert,
+        )
+        confidence_alert = normalize_alert(reliability.get("confidence_alert"))
+        if (rating_available and confidence_alert is None
+                and consensus_alignment == "conflicting"):
+            confidence_alert = build_street_alert(
+                raw_val_gap_pct / 100.0,
+                targets=(
+                    [{"gap": analyst_gap_pct / 100.0, "count": count,
+                      "source": "consensus"}]
+                    if analyst_gap_pct is not None and count >= 5 else []
+                ),
+                ratings=(
+                    [{"label": label, "count": rating_count}]
+                    if rating_direction is not None and rating_count >= 5 else []
+                ),
+            )
+            # "Conflicting" here is the coarse reading (a target inside 8% of
+            # the price counts as neutral). The alert applies the boundary's
+            # own rule, under which a target backing half of the model's move
+            # corroborates it; such a rating then needs no alert.
+            if confidence_alert and confidence_alert["relation"] == UNCONFIRMED:
+                confidence_alert = None
+        if not rating_available:
+            confidence_alert = None
+        if confidence_alert is not None:
+            rating_confidence = "low"
+
         if point_estimate_withheld:
             rating_withheld_reason = reliability.get("withheld_reason")
             if not rating_withheld_reason and reliability.get("band") == "unreliable":
@@ -241,14 +275,6 @@ class RecommendationCalculator:
                     "Valuation evidence is not sufficient for a defensible point "
                     "estimate, directional rating, or price target."
                 )
-        elif consensus_alignment == "conflicting" and abs(raw_val_gap_pct) >= 15:
-            rating_withheld_reason = (
-                "The publishable intrinsic-value model and a sufficiently covered "
-                "external analyst benchmark point in materially different "
-                "directions. The intrinsic methods remain visible for audit, but "
-                "the rating and convergence target are withheld until the "
-                "assumption disagreement is reconciled."
-            )
         elif not valuation_available:
             rating_withheld_reason = (
                 "No usable intrinsic-value method produced a positive result."
@@ -309,6 +335,9 @@ class RecommendationCalculator:
             "price_available": price_available,
             "rating_available": rating_available,
             "rating_withheld_reason": rating_withheld_reason,
+            # Present only on a published rating the Street does not back.
+            "confidence_alert": confidence_alert,
+            "confidence_alert_text": alert_sentence(confidence_alert) or None,
             "inputs": {
                 "raw_val_gap_pct": round(raw_val_gap_pct, 2),
                 "dcf_legs_used": legs_used,

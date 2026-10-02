@@ -22,7 +22,43 @@ from recommendation_calculator import RecommendationCalculator
 from evidence_extractor import EvidenceExtractor
 from recommendation_validator import RecommendationValidator
 from logger import StockAnalystLogger
+from src.confidence_alert import (
+    NOT_RATED, RANGE, SINGLE_ESTIMATE, SUPPORTED_ESTIMATE_LABEL,
+    SUPPORTED_RANGE_LABEL, alert_body, no_single_value_statement,
+    report_rating_heading, single_fair_value_line, support_shape,
+)
 from src.summary_evidence import compact_publication_reason
+
+
+def no_single_value_lines(fixed_numbers: Dict[str, Any], ccy: str) -> Tuple[str, list, str]:
+    """What a recommendation prints where the model supports no single value.
+
+    Returns ``(shape, lines, statement)``: the status line the services read
+    plus the supported range or estimate, and the bold sentence that says what
+    the report shows instead. These replace the old "Point Estimate: Withheld"
+    / "NOT RATED" pair, and follow what the methods actually support, so one
+    estimate (or nothing) is never called a range.
+    """
+    reliability = (fixed_numbers.get("inputs") or {}).get("valuation_reliability") or {}
+    low, high = reliability.get("range_low"), reliability.get("range_high")
+    shape = support_shape(low, high)
+    lines = [single_fair_value_line(shape)]
+    if shape == RANGE:
+        lines.append(f"**{SUPPORTED_RANGE_LABEL}**: {ccy}{low:,.2f} – {ccy}{high:,.2f}")
+    elif shape == SINGLE_ESTIMATE:
+        lines.append(f"**{SUPPORTED_ESTIMATE_LABEL}**: {ccy}{low:,.2f}")
+    return shape, lines, f"**{no_single_value_statement(shape)}** "
+
+
+def no_single_value_shape(fixed_numbers: Dict[str, Any]) -> str:
+    reliability = (fixed_numbers.get("inputs") or {}).get("valuation_reliability") or {}
+    return support_shape(reliability.get("range_low"), reliability.get("range_high"))
+
+
+def confidence_alert_lines(fixed_numbers: Dict[str, Any]) -> list:
+    """The alert on a published rating the Street does not back, if any."""
+    body = alert_body(fixed_numbers.get("confidence_alert"))
+    return [f"**Confidence Alert**: {body}"] if body else []
 
 
 # Local copy rather than an import from report_agent, which imports this module.
@@ -220,10 +256,10 @@ class RecommendationEngineV3:
                 )
             evidence_pack['evidence'] = []
 
-        # A withheld valuation has no recommendation for an LLM to invent or
+        # A range-only valuation has no recommendation for an LLM to invent or
         # embellish.  The deterministic publication policy already decided
-        # NOT RATED and recorded the analyst/market disagreement that caused
-        # it.  Calling a model here used four attempts to manufacture a
+        # that the model supports no single value, and recorded why.
+        # Calling a model here used four attempts to manufacture a
         # narrative, then usually fell back to the same safe facts.  Assemble
         # the non-recommendation directly: this is both clearer and removes a
         # failure/cost path from the most sensitive valuation state.
@@ -688,17 +724,39 @@ class RecommendationEngineV3:
             )
             prompt += (
                 "\n\n---\n"
-                "## OVERRIDE — VALUATION POINT ESTIMATE WITHHELD\n"
+                "## OVERRIDE: NO SINGLE FAIR VALUE FOR THIS RUN\n"
                 f"Reason: {withheld_reason}\n"
-                "The deterministic rating is "
-                "NOT RATED and every price-target field is null. Do not invent, infer, "
+                "There is no directional rating (the machine value is NOT RATED) "
+                "and every price-target field is null. Do not invent, infer, "
                 "or recommend a buy/sell rating, point fair value, upside percentage, "
-                "entry point, or price target. Explain the limitation in the valuation evidence, "
-                "use only the supported valuation range in valuation_reliability, and "
+                "entry point, or price target. In your prose never write "
+                "\"not rated\" or \"withheld\": say what VYNN shows instead of a "
+                "single fair value ("
+                + {
+                    RANGE: "the supported valuation range",
+                    SINGLE_ESTIMATE: "one scenario estimate, never called a range",
+                }.get(no_single_value_shape(fixed_numbers), "nothing: no method produced a usable value")
+                + "), and why. Explain the limitation in the valuation evidence, "
+                "use only the supported figures in valuation_reliability, and "
                 "focus actions on what evidence or assumptions would resolve it. "
                 "Bull/base/bear scenarios may describe operating conditions, but must "
                 "not use the valuation-range endpoints as scenario price targets: those "
                 "endpoints are outputs from different methods, not probabilistic cases.\n"
+            )
+
+        alert_text = alert_body(fixed_numbers.get("confidence_alert"))
+        if fixed_numbers.get("rating_available", True) and alert_text:
+            prompt += (
+                "\n\n---\n"
+                "## OVERRIDE: PUBLISHED WITH A CONFIDENCE ALERT\n"
+                f"Alert: {alert_text}\n"
+                "The rating and target in FIXED_NUMBERS are VYNN's own answer and "
+                "stand as given, at LOW confidence. Do not change them and do not "
+                "blend the analysts' figures into them. State the disagreement "
+                "with the Street plainly in the thesis, in one or two sentences, "
+                "using only the figures in the alert. Never describe the rating "
+                "as supported by, consistent with, or confirmed by analyst "
+                "consensus, and never present the analysts' view as VYNN's.\n"
             )
 
         return prompt
@@ -747,11 +805,14 @@ class RecommendationEngineV3:
             ccy = getattr(self, "_ccy", "$")
             priced = fixed_numbers.get("price_available", True)
             rated = fixed_numbers.get("rating_available", priced)
-            output.append(f"### Investment Rating: {fixed_numbers['rating']}")
+            output.append(report_rating_heading(
+                fixed_numbers['rating'], priced=priced,
+                shape=no_single_value_shape(fixed_numbers)))
             if rated:
                 output.append(
                     f"**Rating Confidence**: "
-                    f"{fixed_numbers.get('rating_confidence', 'moderate').title()}")
+                    f"{(fixed_numbers.get('rating_confidence') or 'moderate').title()}")
+                output.extend(confidence_alert_lines(fixed_numbers))
                 output.append(
                     f"\n**12-Month Price Target**: "
                     f"{ccy}{fixed_numbers['targets']['m12']['price']:.2f}"
@@ -780,16 +841,15 @@ class RecommendationEngineV3:
                 low, high = reliability.get('range_low'), reliability.get('range_high')
                 band = reliability.get('band') or 'unavailable'
                 output.append(f"**Valuation Confidence**: {band.title()}")
-                output.append("**Point Estimate**: Withheld")
-                range_text = ""
-                if isinstance(low, (int, float)) and isinstance(high, (int, float)):
-                    range_text = f" The model outputs span {ccy}{low:,.2f}–{ccy}{high:,.2f}."
-                    output.append(
-                        f"**Supported Valuation Range**: {ccy}{low:,.2f} – {ccy}{high:,.2f}"
-                    )
+                shape, value_lines, statement = no_single_value_lines(fixed_numbers, ccy)
+                output.extend(value_lines)
+                range_text = (
+                    f" The model outputs span {ccy}{low:,.2f}–{ccy}{high:,.2f}."
+                    if shape == RANGE else ""
+                )
                 output.append(
-                    "\n**No point rating or price target is published.** "
-                    f"{fixed_numbers.get('rating_withheld_reason') or 'The valuation is not reliable enough for a directional call.'}"
+                    "\n" + statement
+                    + f"{fixed_numbers.get('rating_withheld_reason') or 'The valuation is not reliable enough for a directional call.'}"
                     f"{range_text}"
                 )
             
@@ -954,15 +1014,20 @@ class RecommendationEngineV3:
     ) -> str:
         """Deterministic fallback after narrative claim-support failure."""
         ccy = getattr(self, "_ccy", "$")
-        lines = [f"### Investment Rating: {fixed_numbers.get('rating', 'NOT RATED')}"]
         rated = fixed_numbers.get(
             "rating_available", fixed_numbers.get("price_available", True)
         )
+        lines = [report_rating_heading(
+            fixed_numbers.get('rating'),
+            priced=bool(fixed_numbers.get("price_available", True)),
+            shape=no_single_value_shape(fixed_numbers),
+        )]
         if rated:
             lines.append(
                 f"**Rating Confidence**: "
-                f"{fixed_numbers.get('rating_confidence', 'moderate').title()}"
+                f"{(fixed_numbers.get('rating_confidence') or 'moderate').title()}"
             )
+            lines.extend(confidence_alert_lines(fixed_numbers))
             target = (fixed_numbers.get("targets") or {}).get("m12") or {}
             if isinstance(target.get("price"), (int, float)):
                 lines.append(f"**12-Month Price Target**: {ccy}{target['price']:.2f}")
@@ -1000,20 +1065,20 @@ class RecommendationEngineV3:
                 )
                 model_view = (
                     f"the modeled cash flows support a value {direction} the market "
-                    f"({gap:+.0%} at the midpoint)"
+                    f"({gap:+.0%}"
+                    # One surviving estimate has no midpoint.
+                    + ("" if support_shape(low, high) == SINGLE_ESTIMATE else " at the midpoint")
+                    + ")"
                 )
+            _shape, value_lines, statement = no_single_value_lines(fixed_numbers, ccy)
             lines.extend([
                 f"**Valuation Confidence**: {str(band).title()}",
                 f"**Model View**: {model_view.capitalize()}" if model_view
                 else "**Model View**: Inconclusive",
-                "**Point Estimate**: Withheld",
+                *value_lines,
             ])
-            if isinstance(low, (int, float)) and isinstance(high, (int, float)):
-                lines.append(
-                    f"**Supported Valuation Range**: {ccy}{low:,.2f} – {ccy}{high:,.2f}"
-                )
             lines.append(
-                "\n**No point rating or price target is published.** "
+                "\n" + statement
                 + compact_publication_reason(fixed_numbers.get("rating_withheld_reason") or (
                     "The valuation evidence is not reliable enough for a directional call."
                 ))
@@ -1095,8 +1160,8 @@ class RecommendationEngineV3:
             )
             lines.append(
                 "\n> **Publication note**: no recommendation narrative was generated "
-                "because the valuation policy withheld the point estimate and rating. "
-                "The status and range above are deterministic."
+                "because this run supports a valuation range, not a single fair "
+                "value. The status and range above are deterministic."
                 + evidence_note
             )
         elif validation_result.get("deterministic_limited_news"):
@@ -1124,14 +1189,20 @@ class RecommendationEngineV3:
         Python, so it is safe to publish even when the LLM payload is unusable.
         """
         ccy = getattr(self, "_ccy", "$")
-        lines = [f"### Investment Rating: {fixed_numbers.get('rating', 'NOT RATED')}"]
         rated = fixed_numbers.get("rating_available", fixed_numbers.get("price_available", True))
+        lines = [report_rating_heading(
+            fixed_numbers.get('rating'),
+            priced=bool(fixed_numbers.get("price_available", True)),
+            shape=no_single_value_shape(fixed_numbers),
+        )]
         confidence = fixed_numbers.get('rating_confidence')
-        if rated or (fixed_numbers.get('rating') != 'NOT RATED' and confidence):
+        if rated or (fixed_numbers.get('rating', NOT_RATED) != NOT_RATED and confidence):
             lines.append(
                 f"**Rating Confidence**: "
                 f"{(confidence or 'moderate').title()}"
             )
+        if rated:
+            lines.extend(confidence_alert_lines(fixed_numbers))
         if rated:
             target = (fixed_numbers.get("targets") or {}).get("m12") or {}
             if target.get("price") is not None:
@@ -1151,9 +1222,11 @@ class RecommendationEngineV3:
                 "target, upside or rating can be derived."
             )
         else:
+            _shape, value_lines, statement = no_single_value_lines(fixed_numbers, ccy)
+            lines.extend(value_lines)
             lines.append(
-                "\n**No point rating or price target is published.** "
-                f"{compact_publication_reason(fixed_numbers.get('rating_withheld_reason') or 'The valuation is not reliable enough for a directional call.')}"
+                "\n" + statement
+                + f"{compact_publication_reason(fixed_numbers.get('rating_withheld_reason') or 'The valuation is not reliable enough for a directional call.')}"
             )
         lines.append(
             "\n> **Note**: the narrative for this section could not be rendered, so "

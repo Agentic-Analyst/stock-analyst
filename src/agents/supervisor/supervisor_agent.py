@@ -122,6 +122,30 @@ from src.summary_evidence import (
     model_view_summary, plain_rating_note, plain_refusal_note,
     unsuitable_method_note,
 )
+from src.confidence_alert import alert_sentence, alert_sentence_zh, normalize_alert
+
+# How an accepted answer says that its result is a range, or the evidence, and
+# not one fair value: "not a single fair value", "no fair value to state",
+# "the evidence, not a fair value". The tool notes ask for those words.
+_STATES_NO_SINGLE_VALUE = re.compile(
+    r"\b(?:not|no|without|rather\s+than)\s+(?:(?:a|an|any|one|single)\s+)*"
+    r"(?:cash-flow\s+)?fair\s+value\b",
+    re.I,
+)
+# An answer that already states the confidence alert in its own words.
+_STATES_LOW_CONFIDENCE = re.compile(
+    r"low[\s-]+confidence|confidence\s*(?:is|:|remains|stays)\s*low|置信度(?:较)?低",
+    re.I,
+)
+# Labels the product retired. A range or an evidence view is an answer, so a
+# user is never told the stock is "not rated" or that something was "withheld".
+_RETIRED_LABELS = re.compile(
+    r"\bnot[\s-]+rated\b|\bunrated\b"
+    r"|\b(?:is|are|was|were|been|being|remains?|stays?)\s+withheld\b"
+    r"|\bwithh[eo]ld(?:s|ing)?\s+(?:(?:a|an|the|its|any|both)\s+)?"
+    r"(?:point\s+|directional\s+|investment\s+)?(?:rating|fair\s+value|estimate|target)",
+    re.I,
+)
 
 _CJK_CHAR = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
@@ -130,6 +154,16 @@ def _mostly_cjk(text: str) -> bool:
     """True when an answer is written in Chinese, Japanese or Korean."""
     letters = sum(1 for ch in str(text or "") if ch.isalpha())
     return bool(letters) and len(_CJK_CHAR.findall(str(text or ""))) / letters >= 0.3
+
+
+def _written_in_chinese(text: str) -> bool:
+    """True for Chinese only. Kana or hangul make it Japanese or Korean, which
+    share the ideograph range but must not be answered in Chinese."""
+    value = str(text or "")
+    return (_mostly_cjk(value)
+            and not re.search(r"[\u3040-\u30ff\uac00-\ud7af]", value))
+
+
 import yfinance as yf
 
 from dotenv import load_dotenv
@@ -182,10 +216,10 @@ class SupervisorWorkflowRunner:
             revenue_growth_source=assumptions.get("revenue_growth_source"),
             valuation_metrics=metrics,
         )
-        # Lead with what the model concluded, not with the fact that a rating
-        # is missing. A withheld rating used to read as "valuation not
-        # available"; the range, the Street's number and what the price
-        # assumes are the answer, and the missing rating is the caveat.
+        # Lead with what the model concluded. The range, the Street's number
+        # and what the price assumes are the answer; why it is a range and not
+        # one value is the caveat. This used to open "NOT RATED", which read
+        # as "valuation not available" to the user who asked.
         view = model_view_summary(
             span=span,
             current_price=metrics.get("current_price"),
@@ -201,10 +235,14 @@ class SupervisorWorkflowRunner:
             part for part in (view.get("evidence"), range_text, view.get("price_assumes"))
             if part
         )
+        note = plain_rating_note(
+            metrics.get("publication_withheld_reason"),
+            unsuitable_method_note(metrics.get("method_suitability")),
+            shape=span["shape"],
+        )
         answer = (
             f"{self.ticker}: {view['headline']}\n\n{body}"
-            f"\n\nRating: NOT RATED. {plain_rating_note(metrics.get('publication_withheld_reason'), unsuitable_method_note(metrics.get('method_suitability')))} "
-            f"Detail: {reason}"
+            f"\n\n{note} Detail: {reason}"
         )
         rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
@@ -285,6 +323,11 @@ class SupervisorWorkflowRunner:
             parts.append(f"12-month price target {headline['price_target_12m']}")
         detail = "; ".join(parts) if parts else "published without a point headline"
         answer = f"{self.ticker} audited report headline: {detail}."
+        # A sound model the Street does not back: the answer stands, and says
+        # how far it is from the analysts.
+        alert = alert_sentence(metrics.get("confidence_alert"))
+        if alert:
+            answer += f"\n\n{alert}"
         benchmark = self._current_external_benchmark()
         rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
@@ -327,15 +370,11 @@ class SupervisorWorkflowRunner:
         Only for a broad valuation question about an analysed company; the
         caller has checked both.
         """
-        lower = answer.lower()
-        states_refusal = any(
-            phrase in lower for phrase in (
-                "not rated", "no rating", "does not publish", "not published",
-            )
-        )
+        states_refusal = bool(_STATES_NO_SINGLE_VALUE.search(answer))
         unsafe = (
             not answer
             or not states_refusal
+            or bool(_RETIRED_LABELS.search(answer))
             or bool(self._OWN_RATING_CLAIM.search(answer))
             or bool(self._PRICED_VALUE_CLAIM.search(answer))
         )
@@ -431,7 +470,7 @@ class SupervisorWorkflowRunner:
         note = plain_refusal_note(
             (refusal or {}).get("kind"), (refusal or {}).get("reason")
         )
-        answer = f"{self.ticker}: NOT RATED. {note}"
+        answer = f"{self.ticker}: {note}"
         benchmark = self._current_external_benchmark()
         rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
@@ -566,6 +605,9 @@ class SupervisorWorkflowRunner:
         unsafe_valuation = not answer
         # A withheld run's internal point figures, as they would be printed.
         withheld_point_tokens = []
+        # The confidence alert an accepted answer must open with, when the run
+        # was published against the Street and the prose left the alert out.
+        alert_lead = ""
         self.guard_template = None
         self.guard_forbidden = ()
         self.guard_kind = None
@@ -596,9 +638,10 @@ class SupervisorWorkflowRunner:
                 )
 
         if withheld:
-            unsafe_valuation = unsafe_valuation or not (
-                "not rated" in lower or "withheld" in lower
-            )
+            # The answer must say that its result is a range and not one fair
+            # value, and must not fall back on the retired labels.
+            unsafe_valuation = unsafe_valuation or not _STATES_NO_SINGLE_VALUE.search(answer)
+            unsafe_valuation = unsafe_valuation or bool(_RETIRED_LABELS.search(answer))
             # External analyst consensus is allowed (and useful) as a named
             # cross-check. Reject only language that presents a directional
             # conclusion as our/model/report recommendation.
@@ -820,6 +863,25 @@ class SupervisorWorkflowRunner:
                     published=self._published_view(canonical_rating, metrics, headline,
                                                    getattr(self.state, "listing_view", None)),
                 )
+            # A sound model the Street does not back is published with a
+            # confidence alert. Prose that gives VYNN's view must carry it:
+            # the alert is the difference between "SELL" and "SELL, and 35
+            # analysts point the other way". Added in code, never left to the
+            # model to remember.
+            alert = normalize_alert(metrics.get("confidence_alert")) if model is not None else None
+            if (alert and answer
+                    and (require_full_benchmark or self._states_published_view(
+                        answer, canonical_rating, metrics, headline))
+                    and not _STATES_LOW_CONFIDENCE.search(answer)):
+                # Chinese has its own sentence; every other language gets the
+                # English one, like the rest of the fixed statements.
+                alert_lead = (
+                    alert_sentence_zh(alert) if _written_in_chinese(answer)
+                    else alert_sentence(alert)
+                )
+
+        def with_alert(text: str) -> str:
+            return f"{alert_lead}\n\n{text}" if alert_lead and text else text
 
         news = getattr(self.state, "news_analysis", None)
         freshness = getattr(news, "freshness", {}) or {}
@@ -866,14 +928,34 @@ class SupervisorWorkflowRunner:
                     kept_lines.append(" ".join(part.rstrip() for part in good))
             sanitized = re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
             if sanitized:
-                return sanitized
+                return with_alert(sanitized)
             if withheld:
                 return self._template(
                     self._safe_withheld_valuation_answer(),
                     forbidden_tokens=withheld_point_tokens,
                     kind="withheld",
                 )
-        return answer
+        return with_alert(answer)
+
+    @staticmethod
+    def _states_published_view(answer: str, rating: str, metrics: Dict[str, object],
+                               headline: Dict[str, object]) -> bool:
+        """True when free prose quotes VYNN's published rating or its figures."""
+        if rating and re.search(
+                rf"(?<![A-Za-z]){re.escape(rating)}(?![A-Za-z])", answer):
+            return True
+        tokens = []
+        fair = metrics.get("fair_value")
+        if (isinstance(fair, (int, float)) and not isinstance(fair, bool)
+                and math.isfinite(float(fair)) and float(fair) > 0):
+            tokens += [f"{float(fair):,.2f}", f"{float(fair):.2f}"]
+        target = re.search(r"[\d,]+(?:\.\d+)?", str(headline.get("price_target_12m") or ""))
+        if target:
+            tokens.append(target.group(0))
+        return any(
+            re.search(rf"(?<![\d.,]){re.escape(token)}(?!\d|[.,]\d)", answer)
+            for token in tokens
+        )
     
     def __init__(self,
                  email: str,
@@ -1314,9 +1396,15 @@ class SupervisorWorkflowRunner:
                             f"- Supported method range: {money_symbol}{span['low']:.2f}-"
                             f"{money_symbol}{span['high']:.2f} {listing_currency}"
                         )
-                    context_parts.append("- Rating / point fair value: NOT RATED / withheld")
                     context_parts.append(
-                        "- Publication reason: "
+                        "- Rating / single fair value: none for this run; "
+                        + {
+                            "range": "the answer is the range above",
+                            "single_estimate": "the answer is the one scenario estimate above",
+                        }.get(span["shape"], "no method produced a usable value")
+                    )
+                    context_parts.append(
+                        "- Why no single fair value: "
                         + str(val_metrics.get("publication_withheld_reason")
                               or "valuation evidence is insufficient")
                     )
@@ -1329,6 +1417,9 @@ class SupervisorWorkflowRunner:
                     upside = val_metrics.get("upside_vs_market")
                     if isinstance(upside, (int, float)):
                         context_parts.append(f"- Upside/Downside: {upside:+.2%}")
+                    alert_text = alert_sentence(val_metrics.get("confidence_alert"))
+                    if alert_text:
+                        context_parts.append(f"- Confidence alert: {alert_text}")
 
                 benchmark = external_benchmark(
                     self.state.financial_data.raw_data or {},
@@ -1368,9 +1459,14 @@ class SupervisorWorkflowRunner:
 - Be informative but concise (2-4 sentences)
 - Be precise and data-driven - use actual numbers from the data
 - If the specific data requested is not available, say so honestly
-- If valuation says NOT RATED / withheld, do not quote its internal midpoint,
-  its implied return, or any BUY/HOLD/SELL recommendation. State the supported
-  method range and exact publication reason instead.
+- If valuation has no single fair value for this run, do not quote its internal
+  midpoint, its implied return, or any BUY/HOLD/SELL recommendation. Say what
+  VYNN's answer is instead, in these words: "a range, not a single fair value"
+  when a range is listed, or "a scenario estimate, not a fair value" when a
+  single scenario estimate is listed; give those figures and the exact reason.
+  Never call it not rated, unrated or withheld.
+- If a confidence alert is listed, the fair value stands as VYNN's own answer at
+  low confidence: state both positions from the alert.
 - Treat human-analyst targets/ratings as a required external cross-check, never
   as intrinsic value. Explain material model-versus-analyst disagreement.
 - Call article tone "news sentiment," never "overall sentiment." If freshness
@@ -2145,21 +2241,24 @@ Provide a helpful, informative answer:"""
                             if span["shape"] == "single_estimate":
                                 parts.append(
                                     f"Supported DCF scenario estimate: "
-                                    f"{_sym}{span['low']:.2f}; no point fair value or rating"
+                                    f"{_sym}{span['low']:.2f}; a scenario, not a single fair value"
                                 )
                             elif span["shape"] == "range":
                                 parts.append(
                                     f"Supported valuation-method range: {_sym}{span['low']:.2f}-"
-                                    f"{_sym}{span['high']:.2f}; no point fair value or rating"
+                                    f"{_sym}{span['high']:.2f}; a range, not a single fair value"
                                 )
                             parts.append(
-                                "Publication reason: "
+                                "Why no single fair value: "
                                 + str(valuation_metrics.get("publication_withheld_reason")
                                       or "valuation evidence is insufficient")
                             )
                         else:
                             if isinstance(fair_value, (int, float)):
                                 parts.append(f"Fair Value: {_sym}{fair_value:.2f}")
+                            _alert = alert_sentence(valuation_metrics.get("confidence_alert"))
+                            if _alert:
+                                parts.append(f"Confidence alert: {_alert}")
                         
                         if current_price:
                             parts.append(f"Current Price: {_sym}{current_price:.2f}")

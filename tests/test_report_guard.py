@@ -282,9 +282,11 @@ def test_generalist_final_answer_uses_shared_withheld_and_analyst_guard():
     )
 
     # This fixture carries no market price, so the model view can only state
-    # the supported range; the withheld rating is still stated explicitly.
+    # the supported range; that the answer is a range is still stated
+    # explicitly, and the draft's retired label does not survive.
     assert guarded.startswith("AAPL: the modeled cash flows support")
-    assert "Rating: NOT RATED" in guarded
+    assert "VYNN's answer here is a range, not a single fair value" in guarded
+    assert "NOT RATED" not in guarded
     assert "154.04–$180.33" in guarded
     assert "human-analyst mean target USD 335.72" in guarded
     assert "reverse DCF" in guarded
@@ -658,12 +660,17 @@ def test_read_report_uses_separate_guard_without_replacing_live_state(
 
     payload = json.loads(asyncio.run(ReadReportTool(ctx).execute("AAPL")))
 
-    assert payload["publication"]["point_estimate_withheld"] is True
+    assert payload["publication"]["no_single_fair_value"] is True
+    assert payload["publication"]["no_single_fair_value_reason"] == "market and analyst evidence conflicts"
+    assert payload["publication"]["valuation_support_shape"] == "range"
     assert payload["publication"]["supported_range_low"] == 154.04
     assert payload["publication"]["supported_range_high"] == 180.33
-    assert payload["publication"]["rating"] == "NOT RATED"
+    # No rating exists, and the prose model is not handed a label to repeat.
+    assert payload["publication"]["rating"] is None
     assert "fair_value" not in payload["publication"]
-    assert payload["rating"] == "NOT RATED"
+    assert "rating" not in payload and payload["valuation_view"] == "no_single_fair_value"
+    assert "NOT RATED" not in json.dumps(payload["publication"])
+    assert "never call the result not rated, unrated or withheld" in payload["note"]
     assert "price_target_12m" not in payload
     assert "price_target_expected_return_pct" not in payload
     assert payload["news_freshness"]["status"] == "limited"
@@ -688,7 +695,7 @@ def test_read_report_uses_separate_guard_without_replacing_live_state(
         "The report is bearish and its fair value is USD 167.67."
     )
     assert guarded.startswith("AAPL: the modeled cash flows support a value below the market")
-    assert "Rating: NOT RATED" in guarded
+    assert "VYNN's answer here is a range, not a single fair value" in guarded
     assert "154.04–$180.33" in guarded
     assert "human-analyst mean target USD 335.72" in guarded
     assert "reverse DCF" in guarded
@@ -709,7 +716,7 @@ def test_read_report_uses_separate_guard_without_replacing_live_state(
         "The report is bearish and its fair value is USD 167.67."
     )
     assert fresh_guarded.startswith("AAPL: the modeled cash flows support a value below the market")
-    assert "Rating: NOT RATED" in fresh_guarded
+    assert "VYNN's answer here is a range, not a single fair value" in fresh_guarded
 
 
 def test_read_report_is_serialized_because_it_installs_a_turn_guard():

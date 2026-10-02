@@ -164,6 +164,8 @@ The Excel model is the same idea made tangible: **all formulas are live, not sta
 
 The harder discipline is that **a number the engine computes correctly can still be meaningless.** A fair value averaged from methods that contradict each other is arithmetically valid and analytically worthless, and it is the most dangerous output the system can produce, because it looks exactly like a precise answer. Two rails address this: the valuation legs are made to *converge by construction* (see [The DCF engine](#the-dcf-engine)), and their remaining spread is classified and reported. When the methods disagree the answer leads with a range; when one fails outright, it says so instead of quietly presenting the survivor as a consensus.
 
+A third case is different in kind: **the model is sound, and well-covered analysts do not back its conclusion.** A valuation has no certain answer, only better or worse evidence, so the engine does not hide its own answer behind the Street's, and does not pull it toward consensus either. It publishes the fair value and rating with a **confidence alert** that states both positions side by side ("VYNN's fair value is 49% below the market price, while the mean target of 35 analysts is 15% above it"), sets the rating confidence to low, and prints the same alert on the report's first page, in the workbook's status cell and in the chat answer (`src/confidence_alert.py`). Analyst targets and ratings remain a benchmark: they never enter intrinsic-value arithmetic.
+
 ### Valuation calibration benchmark
 
 Every release is checked against a fixed basket before the worker image is
@@ -177,7 +179,9 @@ the Street target and the gap to market per name, and fails when the publish
 rate falls below threshold or any name errors. Between 2026-09-15 and
 2026-09-26 the engine withheld 9 of 11 production runs and nothing caught it;
 this check exists so a publish-rate collapse fails a build instead of reaching
-a user. Before a deploy the same summary runs with `--expect
+a user. The summary reports three outcomes per name: PUBLISHED (the Street
+corroborates the model), FLAGGED (published with a confidence alert) and
+WITHHELD (the gate's word for a model that supports only a range). Before a deploy the same summary runs with `--expect
 scripts/valuation_canary_expectations.json`, which names the outcome every
 basket name is supposed to have and why; a candidate ships with zero
 unexplained differences, or the expectation changes in the same commit as the
@@ -544,7 +548,7 @@ prompts/                        # 34 externalized prompt templates
 ## Known limitations
 
 - **News freshness.** SerpAPI's Google News results can lag breaking news by 15–30 minutes; not suitable for intraday signals.
-- **Model calibration is not yet an accuracy claim.** Established-company inputs are now grounded and exceptional/uncorroborated outputs are withheld, but the rating weights and difficult profiles (pre-revenue biotech, SPACs, recent IPOs with thin history) still require a clean, versioned cross-sectional cohort and a genuine 12-month outcome backtest before they can be called calibrated.
+- **Model calibration is not yet an accuracy claim.** Established-company inputs are now grounded, an output the model itself cannot support is shown as a range, and an output well-covered analysts do not back is published with a confidence alert, but the rating weights and difficult profiles (pre-revenue biotech, SPACs, recent IPOs with thin history) still require a clean, versioned cross-sectional cohort and a genuine 12-month outcome backtest before they can be called calibrated.
 - **Companies a DCF does not fit.** Pre-revenue and deeply FCF-negative businesses yield negative intrinsic values under both DCF methods; no assumption set repairs this, because discounted cash flow is the wrong instrument for them. The blend excludes failed legs and the dispersion rail states plainly when a fair value rests on one surviving method — but the honest output in these cases is a range and a caveat, not a price target.
 - **Yahoo Finance rate limiting.** `yfinance` can throttle under heavy concurrent use; the client retries with backoff but does not queue requests across simultaneous analyses.
 - **Symbol resolution.** Non-Latin names are resolved via the model's transliteration plus search; obscure or ambiguously-named companies may need the ticker stated explicitly.

@@ -46,7 +46,27 @@ from src.external_expectations import (
     implied_terminal_fcf_for_enterprise_value,
     reconcile_model_profitability,
 )
+from src.confidence_alert import (
+    NOT_RATED, RANGE, SINGLE_ESTIMATE, SUPPORTED_ESTIMATE_LABEL,
+    SUPPORTED_RANGE_LABEL, UNAVAILABLE, alert_body, alert_label, alert_sentence,
+    normalize_alert, rating_in_report, reason_with_street_context,
+    single_fair_value_line, support_shape, view_name,
+)
 from src.summary_evidence import compact_publication_reason
+
+
+def _published_alert(reliability: Dict[str, Any]):
+    """The confidence alert on a published valuation, or None."""
+    reliability = reliability if isinstance(reliability, dict) else {}
+    if reliability.get('point_estimate_withheld'):
+        return None
+    return normalize_alert(reliability.get('confidence_alert'))
+
+
+def _support_shape(reliability: Dict[str, Any]) -> str:
+    """What the usable methods support: a range, one estimate, or nothing."""
+    reliability = reliability if isinstance(reliability, dict) else {}
+    return support_shape(reliability.get('range_low'), reliability.get('range_high'))
 
 
 def historical_volatility_pct(financial_data: Dict[str, Any]) -> Optional[float]:
@@ -889,7 +909,7 @@ def extract_historical_financials(financial_data: Dict[str, Any]) -> Dict[str, A
 def _withheld_valuation_commentary(
     valuation: Dict[str, Any], company: Dict[str, Any], data: Dict[str, Any],
 ) -> str:
-    """Explain a withheld valuation without smuggling in a directional call."""
+    """Explain a range-only valuation without smuggling in a directional call."""
     reliability = valuation.get('reliability') or {}
     bank = valuation.get('bank')
     lines = [
@@ -929,11 +949,20 @@ def _withheld_valuation_commentary(
                 "terminal growth fixed. It is an expectations diagnostic, not an "
                 "independent valuation method or price target."
             )
-    lines.append(
-        "Until the conflicting evidence is reconciled with another suitable, "
-        "independent intrinsic method, the correct conclusion is NOT RATED rather "
-        "than a hidden directional recommendation."
-    )
+    closing = {
+        RANGE: (
+            "the range is the answer: a single value or a directional call "
+            "would claim more than the evidence supports."
+        ),
+        SINGLE_ESTIMATE: (
+            "the scenario estimate is the answer: calling it a fair value, or "
+            "making a directional call, would claim more than the evidence supports."
+        ),
+    }.get(_support_shape(reliability), (
+        "there is no fair value to state: a single value or a directional "
+        "call would claim more than the evidence supports."
+    ))
+    lines.append(f"Until the model's own evidence is reconciled, {closing}")
     return "\n\n".join(lines)
 
 
@@ -1184,12 +1213,23 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
             )
         reliability_warning = override.get("valuation_warning")
         if withheld_reason:
-            publication_warning = (
-                "PUBLICATION BOUNDARY: point estimate and rating withheld; "
-                "the Valuation Publication Status block contains the full reason."
+            _positive = sorted(value for value in legs.values() if value > 0)
+            _shape = support_shape(
+                _positive[0] if _positive else None,
+                _positive[-1] if _positive else None,
+            )
+            publication_warning = {
+                RANGE: "RANGE ONLY: this run supports a valuation range, not a single fair value; ",
+                SINGLE_ESTIMATE: (
+                    "SCENARIO ESTIMATE ONLY: this run supports one scenario "
+                    "estimate, not a fair value; "
+                ),
+            }.get(_shape, "NO FAIR VALUE: no valuation method produced a usable value; ") + (
+                "the Valuation Publication Status block gives the full reason."
             )
             reliability_warning = _join_distinct_messages(
                 publication_warning, reliability_warning)
+        from src.confidence_alert import normalize_alert
         reliability = {
             **existing_reliability,
             "band": band,
@@ -1198,6 +1238,9 @@ def apply_valuation_override(data: Dict[str, Any], override: Optional[Dict[str, 
             "legs": legs,
             "point_estimate_withheld": withheld,
             "withheld_reason": withheld_reason,
+            "confidence_alert": (
+                None if withheld else normalize_alert(override.get("confidence_alert"))
+            ),
             "financial_freshness": override.get("financial_freshness"),
             "method_suitability": override.get("method_suitability"),
         }
@@ -1348,7 +1391,7 @@ def enforce_valuation_publication_boundary(
     from src.agents.tools.analysis_tools import (
         _megacap_threshold,
         valuation_dispersion,
-        valuation_publication_boundary,
+        valuation_publication_decision,
     )
     from src.financial_freshness import financial_statement_freshness
     from src.valuation_methodology import (
@@ -1550,6 +1593,7 @@ def enforce_valuation_publication_boundary(
         legs = bank_publication["reliability_legs"]
         withheld = bank_publication["point_estimate_withheld"]
         reason = bank_publication.get("publication_withheld_reason")
+        alert = bank_publication.get("confidence_alert")
     else:
         consensus = company.get("analyst_consensus") or {}
         recommendation = consensus.get("recommendation") or {}
@@ -1561,7 +1605,7 @@ def enforce_valuation_publication_boundary(
             (external_expectations.get("price_target") or {}).get("source_evidence")
             or {}
         )
-        withheld, reason = valuation_publication_boundary(
+        publication = valuation_publication_decision(
             band=band,
             legs=legs,
             fair_value=authoritative_fair_value,
@@ -1581,6 +1625,8 @@ def enforce_valuation_publication_boundary(
                 "market_implied_vs_model"
             ),
         )
+        withheld, reason = publication["withheld"], publication["reason"]
+        alert = publication["alert"]
 
     # Financial freshness is a hard input-quality boundary. Refresh time is
     # intentionally ignored: re-downloading an old annual period does not make
@@ -1666,6 +1712,12 @@ def enforce_valuation_publication_boundary(
                 "financing, and share-count bridge before a point valuation can be published.",
             )
 
+    if withheld and alert:
+        # Blocked by a check that ran after the boundary call. Nothing is
+        # published, so there is no alert; what the analysts say follows the
+        # reason as context, as it does when the boundary itself blocks.
+        reason = reason_with_street_context(reason, alert)
+
     return apply_valuation_override(data, {
         "valuation_method": "justified_pb_roe" if is_bank else "dcf",
         "fair_value": authoritative_fair_value if is_bank else None,
@@ -1686,6 +1738,10 @@ def enforce_valuation_publication_boundary(
         "valuation_warning": warning,
         "point_estimate_withheld": withheld,
         "publication_withheld_reason": reason,
+        # A confidence alert qualifies a published answer. Anything below the
+        # boundary call that withheld the point estimate (stale statements, an
+        # unsuitable method, an unreconciled forecast) leaves nothing to alert on.
+        "confidence_alert": None if withheld else alert,
         "financial_freshness": freshness,
         "method_suitability": suitability,
     })
@@ -2105,16 +2161,15 @@ def format_valuation_method_result(value: Any) -> str:
 def supported_valuation_range_row(reliability: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     """Return an honest label/value for positive publication-boundary legs."""
     low, high = reliability.get("range_low"), reliability.get("range_high")
-    if not all(
-        isinstance(value, (int, float)) and not isinstance(value, bool)
-        and math.isfinite(float(value)) and value > 0
-        for value in (low, high)
-    ):
+    # The same rule every surface uses: values equal at the cent are one
+    # estimate, never "$20.74 – $20.74".
+    shape = support_shape(low, high)
+    if shape == UNAVAILABLE:
         return None
-    if math.isclose(float(low), float(high), rel_tol=1e-9, abs_tol=1e-9):
-        return "Only Positive Method Result", format_number(low, 2)
+    if shape == SINGLE_ESTIMATE:
+        return SUPPORTED_ESTIMATE_LABEL, format_number(low, 2)
     return (
-        "Supported Valuation Range",
+        SUPPORTED_RANGE_LABEL,
         f"{format_number(low, 2)} – {format_number(high, 2)}",
     )
 
@@ -2579,6 +2634,9 @@ def _publishable_valuation_commentary(
             f"The publishable model value is {format_number(fair_value, 2)} versus an "
             f"observed price of {format_number(current_price, 2)} ({format_percent(gap)})."
         )
+    commentary_alert = alert_body(_published_alert(reliability))
+    if commentary_alert:
+        lines.append(f"**Confidence alert.** {commentary_alert}")
     method = (reliability.get("method_suitability") or {}).get("primary_method")
     if method:
         lines.append(
@@ -2601,13 +2659,14 @@ def _publishable_valuation_commentary(
             f"market price ({format_percent(implied)} versus model terminal free cash flow); "
             "it is a diagnostic, not a third valuation vote."
         )
+    text = "\n\n".join(lines)
     analyst_lines = _external_analyst_benchmark_lines(company)
     if analyst_lines:
-        lines.append("\n**Independent human-analyst benchmark**")
-        lines.extend(analyst_lines)
-    return "\n\n".join(lines[:5]) + (
-        "\n\n" + "\n".join(lines[5:]) if len(lines) > 5 else ""
-    )
+        text += (
+            "\n\n**Independent human-analyst benchmark**\n"
+            + "\n".join(analyst_lines)
+        )
+    return text
 
 
 def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
@@ -2781,18 +2840,29 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     else:
         label = "**DCF Fair Value**"
     if point_withheld:
+        # The model supports a range here, not one number. A sound model the
+        # Street does not back never reaches this branch: it is published with
+        # a confidence alert.
         ratio = reliability.get('dispersion_ratio')
         ratio_text = f" ({ratio:.1f}x dispersion)" if isinstance(ratio, (int, float)) else ""
-        if bank:
-            withheld_label = "Withheld — bank valuation is not sufficiently corroborated"
-        elif reliability.get('band') == 'single-method':
-            withheld_label = "Withheld — DCF-only result lacks independent corroboration"
-        elif reliability.get('band') == 'unreliable':
-            withheld_label = f"Withheld — valuation methods do not converge{ratio_text}"
+        shape = _support_shape(reliability)
+        # "Range only", "Scenario estimate only" or "None": never a range that is not one.
+        prefix = single_fair_value_line(shape).split(": ", 1)[1]
+        if shape == RANGE and reliability.get('band') == 'unreliable':
+            range_only_label = f"{prefix}: valuation methods do not converge{ratio_text}"
+        elif shape == RANGE and reliability.get('band') == 'wide':
+            range_only_label = f"{prefix}: valuation methods are too far apart{ratio_text}"
+        elif shape == RANGE:
+            range_only_label = (
+                f"{prefix}: the bank methods do not support one value" if bank
+                else f"{prefix}: the evidence does not support one value"
+            )
+        elif shape == SINGLE_ESTIMATE:
+            range_only_label = f"{prefix}: the evidence does not support a fair value"
         else:
-            withheld_label = "Withheld — exceptional gap is not independently corroborated"
+            range_only_label = f"{prefix}: no method produced a usable value"
         summary_table += (
-            f"| **Point Estimate** | **{withheld_label}** |\n"
+            f"| **Single Fair Value** | **{range_only_label}** |\n"
         )
         supported_row = supported_valuation_range_row(reliability)
         if supported_row:
@@ -2813,9 +2883,14 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         _rate = f", converted at {_fx:.4f} {_rc}/{_lc}" if isinstance(_fx, (int, float)) else ""
         summary_table += f"| Price on the listing exchange | {currency_symbol(_lc)}{_pl:,.2f} ({_lc}{_rate}) |\n"
     if point_withheld:
-        summary_table += "| **Implied Upside** | _not meaningful without a defensible point estimate_ |\n"
+        summary_table += "| **Implied Upside** | _not stated without a single fair value_ |\n"
     else:
         summary_table += f"| **Implied Upside** | **{format_percent(valuation['summary']['upside'])}** |\n"
+        published_alert = _published_alert(reliability)
+        if published_alert:
+            summary_table += (
+                f"| **Confidence** | **{alert_label(published_alert).capitalize()}** |\n"
+            )
 
     reliability_note = ""
     if reliability.get('warning'):
@@ -3055,13 +3130,13 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
             "| Required method | Justified P/B x normalized ROE |\n"
             "| Bank valuation inputs | Unavailable or insufficient |\n"
             "| Industrial FCF DCF | Not applicable and suppressed |\n"
-            "| Point estimate / rating | Withheld |\n"
+            "| Single fair value / rating | None for this run |\n"
         )
         tables_md = (
             f"### Valuation Method & Data Basis\n\n{method_basis_table}\n"
             f"### Bank Valuation Availability\n\n{bank_unavailable}\n"
             f"### Analyst Consensus Cross-Check\n\n{analyst_consensus_table}\n\n"
-            f"### Publication Boundary\n\n{reliability_note or '_Point estimate withheld._'}"
+            f"### Publication Boundary\n\n{reliability_note or '_No single fair value is stated for this run._'}"
         )
     else:
         tables_md = (
@@ -3190,11 +3265,14 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
         if supported_row:
             range_label, range_value = supported_row
             intrinsic_value = (
-                f"point estimate withheld; {range_label.lower()} is {range_value}"
+                f"No single fair value is stated; the {range_label.lower()} is {range_value}"
             )
         else:
-            intrinsic_value = "point estimate withheld because the evidence is not sufficient for publication"
-        upside = "not meaningful — point estimate withheld"
+            intrinsic_value = (
+                "No single fair value is stated, because the evidence does not "
+                "support one"
+            )
+        upside = "not stated without a single fair value"
     else:
         intrinsic_value = format_number(valuation['summary']['average_intrinsic'], 2)
         upside = format_percent(valuation['summary']['upside'])
@@ -3208,10 +3286,10 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
     )
     lines = ["### Evidence Boundary", ""]
     if reliability.get('point_estimate_withheld'):
-        # The model view leads. A withheld rating is the caveat on a
-        # conclusion, not the absence of one: the reader gets the supported
-        # range against the price, the Street's number beside it, and what
-        # the market price assumes about the modeled cash flows.
+        # The model view leads. A range in place of one value is the caveat
+        # on a conclusion, not the absence of one: the reader gets the
+        # supported range against the price, the Street's number beside it,
+        # and what the market price assumes about the modeled cash flows.
         from src.summary_evidence import (
             model_view_summary, supported_valuation_span, unsuitable_method_note,
         )
@@ -3234,9 +3312,13 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
             ),
             method_note=unsuitable_method_note(reliability.get('method_suitability')),
         )
+        gives = {
+            RANGE: "the range and the evidence",
+            SINGLE_ESTIMATE: "the scenario estimate and the evidence",
+        }.get(_support_shape(reliability), "the evidence")
         lines.append(
-            f"**Model view: {view['headline']}** No directional investment thesis "
-            "is published."
+            f"**Model view: {view['headline']}** VYNN gives {gives} here, not "
+            "a buy or sell call."
         )
         lines.append(
             f"\n**What the model supports**: {view['evidence']} {intrinsic_value}."
@@ -3245,7 +3327,7 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
         reason = reliability.get('withheld_reason')
         if reason:
             lines.append(
-                "\n**Why no rating is published**: "
+                "\n**Why no single fair value**: "
                 f"{_markdown_cell(compact_publication_reason(reason), 800)}"
             )
         lines.append(
@@ -3259,6 +3341,9 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
             f"({upside}). The separately generated recommendation applies the product's "
             "rating rules and may not be overridden by this section."
         )
+        thesis_alert = alert_sentence(_published_alert(reliability))
+        if thesis_alert:
+            lines.append(f"\n{thesis_alert}")
 
     lines.extend(["", "### Bank-Method Checks" if is_bank else "### Operating-Case Checks", ""])
     revenues = projections.get('revenue') or []
@@ -3396,7 +3481,8 @@ def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], l
     """Assemble the headline deterministically from published report outputs.
 
     This is the first page and therefore the worst place to let a prose model
-    reverse a ``NOT RATED`` boundary or pair a target with the wrong return.
+    invent a rating the boundary did not allow, pair a target with the wrong
+    return, or drop the confidence alert on a call the Street does not back.
     Narrative sections remain available below; the executive decision fields
     are copied from the code-generated recommendation and valuation state.
     """
@@ -3404,11 +3490,27 @@ def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], l
     valuation = data['valuation']
     reliability = valuation.get('reliability') or {}
     recommendation = sections.get('recommendation') or ""
-    rating_match = re.search(
-        r"^#{2,3}\s*Investment Rating:\s*(.+?)\s*$", recommendation, re.M
-    )
-    rating = rating_match.group(1).strip() if rating_match else "NOT RATED"
-    lines = [f"**Investment View**: {rating}"]
+    # ``NOT RATED`` is the machine value for "no rating"; the page says what
+    # the report shows instead (a range, or that no market price exists).
+    rating = rating_in_report(recommendation)
+    if reliability.get('point_estimate_withheld'):
+        rating = NOT_RATED
+    if rating != NOT_RATED:
+        view = rating
+    else:
+        view_match = re.search(
+            r"^#{2,3}\s*Investment View:\s*(.+?)\s*$", recommendation, re.M
+        )
+        if view_match:
+            view = view_match.group(1).strip()
+        elif reliability.get('point_estimate_withheld'):
+            view = view_name(_support_shape(reliability))
+        else:
+            # The recommendation section is missing (it failed to generate)
+            # while the valuation stands: the page gives the fair value below
+            # and claims no rating. "Range Only" would be untrue here.
+            view = "Fair Value Only"
+    lines = [f"**Investment View**: {view}"]
 
     target_match = re.search(
         r"^\*\*12-Month Price Target\*\*:\s*(.+?)\s*$", recommendation, re.M
@@ -3419,11 +3521,16 @@ def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], l
         recommendation,
         re.M,
     )
-    if rating != "NOT RATED" and target_match and return_match:
+    if rating != NOT_RATED and target_match and return_match:
         lines.append(
             f"**12-Month Price Target**: {target_match.group(1).strip()} "
             f"({return_match.group(1).strip()} if intrinsic value converges)"
         )
+    # The alert belongs to the published fair value, so it is on the first
+    # page whenever that value is, even if no rating section was produced.
+    summary_alert = alert_body(_published_alert(reliability))
+    if summary_alert:
+        lines.append(f"**Confidence Alert**: {summary_alert}")
 
     lines.extend(["", "### Decision Context", ""])
     if reliability.get('point_estimate_withheld'):
@@ -3483,16 +3590,38 @@ def generate_executive_summary(sections: Dict[str, str], data: Dict[str, Any], l
 
 
 def valuation_publication_status(data: Dict[str, Any]) -> str:
-    """Code-generated publication boundary, independent of any LLM section."""
+    """Code-generated publication boundary, independent of any LLM section.
+
+    Empty for a published valuation the Street corroborates. A published
+    valuation the Street does not back gets its confidence alert here, with
+    the engine's full reasoning; a model that supports no single value gets
+    the range and the reason.
+    """
     reliability = ((data.get('valuation') or {}).get('reliability') or {})
     if not reliability.get('point_estimate_withheld'):
-        return ""
+        alert = _published_alert(reliability)
+        if not alert:
+            return ""
+        alert_lines = [
+            "### Confidence Alert",
+            "",
+            f"**Low confidence.** {alert_body(alert)}",
+        ]
+        if alert.get("detail"):
+            alert_lines.extend(["", str(alert["detail"])])
+        alert_lines.extend([
+            "",
+            "The fair value, rating and target in this report are VYNN's own "
+            "model output. The analysts' figures are shown as a benchmark and "
+            "are not blended into them.",
+        ])
+        return "\n".join(alert_lines) + "\n\n"
     band = str(reliability.get('band') or 'unavailable').title()
     lines = [
         "### Valuation Publication Status",
         "",
         f"**Valuation Confidence**: {band}",
-        "**Point Estimate**: Withheld",
+        single_fair_value_line(_support_shape(reliability)),
     ]
     supported_row = supported_valuation_range_row(reliability)
     if supported_row:
@@ -3513,9 +3642,14 @@ def valuation_publication_status(data: Dict[str, Any]) -> str:
     reason = reliability.get('withheld_reason')
     if reason:
         lines.append(str(reason))
-    lines.append(
-        "No directional rating, price target or implied-upside percentage is published "
-        "because the valuation evidence is not sufficient for a defensible point call."
+    lines.append({
+        RANGE: "VYNN shows the range above instead of a single fair value, rating or price target",
+        SINGLE_ESTIMATE: (
+            "VYNN shows the scenario estimate above, not a fair value, rating "
+            "or price target"
+        ),
+    }.get(_support_shape(reliability), "VYNN states no fair value, rating or price target here")
+        + ", because the valuation evidence does not support one defensible number."
     )
     return "\n".join(lines) + "\n\n"
 

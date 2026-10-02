@@ -61,15 +61,35 @@ def _financials():
     }
 
 
-def test_model_artifact_carries_the_same_street_conflict_boundary_as_report():
+def test_model_artifact_carries_the_same_street_alert_as_the_report():
     metadata = build_publication_metadata(_computed(), _financials())
 
     assert metadata["status"] == "ready"
-    assert metadata["point_estimate_withheld"] is True
-    assert metadata["valuation_conclusion"] == "inconclusive"
-    assert metadata["canonical_fair_value"] is None
+    # A sound model the Street does not back is published, and the artifact
+    # carries the alert, with its sentence, for the dashboard to show.
+    assert metadata["point_estimate_withheld"] is False
+    assert metadata["publication_allowed"] is True
+    assert metadata["valuation_conclusion"] == "published_point_estimate"
+    assert metadata["canonical_fair_value"] == 55.0
     assert metadata["model_value_for_audit"] == 55.0
-    assert "18-analyst target benchmark" in metadata["withheld_reason"]
+    assert metadata["withheld_reason"] is None
+    alert = metadata["confidence_alert"]
+    assert alert["kind"] == "street_divergence"
+    assert alert["analyst_count"] == 18
+    assert "18-analyst target benchmark" in alert["detail"]
+    assert alert["text"].startswith("Low confidence: VYNN's fair value is ")
+    assert alert["label"] == "low confidence: far from analyst consensus"
+
+
+def test_a_withheld_artifact_never_carries_an_alert():
+    # Methods that contradict each other leave no answer to qualify.
+    metadata = build_publication_metadata(
+        _computed(perpetual=20.0, exit_value=90.0), _financials()
+    )
+
+    assert metadata["point_estimate_withheld"] is True
+    assert metadata["canonical_fair_value"] is None
+    assert metadata["confidence_alert"] is None
 
 
 def test_model_artifact_aligns_street_revenue_to_rolling_forecast_clock():
@@ -165,7 +185,7 @@ def test_downloadable_summary_relabels_withheld_midpoint_as_diagnostic():
     })
 
     summary = builder.workbook["Summary"]
-    assert summary["B24"].value == "WITHHELD — scenario range only"
+    assert summary["B24"].value == "SCENARIO RANGE ONLY"
     assert summary["B25"].value == "150.00 to 180.00 USD/share"
     assert summary["A26"].value == "DCF scenario midpoint (not published)"
     assert summary["A27"].value == "Audit midpoint vs market (diagnostic)"
@@ -197,7 +217,7 @@ def test_zero_width_display_range_is_labeled_as_one_scenario_estimate():
     })
 
     summary = builder.workbook["Summary"]
-    assert summary["B24"].value == "WITHHELD — scenario estimate only"
+    assert summary["B24"].value == "SCENARIO ESTIMATE ONLY"
     assert summary["A25"].value == "Supported DCF scenario estimate"
     assert summary["B25"].value == "13,245.00 TWD/share"
 
@@ -230,7 +250,7 @@ def test_post_evaluation_labels_are_synchronized_to_computed_sidecar():
     builder._sync_publication_labels_into_results(results)
 
     cells = results["Summary"]["cells"]
-    assert cells["(24, 2)"].startswith("WITHHELD")
+    assert cells["(24, 2)"] == "SCENARIO RANGE ONLY"
     assert cells["(26, 1)"] == "DCF scenario midpoint (not published)"
     assert cells["(27, 1)"] == "Audit midpoint vs market (diagnostic)"
     assert results["Sensitivity"]["cells"]["(34, 1)"].endswith(
@@ -262,7 +282,7 @@ def test_downloadable_bank_summary_uses_publication_specific_headline():
     })
 
     assert builder.workbook["Summary"]["A26"].value.endswith("(not published)")
-    assert builder.workbook["Bank Valuation"]["B22"].value.startswith("WITHHELD")
+    assert builder.workbook["Bank Valuation"]["B22"].value == "SCENARIO RANGE ONLY"
     assert builder.workbook["Bank Valuation"]["B23"].value == "External evidence conflicts."
 
 
@@ -462,9 +482,13 @@ def test_bank_metadata_publishes_only_the_appropriate_method_and_inputs():
     assert metadata["valuation_confidence"] == "single-method"
     # The Yahoo/legacy target has no provider as-of date. It remains a visible
     # external benchmark, but cannot positively validate a 38% single-method
-    # point estimate.
-    assert metadata["canonical_fair_value"] is None
-    assert metadata["point_estimate_withheld"] is True
+    # point estimate: the value is published as not yet confirmed.
+    assert metadata["canonical_fair_value"] == 207.69
+    assert metadata["point_estimate_withheld"] is False
+    assert metadata["confidence_alert"]["relation"] == "unconfirmed"
+    assert metadata["confidence_alert"]["label"] == (
+        "low confidence: not yet confirmed by analysts"
+    )
     assert metadata["model_value_for_audit"] == 207.69
     assert metadata["valuation_method_inputs"]["book_value_per_share"] == 100.0
     assert metadata["valuation_method_inputs"]["justified_price_to_book"] == pytest.approx(

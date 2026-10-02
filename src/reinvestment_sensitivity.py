@@ -189,7 +189,7 @@ def build_reinvestment_sensitivity(
             "included_in_intrinsic_value": False,
             "reason": (
                 "The independent DCF replay did not reconcile to the workbook; "
-                "the alternate capex case was withheld."
+                "the alternate capex case is not shown."
             ),
             "annual_observations": history,
             "workbook_value": base_per_share,

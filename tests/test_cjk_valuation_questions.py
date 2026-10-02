@@ -3,8 +3,9 @@
 Found 2026-09-28 while fixing the thin XOM answer: "埃克森美孚值得买入还是持有？"
 was not recognised as a valuation question (the pattern was English only), so
 the guard never ran and the draft below was published as written: a hold call,
-and no NOT RATED, for a company the engine declines to value. The draft is
-verbatim gpt-6-luna output from the production image.
+with nothing saying VYNN states no fair value, for a company the engine
+declines to value. The draft is verbatim gpt-6-luna output from the production
+image.
 """
 import asyncio
 import os
@@ -57,7 +58,7 @@ def test_the_reported_chinese_question_is_guarded_now():
     ag = _chat_agent(ZH_PROMPT, _exxon_state(), "XOM")
     out = ag._guard_final_answer(ZH_DRAFT)
     assert out != ZH_DRAFT and "继续持有" not in out
-    assert out.startswith("XOM: NOT RATED.")
+    assert out.startswith("XOM: VYNN's answer here is the evidence, not a fair value, because")
     assert ag._guard_template == out and ag._guard_kind == "refused:commodity_cycle"
 
 
@@ -71,27 +72,54 @@ def _analysis(ag, provider, draft):
 def test_a_chinese_question_reads_its_position_in_chinese_first():
     ag = _chat_agent(ZH_PROMPT, _exxon_state(), "XOM")
     template, out = _analysis(ag, _Provider(ZH_SECTION, "NO"), ZH_DRAFT)
-    assert out.startswith("XOM：未评级。不发布评级或公允价值：其现金流随大宗商品价格波动")
-    assert out.index("未评级") < out.index("XOM: NOT RATED") < out.index("自由现金流") < out.index("The Street's view")
+    assert out.startswith("XOM：VYNN 在此给出的是证据，而不是公允价值，因为其现金流随大宗商品价格波动")
+    assert (out.index("而不是公允价值") < out.index("XOM: VYNN's answer here is the evidence")
+            < out.index("自由现金流约") < out.index("The Street's view"))
     assert "继续持有" not in out
+    # Neither language reads as a missing rating.
+    assert "未评级" not in out and "NOT RATED" not in out
 
 
 def test_a_chinese_section_with_a_call_is_stopped_and_the_position_still_reads_in_chinese():
     ag = _chat_agent(ZH_PROMPT, _exxon_state(), "XOM")
     template, out = _analysis(ag, _Provider(ZH_SECTION + "\n\n长期投资者可以考虑继续持有。", "YES"), ZH_DRAFT)
-    assert out == "XOM：未评级。不发布评级或公允价值：其现金流随大宗商品价格波动，基于当前价格的现金流模型更像是押注商品价格，而不是估值。\n\n" + template
+    assert out == "XOM：VYNN 在此给出的是证据，而不是公允价值，因为其现金流随大宗商品价格波动，基于当前价格的现金流模型更像是押注商品价格，而不是估值。\n\n" + template
 
 
 def test_an_english_question_gets_no_chinese_line():
     ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
     template, out = _analysis(ag, _Provider(XOM_SECTION, "NO"), "My take: hold.")
-    assert out.startswith("XOM: NOT RATED.") and "未评级" not in out
+    assert out.startswith("XOM: VYNN's answer here is the evidence, not a fair value")
+    assert "而不是公允价值" not in out
 
 
 def test_withheld_and_published_positions_read_in_chinese():
     ag = _chat_agent("给我TEST的看涨和看跌理由，并给出结论", _withheld_state(), "TEST")
     _, out = _analysis(ag, _Provider("ignored"), "结论：买入。")
-    assert out.startswith("TEST：未评级。模型估值未能得到独立证据的印证")
+    assert out.startswith("TEST：VYNN 在此给出的是估值区间，而不是单一公允价值；")
+    assert "未评级" not in out
+
+
+@pytest.mark.parametrize("change,lead", [
+    # One surviving method: an estimate, never a range (区间).
+    ({"exit_multiple_price": -5.0}, "TEST：VYNN 在此给出的是一个情景估算值，而不是公允价值；"),
+    # Nothing usable at all.
+    ({"perpetual_price": -3.0, "exit_multiple_price": -5.0}, "TEST：VYNN 在此没有可给出的公允价值；"),
+    # The method itself was ruled out for the company: a scenario.
+    ({"method_suitability": {
+        "publication_allowed": False,
+        "primary_method": "scenario_only_pending_operating_finance_sotp",
+        "reason": "No point value because a disclosed captive-finance segment is consolidated.",
+    }}, "TEST：VYNN 在此给出的是情景分析，而不是公允价值；"),
+])
+def test_the_chinese_lead_follows_what_the_model_supports(change, lead):
+    state = _withheld_state()
+    state.financial_model.valuation_metrics.update(change)
+    ag = _chat_agent("给我TEST的看涨和看跌理由，并给出结论", state, "TEST")
+    _, out = _analysis(ag, _Provider("ignored"), "结论：买入。")
+    assert out.startswith(lead)
+    first_line = out.splitlines()[0]
+    assert "区间" not in first_line and "未评级" not in first_line
 
     ag = _chat_agent("宝洁的报告评级是什么？分析一下", _published_state(), "PG")
     _, out = _analysis(ag, _Provider("ignored"), "报告评级为卖出，公允价值 167.67 美元。")
@@ -101,12 +129,14 @@ def test_withheld_and_published_positions_read_in_chinese():
 @pytest.mark.parametrize("kind", ["commodity_cycle", "reit", "insurance", "fund", "crypto",
                                   "unsupported_asset", "bank_valuation_input_gap"])
 def test_every_refusal_reads_in_chinese(kind):
-    assert plain_refusal_note_zh(kind).startswith("不发布评级或公允价值：")
+    note = plain_refusal_note_zh(kind)
+    assert note.startswith("VYNN 在此给出的是证据，而不是公允价值，因为")
+    assert "未评级" not in note and "不发布评级" not in note
 
 
 def test_an_unknown_refusal_still_reads_in_chinese():
-    assert plain_refusal_note_zh("new_kind") == "不发布评级或公允价值，因为该标的超出估值方法的适用范围。"
-    assert plain_refusal_note_zh(None) == "不发布评级或公允价值，因为本次运行没有生成估值模型。"
+    assert plain_refusal_note_zh("new_kind") == "VYNN 在此给出的是证据，而不是公允价值，因为该标的超出估值方法的适用范围。"
+    assert plain_refusal_note_zh(None) == "本次运行没有生成估值模型，因此没有可给出的公允价值。"
 
 
 def test_the_section_is_asked_for_in_the_language_named():

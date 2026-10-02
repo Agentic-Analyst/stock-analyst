@@ -21,11 +21,14 @@ set -euo pipefail
 DEPLOY_DIR=${DEPLOY_DIR:-/opt/vynn/deploy}
 OUT_ROOT=${OUT_ROOT:-/var/lib/vynn/canary}
 BASKET=${BASKET:-"TSLA AMD NVDA META AAPL AMZN GOOGL MSFT CRH MC.PA PYPL PCJEWELLER.NS MU GM TEX BKNG"}
-# Ten basket names are withheld by design and Booking sits on a boundary
-# (scripts/valuation_canary_expectations.json), so 5 of 16 publish on a
-# healthy engine, 6 on some days. The floor fails below 5 of 16: it catches a
-# collapse, not one name flipping, which the pre-deploy --expect gate catches.
-MIN_PUBLISH_RATE=${MIN_PUBLISH_RATE:-0.30}
+# Four basket names are range-only by design and Booking sits on a boundary
+# (scripts/valuation_canary_expectations.json), so 11 of 16 publish on a
+# healthy engine (six of them with a confidence alert), 12 on some days. The
+# floor fails below 9 of 16: it catches a collapse, not one name flipping,
+# which the pre-deploy --expect gate catches. Install this file together with
+# the engine image that publishes flagged names: against an older image, which
+# withheld them, 5 of 16 publish and this floor fails.
+MIN_PUBLISH_RATE=${MIN_PUBLISH_RATE:-0.55}
 # Every basket name is an operating company, so any refusal is a regression.
 MAX_REFUSED=${MAX_REFUSED:-0}
 # Nightly output is about 10 MB; keep a month of it.

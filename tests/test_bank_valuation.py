@@ -186,7 +186,7 @@ def test_bank_input_clamps_are_visible_publication_blockers():
     assert override["bank_inputs"]["input_boundary_triggered"] is True
 
 
-def test_bank_analyst_conflict_withholds_directional_call():
+def test_bank_analyst_conflict_publishes_the_call_with_an_alert():
     financials = _bank_financials()
     data = {
         "company_overview": {
@@ -214,9 +214,18 @@ def test_bank_analyst_conflict_withholds_directional_call():
     result = enforce_valuation_publication_boundary(data, financials)
 
     reliability = result["valuation"]["reliability"]
-    assert reliability["point_estimate_withheld"] is True
-    assert "20-analyst target benchmark" in reliability["withheld_reason"]
-    assert "does not corroborate" in reliability["withheld_reason"]
+    # The bank model is sound; 20 analysts point the other way. Its answer is
+    # published and says so, exactly as the corporate boundary does.
+    assert reliability["point_estimate_withheld"] is False
+    assert reliability["withheld_reason"] is None
+    alert = reliability["confidence_alert"]
+    assert alert["relation"] == "opposite"
+    assert round(alert["model_gap"], 2) == -0.20
+    assert round(alert["benchmark_gap"], 2) == 0.05 and alert["analyst_count"] == 20
+    assert alert["analyst_rating"] == "BUY"
+    assert "20-analyst target benchmark" in alert["detail"]
+    assert "does not corroborate" in alert["detail"]
+    assert "withhold" not in alert["detail"].lower()
 
 
 def test_bank_rating_label_cannot_validate_large_single_method_target():
@@ -231,8 +240,12 @@ def test_bank_rating_label_cannot_validate_large_single_method_target():
         analyst_rating_count=30,
     )
 
-    assert result["point_estimate_withheld"] is True
-    assert "does not corroborate" in result["publication_withheld_reason"]
+    # A supportive label backs direction, not the size of a +50% target: the
+    # call is published as not yet confirmed by a numeric target.
+    assert result["point_estimate_withheld"] is False
+    assert result["publication_withheld_reason"] is None
+    assert result["confidence_alert"]["relation"] == "unconfirmed"
+    assert "does not corroborate" in result["confidence_alert"]["detail"]
 
 
 def test_undated_bank_target_cannot_corroborate_large_single_method_target():
@@ -246,7 +259,8 @@ def test_undated_bank_target_cannot_corroborate_large_single_method_target():
         analyst_target_corroboration_qualified=False,
     )
 
-    assert result["point_estimate_withheld"] is True
+    assert result["point_estimate_withheld"] is False
+    assert result["confidence_alert"]["relation"] == "unconfirmed"
 
 
 def test_directional_single_method_bank_call_needs_numeric_corroboration():
@@ -257,7 +271,32 @@ def test_directional_single_method_bank_call_needs_numeric_corroboration():
         current_price=100.0,
     )
 
+    assert result["point_estimate_withheld"] is False
+    assert result["confidence_alert"]["relation"] == "unconfirmed"
+    assert round(result["confidence_alert"]["model_gap"], 2) == 0.20
+
+
+def test_a_bank_model_boundary_still_withholds_even_when_the_street_disagrees():
+    # An input that hit its safety boundary is a model problem: no single
+    # value exists, so there is nothing for an alert to qualify.
+    result = assess_bank_publication(
+        fair_value=150.0,
+        intrinsic_fair_value=150.0,
+        peer_fair_value=None,
+        current_price=100.0,
+        bank_inputs={"input_boundary_triggered": True, "cost_of_equity_clamped": True},
+        analyst_target=95.0,
+        analyst_count=30,
+    )
+
     assert result["point_estimate_withheld"] is True
+    assert result["confidence_alert"] is None
+    assert "hit its model boundary" in result["publication_withheld_reason"]
+    # The Street's position is stated as context, after the model's own reason.
+    reason = result["publication_withheld_reason"]
+    assert "30-analyst target benchmark" in reason
+    assert reason.index("hit its model boundary") < reason.index("30-analyst target benchmark")
+    assert "withhold" not in reason.lower()
 
 
 def test_stale_bank_target_cannot_veto_a_two_method_result():
@@ -279,7 +318,7 @@ def test_stale_bank_target_cannot_veto_a_two_method_result():
     assert result["point_estimate_withheld"] is False
 
 
-def test_secondary_bank_analyst_source_can_block_a_conflicting_call():
+def test_secondary_bank_analyst_source_is_named_in_the_alert():
     result = assess_bank_publication(
         fair_value=120.0,
         intrinsic_fair_value=118.0,
@@ -301,10 +340,11 @@ def test_secondary_bank_analyst_source_can_block_a_conflicting_call():
         },
     )
 
-    assert result["point_estimate_withheld"] is True
-    assert "secondary 18-analyst target benchmark" in result[
-        "publication_withheld_reason"
-    ]
+    assert result["point_estimate_withheld"] is False
+    alert = result["confidence_alert"]
+    assert alert["relation"] == "opposite"
+    assert round(alert["benchmark_gap"], 2) == -0.04 and alert["analyst_count"] == 18
+    assert "secondary 18-analyst target benchmark" in alert["detail"]
 
 
 def test_bank_workbook_exposes_the_selected_method_not_industrial_dcf():
@@ -338,6 +378,47 @@ def test_bank_workbook_exposes_the_selected_method_not_industrial_dcf():
     assert bank["(32, 5)"] == pytest.approx(4.2)
     assert workbook["Summary"].max_row == 41
     assert formula_integrity(result)["status"] == "ready"
+
+
+def test_bank_workbook_states_its_publication_status_in_today_s_words():
+    # The bank tab's status cell is what a user downloads. It says a flagged
+    # value is low confidence (with both positions in the reason cell), calls
+    # a range a range, and never prints the retired "WITHHELD".
+    financials = _bank_financials()
+    override = build_bank_valuation_override(
+        financials,
+        terminal_growth=.02,
+        capm={"risk_free_rate": .04, "equity_risk_premium_total": .06, "beta": 1.0},
+    )
+    alert = {
+        "kind": "street_divergence", "relation": "opposite", "model_gap": 0.42,
+        "benchmark_gap": -0.06, "analyst_count": 25, "analyst_rating": None,
+        "analyst_rating_count": None, "detail": None,
+    }
+
+    def status_cells(**state):
+        workbook = openpyxl.Workbook()
+        workbook.active.title = "Summary"
+        tab = BankValuationTabBuilder({**override, **state}, financials).create_tab(workbook)
+        return tab["B22"].value, tab["B23"].value
+
+    flagged = status_cells(point_estimate_withheld=False, publication_withheld_reason=None,
+                           confidence_alert=alert)
+    assert flagged[0] == "PUBLISHABLE (low confidence: far from analyst consensus)"
+    assert flagged[1] == (
+        "Low confidence: VYNN's fair value is 42% above the market price, while "
+        "the mean target of 25 analysts is 6% below it. That is a large gap "
+        "between VYNN and the Street, so treat this as VYNN's own view and weigh both."
+    )
+    plain = status_cells(point_estimate_withheld=False, publication_withheld_reason=None,
+                         confidence_alert=None)
+    assert plain == ("PUBLISHABLE", "The deterministic bank-method publication checks passed.")
+    range_only = status_cells(
+        point_estimate_withheld=True, confidence_alert=alert,
+        publication_withheld_reason="The bank valuation scenarios do not converge.")
+    assert range_only == ("SCENARIO RANGE ONLY", "The bank valuation scenarios do not converge.")
+    for status, reason in (flagged, plain, range_only):
+        assert "WITHHELD" not in status and "withheld" not in str(reason).lower()
 
 
 def test_summary_uses_listing_financial_currency_not_hardcoded_dollars():
@@ -479,3 +560,21 @@ def test_workbook_builder_refuses_dcf_when_selected_bank_method_disappears(
 
     with pytest.raises(ValueError, match="refusing to build an industrial"):
         builder.build_model()
+
+
+def test_a_bank_answer_the_street_does_not_back_never_goes_out_unflagged(monkeypatch):
+    kwargs = dict(
+        fair_value=200.0, intrinsic_fair_value=200.0, peer_fair_value=None,
+        current_price=250.0, bank_inputs={},
+        analyst_target=262.5, analyst_count=20,
+        analyst_rating="buy", analyst_rating_count=20,
+    )
+    flagged = assess_bank_publication(**kwargs)
+    assert flagged["point_estimate_withheld"] is False
+    assert flagged["confidence_alert"]["relation"] == "opposite"
+
+    import src.confidence_alert as confidence_alert
+    monkeypatch.setattr(confidence_alert, "build_street_alert", lambda *a, **k: None)
+    closed = assess_bank_publication(**kwargs)
+    assert closed["point_estimate_withheld"] is True and closed["confidence_alert"] is None
+    assert "-20% from the market" in closed["publication_withheld_reason"]

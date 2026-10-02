@@ -64,7 +64,7 @@ def _compact(audit: Dict[str, Any], *, elapsed: float) -> Dict[str, Any]:
         "street_coverage", "reliability_band", "range_low", "range_high",
         "analyst_observation_count", "analyst_observation_as_of",
         "analyst_observations_included_in_intrinsic_value",
-        "point_estimate_withheld", "withheld_reason",
+        "point_estimate_withheld", "withheld_reason", "confidence_alert",
         "reverse_dcf_market_implied_vs_model", "stored_publication_allowed",
         "market_implied_fcf_path_vs_model",
         "model_equivalent_revenue_growth_10y", "market_required_revenue_growth_10y",
@@ -79,7 +79,8 @@ def _compact(audit: Dict[str, Any], *, elapsed: float) -> Dict[str, Any]:
         "analyst_target_implied_terminal_growth_vs_model",
         "stored_publication_status", "formula_integrity_status",
         "formula_integrity_issue_count", "model_integrity_status",
-        "model_integrity_issue_count", "workbook_headline_label", "checks",
+        "model_integrity_issue_count", "workbook_headline_label",
+        "workbook_status_label", "checks",
     )
     return {
         **{key: audit.get(key) for key in keys},

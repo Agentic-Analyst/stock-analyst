@@ -12,18 +12,59 @@ sys.modules["valuation_canary_summary"] = summary
 _SPEC.loader.exec_module(summary)
 
 
-def _row(ticker, *, withheld=False, status="passed", reason=None):
+def _row(ticker, *, withheld=False, status="passed", reason=None, alert=None):
     return {
         "ticker": ticker, "status": status,
         "point_estimate_withheld": withheld, "withheld_reason": reason,
+        "confidence_alert": alert,
     }
+
+
+# A sound model the Street does not back: published, with this alert.
+ALERT = {"kind": "street_divergence", "relation": "opposite", "model_gap": -0.49,
+         "benchmark_gap": 0.15, "analyst_count": 35, "analyst_rating": None}
 
 
 def test_status_labels_follow_the_canary_row():
     assert summary._status(_row("NVDA")) == "PUBLISHED"
+    assert summary._status(_row("META", alert=ALERT)) == "FLAGGED"
     assert summary._status(_row("TSLA", withheld=True)) == "WITHHELD"
     assert summary._status(_row("SPY", status="passed_specialized_refusal")) == "refused"
     assert summary._status(_row("X", status="failed")) == "FAILED"
+    # An alert qualifies a published value; a range-only row is never flagged.
+    assert summary._status(_row("MU", withheld=True, alert=ALERT)) == "WITHHELD"
+    # A row from an engine that predates alerts carries no such field.
+    assert summary._status({"ticker": "OLD", "status": "passed"}) == "PUBLISHED"
+
+
+def test_a_flagged_row_counts_as_published_and_is_counted_apart():
+    rows = [_row("NVDA"), _row("META", alert=ALERT), _row("MU", withheld=True)]
+    out = summary.summarize(rows, "candidate")
+    assert out["published"] == 2 and out["flagged"] == 1
+    assert out["publish_rate"] == 2 / 3
+
+
+def test_the_reason_column_says_how_the_street_stands_against_a_flagged_name():
+    assert summary._reason(_row("META", alert=ALERT)) == (
+        "alert: opposite, Street target +15% (35 analysts)"
+    )
+    rating = dict(ALERT, relation="rating", benchmark_gap=None, analyst_count=None,
+                  analyst_rating="HOLD")
+    assert summary._reason(_row("X", alert=rating)) == "alert: rating, rated HOLD"
+    assert summary._reason(
+        _row("MU", withheld=True, reason="The valuation methods span more than 1.8x. More.")
+    ) == "The valuation methods span more than 1.8x"
+    assert summary._reason(_row("NVDA")) == ""
+
+
+def test_published_and_flagged_are_different_outcomes_for_the_gate():
+    expectations = {"META": {"status": "PUBLISHED"}, "NVDA": {"status": "FLAGGED"}}
+    assert summary.unexplained_changes(
+        [_row("META", alert=ALERT), _row("NVDA")], expectations,
+    ) == [
+        "UNEXPLAINED: META expected PUBLISHED but is FLAGGED",
+        "UNEXPLAINED: NVDA expected FLAGGED but is PUBLISHED",
+    ]
 
 
 def test_publish_rate_excludes_failed_and_refused_rows():
@@ -61,18 +102,24 @@ def test_unexplained_changes_name_every_drift_and_every_unlisted_name():
 
 
 def test_cli_exit_codes(tmp_path, capsys):
-    rows = [_row("NVDA"), _row("TSLA", withheld=True, reason="Far below market. More.")]
+    rows = [_row("NVDA"), _row("META", alert=ALERT),
+            _row("MU", withheld=True, reason="Memory cycle. More.")]
     candidate = tmp_path / "cand.json"
     candidate.write_text("chatter\n" + json.dumps(rows), encoding="utf-8")
     expect = tmp_path / "expect.json"
     expect.write_text(json.dumps({
-        "_comment": "ignored", "NVDA": {"status": "PUBLISHED"}, "TSLA": "WITHHELD",
+        "_comment": "ignored", "NVDA": {"status": "PUBLISHED"},
+        "META": {"status": "FLAGGED"}, "MU": "WITHHELD",
     }), encoding="utf-8")
 
     assert summary.main([str(candidate), "--expect", str(expect)]) == 0
-    assert "every name matches" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "every name matches" in out
+    assert "published 2/3 equities (67%), 1 with a confidence alert" in out
+    assert "alert: opposite, Street target +15% (35 analysts)" in out
 
-    expect.write_text(json.dumps({"NVDA": "WITHHELD", "TSLA": "WITHHELD"}), encoding="utf-8")
+    expect.write_text(json.dumps(
+        {"NVDA": "WITHHELD", "META": "FLAGGED", "MU": "WITHHELD"}), encoding="utf-8")
     assert summary.main([str(candidate), "--expect", str(expect)]) == 3
     assert "UNEXPLAINED: NVDA expected WITHHELD but is PUBLISHED" in capsys.readouterr().out
 
@@ -97,8 +144,28 @@ def test_real_expectation_file_covers_the_nightly_basket():
     for entry in expectations.values():
         status = entry["status"]
         statuses.update(status if isinstance(status, list) else [status])
-    assert statuses <= {"PUBLISHED", "WITHHELD"}
+    assert statuses == {"PUBLISHED", "FLAGGED", "WITHHELD"}
     assert all(entry.get("why") for entry in expectations.values())
+    # The basket must keep exercising all three outcomes: a corroborated value,
+    # one the Street does not back, and a model that supports no single value.
+    single = {t: e["status"] for t, e in expectations.items() if isinstance(e["status"], str)}
+    assert sum(status == "FLAGGED" for status in single.values()) >= 5
+    assert sum(status == "WITHHELD" for status in single.values()) >= 3
+    assert sum(status == "PUBLISHED" for status in single.values()) >= 5
+    # The default floor must sit under the healthy rate and above a collapse.
+    healthy = sum(status != "WITHHELD" for status in single.values()) / len(basket)
+    floor = float(re.search(r"MIN_PUBLISH_RATE=\$\{MIN_PUBLISH_RATE:-([0-9.]+)\}", nightly).group(1))
+    assert floor == 0.55 and floor < healthy
+
+
+def test_the_default_floor_matches_the_nightly_script(tmp_path):
+    rows = [_row(f"T{i}") for i in range(9)] + [_row(f"W{i}", withheld=True) for i in range(7)]
+    candidate = tmp_path / "cand.json"
+    candidate.write_text(json.dumps(rows), encoding="utf-8")
+    assert summary.main([str(candidate)]) == 0          # 9 of 16 publish
+    rows[8] = _row("T8", withheld=True)
+    candidate.write_text(json.dumps(rows), encoding="utf-8")
+    assert summary.main([str(candidate)]) == 1          # 8 of 16 is a collapse
 
 
 def test_a_list_accepts_either_outcome_but_never_a_failure():

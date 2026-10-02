@@ -14,7 +14,10 @@ from report_agent import (
     _join_distinct_messages,
     load_prompt,
 )
-from src.agents.tools.analysis_tools import valuation_publication_boundary
+from src.agents.tools.analysis_tools import (
+    valuation_publication_boundary,
+    valuation_publication_decision,
+)
 
 
 def _financials(period="2026-06-30"):
@@ -69,17 +72,25 @@ def _aapl_report_data():
     }
 
 
-def test_legacy_report_path_cannot_publish_aapl_as_a_precise_sell():
+def test_legacy_report_path_publishes_aapl_with_an_alert_not_as_a_confident_sell():
     result = enforce_valuation_publication_boundary(
         _aapl_report_data(), _financials()
     )
     reliability = result["valuation"]["reliability"]
     assert reliability["band"] == "single-method"
-    assert reliability["point_estimate_withheld"] is True
+    # The model is sound, so its answer is published. What the 39 analysts say
+    # travels with it as a confidence alert instead of silencing it.
+    assert reliability["point_estimate_withheld"] is False
+    assert reliability["withheld_reason"] is None
     assert reliability["range_low"] == 151.97
     assert reliability["range_high"] == 181.38
-    assert "no independent market-comps" in reliability["withheld_reason"].lower()
-    assert "39-analyst target benchmark" in reliability["withheld_reason"]
+    alert = reliability["confidence_alert"]
+    assert alert["kind"] == "street_divergence" and alert["relation"] == "smaller"
+    assert round(alert["model_gap"], 3) == -0.498
+    assert round(alert["benchmark_gap"], 3) == -0.024
+    assert alert["analyst_count"] == 39
+    assert "no independent market-comps" in alert["detail"].lower()
+    assert "39-analyst target benchmark" in alert["detail"]
 
 
 def test_broad_sector_comps_are_context_not_independent_corroboration():
@@ -119,7 +130,10 @@ def test_legacy_broad_sector_artifact_cannot_reenter_blend():
     assert summary["workbook_headline_value"] == 206.98
     assert summary["average_intrinsic"] == (151.97 + 181.38) / 2
     assert summary["comps_included_in_blended_value"] is False
-    assert result["valuation"]["reliability"]["point_estimate_withheld"] is True
+    # Still a DCF-only answer the Street barely backs: published, flagged.
+    reliability = result["valuation"]["reliability"]
+    assert reliability["point_estimate_withheld"] is False
+    assert reliability["confidence_alert"]["relation"] == "smaller"
 
 
 def test_legacy_blend_cannot_mask_an_exceptional_dcf_gap_before_boundary():
@@ -143,8 +157,14 @@ def test_legacy_blend_cannot_mask_an_exceptional_dcf_gap_before_boundary():
 
     assert summary["average_intrinsic"] == (54.79 + 75.36) / 2
     assert summary["workbook_headline_value"] == 86.92
-    assert reliability["point_estimate_withheld"] is True
-    assert "-39%" in reliability["withheld_reason"]
+    # The alert is measured on the DCF midpoint, not on the legacy blend that
+    # would have hidden the gap: -39% against 40 analysts at +20%.
+    assert reliability["point_estimate_withheld"] is False
+    alert = reliability["confidence_alert"]
+    assert alert["relation"] == "opposite"
+    assert round(alert["model_gap"], 2) == -0.39
+    assert round(alert["benchmark_gap"], 2) == 0.20
+    assert "-39%" in alert["detail"]
 
 
 def test_well_covered_street_conflict_is_material_for_a_non_megacap():
@@ -161,9 +181,11 @@ def test_well_covered_street_conflict_is_material_for_a_non_megacap():
     result = enforce_valuation_publication_boundary(data, _financials())
     reliability = result["valuation"]["reliability"]
 
-    assert reliability["point_estimate_withheld"] is True
-    assert "18-analyst target benchmark" in reliability["withheld_reason"]
-    assert "does not corroborate" in reliability["withheld_reason"]
+    assert reliability["point_estimate_withheld"] is False
+    alert = reliability["confidence_alert"]
+    assert alert["relation"] == "opposite" and alert["analyst_count"] == 18
+    assert "18-analyst target benchmark" in alert["detail"]
+    assert "does not corroborate" in alert["detail"]
 
 
 def test_well_covered_street_conflict_is_not_ignored_below_extreme_gap():
@@ -180,9 +202,14 @@ def test_well_covered_street_conflict_is_not_ignored_below_extreme_gap():
     result = enforce_valuation_publication_boundary(data, _financials())
     reliability = result["valuation"]["reliability"]
 
-    assert reliability["point_estimate_withheld"] is True
-    assert "52-analyst target benchmark is +16%" in reliability["withheld_reason"]
-    assert "not substituted for intrinsic value" in reliability["withheld_reason"]
+    assert reliability["point_estimate_withheld"] is False
+    alert = reliability["confidence_alert"]
+    assert alert["relation"] == "opposite"
+    assert round(alert["model_gap"], 2) == -0.28
+    assert "52-analyst target benchmark is +16%" in alert["detail"]
+    assert "not substituted for intrinsic value" in alert["detail"]
+    # The benchmark is stated, never blended in.
+    assert result["valuation"]["summary"]["average_intrinsic"] == 72.0
 
 
 def test_aligned_street_evidence_does_not_replace_or_block_model_value():
@@ -216,14 +243,16 @@ def test_directional_dcf_only_call_requires_independent_numeric_benchmark():
     result = enforce_valuation_publication_boundary(data, _financials())
 
     reliability = result["valuation"]["reliability"]
-    assert reliability["point_estimate_withheld"] is True
+    assert reliability["point_estimate_withheld"] is False
+    alert = reliability["confidence_alert"]
+    assert alert["relation"] == "unconfirmed" and alert["benchmark_gap"] is None
     assert "sufficiently covered external analyst benchmark was unavailable" in (
-        reliability["withheld_reason"]
+        alert["detail"]
     )
 
 
 def test_stale_source_evidence_cannot_reenter_through_active_target_fallback():
-    withheld, reason = valuation_publication_boundary(
+    decision = valuation_publication_decision(
         band="single-method",
         legs={"perpetual_dcf": 145.0, "exit_multiple_dcf": 155.0},
         fair_value=150.0,
@@ -242,12 +271,18 @@ def test_stale_source_evidence_cannot_reenter_through_active_target_fallback():
         },
     )
 
-    assert withheld is True
-    assert "sufficiently covered external analyst benchmark was unavailable" in reason
+    # A stale target cannot corroborate, and it is not quoted as the Street's
+    # view either: the answer is published as not yet confirmed.
+    assert decision["withheld"] is False
+    assert decision["alert"]["relation"] == "unconfirmed"
+    assert decision["alert"]["benchmark_gap"] is None
+    assert "sufficiently covered external analyst benchmark was unavailable" in (
+        decision["alert"]["detail"]
+    )
 
 
 def test_undated_target_is_described_as_unqualified_for_corroboration():
-    withheld, reason = valuation_publication_boundary(
+    decision = valuation_publication_decision(
         band="single-method",
         legs={"perpetual_dcf": 45.0, "exit_multiple_dcf": 55.0},
         fair_value=50.0,
@@ -264,9 +299,10 @@ def test_undated_target_is_described_as_unqualified_for_corroboration():
         },
     )
 
-    assert withheld is True
-    assert "no provider-dated current analyst target qualified" in reason
-    assert "provider date unavailable; caution only" in reason
+    assert decision["withheld"] is False
+    detail = decision["alert"]["detail"]
+    assert "no provider-dated current analyst target qualified" in detail
+    assert "provider date unavailable; caution only" in detail
 
 
 def test_a_conflicting_qualified_secondary_target_cannot_be_treated_as_trivial():
@@ -299,10 +335,12 @@ def test_a_conflicting_qualified_secondary_target_cannot_be_treated_as_trivial()
     result = enforce_valuation_publication_boundary(data, financials)
     reliability = result["valuation"]["reliability"]
 
-    assert reliability["point_estimate_withheld"] is True
-    assert "yahoo_finance 39-analyst target benchmark is -4%" in (
-        reliability["withheld_reason"]
-    )
+    assert reliability["point_estimate_withheld"] is False
+    alert = reliability["confidence_alert"]
+    # The source that points away is the one the alert names.
+    assert alert["relation"] == "opposite"
+    assert round(alert["benchmark_gap"], 2) == -0.04 and alert["analyst_count"] == 39
+    assert "yahoo_finance 39-analyst target benchmark is -4%" in alert["detail"]
     assert result["valuation"]["summary"]["average_intrinsic"] == 120.0
 
 
@@ -325,9 +363,11 @@ def test_report_boundary_uses_qualified_recommendation_evidence_without_a_target
     result = enforce_valuation_publication_boundary(data, _financials())
     reliability = result["valuation"]["reliability"]
 
-    assert reliability["point_estimate_withheld"] is True
-    assert "STRONG BUY" in reliability["withheld_reason"]
-    assert "24 ratings" in reliability["withheld_reason"]
+    assert reliability["point_estimate_withheld"] is False
+    alert = reliability["confidence_alert"]
+    assert alert["relation"] == "rating"
+    assert alert["analyst_rating"] == "STRONG BUY" and alert["analyst_rating_count"] == 24
+    assert "STRONG BUY" in alert["detail"] and "24 ratings" in alert["detail"]
 
 
 def test_non_megacap_street_target_never_replaces_intrinsic_value():
@@ -431,8 +471,9 @@ def test_extreme_dcf_only_gap_requires_independent_method_even_without_street():
     result = enforce_valuation_publication_boundary(data, _financials())
     reliability = result["valuation"]["reliability"]
 
-    assert reliability["point_estimate_withheld"] is True
-    assert "no independent market-comps" in reliability["withheld_reason"]
+    assert reliability["point_estimate_withheld"] is False
+    assert reliability["confidence_alert"]["relation"] == "unconfirmed"
+    assert "no independent market-comps" in reliability["confidence_alert"]["detail"]
 
 
 def test_stale_statements_withhold_even_a_non_megacap_point_estimate():
@@ -442,6 +483,38 @@ def test_stale_statements_withhold_even_a_non_megacap_point_estimate():
     reliability = result["valuation"]["reliability"]
     assert reliability["point_estimate_withheld"] is True
     assert "beyond" in reliability["withheld_reason"]
+    # Stale statements are a model problem: no answer, so nothing to alert on,
+    # even though the Street also disagrees here.
+    assert reliability["confidence_alert"] is None
+
+
+def test_a_later_blocker_keeps_what_the_street_says_as_context_not_as_the_reason():
+    # Fresh statements: only the Street stands apart, so the value is published
+    # with an alert. The same model on stale statements publishes nothing, and
+    # the analysts' position must not drop out of what the reader is told.
+    fresh = enforce_valuation_publication_boundary(
+        _aapl_report_data(), _financials())["valuation"]["reliability"]
+    assert fresh["point_estimate_withheld"] is False
+    detail = fresh["confidence_alert"]["detail"]
+    assert detail
+
+    stale = enforce_valuation_publication_boundary(
+        _aapl_report_data(), _financials("2023-12-31"))["valuation"]["reliability"]
+    assert stale["point_estimate_withheld"] is True and stale["confidence_alert"] is None
+    reason = stale["withheld_reason"]
+    # The model's own blocker leads; the Street follows it, once.
+    assert reason.index("beyond") < reason.index(detail)
+    assert reason.count(detail) == 1
+    # The plain sentence still names the model's blocker, never the Street.
+    from src.summary_evidence import plain_rating_note
+    assert plain_rating_note(reason) == (
+        "VYNN's answer here is a range, not a single fair value, because the "
+        "latest annual financial statements are too old for a current valuation."
+    )
+    # Applying the boundary again changes nothing.
+    again = enforce_valuation_publication_boundary(
+        _aapl_report_data(), _financials("2023-12-31"))["valuation"]["reliability"]
+    assert again["withheld_reason"] == reason
 
 
 def test_limited_news_does_not_create_a_synthetic_sentiment_citation():
@@ -471,7 +544,9 @@ def test_an_earnings_word_in_a_yahoo_title_is_not_a_primary_source():
     ) == "primary"
 
 
-def test_executive_summary_cannot_reverse_a_withheld_rating():
+def test_executive_summary_carries_the_confidence_alert_on_a_flagged_call():
+    # AAPL: a sound DCF 50% below the market that 39 analysts do not back.
+    # The first page gives VYNN's answer and, with it, how far the Street is.
     data = enforce_valuation_publication_boundary(
         _aapl_report_data(), _financials()
     )
@@ -485,20 +560,98 @@ def test_executive_summary_cannot_reverse_a_withheld_rating():
     def llm_must_not_run(*_args, **_kwargs):
         raise AssertionError("executive decision fields must be code-generated")
 
+    recommendation = (
+        "### Investment Rating: STRONG SELL\n**Rating Confidence**: Low\n\n"
+        "**12-Month Price Target**: $166.67\n"
+        "**Implied Return if Intrinsic Value Converges**: -49.8%\n"
+    )
     text, cost = generate_executive_summary(
-        {"recommendation": "### Investment Rating: NOT RATED\n"},
-        data,
-        llm_must_not_run,
+        {"recommendation": recommendation}, data, llm_must_not_run,
     )
     assert cost == 0
-    assert "**Investment View**: NOT RATED" in text
-    assert "12-Month Price Target" not in text
-    assert "151.97" in text and "181.38" in text
+    lines = text.splitlines()
+    assert lines[0] == "**Investment View**: STRONG SELL"
+    assert lines[1] == (
+        "**12-Month Price Target**: $166.67 (-49.8% if intrinsic value converges)"
+    )
+    assert lines[2] == (
+        "**Confidence Alert**: VYNN's fair value is 50% below the market price, "
+        "while the mean target of 39 analysts is 2% below it, which backs less "
+        "than half of that move. That is a large gap between VYNN and the "
+        "Street, so treat this as VYNN's own view and weigh both."
+    )
+    assert "NOT RATED" not in text and "withheld" not in text.lower()
+    assert "Model fair value: $166.68" in text
     assert "External analyst target benchmark" in text
     assert "324.40" in text
     assert "39 target observations" in text
     assert "221.4%" in text
     assert "LIMITED" in text
+
+
+def test_executive_summary_cannot_turn_a_range_into_a_rating():
+    # Two DCF variants 2x apart leave no single value. Even if a narrative
+    # section printed a rating and a target, the first page states the range.
+    report = _aapl_report_data()
+    report["valuation"]["dcf_exit"]["intrinsic_value_per_share"] = 420.0
+    data = enforce_valuation_publication_boundary(report, _financials())
+    reliability = data["valuation"]["reliability"]
+    assert reliability["point_estimate_withheld"] is True
+    assert reliability["confidence_alert"] is None
+    data["news"] = {}
+
+    for recommendation in (
+        "### Investment View: Range Only\n",
+        "### Investment Rating: NOT RATED\n",          # a report written before the rewording
+        "### Investment Rating: BUY\n**12-Month Price Target**: $420.00\n"
+        "**Implied Return if Intrinsic Value Converges**: +26.4%\n",
+        "",
+    ):
+        text, cost = generate_executive_summary(
+            {"recommendation": recommendation}, data, None,
+        )
+        assert cost == 0
+        assert text.splitlines()[0] == "**Investment View**: Range Only", recommendation
+        assert "12-Month Price Target" not in text
+        assert "Confidence Alert" not in text
+        assert "this is not a single fair value" in text
+        assert "NOT RATED" not in text and "BUY" not in text
+
+
+def test_a_failed_recommendation_section_does_not_turn_a_published_value_into_a_range():
+    # The valuation stands (and here it is flagged), but the recommendation
+    # section failed to generate. The first page must not call that a range,
+    # must not print a rating, and must still carry the alert on the value.
+    data = enforce_valuation_publication_boundary(
+        _aapl_report_data(), _financials()
+    )
+    assert data["valuation"]["reliability"]["point_estimate_withheld"] is False
+    data["news"] = {}
+    text, cost = generate_executive_summary(
+        {"recommendation": "_Section unavailable (recommendation)._"}, data, None,
+    )
+    assert cost == 0
+    lines = text.splitlines()
+    assert lines[0] == "**Investment View**: Fair Value Only"
+    assert lines[1].startswith("**Confidence Alert**: VYNN's fair value is 50% below the market price")
+    assert "Model fair value: $166.68" in text
+    assert "12-Month Price Target" not in text
+    assert "Range Only" not in text and "NOT RATED" not in text
+
+
+def test_executive_summary_says_when_no_market_price_exists():
+    # Without a market price there is no gap to the market, so the boundary
+    # raises no alert and the page states only that no price exists.
+    report = _aapl_report_data()
+    report["company_overview"]["current_price"] = None
+    data = enforce_valuation_publication_boundary(report, _financials())
+    assert data["valuation"]["reliability"]["confidence_alert"] is None
+    data["news"] = {}
+    text, _ = generate_executive_summary(
+        {"recommendation": "### Investment View: No Market Price\n"}, data, None,
+    )
+    assert text.splitlines()[0] == "**Investment View**: No Market Price"
+    assert "Confidence Alert" not in text
 
 
 def test_every_report_prompt_marks_inserted_content_as_untrusted_data():
@@ -601,3 +754,23 @@ def test_bank_method_still_obeys_financial_freshness_boundary():
     reliability = result["valuation"]["reliability"]
     assert reliability["point_estimate_withheld"] is True
     assert "beyond" in reliability["withheld_reason"]
+
+
+def test_an_answer_the_street_does_not_back_never_goes_out_unflagged(monkeypatch):
+    # The alert is what makes publishing against the Street safe. If one could
+    # ever not be drawn up, the boundary falls back to what it did before
+    # alerts existed: no single value, with the Street's position as the reason.
+    kwargs = dict(
+        band="single-method",
+        legs={"perpetual_dcf": 145.0, "exit_multiple_dcf": 155.0},
+        fair_value=150.0, current_price=300.0, is_mega_cap=True,
+        analyst_target=345.0, analyst_count=35,
+    )
+    flagged = valuation_publication_decision(**kwargs)
+    assert flagged["withheld"] is False and flagged["alert"]["relation"] == "opposite"
+
+    import src.confidence_alert as confidence_alert
+    monkeypatch.setattr(confidence_alert, "build_street_alert", lambda *a, **k: None)
+    closed = valuation_publication_decision(**kwargs)
+    assert closed["withheld"] is True and closed["alert"] is None
+    assert "-50% from the market" in closed["reason"]

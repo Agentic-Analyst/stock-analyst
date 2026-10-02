@@ -129,7 +129,11 @@ def test_write_report_executes_and_machine_gate_bounds_markdown(monkeypatch):
 
     assert payload["status"] == "ok"
     assert payload["fair_value"] is None
-    assert payload["fair_value_withheld"] is True
-    assert payload["rating"] == "NOT RATED"
+    assert payload["no_single_fair_value"] is True
+    assert payload["no_single_fair_value_reason"]
+    # No rating exists, and the prose model is handed no label to repeat.
+    assert "rating" not in payload and payload["valuation_view"] == "no_single_fair_value"
+    assert "confidence_alert" not in payload
+    assert "never call the result not rated, unrated or withheld" in payload["note"]
     assert "price_target_12m" not in payload
     assert "price_target_expected_return_pct" not in payload

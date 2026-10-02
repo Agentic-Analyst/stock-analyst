@@ -1,5 +1,5 @@
 {
-  "_comment": "Expected publication outcome per basket name for the pre-deploy gate (scripts/valuation_canary_summary.py --expect). Change an entry only together with the engine change that explains it, and say why here. 2026-09-27: calibrated premium (3.24%) is the default.",
+  "_comment": "Expected publication outcome per basket name for the pre-deploy gate (scripts/valuation_canary_summary.py --expect). Change an entry only together with the engine change that explains it, and say why here. 2026-09-27: calibrated premium (3.24%) is the default. 2026-10-02: a sound model that well-covered analysts do not back is published with a confidence alert (FLAGGED) instead of withheld; WITHHELD now means the model itself supports no single value (a failed or contradicting method, stale statements, a method the company does not fit) and the answer is the range.",
   "NVDA": {
     "status": "PUBLISHED",
     "why": "Calibrated premium lifts the DCF to about +57%; the 59-analyst Street target (+46%) covers more than half the move in the same direction."
@@ -9,8 +9,8 @@
     "why": "DCF about +14% with the calibrated premium; the Street (+12%) corroborates if it lands above 15%."
   },
   "META": {
-    "status": "WITHHELD",
-    "why": "Calibrated premium lifts the DCF to about +23%; the Street target (+5%) covers less than half the move, so the boundary withholds and the answer leads with the model view."
+    "status": "FLAGGED",
+    "why": "Calibrated premium lifts the DCF to about +23%; the Street target (+5%) covers less than half the move. Published with a confidence alert since 2026-10-02 (was withheld)."
   },
   "GOOGL": {
     "status": "PUBLISHED",
@@ -21,40 +21,40 @@
     "why": "DCF about +25% with the calibrated premium; the Street (+57%) corroborates."
   },
   "TSLA": {
-    "status": "WITHHELD",
-    "why": "Consensus cash flows support a value far below the market; exit leg unavailable above the 80x boundary. Model view is shown, no rating."
+    "status": "FLAGGED",
+    "why": "Consensus cash flows support a value far below the market while the Street target sits above it; the exit leg is unavailable above the 80x boundary, which omits it rather than failing it. Published with a confidence alert since 2026-10-02 (was withheld)."
   },
   "AMD": {
-    "status": "WITHHELD",
-    "why": "DCF far below market on a 30%-capped fade; the Street target sits at the market, so nothing corroborates the gap."
+    "status": "FLAGGED",
+    "why": "DCF far below market on a 30%-capped fade; the Street target sits at the market, so nothing corroborates the gap. Published with a confidence alert since 2026-10-02 (was withheld)."
   },
   "AAPL": {
-    "status": "WITHHELD",
-    "why": "DCF-only, about -38% vs market; Street at the market."
+    "status": "FLAGGED",
+    "why": "DCF-only, about -38% vs market; Street at the market. Published with a confidence alert since 2026-10-02 (was withheld)."
   },
   "AMZN": {
-    "status": "WITHHELD",
-    "why": "DCF about -34% vs market while the Street is +32%; model and Street disagree."
+    "status": "FLAGGED",
+    "why": "DCF about -34% vs market while the Street is +32%; model and Street point opposite ways. Published with a confidence alert since 2026-10-02 (was withheld)."
   },
   "PYPL": {
-    "status": "WITHHELD",
-    "why": "DCF well above market while the Street target sits at the market."
+    "status": "FLAGGED",
+    "why": "DCF well above market while the Street target sits at the market. Published with a confidence alert since 2026-10-02 (was withheld)."
   },
   "MC.PA": {
     "status": "WITHHELD",
-    "why": "Latest annual filing beyond the 200-day limit and no semiannual bridge."
+    "why": "Latest annual filing beyond the 200-day limit and no semiannual bridge. Range only: stale statements are a model input problem, not a disagreement with the Street."
   },
   "PCJEWELLER.NS": {
     "status": "WITHHELD",
-    "why": "Perpetual DCF is negative; a failed leg never publishes."
+    "why": "Perpetual DCF is negative; a failed leg never publishes. Range only."
   },
   "MU": {
     "status": "WITHHELD",
-    "why": "Memory maker: DRAM/NAND prices set the covered years' margin, so the model is a scenario until a mid-cycle margin exists."
+    "why": "Memory maker: DRAM/NAND prices set the covered years' margin, so the model is a scenario until a mid-cycle margin exists. Range only."
   },
   "GM": {
     "status": "WITHHELD",
-    "why": "GM Financial is a consolidated captive lender; scenario only until an operating/finance split exists."
+    "why": "GM Financial is a consolidated captive lender; scenario only until an operating/finance split exists. Range only."
   },
   "TEX": {
     "status": "PUBLISHED",
@@ -63,8 +63,9 @@
   "BKNG": {
     "status": [
       "PUBLISHED",
+      "FLAGGED",
       "WITHHELD"
     ],
-    "why": "Reports no cost of revenue in any year (expenses by function). It must build and pass integrity: before 2026-09-27 every Booking model failed the historical-period check, and payables measured against the absent line were projected at zero. Either publication outcome is accepted because the methods span right at the 1.8x limit: DCF about +34%, comps about +134% on Airbnb, Hilton and Royal Caribbean at 26.7x EBITDA versus Booking's own 12.2x."
+    "why": "Reports no cost of revenue in any year (expenses by function). It must build and pass integrity: before 2026-09-27 every Booking model failed the historical-period check, and payables measured against the absent line were projected at zero. Any publication outcome is accepted because the methods span right at the 1.8x limit: DCF about +34%, comps about +134% on Airbnb, Hilton and Royal Caribbean at 26.7x EBITDA versus Booking's own 12.2x. When the methods land inside the limit the value publishes, flagged if the Street does not back it."
   }
 }

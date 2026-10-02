@@ -409,13 +409,13 @@ class RecommendationValidator:
             'valuation_reliability') or {}
         if not fixed_numbers.get('rating_available', True):
             deterministic_perspective = (
-                "The point estimate, directional rating, and price targets are "
-                "withheld because "
+                "No single fair value, directional rating or price target is "
+                "stated for this run. "
                 + str(fixed_numbers.get('rating_withheld_reason') or (
                     reliability.get('withheld_reason')
-                    or "the valuation evidence does not support a defensible point call."
-                )).strip()
-                + " The published range contains model-method outputs, not "
+                    or "The valuation evidence does not support a defensible point call."
+                )).strip().rstrip('.')
+                + ". The published range contains model-method outputs, not "
                 "probabilistic bull/base/bear targets."
             )
         else:

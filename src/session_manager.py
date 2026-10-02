@@ -280,10 +280,18 @@ class SessionManager:
                             f"{valuation.get('current_price', 'N/A')}"
                         )
                     if valuation.get("point_estimate_withheld"):
-                        summary_lines.append(
-                            "  - Rating / point fair value: NOT RATED / withheld"
-                        )
                         low, high = valuation.get("range_low"), valuation.get("range_high")
+                        from src.confidence_alert import (
+                            RANGE, SINGLE_ESTIMATE, support_shape,
+                        )
+                        summary_lines.append(
+                            "  - Rating / single fair value: none for this run ("
+                            + {
+                                RANGE: "the answer is a range",
+                                SINGLE_ESTIMATE: "the answer is one scenario estimate",
+                            }.get(support_shape(low, high), "no method produced a usable value")
+                            + ")"
+                        )
                         price = valuation.get("current_price")
                         from src.summary_evidence import unsuitable_method_note
                         method_note = unsuitable_method_note(
@@ -303,7 +311,11 @@ class SessionManager:
                             )
                             summary_lines.append(
                                 f"  - Model view: the modeled cash flows support a value "
-                                f"{direction} the market ({gap:+.0%} at the midpoint)"
+                                f"{direction} the market ({gap:+.0%}"
+                                # One surviving estimate has no midpoint.
+                                + ("" if support_shape(low, high) == SINGLE_ESTIMATE
+                                   else " at the midpoint")
+                                + ")"
                             )
                         if isinstance(low, (int, float)) and isinstance(high, (int, float)):
                             if (valuation.get("support_shape") == "single_estimate"
@@ -320,7 +332,7 @@ class SessionManager:
                         reason = valuation.get("publication_withheld_reason")
                         if reason:
                             summary_lines.append(
-                                f"  - Publication reason: {str(reason)[:1500]}"
+                                f"  - Why no single fair value: {str(reason)[:1500]}"
                             )
                     if "fair_value" in valuation:
                         summary_lines.append(
@@ -330,6 +342,12 @@ class SessionManager:
                     if "upside_downside" in valuation:
                         upside = valuation.get('upside_downside', 0)
                         summary_lines.append(f"  - Upside/Downside: {upside:+.2%}")
+                    if valuation.get("confidence_alert"):
+                        # A view published against the Street stays flagged in
+                        # every follow-up turn.
+                        summary_lines.append(
+                            f"  - Confidence alert: {str(valuation['confidence_alert'])[:800]}"
+                        )
                     if "model_type" in valuation:
                         summary_lines.append(f"  - Model Used: {valuation.get('model_type', 'N/A')}")
                 

@@ -144,14 +144,48 @@ def test_soft_calls_pass_this_check_and_are_left_to_the_model_check():
 
 def test_repeats_of_the_fixed_statement_are_stripped_not_counted():
     section = (
-        "O: NOT RATED. No rating or fair value is published: it is a REIT.\n\n"
+        "O: VYNN's answer here is the evidence, not a fair value, because it is a REIT.\n\n"
         "Realty Income trades at $55.54, down 3% this year, with a 5.8% dividend yield. "
         "It targets about $5 billion of investment volume in 2026. Analysts rate it a Hold on average."
     )
     review = review_section(section)
     assert review.publishable and not review.claims
-    assert len(review.repeated) == 3
+    assert len(review.repeated) == 2
     assert review.text.startswith("Realty Income trades at $55.54") and "Hold" not in review.text
+
+
+@pytest.mark.parametrize("sentence", [
+    # The retired labels are still stripped if a model falls back on them.
+    "O: NOT RATED.",
+    "No rating or fair value is published: it is a REIT.",
+    "The point estimate was withheld.",
+    # The fixed statement's words today.
+    "VYNN's answer here is a range, not a single fair value.",
+    "There is no single fair value for this run.",
+    "Low confidence: VYNN's fair value is 49% below the market price.",
+    "VYNN 在此给出的是证据，而不是公允价值。",
+    "置信度低：VYNN 的公允价值低于市场价 49%。",
+])
+def test_the_fixed_statement_s_own_words_count_as_a_repeat(sentence):
+    assert restates(sentence)
+
+
+@pytest.mark.parametrize("sentence", [
+    "The rating is low confidence because the Street's targets sit above the price.",
+    "VYNN's view carries low confidence here.",
+    "A low-confidence call: the model is far from consensus.",
+])
+def test_low_confidence_said_of_vynn_s_view_is_a_repeat(sentence):
+    assert restates(sentence)
+
+
+@pytest.mark.parametrize("sentence", [
+    "Management expressed low confidence in the second-half outlook.",
+    "Consumer confidence is low across its main markets.",
+    "Surveys show low confidence among small-business customers.",
+])
+def test_low_confidence_about_the_company_is_evidence_and_stays(sentence):
+    assert not restates(sentence)
 
 
 def test_a_claim_anywhere_makes_the_section_unpublishable():
@@ -321,11 +355,11 @@ def test_a_withheld_figure_matches_only_as_a_whole_number():
 
 def test_compose_puts_the_answer_first_and_the_benchmark_last():
     template = (
-        "XOM: NOT RATED. No rating or fair value is published: reason.\n\n"
+        "XOM: VYNN's answer here is the evidence, not a fair value, because reason.\n\n"
         "The Street's view, shown as a benchmark and not as VYNN's rating:\n- mean target 172.55"
     )
     out = compose(template, "Price and trend: up 41% over the year.")
-    assert out.index("NOT RATED") < out.index("Price and trend") < out.index("The Street's view")
+    assert out.index("the evidence, not a fair value") < out.index("Price and trend") < out.index("The Street's view")
     assert compose(template, "") == template
 
 
@@ -425,7 +459,11 @@ def _chat_agent(prompt, state, ticker):
 def test_the_reported_question_gets_the_template_and_it_is_recorded():
     ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
     out = ag._guard_final_answer(XOM_DRAFT_2)
-    assert out.startswith("XOM: NOT RATED. No rating or fair value is published: its cash flows follow commodity prices")
+    assert out.startswith(
+        "XOM: VYNN's answer here is the evidence, not a fair value, because its "
+        "cash flows follow commodity prices")
+    # The answer says what it is; it never reads as a missing rating.
+    assert "NOT RATED" not in out and "No rating" not in out
     assert ag._guard_template == out and "Hold XOM" not in out
 
 
@@ -483,8 +521,10 @@ def test_a_clean_section_that_passes_both_checks_is_published():
     provider = _Provider(XOM_SECTION, "NO")
     template, out = _analysis(ag, provider, XOM_DRAFT_2)
 
-    assert out.index("XOM: NOT RATED") < out.index("Guyana and the Permian") < out.index("The Street's view")
-    assert out.count("NOT RATED") == 1 and "172.55" in out
+    assert (out.index("XOM: VYNN's answer here is the evidence")
+            < out.index("Guyana and the Permian") < out.index("The Street's view"))
+    assert out.count("the evidence, not a fair value") == 1 and "172.55" in out
+    assert "NOT RATED" not in out
     write, check = provider.calls
     # The section is written without the draft in view, and with no tool.
     assert write["tool_choice"] == "none"
@@ -528,6 +568,7 @@ def test_an_explicit_claim_stops_the_section_before_the_model_check():
     ("",),
     ("埃克森美孚的股价在过去一年上涨了41%，高于50日和200日均线。炼油利润率异常强劲，可能回落。",),
     ("XOM: NOT RATED. Analysts rate it a Hold.",),
+    ("XOM: VYNN's answer here is the evidence, not a fair value. Analysts rate it a Hold.",),
     (XOM_SECTION, RuntimeError("check failed")),
     (None,),
 ])
@@ -556,7 +597,9 @@ def test_a_withheld_section_with_the_bull_and_bear_case_is_published():
     )
     _, out = _analysis(ag, _Provider(section, "NO"), "Verdict: Buy. The midpoint of $167.67 is below.")
     assert "ad revenue grew 22% last quarter" in out and "EU regulators are circling" in out
-    assert out.index("Rating: NOT RATED") < out.index("Bull case") < out.index("benchmark reconciliation")
+    assert (out.index("VYNN's answer here is a range, not a single fair value")
+            < out.index("Bull case") < out.index("benchmark reconciliation"))
+    assert "NOT RATED" not in out
 
 
 def test_a_published_section_cannot_restate_the_contradicted_figure():

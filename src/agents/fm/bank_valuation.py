@@ -450,8 +450,9 @@ def assess_bank_publication(
         # pointing the same way, just as the corporate DCF boundary does.
         and not target_corroborates
     )
+    alert = None
     if target_conflict or rating_conflict or unsupported_single_method:
-        withheld = True
+        street_only = not withheld
         benchmark_parts = []
         for row in target_rows[:3]:
             benchmark_parts.append(
@@ -468,15 +469,35 @@ def assess_bank_publication(
             " External benchmarks: " + "; ".join(benchmark_parts) + "."
             if benchmark_parts else ""
         )
-        analyst_reason = (
+        analyst_fact = (
             f"The bank valuation is {model_gap:+.0%} from the market"
             + (" and rests on one intrinsic method" if band == "single-method" else "")
             + ". Well-covered external analyst evidence does not corroborate "
             "a directional call at that gap."
             + benchmark_note
-            + " Publish the bank methods as scenarios and withhold a rating."
         )
-        reason = f"{reason} {analyst_reason}" if reason else analyst_reason
+        if street_only:
+            # The bank model is sound and only the Street stands apart from
+            # it: publish the answer with a confidence alert (see
+            # src/confidence_alert.py), exactly as the corporate boundary does.
+            from src.confidence_alert import build_street_alert
+            alert = build_street_alert(
+                model_gap,
+                targets=target_rows,
+                ratings=rating_rows,
+                half_move_floor=.08,
+                detail=analyst_fact,
+            )
+            if alert is None:
+                # These conflicts all need a model gap, so an alert can always
+                # be drawn up. If that ever stops holding, fail closed: this
+                # answer must not go out unflagged.
+                withheld = True
+                reason = analyst_fact
+        else:
+            # The bank model is blocked on its own; what the Street says is
+            # context for the reader, not the reason.
+            reason = f"{reason} {analyst_fact}" if reason else analyst_fact
 
     return {
         "dispersion_ratio": ratio,
@@ -484,6 +505,7 @@ def assess_bank_publication(
         "valuation_warning": warning,
         "point_estimate_withheld": withheld,
         "publication_withheld_reason": reason,
+        "confidence_alert": None if withheld else alert,
         "reliability_legs": legs,
     }
 

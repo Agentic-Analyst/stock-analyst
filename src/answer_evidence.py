@@ -11,8 +11,10 @@ The chat agent now asks the model for the analysis alone and publishes it with
 the template only if it passes two checks (GeneralistAgent._add_analysis). This
 module is the first: deterministic, and deliberately precise. It
 
-- strips what merely repeats the template: the rating status ("NOT RATED") and
-  the Street's targets and ratings, and news sentiment the run cannot support;
+- strips what merely repeats the template: the position it states ("the
+  evidence, not a fair value", "a range, not a single fair value", a
+  confidence alert) and the Street's targets and ratings, and news sentiment
+  the run cannot support;
 - finds EXPLICIT claims only a published rating may make: a rating word used as
   a rating, a price target, a fair value with a number, over- or undervalued, a
   value per share for a scenario, a withheld run's point figures. Any one of
@@ -235,6 +237,17 @@ _RESTATEMENT = re.compile(
     r"\bnot\s+rated\b|\bno\s+(?:rating|fair\s+value)\b|\bwithh(?:e|o)ld\w*\b|"
     r"\bdoes\s+not\s+publish\b|\bnot\s+published\b|\baudited\s+report\s+headline\b|"
     r"\bpoint\s+headline\b|\bpoint\s+estimate\b|"
+    # The fixed statement's own words since the labels above were retired: the
+    # answer is the evidence or a range, and a published view may carry a
+    # confidence alert.
+    r"\b(?:not|no|rather\s+than)\s+(?:(?:a|an|any|one|single)\s+)+fair\s+value\b|"
+    # "Low confidence" only as the alert states it (the lead-in, or said of
+    # VYNN's own view): "management has low confidence in the outlook" is
+    # evidence about the company and stays.
+    r"\blow[-\s]+confidence\s*[:.]|\bconfidence\s+alert\b|"
+    r"\b(?:vynn(?:'s)?|rating|fair\s+value|call|view)\b[^.\n]{0,60}?\blow[-\s]+confidence\b|"
+    r"\blow[-\s]+confidence\b[^.\n]{0,60}?\b(?:vynn(?:'s)?|rating|fair\s+value|call|view)\b|"
+    r"而不是(?:单一)?公允价值|置信度(?:较)?低|"
     r"\b(?:analysts?'?|street'?s?|consensus|wall\s+street|sell[-\s]side|brokers?)\b[^.\n]{0,60}?"
     r"\b(?:targets?|rat(?:e|es|ed|ing|ings)|recommend\w*)\b|未评级|不予评级|分析师[^。\n]{0,20}(?:目标价|评级)|"
     r"\b(?:raised|lifted|cut|lowered|trimmed|boosted|reiterated|maintained|initiated|set|increased|"

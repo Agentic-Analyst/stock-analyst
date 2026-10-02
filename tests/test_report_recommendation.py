@@ -337,7 +337,10 @@ class TestValidationAnnotations:
         )
 
         assert cost == 0.0
-        assert "Investment Rating: NOT RATED" in output
+        # No rating exists, and the report says what it shows instead of
+        # printing a missing one.
+        assert "### Investment View: Range Only" in output
+        assert "NOT RATED" not in output and "Withheld" not in output
         assert "Publication note" in output
         assert "fallback" not in output.lower()
         assert pack["validation"]["status"] == "not_rated_deterministic"
@@ -537,9 +540,11 @@ class TestUnreliableValuation:
 
     def test_formatter_publishes_range_but_no_directional_numbers(self, engine):
         out = engine._format_final_output(LLM_RESPONSE, self._withheld(), {})
-        assert "### Investment Rating: NOT RATED" in out
+        assert "### Investment View: Range Only" in out
+        assert "NOT RATED" not in out
         assert "**Valuation Confidence**: Unreliable" in out
-        assert "**Point Estimate**: Withheld" in out
+        assert "**Single Fair Value**: Range only" in out
+        assert "VYNN shows a range here rather than a single fair value" in out
         assert "**Supported Valuation Range**: €188.30 – €744.86" in out
         assert "€188.30–€744.86" in out
         assert "12-Month Price Target" not in out
@@ -552,16 +557,30 @@ class TestUnreliableValuation:
         fixed = self._withheld()
         fixed.pop("inputs")
         out = engine._format_final_output(LLM_RESPONSE, fixed, {})
-        assert "### Investment Rating: NOT RATED" in out
-        assert "No point rating or price target" in out
+        # With no method range to hand, the fallback claims no range either.
+        assert "### Investment View: No Fair Value" in out
+        assert "**Single Fair Value**: None" in out
+        assert "VYNN states no fair value, rating or price target here." in out
+        assert "NOT RATED" not in out
         assert "12-Month Price Target" not in out
 
     def test_prompt_forbids_the_explainer_from_recreating_a_target(self, engine):
         prompt = engine._build_explainer_prompt(
             self._withheld(), {"evidence": []}, {}, {}, citations_enabled=False)
-        assert "VALUATION POINT ESTIMATE WITHHELD" in prompt
+        assert "## OVERRIDE: NO SINGLE FAIR VALUE FOR THIS RUN" in prompt
         assert "Do not invent" in prompt
         assert "must not use the valuation-range endpoints as scenario price targets" in prompt
+        # The prose model is told what the run shows instead, in words that fit
+        # it, and is handed neither retired label to repeat.
+        assert "(the supported valuation range), and why" in prompt
+        override = prompt.split("## OVERRIDE: NO SINGLE FAIR VALUE FOR THIS RUN")[1]
+        assert "WITHHELD" not in override and "Withheld" not in override
+
+        one = self._withheld()
+        one["inputs"]["valuation_reliability"].update(range_low=264.73, range_high=264.73)
+        one_prompt = engine._build_explainer_prompt(
+            one, {"evidence": []}, {}, {}, citations_enabled=False)
+        assert "(one scenario estimate, never called a range), and why" in one_prompt
 
     def test_full_engine_carries_reliability_into_the_calculator(self, engine):
         company = {
@@ -586,8 +605,9 @@ class TestUnreliableValuation:
             company, valuation, screening,
             lambda messages, temperature=0.6: (LLM_RESPONSE, 0.0),
         )
-        assert "### Investment Rating: NOT RATED" in text
-        assert "**Point Estimate**: Withheld" in text
+        assert "### Investment View: Range Only" in text
+        assert "**Single Fair Value**: Range only" in text
+        assert "NOT RATED" not in text
         assert "12-Month Price Target" not in text
 
 
