@@ -53,6 +53,7 @@ def build_market_expectations(
         sentence = None if method_note else required_growth_sentence(required)
 
         headline = None
+        shape = "range"
         publication = publication if isinstance(publication, dict) else {}
         if publication.get("point_estimate_withheld"):
             values = [
@@ -74,6 +75,7 @@ def build_market_expectations(
                 method_note=method_note,
             )
             headline = view.get("headline") or None
+            shape = supported_valuation_span(values)["shape"]
 
         return {
             "schema_version": SCHEMA_VERSION,
@@ -85,8 +87,12 @@ def build_market_expectations(
             "sentence": sentence,
             "model_view_headline": headline,
             "method_note": method_note,
+            # Why this run's answer is a range and not one fair value. The
+            # key keeps its name: api-runner and the dashboard read it.
             "rating_note": (
-                plain_rating_note(publication.get("withheld_reason"), method_note)
+                plain_rating_note(
+                    publication.get("withheld_reason"), method_note, shape=shape,
+                )
                 if publication.get("point_estimate_withheld") else None
             ),
         }

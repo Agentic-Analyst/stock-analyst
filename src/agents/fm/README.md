@@ -17,10 +17,11 @@ financial-data JSON saved by `FinancialScraper`.
   inputs, and other unsupported instruments fail closed into their specialized
   service contract.
 - Every build evaluates formulas, stores formula-integrity and publication
-  metadata in the computed-values sidecar, and relabels a withheld workbook
-  midpoint as an audit scenario rather than a fair value.
+  metadata in the computed-values sidecar, and relabels the midpoint of a
+  range-only workbook as an audit scenario rather than a fair value.
 - Analyst targets and peer multiples are independent benchmarks. They can
-  corroborate or block a directional publication, but are never silently
+  corroborate a published value or attach a confidence alert to it (the value
+  is still published, at low confidence), but are never silently
   averaged into intrinsic value unless a peer-comps leg passes the explicit
   comparability policy.
 
@@ -161,12 +162,13 @@ Required packages (already in project):
   REITs, insurers, or commodity-cycle businesses without normalized cycle
   inputs. Those routes must use or await their specialized engine.
 - Two DCF terminal methods share one operating forecast and are one valuation
-  lens. A directional DCF-only conclusion needs qualified numeric independent
-  corroboration.
+  lens. A directional DCF-only conclusion is published with a confidence alert
+  unless qualified numeric independent evidence corroborates it.
 - Provider price targets without a provider as-of date may challenge a model
-  but cannot validate a directional point target.
-- Missing, misaligned, or stale statements withhold publication. A recent
-  scrape timestamp never makes an old financial period current.
+  but cannot validate a directional point target; a value they alone would
+  back is published as not yet confirmed.
+- Missing, misaligned, or stale statements leave a range, not a single value.
+  A recent scrape timestamp never makes an old financial period current.
 
 ## Testing
 
@@ -185,10 +187,16 @@ PYTHONPATH=.:src conda run -n stock-analyst \
 **Issue**: "No data loaded" error
 - **Solution**: load the normalized financial JSON before `build_model()`.
 
-**Issue**: point estimate is withheld
-- **Solution**: read `withheld_reason`; do not bypass it. Typical causes are a
-  stale period, an unsuitable method, a failed valuation leg, method
-  dispersion, or unreconciled independent evidence.
+**Issue**: the workbook says `SCENARIO RANGE ONLY`
+- **Solution**: read `withheld_reason`; do not bypass it. The model itself
+  supports no single value: typical causes are a stale period, an unsuitable
+  method, a failed valuation leg, method dispersion, or a near-term forecast
+  far from analysts' estimates.
+
+**Issue**: the workbook says `PUBLISHABLE (low confidence: ...)`
+- **Solution**: nothing is broken. The model is sound and well-covered analysts
+  do not back its conclusion; `confidence_alert` in the publication metadata
+  states both positions, and every surface prints it beside the value.
 
 **Issue**: field name mismatch
 - **Solution**: add and test an alias at the normalization boundary; never

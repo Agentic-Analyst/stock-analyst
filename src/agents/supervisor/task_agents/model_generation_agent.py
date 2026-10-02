@@ -60,12 +60,14 @@ def _valuation_log_summary(metrics):
         return (
             "📊 Extracted valuation: "
             f"Audit midpoint={display(metrics.get('fair_value'))}, "
-            f"Current={current}, Point estimate=WITHHELD, Upside=WITHHELD"
+            f"Current={current}, Single fair value=NONE, Upside=NONE"
         )
     return (
         "📊 Extracted valuation: "
         f"Fair Value={display(metrics.get('fair_value'))}, Current={current}, "
         f"Upside={display(metrics.get('upside_vs_market'), percent=True)}"
+        + (", Confidence=LOW (far from the Street)"
+           if metrics.get("confidence_alert") else "")
     )
 
 
@@ -119,6 +121,17 @@ def _merge_machine_publication_boundary(valuation_metrics, computed_data):
             and not isinstance(canonical_upside, bool)
             and math.isfinite(float(canonical_upside))):
         metrics["upside_vs_market"] = float(canonical_upside)
+    if ready and allowed and not manifest_withheld and not metrics.get("point_estimate_withheld"):
+        # The workbook ran the complete policy, so its alert is the one the
+        # downloaded file, the report and the dashboard all state. An alert
+        # found only in memory is kept: it can add a caution, never remove one.
+        from src.confidence_alert import normalize_alert
+        stored_alert = normalize_alert(publication.get("confidence_alert"))
+        if stored_alert:
+            metrics["confidence_alert"] = stored_alert
+    else:
+        # An alert qualifies a published answer; a range-only result has none.
+        metrics.pop("confidence_alert", None)
     if not ready or not allowed or manifest_withheld:
         metrics["point_estimate_withheld"] = True
         manifest_reason = publication.get("withheld_reason") if ready else None
@@ -488,7 +501,7 @@ async def model_generation_agent(
                     from src.agents.tools.analysis_tools import (
                         _megacap_threshold,
                         valuation_dispersion,
-                        valuation_publication_boundary,
+                        valuation_publication_decision,
                     )
                     raw = state.financial_data.raw_data or {}
                     # Put the licensed/public human target on the same economic
@@ -636,7 +649,7 @@ async def model_generation_agent(
                         and not isinstance(market_cap, bool)
                         and market_cap >= _megacap_threshold(currency)
                     )
-                    withheld, withheld_reason = valuation_publication_boundary(
+                    publication = valuation_publication_decision(
                         band=band,
                         legs={
                             "perpetual_dcf": perpetual_price,
@@ -663,29 +676,48 @@ async def model_generation_agent(
                         ),
                         reverse_dcf_gap=market_implied_vs_model,
                     )
+                    withheld = publication["withheld"]
+                    withheld_reason = publication["reason"]
                     if withheld:
                         valuation_metrics["point_estimate_withheld"] = True
                         valuation_metrics["publication_withheld_reason"] = withheld_reason
                         state.log_action(
                             "model_generation_agent",
-                            f"⚠️ Point estimate and rating withheld: {withheld_reason}",
+                            f"⚠️ No single fair value: {withheld_reason}",
+                        )
+                    elif publication.get("alert"):
+                        # The model is sound; the Street stands apart from it.
+                        # The answer is published and says so.
+                        from src.confidence_alert import alert_facts
+                        valuation_metrics["confidence_alert"] = publication["alert"]
+                        state.log_action(
+                            "model_generation_agent",
+                            "⚠️ Published with a confidence alert: "
+                            f"{alert_facts(publication['alert'])}",
                         )
                     if financial_freshness.get("status") in {"stale", "unavailable"}:
                         freshness_reason = financial_freshness.get("reason") or (
                             "The financial statements needed for the valuation are unavailable."
                         )
                         valuation_metrics["point_estimate_withheld"] = True
+                        # An alert qualifies a published answer; there is none.
+                        # What the analysts say stays in the reason as context.
+                        from src.confidence_alert import reason_with_street_context
+                        dropped_alert = valuation_metrics.pop("confidence_alert", None)
                         existing_reason = valuation_metrics.get(
                             "publication_withheld_reason"
                         )
                         valuation_metrics["publication_withheld_reason"] = (
-                            f"{existing_reason} {freshness_reason}"
-                            if existing_reason and freshness_reason not in existing_reason
-                            else freshness_reason
+                            reason_with_street_context(
+                                f"{existing_reason} {freshness_reason}"
+                                if existing_reason and freshness_reason not in existing_reason
+                                else freshness_reason,
+                                dropped_alert,
+                            )
                         )
                         state.log_action(
                             "model_generation_agent",
-                            f"⚠️ Point estimate and rating withheld: {freshness_reason}",
+                            f"⚠️ No single fair value: {freshness_reason}",
                         )
                 except Exception as _disp_err:
                     # Publication controls are safety checks, not optional
@@ -693,6 +725,7 @@ async def model_generation_agent(
                     # when the engine cannot establish whether a point value is
                     # safe to show.
                     valuation_metrics["point_estimate_withheld"] = True
+                    valuation_metrics.pop("confidence_alert", None)
                     valuation_metrics["publication_withheld_reason"] = (
                         "The valuation publication safety check could not be completed; "
                         "the model is available only as an audit scenario."
@@ -788,15 +821,22 @@ async def model_generation_agent(
                 # only method-independent input-quality boundaries below.
                 valuation_metrics.pop("point_estimate_withheld", None)
                 valuation_metrics.pop("publication_withheld_reason", None)
+                # The same holds for an alert computed against the FCF value:
+                # only the bank method's own alert describes the bank answer.
+                valuation_metrics.pop("confidence_alert", None)
                 if bank_override.get("point_estimate_withheld"):
                     valuation_metrics["point_estimate_withheld"] = True
                     valuation_metrics["publication_withheld_reason"] = (
                         bank_override.get("publication_withheld_reason")
                         or "The bank valuation did not pass its publication boundary."
                     )
+                elif bank_override.get("confidence_alert"):
+                    valuation_metrics["confidence_alert"] = bank_override["confidence_alert"]
                 financial_freshness = valuation_metrics.get("financial_freshness") or {}
                 if financial_freshness.get("status") in {"stale", "unavailable"}:
+                    from src.confidence_alert import reason_with_street_context
                     valuation_metrics["point_estimate_withheld"] = True
+                    dropped_alert = valuation_metrics.pop("confidence_alert", None)
                     freshness_reason = (
                         financial_freshness.get("reason") or
                         "The financial statements needed for the valuation are unavailable."
@@ -805,9 +845,12 @@ async def model_generation_agent(
                         "publication_withheld_reason"
                     )
                     valuation_metrics["publication_withheld_reason"] = (
-                        f"{existing_reason} {freshness_reason}"
-                        if existing_reason and freshness_reason not in existing_reason
-                        else freshness_reason
+                        reason_with_street_context(
+                            f"{existing_reason} {freshness_reason}"
+                            if existing_reason and freshness_reason not in existing_reason
+                            else freshness_reason,
+                            dropped_alert,
+                        )
                     )
                 for k, v in bank["inputs"].items():
                     assumptions[f"bank_{k}"] = v
@@ -821,7 +864,8 @@ async def model_generation_agent(
                        if isinstance(bank.get('peer_fair_value'), (int, float)) else "")
                     + f" (P/B {bank['inputs']['justified_pb']:.2f}, "
                     f"ROE {bank['inputs']['roe']*100:.1f}%, r {bank['inputs']['cost_of_equity']*100:.1f}%) "
-                    + ("— point estimate withheld; " if bank_override.get("point_estimate_withheld")
+                    + ("— no single fair value; "
+                       if bank_override.get("point_estimate_withheld")
                        else "— point estimate publishable; ")
                     + "FCF DCF suppressed as not meaningful for financials"
                 )
@@ -843,14 +887,16 @@ async def model_generation_agent(
             valuation_metrics["method_suitability"] = suitability
             if not suitability.get("publication_allowed"):
                 valuation_metrics["point_estimate_withheld"] = True
+                valuation_metrics.pop("confidence_alert", None)
                 valuation_metrics["publication_withheld_reason"] = suitability.get("reason")
                 state.log_action(
                     "model_generation_agent",
-                    "⚠️ Point estimate and rating withheld by method-suitability check: "
+                    "⚠️ No single fair value (method-suitability check): "
                     + str(suitability.get("reason")),
                 )
         except Exception as suitability_error:
             valuation_metrics["point_estimate_withheld"] = True
+            valuation_metrics.pop("confidence_alert", None)
             valuation_metrics["publication_withheld_reason"] = (
                 "The valuation-method suitability check could not be completed; "
                 "the model is available only as an audit scenario."

@@ -75,16 +75,18 @@ def test_immediate_answer_cannot_leak_withheld_value_or_unverified_sentiment(
 
     answer = runner._check_for_immediate_answer("model_generation_agent")
 
-    # The model view leads; the withheld rating is stated, not the opener.
+    # The model view leads; why it is a range and not one value follows it.
     assert answer.startswith("TEST.PA: the modeled cash flows support a value below the market")
-    assert "Rating: NOT RATED" in answer
+    assert "VYNN's answer here is a range, not a single fair value" in answer
+    assert "NOT RATED" not in answer and "withheld" not in answer.lower()
     assert "€153.91–€183.79 EUR" in answer
     assert "independent evidence conflicts" in answer
     assert "Human-analyst and market benchmark reconciliation" in answer
     assert "EUR 200.00" in answer
     prompt = captured["prompt"]
     assert "Supported method range: €153.91-€183.79 EUR" in prompt
-    assert "Rating / point fair value: NOT RATED / withheld" in prompt
+    assert "Rating / single fair value: none for this run; the answer is the range above" in prompt
+    assert "NOT RATED" not in prompt
     assert "Fair Value: €167.67" not in prompt
     assert "News Sentiment: unavailable" in prompt
     assert "News Sentiment: bearish" not in prompt
@@ -112,19 +114,29 @@ def test_guard_preserves_named_external_consensus_but_rejects_model_rating():
     )
 
     external = (
-        "TEST is NOT RATED and the supported range is $153.91–$183.79. "
-        "The independent analyst consensus rating is BUY, but that is only a "
-        "cross-check and not our intrinsic-value conclusion."
+        "VYNN's answer on TEST is a range, not a single fair value: "
+        "$153.91–$183.79. The independent analyst consensus rating is BUY, but "
+        "that is only a cross-check and not our intrinsic-value conclusion."
     )
     assert runner._guard_user_answer(external) == external
 
+    # The retired label reads as "no answer", so prose that falls back on it
+    # gets the fixed statement, which says what the answer is.
+    retired = external.replace(
+        "VYNN's answer on TEST is a range, not a single fair value:",
+        "TEST is NOT RATED and the supported range is",
+    )
+    replaced = runner._guard_user_answer(retired)
+    assert replaced != retired and "NOT RATED" not in replaced
+    assert "VYNN's answer here is a range, not a single fair value" in replaced
+
     unsafe = (
-        "TEST is NOT RATED, but the model rating is SELL with a fair value of "
-        "$167.67 and -44.0% implied return."
+        "TEST has no single fair value, but the model rating is SELL with a "
+        "fair value of $167.67 and -44.0% implied return."
     )
     guarded = runner._guard_user_answer(unsafe)
     assert guarded.startswith("TEST: the modeled cash flows support")
-    assert "Rating: NOT RATED" in guarded
+    assert "VYNN's answer here is a range, not a single fair value" in guarded
     assert "$153.91–$183.79 USD" in guarded
     assert "SELL" not in guarded
     assert "167.67" not in guarded
@@ -215,11 +227,11 @@ def test_withheld_answer_must_explain_reverse_dcf_and_human_benchmark():
     )
 
     guarded = runner._guard_user_answer(
-        "TEST is NOT RATED and its supported range is $100-$120."
+        "VYNN's answer on TEST is a range, not a single fair value: $100-$120."
     )
 
     assert guarded.startswith("TEST: the modeled cash flows support")
-    assert "Rating: NOT RATED" in guarded
+    assert "VYNN's answer here is a range, not a single fair value" in guarded
     assert "human-analyst mean target USD 210.00" in guarded
     assert "reverse DCF" in guarded
     assert "57.3% above the model" in guarded
@@ -258,7 +270,7 @@ def test_generic_analyst_mention_cannot_replace_numeric_benchmark():
     )
 
     guarded = runner._guard_user_answer(
-        "TEST is NOT RATED. Analysts were considered as a cross-check."
+        "TEST: a range, not a single fair value. Analysts were considered as a cross-check."
     )
 
     assert "human-analyst mean target USD 210.00" in guarded
@@ -379,13 +391,13 @@ def test_withheld_answer_requires_dated_material_conflict_and_whole_path():
     )
 
     incomplete = (
-        "AAPL is NOT RATED. The analyst target is USD 335.72, but the model "
-        "range is USD 157.80-182.40."
+        "AAPL: a range, not a single fair value. The analyst target is USD "
+        "335.72, but the model range is USD 157.80-182.40."
     )
     guarded = runner._guard_user_answer(incomplete)
 
     assert guarded.startswith("AAPL: the modeled cash flows support a value below the market")
-    assert "Rating: NOT RATED" in guarded
+    assert "VYNN's answer here is a range, not a single fair value" in guarded
     assert "benzinga" in guarded
     assert "2026-09-10" in guarded
     assert "materially conflicts" in guarded
@@ -416,7 +428,7 @@ def test_extreme_expectation_gap_requires_an_explicit_model_scope_warning():
     )
 
     incomplete = (
-        "TSLA is NOT RATED. The whole-path reverse DCF says the market is "
+        "TSLA: a range, not a single fair value. The whole-path reverse DCF says the market is "
         "43.07x the model FCF path."
     )
     guarded = runner._guard_user_answer(incomplete)

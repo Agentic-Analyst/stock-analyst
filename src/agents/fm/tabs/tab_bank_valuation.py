@@ -141,14 +141,16 @@ class BankValuationTabBuilder:
         ws["B21"] = '=IFERROR(B18/B4-1,"")'
         ws["B21"].number_format = "0.0%"
         ws["A22"] = "Publication status"
-        ws["B22"] = (
-            "WITHHELD — scenario range only"
-            if self.valuation.get("point_estimate_withheld")
-            else "PUBLISHABLE"
+        from src.confidence_alert import workbook_status
+        ws["B22"] = workbook_status(
+            bool(self.valuation.get("point_estimate_withheld")),
+            self.valuation.get("confidence_alert"),
         )
         ws["A23"] = "Publication reason"
+        from src.confidence_alert import alert_sentence
         ws["B23"] = self.valuation.get("publication_withheld_reason") or (
-            "The deterministic bank-method publication checks passed."
+            alert_sentence(self.valuation.get("confidence_alert"))
+            or "The deterministic bank-method publication checks passed."
         )
         ws.merge_cells("B23:D23")
         ws["B23"].alignment = Alignment(wrap_text=True, vertical="top")

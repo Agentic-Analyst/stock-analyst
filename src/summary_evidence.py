@@ -12,6 +12,7 @@ import math
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
+from src.confidence_alert import SCENARIO_STEM, no_single_value_stem, support_shape
 from src.external_expectations import (
     align_forward_estimates_to_forecast_basis,
     build_external_expectations,
@@ -141,10 +142,7 @@ def supported_valuation_span(values: Iterable[Any]) -> Dict[str, Any]:
     if not supported:
         return {"low": None, "high": None, "shape": "unavailable"}
     low, high = min(supported), max(supported)
-    # Product surfaces display cents. Two methods that round to the same
-    # number support one visible scenario estimate, not a zero-width range.
-    shape = "single_estimate" if round(low, 2) == round(high, 2) else "range"
-    return {"low": low, "high": high, "shape": shape}
+    return {"low": low, "high": high, "shape": support_shape(low, high)}
 
 
 MODEL_VIEW_DIRECTION_THRESHOLD = 0.15
@@ -272,8 +270,19 @@ _PLAIN_REFUSALS = {
 }
 
 
+# What a user reads where the engine states no single fair value. These say
+# what the answer IS (the evidence, or a range) and why; none of them reads as
+# a missing rating. A sound model the Street does not back never reaches these
+# sentences: it is published with a confidence alert (src/confidence_alert.py).
+EVIDENCE_ANSWER = "VYNN's answer here is the evidence, not a fair value"
+NO_MODEL_ANSWER = (
+    "No valuation model was produced in this run, so there is no fair value "
+    "to state."
+)
+
+
 def plain_refusal_note(kind: Any, reason: Any = None) -> str:
-    """Why no rating or fair value exists for this run, in one plain sentence.
+    """Why this run answers with evidence and no fair value, in one plain sentence.
 
     ``kind`` is the methodology's ``specialized_service``; ``reason`` is its
     auditor-facing text, used only when the kind is unknown. A run with no
@@ -282,18 +291,15 @@ def plain_refusal_note(kind: Any, reason: Any = None) -> str:
     """
     plain = _PLAIN_REFUSALS.get(str(kind or "").strip().lower())
     if plain:
-        return f"No rating or fair value is published: {plain}."
+        return f"{EVIDENCE_ANSWER}, because {plain}."
     if kind:
         detail = " ".join(str(reason or "").split())
         return (
-            "No rating or fair value is published, because this instrument is "
-            "outside the valuation method's scope"
+            f"{EVIDENCE_ANSWER}, because this instrument is outside the "
+            "valuation method's scope"
             + (f": {detail}" if detail else ".")
         )
-    return (
-        "No rating or fair value is published, because no valuation model was "
-        "produced in this run."
-    )
+    return NO_MODEL_ANSWER
 
 
 # The same sentences for a question asked in Chinese, keyed like _PLAIN_REFUSALS.
@@ -309,115 +315,95 @@ _PLAIN_REFUSALS_ZH = {
 
 
 def plain_refusal_note_zh(kind: Any) -> str:
-    """plain_refusal_note in Chinese: why no rating or fair value exists for this run."""
+    """plain_refusal_note in Chinese: why this run answers with evidence and no fair value."""
     plain = _PLAIN_REFUSALS_ZH.get(str(kind or "").strip().lower())
     if plain:
-        return f"不发布评级或公允价值：{plain}。"
+        return f"VYNN 在此给出的是证据，而不是公允价值，因为{plain}。"
     if kind:
-        return "不发布评级或公允价值，因为该标的超出估值方法的适用范围。"
-    return "不发布评级或公允价值，因为本次运行没有生成估值模型。"
+        return "VYNN 在此给出的是证据，而不是公允价值，因为该标的超出估值方法的适用范围。"
+    return "本次运行没有生成估值模型，因此没有可给出的公允价值。"
 
 
-# The engine's own figures, as analysis_tools.valuation_publication_boundary
-# prints them for a corporate valuation: "The model is +94% from the market",
-# "37-analyst target benchmark is +46%", "finnhub rates it HOLD (20 ratings)".
-# Only the qualified evidence is printed, and only qualified evidence blocks.
-# tests/test_market_expectations.py builds reasons with that function across
-# both branches (DCF-only and model-plus-comps), so a wording change there
-# fails a test rather than reaching a user.
-_MODEL_GAP = re.compile(r"(?:model|estimate) is ([+-]\d+)% from the market")
-_TARGET_GAP = re.compile(r"target benchmark is ([+-]\d+)%")
-_RATING = re.compile(r"rates it ([a-z][a-z ]*?) \(\d+ ratings\)")
-_RATING_DIRECTION = {
-    "strong buy": 1, "buy": 1, "outperform": 1, "overweight": 1,
-    "strong sell": -1, "sell": -1, "underperform": -1, "underweight": -1,
-    "hold": 0, "neutral": 0, "market perform": 0, "equal weight": 0,
-}
-_NO_CURRENT_TARGET = "no provider-dated current analyst target qualified"
-_UNCONFIRMED = "independent analyst evidence does not confirm the model's call"
+# The model's own reasons for stating a range, in the order a reader should
+# hear them: the valuation itself, then the business it is applied to, then
+# its inputs. Each entry is (phrases the engine's reason contains, the plain
+# cause). tests/test_market_expectations.py builds reasons with the engine's
+# own functions, so a wording change there fails a test rather than leaving a
+# user with the bare sentence.
+_PLAIN_RANGE_CAUSES = (
+    (("span more than", "disagree by more than", "do not converge",
+      "contradict each other"),
+     "the valuation methods disagree too widely to settle on one"),
+    (("non-positive value", "failed with"),
+     "one valuation method produced no positive value"),
+    (("no finite positive",),
+     "the model produced no positive value"),
+    (("operating cash flow is non-positive", "operating cash flow is unavailable",
+      "free cash flow is not yet established"),
+     "the company does not yet generate the steady cash flow a cash-flow "
+     "valuation needs"),
+    (("positive current revenue is unavailable",),
+     "the company has no revenue yet to build a forecast on"),
+    (("fewer than two aligned annual",),
+     "there is too little financial history to build a forecast on"),
+    (("near-term operating case is not reconciled",),
+     "the model's near-term revenue forecast is far from analysts' estimates "
+     "and that gap is not yet explained"),
+    (("near-term profitability case is not reconciled",),
+     "the model's near-term profit margin is far from what analysts' estimates "
+     "imply and that gap is not yet explained"),
+    (("model boundary", "safety boundary"),
+     "a core input of the bank model hit its safety limit"),
+    (("days old", "annual-only limit"),
+     "the latest annual financial statements are too old for a current valuation"),
+    (("currency conversion is unavailable",),
+     "the exchange rate needed to compare the value with the share price was "
+     "unavailable"),
+    (("market price is unavailable",),
+     "the valuation or the market price was unavailable"),
+    (("could not be completed", "decision is missing or incomplete"),
+     "a safety check on this valuation could not be completed"),
+)
 
 
-def _street_disagreement(text: str) -> str:
-    """Name what kept the Street from backing the model, only when it is sure.
+def plain_rating_note(reason: Any, method_note: Optional[str] = None, *,
+                      shape: str = "range") -> str:
+    """Why this run's answer is a range (or one scenario estimate, or nothing)
+    and not one fair value, in one sentence a retail reader follows.
 
-    The engine withholds a rating when a qualified Street target points the
-    other way, backs less than half of the model's move, or when a qualified
-    analyst rating points another way; a DCF-only call also needs a current,
-    dated target to back it. "The model and the Street's price targets point
-    to different conclusions" misread the common case (Meta: +26% against
-    the Street's +5%, both undervalued) and blamed targets when a rating or a
-    missing target was the reason. Every specific sentence here is one the
-    printed evidence proves; anything else gets the neutral sentence. Bank
-    reasons ("The bank valuation is ...") follow different thresholds, so they
-    always get the neutral sentence. The model's own figure is left to the
-    model-view line beside this note, which states it at the range midpoint.
+    The engine's reasons are written for an auditor ("The valuation methods
+    span more than 1.8x. That range is useful scenario evidence ..."). The
+    technical reason stays in the report and after this sentence in chat; this
+    is the line a user reads first. A reason can carry two conditions at once
+    (methods that disagree AND statements 270 days old); the first two in the
+    order above are named.
+
+    Only the model's own state is ever the cause. What the Street thinks the
+    shares are worth is never one: a sound model the analysts' targets and
+    ratings do not back is published with a confidence alert, and when the
+    model is blocked their position is context that follows the reason.
+
+    ``shape`` is what the usable methods support (supported_valuation_span):
+    a "range", a "single_estimate" when one method survived, or "unavailable"
+    when none produced a positive value. The sentence never calls one
+    estimate, or nothing, a range.
     """
-    model = _MODEL_GAP.search(text)
-    gap = int(model.group(1)) if model else 0
-    if not gap:
-        return _UNCONFIRMED
-    side = "upside" if gap > 0 else "downside"
-    targets = [int(value) for value in _TARGET_GAP.findall(text)]
-    # A target at the price or on the other side never backs the model.
-    for target in sorted(targets, key=lambda value: value * gap):
-        if target * gap <= 0:
-            where = (
-                "sit at the market price" if target == 0
-                else f"point the other way ({target:+d}%)"
-            )
-            return f"the Street's price targets {where}, against the model's {side}"
-    # Below half the model's move blocks. The printed figures are rounded to
-    # a whole percent, so only a target at least a point under the bar is
-    # certain to be one the engine rejected; the tightest one is named.
-    bar = max(5, abs(gap) / 2)
-    short = [target for target in targets if abs(target) < bar - 1]
-    if short:
-        target = min(short, key=abs)
-        return (
-            f"the Street's price targets ({target:+d}%) back less than half "
-            f"of the model's {side}"
-        )
-    direction = 1 if gap > 0 else -1
-    for label in _RATING.findall(text):
-        if _RATING_DIRECTION.get(label.strip()) not in (None, direction):
-            return (
-                f"the Street's analyst ratings ({label.strip().upper()}) do not "
-                "point the same way as the model"
-            )
-    if _NO_CURRENT_TARGET in text:
-        return "no current, dated analyst target backs the model's call"
-    return _UNCONFIRMED
-
-
-def plain_rating_note(reason: Any, method_note: Optional[str] = None) -> str:
-    """Why no rating was published, in one sentence a retail reader follows.
-
-    The engine's reasons are written for an auditor ("well-covered
-    analyst-target evidence does not corroborate both the direction and
-    material magnitude"). The technical reason stays in the report and after
-    this sentence in chat; this is the line a user reads first. A reason can
-    carry two conditions at once (Amazon: the model and the Street disagree
-    AND the latest annual statements are 270 days old); the two most
-    substantive are named, disagreement before data freshness.
-    """
+    stem = no_single_value_stem(shape)
     text = " ".join(str(method_note or reason or "").split()).lower()
     if method_note:
+        # The method itself was ruled out, so whatever it produced is a
+        # scenario: the model-view line beside this note says the same.
         for marker, plain in _PLAIN_METHOD_NOTES:
             if marker in text:
-                return f"No rating is published because {plain}."
-        return "No rating is published because the cash-flow method does not fit this company."
-    found = []
-    if "corroborate" in text or "conflict" in text:
-        found.append(_street_disagreement(text))
-    if "span more than" in text or "disagree by more than" in text:
-        found.append("the valuation methods disagree too widely for a single fair value")
-    if "non-positive value" in text or "failed with" in text:
-        found.append("one valuation method produced no positive value")
-    if "days old" in text or "annual-only limit" in text:
-        found.append("the latest annual financial statements are too old for a current valuation")
+                return f"{SCENARIO_STEM}, because {plain}."
+        return f"{SCENARIO_STEM}, because the cash-flow method does not fit this company."
+    found = [
+        plain for markers, plain in _PLAIN_RANGE_CAUSES
+        if any(marker in text for marker in markers)
+    ]
     if not found:
-        return "No rating is published for this run."
-    return "No rating is published because " + " and ".join(found[:2]) + "."
+        return f"{stem}."
+    return f"{stem}, because " + " and ".join(found[:2]) + "."
 
 
 def unsuitable_method_note(suitability: Any) -> Optional[str]:
@@ -446,13 +432,13 @@ def model_view_summary(
     required_growth: Optional[Dict[str, Any]] = None,
     method_note: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """The conclusion a withheld valuation still supports, in plain words.
+    """The conclusion a range-only valuation still supports, in plain words.
 
     Direction and size of the supported method span against the market, the
     Street's mean target beside it, and the multiple of the modeled free-cash-
     flow path that the market price assumes. It never manufactures a rating or
-    a point estimate: those stay withheld by the publication boundary. Before
-    this, a withheld rating rendered as "valuation conclusion: INCONCLUSIVE",
+    a point estimate: the publication boundary states none for this run.
+    Before this, such a run rendered as "valuation conclusion: INCONCLUSIVE",
     which read as "not available" to the user who asked.
     """
     price = _number(current_price, positive=True)
@@ -490,6 +476,8 @@ def model_view_summary(
         return out
 
     midpoint = (low + high) / 2.0
+    # One surviving estimate has no midpoint and is not a range.
+    one_estimate = support_shape(low, high) == "single_estimate"
     parts: List[str] = []
     if price is not None:
         gap = midpoint / price - 1.0
@@ -502,13 +490,14 @@ def model_view_summary(
         out["direction"] = direction
         out["headline"] = (
             f"the modeled cash flows support a value {direction} the market "
-            f"({gap:+.0%} at the midpoint)."
+            f"({gap:+.0%}" + ("" if one_estimate else " at the midpoint") + ")."
         )
         parts.append(f"Against a price of {money(price)}")
     else:
         out["headline"] = (
-            "the modeled cash flows support a valuation range, but no market "
-            "price was available to compare it with."
+            "the modeled cash flows support "
+            + ("one scenario estimate" if one_estimate else "a valuation range")
+            + ", but no market price was available to compare it with."
         )
 
     target = _number(street_target, positive=True)

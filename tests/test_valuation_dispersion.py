@@ -40,6 +40,7 @@ _ns: dict = {"math": math}
 exec(compile(_text[_start:_end], _SRC, "exec"), _ns)
 valuation_dispersion = _ns["valuation_dispersion"]
 valuation_publication_boundary = _ns["valuation_publication_boundary"]
+valuation_publication_decision = _ns["valuation_publication_decision"]
 
 
 def band(**legs):
@@ -219,8 +220,8 @@ class TestPublicationBoundary:
         "market_comps": 0.0,
     }
 
-    def test_dcf_only_megacap_gap_cannot_become_a_precise_sell(self):
-        withheld, reason = valuation_publication_boundary(
+    def test_dcf_only_megacap_gap_is_published_with_an_alert_not_as_a_confident_sell(self):
+        decision = valuation_publication_decision(
             band="single-method",
             legs=self.AAPL_LEGS,
             fair_value=167.67,
@@ -229,19 +230,31 @@ class TestPublicationBoundary:
             analyst_target=324.40,
             analyst_count=39,
         )
-        assert withheld is True
-        assert "no independent market-comps" in reason.lower()
+        # The model is sound, so its answer is published; the Street's view
+        # travels with it as an alert instead of silencing it.
+        assert decision["withheld"] is False and decision["reason"] is None
+        alert = decision["alert"]
+        assert alert["kind"] == "street_divergence"
+        assert alert["relation"] == "smaller"
+        assert round(alert["model_gap"], 3) == -0.495
+        assert round(alert["benchmark_gap"], 3) == -0.024
+        assert alert["analyst_count"] == 39
+        assert "no independent market-comps" in alert["detail"].lower()
+        assert "withhold" not in alert["detail"].lower()
 
-    def test_large_non_megacap_dcf_gap_still_needs_numeric_corroboration(self):
-        withheld, reason = valuation_publication_boundary(
+    def test_large_dcf_gap_with_no_analyst_coverage_is_published_as_unconfirmed(self):
+        decision = valuation_publication_decision(
             band="single-method",
             legs=self.AAPL_LEGS,
             fair_value=167.67,
             current_price=332.27,
             is_mega_cap=False,
         )
-        assert withheld is True
-        assert "analyst-target evidence does not corroborate both" in reason
+        assert decision["withheld"] is False
+        alert = decision["alert"]
+        assert alert["relation"] == "unconfirmed"
+        assert alert["benchmark_gap"] is None and alert["analyst_count"] is None
+        assert "analyst-target evidence does not corroborate both" in alert["detail"]
 
     def test_independent_comps_do_not_override_conflicting_broad_consensus(self):
         withheld, reason = valuation_publication_boundary(
@@ -253,8 +266,54 @@ class TestPublicationBoundary:
             analyst_target=324.40,
             analyst_count=39,
         )
-        assert withheld is True
-        assert "39-analyst target benchmark" in reason
+        assert withheld is False and reason is None
+
+    def test_comps_do_not_hide_a_street_that_backs_little_of_the_move(self):
+        decision = valuation_publication_decision(
+            band="moderate",
+            legs={**self.AAPL_LEGS, "market_comps": 234.93},
+            fair_value=201.10,
+            current_price=332.27,
+            is_mega_cap=True,
+            analyst_target=324.40,
+            analyst_count=39,
+        )
+        assert decision["withheld"] is False
+        assert decision["alert"]["relation"] == "smaller"
+        assert "39-analyst target benchmark" in decision["alert"]["detail"]
+
+    def test_a_model_blocker_still_withholds_even_when_the_street_disagrees(self):
+        # Methods that contradict each other leave no single value to publish.
+        # The Street's position is then context after the reason, not an alert.
+        decision = valuation_publication_decision(
+            band="wide",
+            legs={"perpetual_dcf": 145.0, "exit_multiple_dcf": 177.0,
+                  "market_comps": 329.0},
+            fair_value=245.0,
+            current_price=420.0,
+            is_mega_cap=True,
+            analyst_target=450.0,
+            analyst_count=22,
+        )
+        assert decision["withheld"] is True
+        assert decision["alert"] is None
+        reason = decision["reason"]
+        assert reason.startswith("The valuation methods span more than 1.8x.")
+        assert "does not corroborate" in reason
+        assert "22-analyst target benchmark is +7%" in reason
+        assert "withhold" not in reason.lower()
+
+    def test_a_failed_method_still_withholds_with_no_alert(self):
+        decision = valuation_publication_decision(
+            band="single-method",
+            legs={"perpetual_dcf": -7.23, "exit_multiple_dcf": 38.05},
+            fair_value=38.05,
+            current_price=60.0,
+            analyst_target=62.0,
+            analyst_count=18,
+        )
+        assert decision["withheld"] is True and decision["alert"] is None
+        assert "non-positive value" in decision["reason"]
 
     def test_wide_methods_publish_a_range_not_a_point_call(self):
         withheld, reason = valuation_publication_boundary(
@@ -291,12 +350,27 @@ class TestPublicationBoundary:
             analyst_rating="strong_buy",
             analyst_rating_count=24,
         )
-        assert withheld is True
-        assert "STRONG BUY" in reason
-        assert "24 ratings" in reason
+        assert withheld is False and reason is None
 
-    def test_supportive_rating_alone_cannot_validate_a_precise_large_target(self):
-        withheld, reason = valuation_publication_boundary(
+    def test_a_conflicting_rating_is_the_alert_when_no_target_exists(self):
+        alert = valuation_publication_decision(
+            band="single-method",
+            legs={"perpetual_dcf": 50.0, "exit_multiple_dcf": 60.0},
+            fair_value=55.0,
+            current_price=100.0,
+            is_mega_cap=False,
+            analyst_rating="strong_buy",
+            analyst_rating_count=24,
+        )["alert"]
+        assert alert["relation"] == "rating"
+        assert alert["analyst_rating"] == "STRONG BUY"
+        assert alert["analyst_rating_count"] == 24
+        assert "STRONG BUY" in alert["detail"] and "24 ratings" in alert["detail"]
+
+    def test_supportive_rating_alone_leaves_a_large_target_unconfirmed(self):
+        # A SELL label supports direction, not the size of a precise target:
+        # the answer is published, flagged as not confirmed by a numeric target.
+        decision = valuation_publication_decision(
             band="single-method",
             legs={"perpetual_dcf": 50.0, "exit_multiple_dcf": 60.0},
             fair_value=55.0,
@@ -305,11 +379,13 @@ class TestPublicationBoundary:
             analyst_rating="sell",
             analyst_rating_count=24,
         )
-        assert withheld is True
-        assert "analyst-target evidence does not corroborate both" in reason
+        assert decision["withheld"] is False
+        assert decision["alert"]["relation"] == "unconfirmed"
+        assert decision["alert"]["analyst_rating"] is None
+        assert "analyst-target evidence does not corroborate both" in decision["alert"]["detail"]
 
     def test_same_direction_but_trivial_target_gap_does_not_corroborate_model(self):
-        withheld, reason = valuation_publication_boundary(
+        decision = valuation_publication_decision(
             band="single-method",
             legs={"perpetual_dcf": 72.58, "exit_multiple_dcf": 87.71},
             fair_value=80.15,
@@ -320,9 +396,14 @@ class TestPublicationBoundary:
             analyst_rating="buy",
             analyst_rating_count=52,
         )
-        assert withheld is True
-        assert "+49%" in reason
-        assert "32-analyst target benchmark is +6%" in reason
+        assert decision["withheld"] is False
+        alert = decision["alert"]
+        assert alert["relation"] == "smaller"
+        assert round(alert["model_gap"], 2) == 0.49
+        assert round(alert["benchmark_gap"], 2) == 0.06
+        assert alert["analyst_count"] == 32
+        assert "+49%" in alert["detail"]
+        assert "32-analyst target benchmark is +6%" in alert["detail"]
 
     def test_aligned_target_direction_and_magnitude_can_corroborate_large_dcf(self):
         assert valuation_publication_boundary(
@@ -338,7 +419,7 @@ class TestPublicationBoundary:
         ) == (False, None)
 
     def test_non_megacap_comps_conflict_is_not_mislabeled_megacap(self):
-        withheld, reason = valuation_publication_boundary(
+        decision = valuation_publication_decision(
             band="moderate",
             legs={"perpetual_dcf": 45.0, "exit_multiple_dcf": 55.0,
                   "market_comps": 60.0},
@@ -349,6 +430,8 @@ class TestPublicationBoundary:
                 "finnhub": {"label": "buy", "analyst_count": 20},
             },
         )
-        assert withheld is True
-        assert "for the company" in reason
-        assert "mega-cap" not in reason
+        assert decision["withheld"] is False
+        alert = decision["alert"]
+        assert alert["relation"] == "rating" and alert["analyst_rating"] == "BUY"
+        assert "for the company" in alert["detail"]
+        assert "mega-cap" not in alert["detail"]

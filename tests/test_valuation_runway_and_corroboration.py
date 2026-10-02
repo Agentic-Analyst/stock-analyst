@@ -43,7 +43,10 @@ from src.agents.fm.assumption_grounding import (  # noqa: E402
     _post_consensus_growth_path,
     ground_assumptions,
 )
-from src.agents.tools.analysis_tools import valuation_publication_boundary  # noqa: E402
+from src.agents.tools.analysis_tools import (  # noqa: E402
+    valuation_publication_boundary,
+    valuation_publication_decision,
+)
 from src.external_expectations import build_external_expectations  # noqa: E402
 from src.peer_comps import collect_peer_comps  # noqa: E402
 from src.report_agent import enforce_valuation_publication_boundary  # noqa: E402
@@ -118,11 +121,15 @@ def test_unavailable_exit_leg_is_omitted_not_reported_as_failed():
 
     assert "exit_multiple_dcf" not in reliability["legs"]
     assert reliability["failed_legs"] == {}
-    assert "failed with a non-positive value" not in reliability["withheld_reason"]
-    # Still withheld, for the right reason: a DCF-only mega-cap gap of -96%
-    # with nothing to corroborate it.
-    assert reliability["point_estimate_withheld"] is True
-    assert "DCF-only estimate" in reliability["withheld_reason"]
+    # An unavailable leg is not a failed method, so the model is not blocked:
+    # its single-method answer is published, and the DCF-only mega-cap gap of
+    # -96% with nothing to corroborate it is stated as a confidence alert.
+    assert reliability["point_estimate_withheld"] is False
+    assert reliability["withheld_reason"] is None
+    alert = reliability["confidence_alert"]
+    assert alert is not None
+    assert "failed with a non-positive value" not in alert["detail"]
+    assert "DCF-only estimate" in alert["detail"]
 
 
 def test_workbook_zero_multiple_alone_marks_the_exit_leg_unavailable():
@@ -220,7 +227,7 @@ def test_a_month_old_capture_of_an_undated_target_does_not_corroborate():
     assert evidence["qualified_for_corroboration"] is False
     assert evidence["qualified_for_contradiction"] is True
 
-    withheld, reason = valuation_publication_boundary(
+    decision = valuation_publication_decision(
         band="single-method",
         legs={"perpetual_dcf": 271.53, "exit_multiple_dcf": 294.85},
         fair_value=283.19,
@@ -230,9 +237,13 @@ def test_a_month_old_capture_of_an_undated_target_does_not_corroborate():
         analyst_count=58,
         analyst_target_evidence=expectations["price_target"]["source_evidence"],
     )
-    assert withheld is True
-    assert "no provider-dated current analyst target qualified" in reason
-    assert "capture-dated" not in reason
+    # A stale capture cannot confirm the model, so the answer is published as
+    # not yet confirmed rather than as one the Street backs.
+    assert decision["withheld"] is False
+    assert decision["alert"]["relation"] == "unconfirmed"
+    detail = decision["alert"]["detail"]
+    assert "no provider-dated current analyst target qualified" in detail
+    assert "capture-dated" not in detail
 
 
 # --------------------------------------------------------------------------
@@ -787,7 +798,12 @@ def test_withheld_chat_answer_carries_the_required_growth_sentence():
     )
     answer = runner._safe_withheld_valuation_answer()
     assert "revenue would have to grow about 30% a year for 10 years" in answer
-    assert "Rating: NOT RATED" in answer
+    # Tesla's exit leg is unavailable above the 80x boundary: one method
+    # survives, so the answer is that method's estimate and is not called a range.
+    assert "VYNN's answer here is a scenario estimate, not a fair value" in answer
+    assert "The supported DCF scenario estimate is" in answer
+    assert "a range" not in answer.split("Detail:")[0].split("\n\n")[-1]
+    assert "NOT RATED" not in answer
 
 
 def test_reported_basis_wedge_ignores_a_one_off_tax_charge():

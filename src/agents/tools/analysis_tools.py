@@ -512,8 +512,51 @@ def _bounded_report_headline(
     """
     headline = _report_headline(content)
     if point_estimate_withheld:
-        return {"rating": "NOT RATED"}
+        # No rating exists for this run. What the answer states instead is
+        # what the model supports and why; the engine's machine value for "no
+        # rating" is never handed to the prose model to repeat.
+        return {"valuation_view": "no_single_fair_value"}
     return headline
+
+
+# What the prose model is told about a run with no single fair value. The
+# field names matter: it repeats them, and a user must never read "withheld"
+# or "not rated" for a result that is what the model supports, nor "range"
+# for one estimate.
+NO_SINGLE_VALUE_NOTE = (
+    "When `no_single_fair_value` is true there is no single fair value and no "
+    "buy/hold/sell rating for this run. Say so once, in the words that fit "
+    "`valuation_support_shape`: for `range`, that VYNN's answer here is a "
+    "range, not a single fair value; for `single_estimate`, that it is a "
+    "scenario estimate, not a fair value; with no supported value at all, "
+    "that VYNN has no fair value to state. Give `no_single_fair_value_reason`, "
+    "and lead with what the supported figures say against the price. Do not "
+    "substitute dispersion as the reason, do not turn range endpoints into "
+    "scenario targets, and never call the result not rated, unrated or "
+    "withheld. "
+)
+CONFIDENCE_ALERT_NOTE = (
+    "When `confidence_alert` is present, the fair value and rating stand as "
+    "VYNN's own answer at LOW confidence: state the alert's two positions "
+    "(VYNN's gap to the market and the analysts') plainly and early, using its "
+    "figures, and never describe the result as confirmed by, supported by or "
+    "consistent with analyst consensus. Do not move VYNN's figures toward the "
+    "analysts'. "
+)
+
+
+def _alert_payload(metrics, *, withheld: bool) -> dict:
+    """The confidence alert on a published answer, as the prose model reads it."""
+    if withheld or not isinstance(metrics, dict):
+        return {}
+    try:
+        from src.confidence_alert import alert_sentence, normalize_alert
+        alert = normalize_alert(metrics.get("confidence_alert"))
+    except Exception:
+        return {}
+    if not alert:
+        return {}
+    return {"confidence_alert": alert_sentence(alert), "rating_confidence": "low"}
 
 
 def _bounded_news_payload(
@@ -591,10 +634,19 @@ def _rehydrate_report_guard_state(base: Path, ticker: str, content: str):
 
     method_values = publication.get("method_values_for_audit") or {}
     method_inputs = publication.get("valuation_method_inputs") or {}
+    try:
+        from src.confidence_alert import normalize_alert
+        stored_alert = (
+            normalize_alert(publication.get("confidence_alert"))
+            if ready and not withheld else None
+        )
+    except Exception:
+        stored_alert = None
     metrics = {
         "valuation_method": method or "dcf",
         "point_estimate_withheld": withheld,
         "publication_withheld_reason": reason,
+        "confidence_alert": stored_alert,
         "valuation_confidence": publication.get("valuation_confidence"),
         "comps_included_in_blended_value": bool(
             publication.get("comps_included_in_blended_value")
@@ -977,22 +1029,68 @@ def valuation_dispersion(legs: dict):
         "multiples instead.")
 
 
-def valuation_publication_boundary(*, band, legs, fair_value, current_price,
+def valuation_publication_decision(*, band, legs, fair_value, current_price,
                                    is_mega_cap=False, analyst_target=None,
                                    analyst_count=0, analyst_rating=None,
                                    analyst_rating_count=0,
                                    analyst_rating_evidence=None,
                                    analyst_target_evidence=None,
                                    reverse_dcf_gap=None):
-    """Decide whether a precise fair value/rating is safe to publish.
+    """Decide what the engine can publish for this model.
 
-    This does not alter a model or pull its answer toward the market.  It
-    separates an auditable scenario output from a publishable investment call.
-    Large claims about heavily covered mega-caps need independent support; two
-    terminal-value variants of the same DCF do not provide it.
+    This does not alter a model or pull its answer toward the market. Two
+    different things can stand against a point estimate, and they are no
+    longer treated alike:
 
-    Returns ``(withheld, reason)``.
+    * the MODEL itself: a method failed, the methods contradict each other,
+      or no positive value was produced. No single value exists, so the
+      result is withheld and shown as a scenario range with its reason;
+    * the STREET: the model is sound, but well-covered analysts do not back
+      the size or direction of its conclusion. That used to withhold the
+      answer as well ("NOT RATED"). A valuation has no certain answer, only
+      evidence, so the answer is now published with a confidence alert that
+      states both positions (src/confidence_alert.py). The benchmark still
+      never enters intrinsic-value arithmetic.
+
+    Returns ``{"withheld": bool, "reason": str | None, "alert": dict | None}``.
     """
+    alert_out = {}
+    withheld, reason = _publication_boundary_core(
+        band=band, legs=legs, fair_value=fair_value, current_price=current_price,
+        is_mega_cap=is_mega_cap, analyst_target=analyst_target,
+        analyst_count=analyst_count, analyst_rating=analyst_rating,
+        analyst_rating_count=analyst_rating_count,
+        analyst_rating_evidence=analyst_rating_evidence,
+        analyst_target_evidence=analyst_target_evidence,
+        reverse_dcf_gap=reverse_dcf_gap, _alert_out=alert_out,
+    )
+    return {
+        "withheld": withheld,
+        "reason": reason,
+        "alert": None if withheld else alert_out.get("alert"),
+    }
+
+
+def valuation_publication_boundary(**kwargs):
+    """``(withheld, reason)`` from :func:`valuation_publication_decision`.
+
+    Kept for callers that only need to know whether a point estimate exists.
+    A Street-only disagreement is not a withhold; read the decision's
+    ``alert`` to state it.
+    """
+    decision = valuation_publication_decision(**kwargs)
+    return decision["withheld"], decision["reason"]
+
+
+def _publication_boundary_core(*, band, legs, fair_value, current_price,
+                               is_mega_cap=False, analyst_target=None,
+                               analyst_count=0, analyst_rating=None,
+                               analyst_rating_count=0,
+                               analyst_rating_evidence=None,
+                               analyst_target_evidence=None,
+                               reverse_dcf_gap=None, _alert_out=None):
+    """The boundary's logic. Returns ``(withheld, reason)``; a Street-only
+    disagreement is written to ``_alert_out["alert"]`` instead of blocking."""
     positive = {
         str(name): float(value)
         for name, value in (legs or {}).items()
@@ -1291,16 +1389,32 @@ def valuation_publication_boundary(*, band, legs, fair_value, current_price,
         if math.isfinite(reverse_gap) else ""
     )
 
-    def finish(market_blocker=None):
-        if market_blocker:
-            add_blocker(market_blocker)
+    def finish(street_note=None):
+        """``street_note`` states how the Street stands against the model."""
         if not blocking_reasons:
+            # The model is sound. When only the Street stands apart from it,
+            # the answer is published with a confidence alert, not withheld.
+            if street_note and _alert_out is not None:
+                from src.confidence_alert import build_street_alert
+                alert = build_street_alert(
+                    model_gap,
+                    targets=qualified_targets,
+                    ratings=qualified_ratings,
+                    detail=street_note + benchmark_note + reverse_note,
+                )
+                if alert is None:
+                    # A Street note always comes with a model gap, so an alert
+                    # can always be drawn up. If that ever stops holding, fail
+                    # closed: this answer must not go out unflagged.
+                    add_blocker(street_note)
+                    return blocked_result(benchmark_note + reverse_note)
+                _alert_out["alert"] = alert
             return False, None
-        # Once publication is blocked, make the independent market evidence
-        # part of the explanation rather than a buried appendix.  It remains a
-        # benchmark only and never enters intrinsic-value arithmetic.
-        evidence_note = benchmark_note + reverse_note
-        return blocked_result(evidence_note)
+        # The model is blocked on its own. Make the independent market
+        # evidence part of the explanation rather than a buried appendix: it
+        # is context for the reader, not the reason, and it never enters
+        # intrinsic-value arithmetic.
+        return blocked_result(street_note, benchmark_note + reverse_note)
 
     names = {name.lower().replace("_", " ") for name in positive}
     has_market_comps = any("comp" in name for name in names)
@@ -1312,9 +1426,7 @@ def valuation_publication_boundary(*, band, legs, fair_value, current_price,
                 f"The intrinsic-value estimate is {model_gap:+.0%} from the market, "
                 "while well-covered external analyst evidence points materially "
                 "away from that directional conclusion."
-                + " The external benchmark is not substituted for intrinsic value; "
-                "publish the model cases, reconcile the assumption disagreement, "
-                "and withhold the point rating in the meantime."
+                + " The external benchmark is not substituted for intrinsic value."
             )
         return finish()
     if not has_market_comps:
@@ -1340,8 +1452,6 @@ def valuation_publication_boundary(*, band, legs, fair_value, current_price,
                 + ", but no independent market-comps valuation qualified and "
                 + target_explanation + "."
                 + " The external benchmark is not substituted for intrinsic value."
-                + " Publish the DCF cases as scenarios and withhold the point "
-                "estimate and directional rating until the assumption gap is reconciled."
             )
         return finish()
 
@@ -1351,8 +1461,6 @@ def valuation_publication_boundary(*, band, legs, fair_value, current_price,
             f"{'a mega-cap' if is_mega_cap else 'the company'}. "
             "Well-covered independent evidence does not corroborate the model's "
             "exceptional gap."
-            + " Publish the valuation methods as a range and "
-            "withhold a directional rating."
         )
     return finish()
 
@@ -1601,6 +1709,8 @@ def _refusal_result(ticker: str, refusal: dict, *, what: str, evidence: Optional
     return _json.dumps({
         "status": "not_applicable",
         "note": f"No {what} for {ticker}. {plain_refusal_note(refusal['kind'])} "
+                "Say that sentence once, in the user's language, and never call "
+                "the result not rated, unrated or withheld. "
                 "Do not give a buy, hold or sell call or a fair value of your own. "
                 "Answer with what the run found instead: the price and its trend, "
                 "the technicals, the news with its catalysts and risks, and the "
@@ -1777,8 +1887,8 @@ class BuildModelTool(_CtxTool):
         if withheld:
             fair_value_out, upside_out = None, None
             withheld_payload = {
-                "fair_value_withheld": True,
-                "fair_value_withheld_reason": withheld_reason,
+                "no_single_fair_value": True,
+                "no_single_fair_value_reason": withheld_reason,
             }
             if positive_legs:
                 from src.summary_evidence import (
@@ -1876,6 +1986,8 @@ class BuildModelTool(_CtxTool):
             **_listing_view_payload(view, vm, street=_street_of(state)),
             # What the methods actually support when they refuse to agree.
             **withheld_payload,
+            # A sound model the Street does not back: published, and flagged.
+            **_alert_payload(vm, withheld=withheld),
             # Publish the legs and the confidence band so the answer can show a
             # football field instead of a false point estimate.
             **({"valuation_legs": legs_pub} if legs_pub else {}),
@@ -1895,7 +2007,8 @@ class BuildModelTool(_CtxTool):
                if isinstance(vm, dict) and vm.get("dcf_fair_value") is not None
                and method and method != "justified_pb_roe" else {}),
             **({"data_quality_warning": warning} if warning else {}),
-            note=(note + " Treat Street targets/ratings as a decision-relevant external "
+            note=(note + " " + NO_SINGLE_VALUE_NOTE + CONFIDENCE_ALERT_NOTE
+                  + "Treat Street targets/ratings as a decision-relevant external "
                   "benchmark, not intrinsic value. When benchmark_reconciliation is "
                   "present, surface its dated coverage, conflict/corroboration result, "
                   "and whole-path reverse DCF; do not reduce it to a generic caveat. "
@@ -2141,8 +2254,8 @@ class WriteReportTool(_CtxTool):
             fair_value = None
             upside = None
             range_fields = {
-                "fair_value_withheld": True,
-                "fair_value_withheld_reason": withheld_reason,
+                "no_single_fair_value": True,
+                "no_single_fair_value_reason": withheld_reason,
             }
             if positive_legs:
                 from src.summary_evidence import supported_valuation_span
@@ -2231,6 +2344,7 @@ class WriteReportTool(_CtxTool):
             # The rating the report published, so the answer cannot contradict
             # the document the user downloads.
             **bounded_headline,
+            **_alert_payload(vm, withheld=withheld),
             **({"valuation_method": method} if method else {}),
             **({"valuation_confidence": band} if band else {}),
             **({"data_quality_warning": warning} if warning else {}),
@@ -2238,9 +2352,7 @@ class WriteReportTool(_CtxTool):
                   "the user. The `price`, `technicals`, `top_catalysts` and `top_risks` "
                   "fields are this run's market evidence: use them for the price trend, "
                   "the levels and what supports or threatens the case. "
-                  "When `fair_value_withheld` is true, state the supplied "
-                  "`fair_value_withheld_reason`; do not substitute dispersion as the "
-                  "reason and do not turn range endpoints into scenario targets. "
+                  + NO_SINGLE_VALUE_NOTE + CONFIDENCE_ALERT_NOTE +
                   "When benchmark_reconciliation is present, surface its dated human-"
                   "analyst coverage, conflict/corroboration conclusion, and whole-path "
                   "reverse DCF instead of merely calling the assumptions suspect. "
@@ -2338,11 +2450,12 @@ class ReadReportTool(_CtxTool):
         )
         publication = {
             "rating": headline.get("rating"),
-            "point_estimate_withheld": withheld,
+            "no_single_fair_value": withheld,
             "valuation_confidence": metrics.get("valuation_confidence"),
+            **_alert_payload(metrics, withheld=withheld),
         }
         if metrics.get("point_estimate_withheld"):
-            publication["withheld_reason"] = metrics.get(
+            publication["no_single_fair_value_reason"] = metrics.get(
                 "publication_withheld_reason")
             if supported:
                 from src.summary_evidence import supported_valuation_span
@@ -2377,7 +2490,8 @@ class ReadReportTool(_CtxTool):
             note=("Existing report and its machine publication boundary loaded. "
                   "Answer the user's follow-up from THIS content; do not regenerate. "
                   "The `publication` object controls any rating or valuation claim. "
-                  "Audit-only numbers in the markdown never override it."),
+                  "Audit-only numbers in the markdown never override it. "
+                  + NO_SINGLE_VALUE_NOTE + CONFIDENCE_ALERT_NOTE).strip(),
         )
 
 

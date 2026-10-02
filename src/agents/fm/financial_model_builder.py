@@ -603,8 +603,13 @@ class FinancialModelBuilder:
         """
         if self.workbook is None or "Summary" not in self.workbook.sheetnames:
             return
+        from src.confidence_alert import alert_sentence, workbook_status
         metadata = publication if isinstance(publication, dict) else {}
         withheld = metadata.get("publication_allowed") is not True
+        # A published answer the Street does not back says so in the status
+        # cell and gives both positions in the reason cell.
+        alert = None if withheld else metadata.get("confidence_alert")
+        published_reason = alert_sentence(alert) or None
         summary = self.workbook["Summary"]
         is_bank = "Bank Valuation" in self.workbook.sheetnames
         low = metadata.get("range_low")
@@ -623,10 +628,8 @@ class FinancialModelBuilder:
                 "Valuation audit composite (not published)"
                 if withheld else "Fair value per share"
             )
-            bank["B22"] = (
-                "WITHHELD — scenario range only" if withheld else "PUBLISHABLE"
-            )
-            bank["B23"] = str(metadata.get("withheld_reason") or (
+            bank["B22"] = workbook_status(withheld, alert)
+            bank["B23"] = str(metadata.get("withheld_reason") or published_reason or (
                 "The deterministic bank-method publication checks passed."
             ))[:32000]
         else:
@@ -636,12 +639,9 @@ class FinancialModelBuilder:
                 and isinstance(high, (int, float)) and not isinstance(high, bool)
                 and round(low, 2) == round(high, 2)
             )
-            summary["B24"] = (
-                ("WITHHELD — scenario estimate only" if one_visible_estimate
-                 else "WITHHELD — scenario range only")
-                if withheld else "PUBLISHABLE"
-            )
-            summary["G24"] = str(metadata.get("withheld_reason") or (
+            summary["B24"] = workbook_status(
+                withheld, alert, one_estimate=one_visible_estimate)
+            summary["G24"] = str(metadata.get("withheld_reason") or published_reason or (
                 "The deterministic valuation publication checks passed."
             ))[:32000]
             summary["G24"].alignment = Alignment(wrap_text=True, vertical="top")

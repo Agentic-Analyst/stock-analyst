@@ -173,7 +173,7 @@ def test_consensus_is_recorded_as_a_cross_check_not_added_to_return():
     assert out["inputs"]["analyst_count"] == 25
 
 
-def test_well_covered_opposite_consensus_withholds_the_call_symmetrically():
+def test_well_covered_opposite_consensus_flags_the_call_symmetrically():
     calc = RecommendationCalculator()
     common = dict(
         catalyst_score_pct=0.0, risk_score_pct=0.0,
@@ -186,12 +186,65 @@ def test_well_covered_opposite_consensus_withholds_the_call_symmetrically():
     bullish = calc.calculate_fixed_numbers(
         ticker="X", current_price=100.0, dcf_perpetual=170.0, dcf_exit=170.0,
         fair_value=170.0, analyst_target=80.0, **common)
-    assert bearish["expected_return_pct_12m"] is None
-    assert bearish["rating"] == "NOT RATED"
-    assert bullish["expected_return_pct_12m"] is None
-    assert bullish["rating"] == "NOT RATED"
-    assert bearish["rating_confidence"] is bullish["rating_confidence"] is None
+    # The model's answer stands in both directions. It is published at low
+    # confidence with an alert that states the model and the Street side by
+    # side; the benchmark never moves the rating or the target.
+    assert bearish["rating"] == "STRONG SELL" and bearish["rating_available"] is True
+    assert bearish["expected_return_pct_12m"] == -70.0
+    assert bearish["targets"]["m12"]["price"] == 30.0
+    assert bullish["rating"] == "STRONG BUY" and bullish["rating_available"] is True
+    assert bullish["expected_return_pct_12m"] == 70.0
+    assert bearish["rating_confidence"] == bullish["rating_confidence"] == "low"
+    assert bearish["rating_withheld_reason"] is bullish["rating_withheld_reason"] is None
     assert bearish["inputs"]["consensus_alignment"] == "conflicting"
+    for out, model, street in ((bearish, -0.70, 0.20), (bullish, 0.70, -0.20)):
+        alert = out["confidence_alert"]
+        assert alert["kind"] == "street_divergence" and alert["relation"] == "opposite"
+        assert round(alert["model_gap"], 2) == model
+        assert round(alert["benchmark_gap"], 2) == street
+        assert alert["analyst_count"] == 20
+    assert bearish["confidence_alert_text"] == (
+        "Low confidence: VYNN's fair value is 70% below the market price, while "
+        "the mean target of 20 analysts is 20% above it. That is a large gap "
+        "between VYNN and the Street, so treat this as VYNN's own view and weigh both."
+    )
+
+
+def test_a_call_the_street_backs_carries_no_alert():
+    calc = RecommendationCalculator()
+    out = calc.calculate_fixed_numbers(
+        ticker="X", current_price=100.0, dcf_perpetual=130.0, dcf_exit=140.0,
+        fair_value=135.0, analyst_target=128.0, analyst_count=20,
+        catalyst_score_pct=0.0, risk_score_pct=0.0,
+        momentum_score_pct=0.0, hist_vol_annual_pct=20.0)
+    assert out["rating"] == "STRONG BUY"
+    assert out["rating_confidence"] == "moderate"
+    assert out["confidence_alert"] is None and out["confidence_alert_text"] is None
+
+
+def test_a_target_that_backs_half_the_move_is_not_an_alert_even_if_read_as_neutral():
+    # The coarse reading calls a target inside 8% of the price neutral, so a
+    # +15.5% model against a +7.8% target is "conflicting". By the boundary's
+    # rule that target backs half of the move, which corroborates the model:
+    # the alert must not claim that no analyst target was available.
+    calc = RecommendationCalculator()
+    out = calc.calculate_fixed_numbers(
+        ticker="X", current_price=100.0, dcf_perpetual=115.5, dcf_exit=115.5,
+        fair_value=115.5, analyst_target=107.8, analyst_count=20,
+        catalyst_score_pct=0.0, risk_score_pct=0.0,
+        momentum_score_pct=0.0, hist_vol_annual_pct=20.0)
+    assert out["inputs"]["consensus_alignment"] == "conflicting"
+    assert out["rating_available"] is True and out["rating"] != "NOT RATED"
+    assert out["confidence_alert"] is None and out["confidence_alert_text"] is None
+    assert out["rating_confidence"] == "moderate"
+    # One point lower and the target no longer backs half of the move.
+    flagged = calc.calculate_fixed_numbers(
+        ticker="X", current_price=100.0, dcf_perpetual=115.5, dcf_exit=115.5,
+        fair_value=115.5, analyst_target=106.8, analyst_count=20,
+        catalyst_score_pct=0.0, risk_score_pct=0.0,
+        momentum_score_pct=0.0, hist_vol_annual_pct=20.0)
+    assert flagged["confidence_alert"]["relation"] == "smaller"
+    assert flagged["rating_confidence"] == "low"
 
 
 def test_well_covered_analyst_ratings_are_not_discarded_when_target_is_neutral():
@@ -213,8 +266,15 @@ def test_well_covered_analyst_ratings_are_not_discarded_when_target_is_neutral()
     assert out["inputs"]["analyst_rating"] == "strong_buy"
     assert out["inputs"]["analyst_rating_count"] == 53
     assert out["inputs"]["consensus_alignment"] == "conflicting"
-    assert out["rating"] == "NOT RATED"
-    assert out["rating_confidence"] is None
+    # A target at the price and 53 STRONG BUY ratings both stand against a
+    # -55% model: the call is published, flagged, and names both.
+    assert out["rating"] == "STRONG SELL"
+    assert out["rating_confidence"] == "low"
+    alert = out["confidence_alert"]
+    assert alert["relation"] == "smaller"
+    assert round(alert["benchmark_gap"], 2) == -0.02 and alert["analyst_count"] == 39
+    assert alert["analyst_rating"] == "STRONG BUY"
+    assert alert["analyst_rating_count"] == 53
 
 
 def test_external_alignment_is_auditable_even_when_publication_is_withheld():
@@ -233,6 +293,8 @@ def test_external_alignment_is_auditable_even_when_publication_is_withheld():
     ))
     assert out["rating"] == "NOT RATED"
     assert out["inputs"]["consensus_alignment"] == "conflicting"
+    # A withheld point estimate has no answer for an alert to qualify.
+    assert out["confidence_alert"] is None
 
 
 def test_malformed_numeric_provider_inputs_fail_neutral_not_with_an_exception():

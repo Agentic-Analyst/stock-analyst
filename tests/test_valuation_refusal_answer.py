@@ -11,6 +11,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import sys
 from types import SimpleNamespace
 
@@ -54,13 +55,20 @@ def test_plain_refusal_notes_cover_every_refusal_kind():
     for kind in ("commodity_cycle", "reit", "insurance", "fund", "crypto",
                  "unsupported_asset", "bank_valuation_input_gap"):
         note = plain_refusal_note(kind)
-        assert note.startswith("No rating or fair value is published: ")
+        # The sentence says what the answer is, and never reads as a missing
+        # rating ("NOT RATED", "No rating ... is published").
+        assert note.startswith("VYNN's answer here is the evidence, not a fair value, because ")
+        assert not re.search(r"\brat(?:ed|ing)\b|\bpublished\b|\bwithheld\b", note, re.I)
         assert "DCF" not in note and "normalized" not in note
-    assert "commodity price" in plain_refusal_note("commodity_cycle")
+    assert plain_refusal_note("commodity_cycle") == (
+        "VYNN's answer here is the evidence, not a fair value, because its cash "
+        "flows follow commodity prices, so a cash-flow model built on today's "
+        "prices would be a bet on the commodity price rather than a valuation."
+    )
     assert "outside the valuation method's scope: because." in plain_refusal_note("new_kind", "because.")
     assert plain_refusal_note(None) == (
-        "No rating or fair value is published, because no valuation model was "
-        "produced in this run."
+        "No valuation model was produced in this run, so there is no fair value "
+        "to state."
     )
 
 
@@ -95,7 +103,10 @@ def test_a_refused_run_gets_a_plain_answer_not_a_published_template():
         "XOM audited report headline: published without a point headline.",
         require_full_benchmark=True,
     )
-    assert out.startswith("XOM: NOT RATED. No rating or fair value is published: its cash flows follow commodity prices")
+    assert out.startswith(
+        "XOM: VYNN's answer here is the evidence, not a fair value, because its "
+        "cash flows follow commodity prices")
+    assert "NOT RATED" not in out and "No rating" not in out
     assert "published without a point headline" not in out
     assert "172.55" in out          # the Street's view stays, as a benchmark
     assert "not as VYNN's rating" in out
@@ -104,36 +115,54 @@ def test_a_refused_run_gets_a_plain_answer_not_a_published_template():
 def test_an_honest_refusal_answer_from_the_model_is_kept():
     runner = _runner()
     honest = (
-        "XOM is not rated: VYNN does not publish a rating or fair value for an "
-        "integrated oil company. Analysts at yahoo_finance have a mean target of "
-        "USD 172.55 (+7.4%, 22 analysts); the consensus from finnhub is BUY."
+        "VYNN's answer on XOM is the evidence, not a fair value, because an "
+        "integrated oil company's cash flows follow commodity prices. Analysts at "
+        "yahoo_finance have a mean target of USD 172.55 (+7.4%, 22 analysts); the "
+        "consensus from finnhub is BUY."
     )
     for broad in (True, False):
         assert runner._guard_user_answer(honest, require_full_benchmark=broad) == honest
 
 
+def test_an_answer_that_falls_back_on_the_retired_label_is_replaced():
+    # "Not rated" read as "no answer". A valuation answer that says it gets
+    # the fixed statement, which says what VYNN's answer is.
+    runner = _runner()
+    for retired in (
+        "XOM is not rated: VYNN states no fair value for an integrated oil "
+        "company. Analysts at yahoo_finance have a mean target of USD 172.55 "
+        "(+7.4%, 22 analysts); the consensus from finnhub is BUY.",
+        "No fair value here; the rating is withheld for commodity producers. "
+        "Analysts at yahoo_finance have a mean target of USD 172.55.",
+    ):
+        out = runner._guard_user_answer(retired, require_full_benchmark=True)
+        assert out.startswith("XOM: VYNN's answer here is the evidence, not a fair value"), retired
+        assert "not rated" not in out.lower() and "withheld" not in out.lower()
+
+
 def test_an_invented_rating_or_fair_value_is_replaced_in_any_question():
     runner = _runner()
     for bad in (
-        "XOM is not rated, but our rating would be a BUY given the yield.",
-        "XOM: no rating is published. The model's fair value of $185 implies upside.",
+        "VYNN gives no fair value for XOM, but our rating would be a BUY given the yield.",
+        "XOM: the evidence, not a fair value. The model's fair value of $185 implies upside.",
     ):
         for broad in (True, False):
             out = runner._guard_user_answer(bad, require_full_benchmark=broad)
-            assert out.startswith("XOM: NOT RATED."), bad
+            assert out.startswith("XOM: VYNN's answer here is the evidence, not a fair value"), bad
 
 
 def test_a_valuation_question_must_be_answered_with_the_refusal():
     runner = _runner()
     silent = "Exxon looks attractive at 15x earnings and yields 3.4%."
-    assert runner._guard_user_answer(silent, require_full_benchmark=True).startswith("XOM: NOT RATED.")
+    assert runner._guard_user_answer(silent, require_full_benchmark=True).startswith(
+        "XOM: VYNN's answer here is the evidence, not a fair value")
     # A narrower question (news, price) keeps prose that claims nothing.
     assert runner._guard_user_answer(silent, require_full_benchmark=False) == silent
 
 
 def test_answers_with_no_company_data_are_left_alone():
     # A price, macro or crypto answer has no model and no financials; the
-    # guard must not turn it into "NOT RATED".
+    # guard must not turn it into the valuation statement.
     runner = _runner("should i buy bitcoin?")
     runner.ticker = "BTC-USD"
     runner.state.financial_data = None
@@ -149,7 +178,8 @@ def test_a_build_failure_without_a_refusal_says_so():
         "XOM audited report headline: published without a point headline.",
         require_full_benchmark=True,
     )
-    assert out.startswith("XOM: NOT RATED. No rating or fair value is published, because no valuation model was produced")
+    assert out.startswith(
+        "XOM: No valuation model was produced in this run, so there is no fair value to state.")
 
 
 def _state_with_exxon():
@@ -180,7 +210,11 @@ def test_build_model_reports_the_refusal_instead_of_an_error(monkeypatch):
     payload = json.loads(asyncio.run(BuildModelTool(_context(state)).execute("XOM")))
     assert payload["status"] == "not_applicable"
     assert payload["refusal"] == "commodity_cycle"
-    assert payload["note"].startswith("No valuation model for XOM. No rating or fair value is published: its cash flows follow commodity prices")
+    assert payload["note"].startswith(
+        "No valuation model for XOM. VYNN's answer here is the evidence, not a "
+        "fair value, because its cash flows follow commodity prices")
+    # The prose model is told what to say, and what never to call it.
+    assert "never call the result not rated, unrated or withheld" in payload["note"]
     assert "Street" in payload["note"]
     assert "normalized commodity price deck" in payload["detail"]
 

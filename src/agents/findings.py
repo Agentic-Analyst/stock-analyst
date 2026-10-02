@@ -168,16 +168,18 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
 
     elif tool == "build_model":
         us = result.get("listing_view") if isinstance(result.get("listing_view"), dict) else {}
+        # A fair value the Street does not back is shown with its confidence.
+        flag = " · low confidence" if result.get("confidence_alert") else ""
         if us.get("fair_value"):
             up = _pct(us.get("upside"))
             add("valuation", "Fair value", _money(us.get("fair_value"), "USD"),
-                f"per {us.get('ticker')} share" + (f" · {up} vs market" if up else ""))
+                f"per {us.get('ticker')} share" + (f" · {up} vs market" if up else "") + flag)
         else:
             fv = _money(result.get("fair_value"), ccy)
             up = _pct(result.get("upside_vs_market"))
             method = result.get("valuation_method")
             add("valuation", "Fair value", fv,
-                f"{up} vs market" if up else (method or None))
+                (f"{up} vs market" + flag) if up else (method or None))
 
     elif tool == "analyze_news":
         n = _num(result.get("articles_analyzed"))

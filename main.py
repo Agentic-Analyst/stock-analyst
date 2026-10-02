@@ -415,7 +415,8 @@ class ComprehensiveStockAnalysisPipeline:
                             f"(P/B {bank_inputs.get('justified_pb', 0):.2f}; single method)"
                         )
                     publication_note = (
-                        "point estimate withheld" if valuation_override.get("point_estimate_withheld")
+                        "no single fair value"
+                        if valuation_override.get("point_estimate_withheld")
                         else "point estimate publishable"
                     )
                     self.logger.info(

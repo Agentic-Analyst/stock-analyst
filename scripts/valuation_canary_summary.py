@@ -6,9 +6,11 @@ workbook and applies the publication boundary for each symbol with no LLM
 call, and prints one JSON row per symbol. This script turns those rows into
 the numbers that matter for release:
 
-  * publish rate: how many equities received a point estimate and rating;
+  * publish rate: how many equities received a point estimate and rating,
+    and how many of those are FLAGGED (published with a confidence alert
+    because well-covered analysts do not back the model's conclusion);
   * per name: both DCF legs, the comps leg, the Street target, the model's gap
-    to market, and the first sentence of any withhold reason;
+    to market, and the first sentence of any range-only reason or the alert;
   * with a baseline file: the same table side by side, so a candidate engine
     can be compared before it is pinned.
 
@@ -17,8 +19,11 @@ Exit status is non-zero when the candidate publish rate is below
 release gate can block on it.
 
 With ``--expect expectations.json`` every name is also compared with the
-outcome it is expected to have (PUBLISHED, WITHHELD, refused), and any
-difference is listed as UNEXPLAINED and fails the run. That is the
+outcome it is expected to have (PUBLISHED, FLAGGED, WITHHELD, refused), and
+any difference is listed as UNEXPLAINED and fails the run. WITHHELD is this
+tool's word for a range-only result (no single value exists); a user never
+reads it. PUBLISHED and FLAGGED are different outcomes: a corroborated name
+that becomes flagged, or the reverse, is a change someone must explain. That is the
 pre-deploy gate: a candidate engine ships with zero unexplained changes, or
 the expectation file is updated in the same change with the reason. Prices
 move between runs, so a name whose model sits near the 15% publication
@@ -84,12 +89,36 @@ def _growth(row: Dict[str, Any], width: int = 8) -> str:
     return _fmt(row.get("market_required_revenue_growth_10y"), width, pct=True)
 
 
+def _alert(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The confidence alert on a published row, if the canary reported one."""
+    alert = row.get("confidence_alert")
+    if row.get("point_estimate_withheld") or not isinstance(alert, dict):
+        return None
+    return alert
+
+
 def _status(row: Dict[str, Any]) -> str:
     if row.get("status") == "failed":
         return "FAILED"
     if row.get("status") == "passed_specialized_refusal":
         return "refused"
-    return "WITHHELD" if row.get("point_estimate_withheld") else "PUBLISHED"
+    if row.get("point_estimate_withheld"):
+        return "WITHHELD"
+    return "FLAGGED" if _alert(row) else "PUBLISHED"
+
+
+def _reason(row: Dict[str, Any], width: int = 88) -> str:
+    """Why a row is range-only, or how the Street stands against a flagged one."""
+    alert = _alert(row)
+    if alert is None:
+        return str(row.get("withheld_reason") or "").split(". ")[0][:width]
+    parts = [f"alert: {alert.get('relation') or 'unconfirmed'}"]
+    gap, count = _num(alert.get("benchmark_gap")), _num(alert.get("analyst_count"))
+    if gap is not None:
+        parts.append(f"Street target {gap * 100:+.0f}%" + (f" ({count:.0f} analysts)" if count else ""))
+    if alert.get("analyst_rating"):
+        parts.append(f"rated {alert['analyst_rating']}")
+    return ", ".join(parts)[:width]
 
 
 def _equity_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -109,6 +138,7 @@ def summarize(rows: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
         "symbols": len(rows),
         "equities": len(equities),
         "published": len(published),
+        "flagged": sum(1 for row in published if _alert(row)),
         "failed": [row.get("ticker") for row in failed],
         "refused": [row.get("ticker") for row in refused],
         "publish_rate": (len(published) / len(equities)) if equities else 0.0,
@@ -183,7 +213,7 @@ def print_table(candidate: List[Dict[str, Any]], baseline: Optional[List[Dict[st
     print("-" * len(header))
     for row in candidate:
         ticker = str(row.get("ticker") or "?")
-        reason = str(row.get("withheld_reason") or "").split(". ")[0][:88]
+        reason = _reason(row)
         print(
             f"{ticker:<14}{_status(row):<10}{_fmt(row.get('current_price'))}"
             f"{_fmt(row.get('dcf_perpetual'), 10)}{_fmt(row.get('dcf_exit'), 10)}"
@@ -194,7 +224,7 @@ def print_table(candidate: List[Dict[str, Any]], baseline: Optional[List[Dict[st
         )
         base = base_by_ticker.get(ticker)
         if base is not None:
-            base_reason = str(base.get("withheld_reason") or "").split(". ")[0][:88]
+            base_reason = _reason(base)
             print(
                 f"{'  baseline':<14}{_status(base):<10}{_fmt(base.get('current_price'))}"
                 f"{_fmt(base.get('dcf_perpetual'), 10)}{_fmt(base.get('dcf_exit'), 10)}"
@@ -209,11 +239,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("candidate", type=Path)
     parser.add_argument("--baseline", type=Path)
-    # The nightly basket publishes 5 of 16 today (NVDA, GOOGL, MSFT, CRH,
-    # TEX), 6 when Booking clears its boundary. At 0.30 the floor fails once
-    # fewer than 5 of 16 judged equities publish: it catches a collapse, not
-    # a single flip, which is the --expect check's job before a deploy.
-    parser.add_argument("--min-publish-rate", type=float, default=0.30)
+    # The nightly basket publishes 11 of 16 today: five the Street
+    # corroborates (NVDA, GOOGL, MSFT, CRH, TEX) and six published with a
+    # confidence alert (META, TSLA, AMD, AAPL, AMZN, PYPL); 12 when Booking
+    # clears its boundary. At 0.55 the floor fails once fewer than 9 of 16
+    # judged equities publish: it catches a collapse, not a single flip, which
+    # is the --expect check's job before a deploy. (Before 2026-10-02 a name
+    # the Street did not back was withheld, 5 of 16 published, and the floor
+    # was 0.30.)
+    parser.add_argument("--min-publish-rate", type=float, default=0.55)
     parser.add_argument("--expect", type=Path, help="per-name expected outcomes (JSON)")
     # A refused equity leaves the rate's denominator, so a classification
     # regression that refused every name would otherwise raise the rate.
@@ -239,6 +273,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(
             f"{label:<10} published {summary['published']}/{summary['equities']} equities "
             f"({summary['publish_rate']:.0%})"
+            + (f", {summary['flagged']} with a confidence alert" if summary["flagged"] else "")
             + (f"; FAILED: {', '.join(summary['failed'])}" if summary["failed"] else "")
         )
     for line in warnings(candidate):

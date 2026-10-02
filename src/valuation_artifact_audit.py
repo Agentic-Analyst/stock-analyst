@@ -81,6 +81,62 @@ def _workbook_headline_label(root: Path) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
+def _workbook_status_label(root: Path) -> Optional[str]:
+    """The "Publication status" cell users download: the bank tab's when the
+    workbook has one (the Summary cell is a formula pointing at it)."""
+    workbook_path = _single(root, "models/*.xlsx")
+    workbook = load_workbook(workbook_path, data_only=False, read_only=True)
+    if "Bank Valuation" in workbook.sheetnames:
+        value = workbook["Bank Valuation"]["B22"].value
+    elif "Summary" in workbook.sheetnames:
+        value = workbook["Summary"]["B24"].value
+    else:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _confidence_alert_checks(
+    *, withheld: bool, current_alert: Optional[Dict[str, Any]],
+    stored_publication: Dict[str, Any], workbook_status_label: Optional[str],
+) -> list:
+    """A confidence alert qualifies a published value, and every copy states it.
+
+    A sound model the Street does not back is published with an alert
+    (src/confidence_alert.py). The alert must never sit on a range-only
+    result, the saved artifact must carry the alert current policy computes,
+    and the workbook a user downloads must say "low confidence" beside the
+    value it publishes.
+    """
+    from src.confidence_alert import normalize_alert
+
+    checks = []
+    if withheld:
+        if current_alert:
+            checks.append("FAIL range-only output carries a confidence alert")
+        return checks
+    if not current_alert:
+        return checks
+    stored_alert = normalize_alert(stored_publication.get("confidence_alert"))
+    if stored_publication.get("publication_allowed") is True and not stored_alert:
+        # An artifact written before alerts existed has no such key; it can be
+        # read, but its workbook and report do not state the alert.
+        if "confidence_alert" in stored_publication:
+            checks.append(
+                "FAIL saved artifact publishes without the confidence alert "
+                "current policy requires"
+            )
+        else:
+            checks.append(
+                "WARN saved artifact predates confidence alerts; regenerate before use"
+            )
+    if stored_alert and "low confidence" not in str(workbook_status_label or "").casefold():
+        checks.append(
+            "FAIL downloadable workbook does not state the confidence alert "
+            "on the value it publishes"
+        )
+    return checks
+
+
 def _withheld_headline_is_explicit(label: Optional[str]) -> bool:
     """A hidden number needs an unmistakable non-publication label.
 
@@ -215,6 +271,7 @@ def audit_run(root: Path) -> Dict[str, Any]:
         semantic_integrity = _replay_model_integrity(root)
         semantic_integrity_source = "workbook_replay"
     workbook_headline_label = _workbook_headline_label(root)
+    workbook_status_label = _workbook_status_label(root)
     data = _publication_input_from_artifact(financial, computed)
     data = apply_valuation_override(
         data, valuation_override_from_publication_metadata(computed)
@@ -322,6 +379,16 @@ def audit_run(root: Path) -> Dict[str, Any]:
         checks.append("FAIL saved artifact publication permission is rejected by current policy")
     if stored_publication.get("status") == "error":
         checks.append("WARN saved artifact publication metadata failed; regenerate before use")
+    from src.confidence_alert import normalize_alert
+    withheld_now = bool(reliability.get("point_estimate_withheld"))
+    # Read before the withheld guard on purpose: an alert left on a range-only
+    # result is exactly what the first check reports.
+    current_alert = normalize_alert(reliability.get("confidence_alert"))
+    checks.extend(_confidence_alert_checks(
+        withheld=withheld_now, current_alert=current_alert,
+        stored_publication=stored_publication,
+        workbook_status_label=workbook_status_label,
+    ))
     if analyst_observations.get("included_in_intrinsic_value") is True:
         checks.append("FAIL external analyst observations retain an intrinsic-value vote")
     if (analyst_observations.get("observation_count")
@@ -360,6 +427,9 @@ def audit_run(root: Path) -> Dict[str, Any]:
             else summary.get("average_intrinsic")
         ),
         "workbook_headline_label": workbook_headline_label,
+        "workbook_status_label": workbook_status_label,
+        # Published against the Street: the alert every surface states.
+        "confidence_alert": None if withheld_now else current_alert,
         "stored_publication_allowed": stored_publication.get("publication_allowed"),
         "stored_publication_status": stored_publication.get("status"),
         "formula_integrity_status": integrity.get("status"),

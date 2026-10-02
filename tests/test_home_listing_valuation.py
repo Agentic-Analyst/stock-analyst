@@ -489,10 +489,11 @@ def test_where_the_figures_are_the_same_the_home_ones_are_published_too():
     assert pytest.approx(5.0) in view["percents"]
 
 
-# A withheld answer that passes every other check: it says it is not rated and
-# uses the Street benchmark (_withheld_state's 200.00 target, 15 revenue analysts).
-WITHHELD_OK = ("TEST is not rated: the valuation is withheld. The Street's analyst consensus "
-               "target is 200.00 (yahoo_finance), on revenue estimates from 15 analysts.")
+# A range-only answer that passes every other check: it says the answer is a
+# range and not one fair value, and uses the Street benchmark (_withheld_state's
+# 200.00 target, 15 revenue analysts).
+WITHHELD_OK = ("VYNN's answer on TEST is a range, not a single fair value. The Street's analyst "
+               "consensus target is 200.00 (yahoo_finance), on revenue estimates from 15 analysts.")
 
 
 def _withheld_with_view(**view):

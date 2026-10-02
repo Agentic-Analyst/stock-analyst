@@ -826,9 +826,20 @@ class TestUnreliableValuationReachesTheReport:
         assert reliability['range_high'] == 264.73
         assert reliability['failed_legs'] == {'exit_multiple_dcf': -17.33}
         status = valuation_publication_status(result)
-        assert "Only Positive Method Result**: $264.73" in status
+        assert "**Supported Scenario Estimate**: $264.73" in status
+        assert "**Single Fair Value**: Scenario estimate only" in status
         assert "Failed Method Outputs (audit only)**: exit multiple dcf $-17.33" in status
         assert "$-17.33 – $264.73" not in status
+
+    def test_two_methods_equal_at_the_cent_are_one_estimate_not_a_zero_width_range(self):
+        from src.report_agent import supported_valuation_range_row
+        assert supported_valuation_range_row({'range_low': 20.74, 'range_high': 20.7401}) == (
+            "Supported Scenario Estimate", "$20.74")
+        assert supported_valuation_range_row({'range_low': 20.74, 'range_high': 20.75}) == (
+            "Supported Valuation Range", "$20.74 – $20.75")
+        for low, high in ((None, 20.0), (20.0, None), (-1.0, 20.0), (0, 20.0),
+                          (float('nan'), 20.0), (True, 20.0)):
+            assert supported_valuation_range_row({'range_low': low, 'range_high': high}) is None
 
     def test_dcf_only_megacap_publication_boundary_reaches_the_report(self):
         from src.report_agent import apply_valuation_override, generate_section_valuation
@@ -857,20 +868,24 @@ class TestUnreliableValuationReachesTheReport:
             raise AssertionError("withheld valuation commentary must be deterministic")
 
         text, cost = generate_section_valuation(result, must_not_call_llm)
-        assert "Withheld — DCF-only result lacks independent corroboration" in text
+        assert "Single Fair Value** | **Range only: the evidence does not support one value" in text
         assert "valuation methods do not converge" not in text
         assert cost == 0.0
         assert "do not establish that the shares are overvalued or undervalued" in text
-        assert "correct conclusion is NOT RATED" in text
+        assert "the range is the answer" in text
+        # The section says what the answer is; it never reads as a missing one.
+        assert "NOT RATED" not in text and "Withheld" not in text
 
     def test_valuation_section_withholds_midpoint_and_upside(self):
         from src.report_agent import apply_valuation_override, generate_section_valuation
         data = apply_valuation_override(_valuation_data(comps=744.86), self.OVERRIDE)
         text, _ = generate_section_valuation(
             data, lambda messages, temperature=0.5: ("commentary", 0.0))
-        assert "Point Estimate** | **Withheld" in text
+        assert ("Single Fair Value** | **Range only: valuation methods do not converge "
+                "(4.0x dispersion)") in text
         assert "Supported Valuation Range** | **$188.30 – $744.86" in text
-        assert "not meaningful without a defensible point estimate" in text
+        assert "not stated without a single fair value" in text
+        assert "Withheld" not in text
         assert "UNRELIABLE VALUATION" in text
         assert "**$87.11**" not in text
 
@@ -886,7 +901,9 @@ class TestUnreliableValuationReachesTheReport:
             raise AssertionError("withheld thesis must not call the prose model")
 
         text, cost = generate_section_investment_thesis(data, must_not_call)
-        assert "No directional investment thesis is published" in text
+        assert "VYNN gives the range and the evidence here, not a buy or sell call." in text
+        assert "No single fair value is stated; the supported valuation range is" in text
+        assert "withheld" not in text.lower() and "NOT RATED" not in text
         assert "not probability-weighted bull/base/bear targets" in text
         assert "$87.11" not in text
         assert cost == 0.0
@@ -896,9 +913,11 @@ class TestUnreliableValuationReachesTheReport:
         data = apply_valuation_override(_valuation_data(comps=744.86), self.OVERRIDE)
         status = valuation_publication_status(data)
         assert "**Valuation Confidence**: Unreliable" in status
-        assert "**Point Estimate**: Withheld" in status
+        assert "**Single Fair Value**: Range only" in status
         assert "**Supported Valuation Range**: $188.30 – $744.86" in status
-        assert "No directional rating" in status
+        assert ("VYNN shows the range above instead of a single fair value, rating "
+                "or price target, because") in status
+        assert "Withheld" not in status
 
 
 class TestDepositaryReceiptGuard:

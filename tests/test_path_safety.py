@@ -100,10 +100,72 @@ def test_session_summary_renders_withheld_range_without_leaking_internal_value(
 
     summary = manager.get_conversation_summary()
 
-    assert "NOT RATED / withheld" in summary
+    assert "Rating / single fair value: none for this run (the answer is a range)" in summary
+    assert "NOT RATED / withheld" not in summary
     assert "USD 154.04–180.33" in summary
-    assert "Publication reason: external evidence conflicts" in summary
+    assert "Why no single fair value: external evidence conflicts" in summary
     assert "Fair Value:" not in summary
+
+
+def test_session_summary_does_not_call_one_estimate_or_nothing_a_range(tmp_path, monkeypatch):
+    import src.session_manager as session_module
+
+    monkeypatch.setattr(session_module, "DATA_ROOT", tmp_path)
+    manager = SessionManager("person@example.com", "CHAT", "session-1")
+
+    def summary_for(**valuation):
+        manager.session_data["conversation_history"] = [{
+            "timestamp": "2026-10-02T12:00:00", "user_query": "value X",
+            "completion_status": "completed", "routing_decisions": ["build_model"],
+            "key_findings": "", "analysis_results": {"ticker": "X", "valuation": {
+                "current_price": 100.0, "currency": "USD", "model_type": "DCF",
+                "point_estimate_withheld": True, **valuation,
+            }},
+        }]
+        return manager.get_conversation_summary()
+
+    one = summary_for(range_low=60.0, range_high=60.0)
+    assert "none for this run (the answer is one scenario estimate)" in one
+    assert "Supported DCF scenario estimate: USD 60.00" in one
+    # One estimate has no midpoint.
+    assert "support a value below the market (-40%)" in one and "at the midpoint" not in one
+    both = summary_for(range_low=60.0, range_high=80.0)
+    assert "support a value below the market (-30% at the midpoint)" in both
+    nothing = summary_for()
+    assert "none for this run (no method produced a usable value)" in nothing
+    for text in (one, nothing):
+        assert "the answer is a range" not in text and "NOT RATED" not in text
+
+
+def test_session_summary_keeps_the_confidence_alert_for_follow_ups(tmp_path, monkeypatch):
+    import src.session_manager as session_module
+
+    monkeypatch.setattr(session_module, "DATA_ROOT", tmp_path)
+    manager = SessionManager("person@example.com", "CHAT", "session-1")
+    alert = (
+        "Low confidence: VYNN's fair value is 49% below the market price, while "
+        "the mean target of 35 analysts is 15% above it."
+    )
+    manager.session_data["conversation_history"] = [{
+        "timestamp": "2026-10-02T12:00:00",
+        "user_query": "value META",
+        "completion_status": "completed",
+        "routing_decisions": ["build_model"],
+        "key_findings": "META: SELL at low confidence.",
+        "analysis_results": {
+            "ticker": "META",
+            "valuation": {
+                "current_price": 751.66, "currency": "USD", "model_type": "DCF",
+                "fair_value": 380.0, "upside_downside": -0.494,
+                "confidence_alert": alert,
+            },
+        },
+    }]
+
+    summary = manager.get_conversation_summary()
+
+    assert "Fair Value: USD 380.0" in summary
+    assert f"Confidence alert: {alert}" in summary
 
 
 def test_session_summary_formats_fractional_upside_as_percentage(
