@@ -1,13 +1,12 @@
-version: '3.8'
-
+# Run the agent locally from source: docker compose run --rm stock-analyst \
+#   --pipeline chat --email you@example.com --timestamp 20260101_120000 \
+#   --user-prompt "Analyze NVDA"
 services:
   stock-analyst:
-    image: fuzanwenn/stock-analyst:latest
-    container_name: stock-analyst
+    build:
+      context: .
+      target: production
+    image: stock-analyst:local
+    env_file: .env
     volumes:
       - ./data:/data
-    environment:
-      - SERPAPI_API_KEY=${SERPAPI_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-    # Override entrypoint for interactive usage
-    # command: --help

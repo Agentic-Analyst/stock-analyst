@@ -1,4 +1,10 @@
-# Dependency security decisions
+# Security
+
+## Reporting a vulnerability
+
+Please report security issues privately to zanwen.fu@duke.edu rather than in a public issue. Include the steps to reproduce and the impact you expect. You will get a reply within a few days.
+
+## Dependency security decisions
 
 ## CVE-2026-81726 / GHSA-8mgp-746c-j5xp (NLTK)
 
