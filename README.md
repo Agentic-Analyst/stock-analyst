@@ -4,11 +4,10 @@
 
 **A personal, trustworthy AI financial analyst.** Ask about a company in plain words, in any language. The agent decides what the question needs, and code computes every number it gives you. By [Zanwen Fu](https://zanwenfu.com), founder of VYNN AI.
 
-[Try VYNN](https://app.vynnai.com) ·
-[Website](https://vynnai.com) ·
-[Research records](https://vynnai.com/research) ·
-[Demo video](https://www.youtube.com/watch?v=aXR1ZIEdezs) ·
-[How it works, in depth](docs/how-it-works.md)
+[![Try VYNN](assets/readme/button-try.svg)](https://app.vynnai.com)&nbsp;
+[![Research records](assets/readme/button-research.svg)](https://vynnai.com/research)&nbsp;
+[![vynnai.com](assets/readme/button-website.svg)](https://vynnai.com)&nbsp;
+[![Engineering notes](assets/readme/button-notes.svg)](docs/how-it-works.md)
 
 [![CI](https://github.com/Agentic-Analyst/stock-analyst/actions/workflows/ci.yml/badge.svg)](https://github.com/Agentic-Analyst/stock-analyst/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
@@ -75,7 +74,7 @@ The calculator, the validator and the confidence check are on the figure. Beneat
 - **Checked every night.** A canary rebuilds a fixed basket of companies with the released engine. A release ships only with zero unexplained differences from the expected outcomes.
 - **Untrusted text stays data.** News articles, search results and replayed history enter the context marked as data, never as instructions.
 
-The details, from cost of capital to the calibration benchmark, are in [How it works, in depth](docs/how-it-works.md).
+The details, from cost of capital to the calibration benchmark, are in the [engineering notes](docs/how-it-works.md).
 
 ## Real output
 
