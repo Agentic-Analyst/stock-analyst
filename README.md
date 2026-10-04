@@ -1,26 +1,25 @@
-<div align="center">
-
-<img src="assets/vynnai-logo.jpg" alt="VYNN AI" width="160">
+<img src="assets/readme/banner.webp" alt="VYNN AI, personal AI financial analyst. Know what you own. Ask about a company you own: VYNN builds the valuation model and the report in about two minutes, every number sourced." width="100%">
 
 # The agent behind VYNN AI
 
-**A personal, trustworthy AI financial analyst.**<br>
-Ask about a company in plain words, in any language. The agent decides what the question needs, and code computes every number it gives you.
+**A personal, trustworthy AI financial analyst.** Ask about a company in plain words, in any language. The agent decides what the question needs, and code computes every number it gives you. By [Zanwen Fu](https://zanwenfu.com), founder of VYNN AI.
 
-[Website](https://vynnai.com) · [Try VYNN](https://app.vynnai.com) · [Research records](https://vynnai.com/research) · [Demo video](https://www.youtube.com/watch?v=aXR1ZIEdezs)
+[Try VYNN](https://app.vynnai.com) ·
+[Website](https://vynnai.com) ·
+[Research records](https://vynnai.com/research) ·
+[Demo video](https://www.youtube.com/watch?v=aXR1ZIEdezs) ·
+[How it works, in depth](docs/how-it-works.md)
 
 [![CI](https://github.com/Agentic-Analyst/stock-analyst/actions/workflows/ci.yml/badge.svg)](https://github.com/Agentic-Analyst/stock-analyst/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Agentic-Analyst/stock-analyst)
 [![License: source-available](https://img.shields.io/badge/license-source--available-lightgrey.svg)](LICENSE)
 
-</div>
+## Overview
 
-<p align="center">
-  <img src="assets/chat-answer.webp" width="49%" alt="A chat answer in the VYNN app: asked why Broadcom dropped today, the agent checks the live quote, finds it is up on the day, and explains what the headlines do and do not show">
-  <img src="assets/report-page.webp" width="49%" alt="Page 3 of Microsoft's research report from 30 September 2026: the contents, then an executive summary with a Buy view and a $595.14 twelve-month target">
-</p>
-<p align="center"><sub>Real output from the production app: a quick answer in seconds, and a page from the report of a full analysis.</sub></p>
+- **One loop, any question.** A reasoning agent reads the request and picks the tools it needs, or none. There is no fixed pipeline and no intent menu.
+- **A full analysis in about two minutes.** Financials, a ten-tab Excel model with live formulas, screened news and a cited report of 30 pages or more.
+- **Code owns every number.** A deterministic calculator sets the rating and the target. A validator checks every figure against it, and requires at least 95% of material sentences to cite the run's evidence.
+- **Flagged, not hidden.** When well-covered analysts disagree with the model, VYNN still answers, with both positions side by side. The call is yours.
 
 ## What you can ask
 
@@ -39,20 +38,22 @@ The heavy path, financials to model to news to report, runs only when a question
 
 ## How it works
 
-One reasoning loop and a set of tools. The agent reads the request, calls the tools it needs (or none), reads their JSON results and either calls more or answers. There is no fixed pipeline and no intent menu.
+The agent runs one reasoning loop over its tools. A quick question stops there. A question that needs a full analysis goes through the pipeline, and everything it publishes passes the guardrails first. The numbers on the figure are the steps below.
 
-```mermaid
-flowchart LR
-    Q["Question<br/>any language"] --> A["Reasoning agent<br/>plan, call tools, read results"]
-    A <--> D["Data<br/>prices, technicals, news, macro"]
-    A <--> M["Markets<br/>options, risk, portfolios, odds"]
-    A <--> P["Analysis<br/>financials, model, news, report"]
-    P --> W["Excel model<br/>live formulas"]
-    P --> R["Research report<br/>cited PDF"]
-    A --> Ans["Answer<br/>every number from code"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/how-it-works-dark.svg">
+  <img alt="How a question becomes an answer: a question in any language goes to a reasoning agent that reads it, plans and acts. A quick question is answered in seconds. A question that needs a full analysis runs the pipeline: financials, then a ten-tab model and the news screening in parallel, then a cited report, in about two minutes, from published data. Before anything is published, a calculator sets the rating and target, a validator checks every figure and requires at least 95% of material sentences to cite evidence, and a confidence check flags a large gap to analysts' targets, which are a benchmark kept apart from the valuation. A nightly canary gates every release." src="assets/readme/how-it-works-light.svg" width="100%">
+</picture>
 
-The four analysis stages are tools that share one state object, so a full run keeps its order (data, then model, then news, then report) while independent work runs in parallel. Tools register themselves with schemas for both OpenAI and Anthropic, so the same loop runs on either provider.
+1. **Ask.** Your question, in any language, reaches the reasoning agent with the conversation so far. History and every tool result enter as data, never as instructions, so a headline saying "ignore your rules" is analyzed, not obeyed.
+2. **Quick answer.** Prices, technicals, options, portfolio risk, prediction-market odds, macro data, funds and crypto come back in seconds, without the full analysis.
+3. **Full analysis.** When the question needs it, the agent gathers the financials, builds the ten-tab model and screens the news in parallel, then writes the report: about two minutes in all.
+4. **Check.** Every figure and claim passes the guardrails. The calculator sets the rating from the gap to price and makes the fair value the 12-month target. The validator corrects any figure that differs and rewrites text that does not cite the run's evidence. The confidence check compares the value with analysts' targets, which never enter the valuation itself.
+5. **Answer.** The answer arrives in the chat, on the report's first page and in the workbook, held to one set of numbers. When analysts disagree, it says so and shows both positions.
+
+### The tools
+
+The four analysis stages are tools over one shared state, so a full run keeps its order while independent work runs in parallel. Every tool registers itself with schemas for both OpenAI and Anthropic, so the same loop runs on either provider.
 
 | Group | Tools |
 |---|---|
@@ -64,17 +65,17 @@ The four analysis stages are tools that share one state object, so a full run ke
 
 `get_macro` needs a free FRED key; without one, the agent is simply not offered that tool.
 
-## Why the numbers hold up
+## Guardrails
 
-- **Code owns every number.** A symbolic DCF engine builds the valuation, and a deterministic calculator sets the rating and the 12-month target. The language model writes the narrative. A validator corrects any figure that differs from the calculator's and, whenever the run has evidence to cite, requires at least 95% of the narrative's material sentences to cite it.
+The calculator, the validator and the confidence check are on the figure. Beneath them:
+
 - **The workbook is the source of truth.** All formulas are live: change one assumption and the projections, both valuations, the sensitivity tables and the summary recompute.
 - **Two methods that agree by construction.** Perpetual growth and exit multiple are reconciled so they describe the same future. The spread that remains is classified, and a method that fails, such as a negative value for a cash-burning company, is reported as failed, not averaged in.
 - **Inputs from published data.** The discount rate is built from the government yield in the currency of the cash flows, Damodaran's equity risk premium and a regressed beta. Every input is printed with its source.
-- **Flagged, not hidden.** When well-covered analysts disagree with the model, VYNN still answers. It shows both positions side by side, in the chat, on the report's first page and in the workbook. The call is yours.
 - **Checked every night.** A canary rebuilds a fixed basket of companies with the released engine. A release ships only with zero unexplained differences from the expected outcomes.
-- **Untrusted text stays data.** News articles, search results and replayed history enter the context marked as data, never as instructions. A headline saying "ignore your rules" is analyzed, not obeyed.
+- **Untrusted text stays data.** News articles, search results and replayed history enter the context marked as data, never as instructions.
 
-The details, from cost of capital to the calibration benchmark, are in [How it works](docs/how-it-works.md).
+The details, from cost of capital to the calibration benchmark, are in [How it works, in depth](docs/how-it-works.md).
 
 ## Real output
 
@@ -87,6 +88,12 @@ Five research records from the current engine, each with its full report and mod
 | [Alphabet](https://vynnai.com/research/googl) | 3 Oct 2026 | $399.69 | $343.50 | Buy |
 | [Visa](https://vynnai.com/research/v) | 3 Oct 2026 | $373.75 | $360.66 | Hold |
 | [Apple](https://vynnai.com/research/aapl) | 3 Oct 2026 | $224.55 | $333.69 | Strong Sell, flagged |
+
+<p align="center">
+  <img src="assets/readme/chat-answer.webp" width="49%" alt="A chat answer in the VYNN app: asked why Broadcom dropped today, the agent checks the live quote, finds it is up on the day, and explains what the headlines do and do not show">
+  <img src="assets/readme/report-page.webp" width="49%" alt="Page 3 of Microsoft's research report from 30 September 2026: the contents, then an executive summary with a Buy view and a $595.14 twelve-month target">
+</p>
+<p align="center"><sub>From the production app: a quick answer in seconds, and page 3 of Microsoft's report.</sub></p>
 
 Each record states its confidence and its sources. Microsoft's [report](samples/MSFT-research-report.pdf) and [model](samples/MSFT-financial-model.xlsx) are also in [`samples/`](samples). Research, not investment advice.
 
