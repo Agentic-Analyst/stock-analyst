@@ -10,7 +10,6 @@ A generalizable tool-use agent for equity research. It resolves a company in any
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![Tool-Use Agent](https://img.shields.io/badge/Architecture-Tool--Use_Agent-orange.svg)](#architecture)
-[![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED.svg)](https://hub.docker.com/r/fuzanwenn/stock-analyst)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Agentic-Analyst/stock-analyst)
 [![License](https://img.shields.io/badge/License-All_Rights_Reserved-red.svg)](LICENSE)
 
@@ -478,28 +477,11 @@ docker run --rm --env-file .env -v $(pwd)/data:/data \
   --pipeline chat --user-prompt "Analyze NVDA"
 ```
 
-The published image ([`fuzanwenn/stock-analyst`](https://hub.docker.com/r/fuzanwenn/stock-analyst)) is `linux/amd64`. In production the worker runs as a one-shot container spawned per request by a FastAPI backend, which tails its stdout and streams progress to the frontend over SSE.
+The image is `linux/amd64`. In production the worker runs as a one-shot container spawned per request by a FastAPI backend, which tails its stdout and streams progress to the frontend over SSE.
 
-Production builds happen on `vynnai-prod`, from `/opt/vynn/stock-analyst`,
-after the shared-core commit referenced by both requirement locks is available
-on GitHub. Publish a versioned image, resolve its registry digest, and configure
-the API with that digest, never with `:latest`:
-
-```bash
-ssh root@128.140.85.148 'cd /opt/vynn/stock-analyst && \
-  docker build --target production \
-    --build-arg VYNN_SOURCE_REVISION=<STOCK_ANALYST_COMMIT> \
-    -t fuzanwenn/stock-analyst:<RELEASE_ID> . && \
-  docker push fuzanwenn/stock-analyst:<RELEASE_ID> && \
-  docker pull fuzanwenn/stock-analyst:<RELEASE_ID> && \
-  docker image inspect fuzanwenn/stock-analyst:<RELEASE_ID> \
-    --format "{{index .RepoDigests 0}}"'
-```
-
-Put the resulting `name@sha256:...` in the server-only `api.env` as
-`BACKEND_IMAGE`, set the matching immutable `ANALYSIS_MODEL_VERSION`, keep
-`PEER_COMPS_ENABLED=false`, and review the API scheduler dry-run before
-enabling scheduled research.
+The production image is built from source on the production host, and the API
+runs it by its immutable image digest, never by `:latest`. The operational
+release steps are kept outside this public repository.
 
 ---
 
