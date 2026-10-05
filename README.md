@@ -1,4 +1,8 @@
-<img src="assets/readme/banner.webp" alt="VYNN AI, personal AI financial analyst. Know what you own. Ask about a company you own: VYNN builds the valuation model and the report in about two minutes, every number sourced." width="100%">
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/banner.webp">
+  <source type="image/avif" srcset="assets/readme/banner.avif">
+  <img src="assets/readme/banner.webp" alt="VYNN AI, personal AI financial analyst. Know what you own. Ask about a company you own: VYNN builds the valuation model and the report in about two minutes, every number sourced." width="100%">
+</picture>
 
 # The agent behind VYNN AI
 
