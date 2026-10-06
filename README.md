@@ -1,8 +1,10 @@
+<a href="https://vynnai.com">
 <picture>
   <source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/banner.webp">
   <source type="image/avif" srcset="assets/readme/banner.avif">
   <img src="assets/readme/banner.webp" alt="VYNN AI, personal AI financial analyst. Know what you own. Ask about a company you own: VYNN builds the valuation model and the report in about two minutes, every number sourced. In the animation, the market's crowd settles into VYNN's valuation of Microsoft, traces back to the numbers it rests on, and becomes the price moving around fair value." width="100%">
 </picture>
+</a>
 
 # The agent behind VYNN AI
 
