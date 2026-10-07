@@ -723,6 +723,7 @@ class RecommendationValidator:
             report["coverage_details"] = {
                 "material_sentences": 0,
                 "cited_sentences": 0,
+                "cited_count": 0,
                 "coverage_pct": 100.0
             }
             return 100.0  # No material claims to cite
@@ -743,7 +744,9 @@ class RecommendationValidator:
         
         report["coverage_details"] = {
             "material_sentences": len(material_sentences),
-            "cited_sentences": cited_count,
+            # The count has its own key: "cited_sentences" below holds the
+            # example sentences (it once held both, and the list won).
+            "cited_count": cited_count,
             "coverage_pct": coverage,
             "uncited_sentences": uncited_sentences[:10],  # Show first 10 for debugging
             "cited_sentences": cited_sentences[:5]  # Show first 5 examples

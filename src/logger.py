@@ -9,8 +9,22 @@ and provides both file logging and console output with proper formatting.
 import logging
 import pathlib
 import os
+import re
+import sys
 from datetime import datetime
 from typing import Optional
+
+# This file is imported under two names: `logger` (main.py puts src/ on
+# sys.path, and the chat tools set the run logger up through it) and
+# `src.logger` (FinancialState reads the run logger back through it). Python
+# would load it twice, with two separate run-logger globals, so on the chat
+# path FinancialState never saw the run logger and every task agent's lines,
+# the report validator's verdicts among them, went to a console-only fallback
+# instead of info.log. Register one module object under both names, whichever
+# is imported first.
+for _name in ("logger", "src.logger"):
+    sys.modules.setdefault(_name, sys.modules[__name__])
+del _name
 
 class StockAnalystLogger:
     """Centralized logger for the stock analysis pipeline."""
@@ -170,6 +184,77 @@ def setup_logger(ticker: str, base_path: pathlib.Path = None, console_level: str
     logger = StockAnalystLogger(ticker, base_path, console_level, session_name)
     set_logger(logger)
     return logger
+
+
+# What the task agents log (the agents themselves and the scrapers, filter,
+# screener, model builder and report writer they hand their logger to) goes
+# to agents.log beside the run's info.log, not into info.log. api-runner
+# streams every info.log line to the chat page, which turns lines into the
+# job's status label and acts on control phrases anywhere in them, and these
+# lines carry text the run does not control: article titles, search queries,
+# URLs, exception messages. A requests ConnectionError, for one, carries the
+# full SerpAPI URL with its api_key, so the file is scrubbed as well.
+_SECRETS = (
+    (re.compile(r"mongodb(?:\+srv)?://[^\s'\"]+", re.I), "[REDACTED_DATABASE_URI]"),
+    (re.compile(r"\b(?:sk|rk|pk)[-_](?:proj-|live_|test_)?[A-Za-z0-9]{20,}[A-Za-z0-9_-]*"), "[REDACTED_KEY]"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED_KEY]"),
+    (re.compile(r"\bAIza[A-Za-z0-9_-]{20,}"), "[REDACTED_KEY]"),
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(api[_-]?key|access[_-]?token|token|secret|password|credentials?|crumb)"
+                r"(['\"]?\s*(?:[=:]|%3D)\s*['\"]?)[^\s&,;'\")}]+"), r"\1\2[REDACTED]"),
+)
+_CONTROL = (
+    (re.compile(r"\[(ANSWER_BEGIN|ANSWER_END|FINDING|CHART_DIRECTIVE|LLM)\]", re.I), r"(\1)"),
+    (re.compile(r"identified ticker\s*:", re.I), "identified ticker -"),
+    (re.compile(r"entire\s+program", re.I), "entire-program"),
+    (re.compile(r"session_id\s*:", re.I), "session_id -"),
+    (re.compile(r"generated successfully\s*:", re.I), "generated successfully -"),
+)
+
+
+def scrub_untrusted(text) -> str:
+    """Redact secrets and disarm the chat page's control phrases."""
+    text = str(text)
+    for pattern, replacement in _SECRETS + _CONTROL:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+class _ScrubbingFormatter(logging.Formatter):
+    """Scrubs the finished line, tracebacks included, whatever built it."""
+
+    def format(self, record):
+        return scrub_untrusted(super().format(record))
+
+
+def _agents_logger(log_file: pathlib.Path) -> logging.Logger:
+    log = logging.getLogger("stock-analyst-agents:" + str(log_file).replace(".", "_"))
+    if not log.handlers:
+        log.setLevel(logging.DEBUG)
+        log.propagate = False
+        # delay: no file for a run whose agents never log.
+        to_file = logging.FileHandler(log_file, mode="a", encoding="utf-8", delay=True)
+        to_file.setLevel(logging.DEBUG)
+        to_file.setFormatter(_ScrubbingFormatter(
+            '%(asctime)s | %(levelname)-8s | agents | %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+        log.addHandler(to_file)
+        to_console = logging.StreamHandler()
+        to_console.setLevel(logging.INFO)
+        to_console.setFormatter(_ScrubbingFormatter('%(message)s'))
+        log.addHandler(to_console)
+    return log
+
+
+class TaskAgentLog(StockAnalystLogger):
+    """The run logger as the task agents see it: same run folder, agents.log."""
+
+    def __init__(self, run_logger: StockAnalystLogger):
+        self.ticker = run_logger.ticker
+        self.data_dir = run_logger.data_dir
+        self.session_name = run_logger.session_name
+        self.log_file = self.data_dir / "agents.log"
+        self.logger = _agents_logger(self.log_file)
+
 
 # Convenience functions for when logger is set
 def info(message: str, **kwargs):
