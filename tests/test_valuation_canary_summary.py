@@ -155,7 +155,10 @@ def test_real_expectation_file_covers_the_nightly_basket():
     # The default floor must sit under the healthy rate and above a collapse.
     healthy = sum(status != "WITHHELD" for status in single.values()) / len(basket)
     floor = float(re.search(r"MIN_PUBLISH_RATE=\$\{MIN_PUBLISH_RATE:-([0-9.]+)\}", nightly).group(1))
-    assert floor == 0.55 and floor < healthy
+    assert floor == 0.52 and floor < healthy
+    # One name flipping from the bottom of the healthy band (10 publish)
+    # still passes: the floor catches a collapse, the --expect gate a flip.
+    assert (10 - 1) / len(basket) >= floor
 
 
 def test_the_default_floor_matches_the_nightly_script(tmp_path):

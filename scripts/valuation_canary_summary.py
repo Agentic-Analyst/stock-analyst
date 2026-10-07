@@ -239,16 +239,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("candidate", type=Path)
     parser.add_argument("--baseline", type=Path)
-    # The nightly basket publishes 10 to 12 of 16: five the Street
+    # The nightly basket publishes 10 to 12 of 17: five the Street
     # corroborates (NVDA, GOOGL, MSFT, CRH, TEX), five published with a
     # confidence alert (META, TSLA, AMD, AAPL, PYPL), Amazon with an alert
     # once the provider's statements for it are current, and Booking when it
-    # clears its boundary. At 0.55 the floor fails once fewer than 9 of 16
-    # judged equities publish: it catches a collapse, not a single flip, which
+    # clears its boundary. At 0.52 the floor fails once fewer than 9 of 17
+    # judged equities publish (SNDK, a memory maker, never does; at 0.55 a
+    # single flip from 10 failed): it catches a collapse, not a single flip, which
     # is the --expect check's job before a deploy. (Before 2026-10-02 a name
     # the Street did not back was withheld, 5 of 16 published, and the floor
     # was 0.30.)
-    parser.add_argument("--min-publish-rate", type=float, default=0.55)
+    parser.add_argument("--min-publish-rate", type=float, default=0.52)
     parser.add_argument("--expect", type=Path, help="per-name expected outcomes (JSON)")
     # A refused equity leaves the rate's denominator, so a classification
     # regression that refused every name would otherwise raise the rate.

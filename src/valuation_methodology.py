@@ -45,7 +45,17 @@ _MEMORY_CYCLE_INDUSTRY_HINTS = ("semiconductor", "computer hardware")
 # (Silicon Motion) or a tester of DRAM (Teradyne, filed under Semiconductor
 # Equipment & Materials) sells into the cycle without being priced by it.
 _SINGLE_MEMORY_PRODUCT = re.compile(r"\b(?:nand|dram)\b")
-_MEMORY_CONTROLLER_VENDOR = re.compile(r"\b(?:nand\s+flash|flash|nand|memory)\s+controllers?\b")
+# Kioxia, Sandisk's manufacturing partner, says "flash memory, SSDs", never
+# "NAND". With drives beside it: Microchip's serial flash comes without them.
+_FLASH_MEMORY = re.compile(r"\bflash memory\b")
+_SOLID_STATE_DRIVES = re.compile(r"\bssds?\b|\bsolid[- ]state drives?\b")
+# The company's own making: "manufactures", "manufacturing", "a manufacturer
+# of", never its customers ("sells to module manufacturers").
+_MAKES = re.compile(r"\bmanufactur(?:e|es|ed|ing|er)\b")
+_MEMORY_CONTROLLER_VENDOR = re.compile(
+    r"\b(?:nand\s+flash|flash|nand|memory)\s+controllers?\b"
+    r"|\bcontrollers?\s+for\s+(?:nand|flash)\b"
+)
 
 _CONGLOMERATE_HINTS = (
     "conglomerate", "diversified industrial", "diversified holdings",
@@ -256,12 +266,13 @@ def is_memory_maker(industry: str, business_summary: str) -> bool:
         return False
     if all(hint in summary for hint in _MEMORY_CYCLE_SUMMARY_HINTS):
         return True
-    return (
-        "equipment" not in industry_key
-        and "manufactur" in summary
-        and _SINGLE_MEMORY_PRODUCT.search(summary) is not None
-        and _MEMORY_CONTROLLER_VENDOR.search(summary) is None
-    )
+    if ("equipment" in industry_key or _MAKES.search(summary) is None
+            or _MEMORY_CONTROLLER_VENDOR.search(summary) is not None):
+        return False
+    if _SINGLE_MEMORY_PRODUCT.search(summary) is not None:
+        return True
+    return (_FLASH_MEMORY.search(summary) is not None
+            and _SOLID_STATE_DRIVES.search(summary) is not None)
 
 
 def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, Any]:

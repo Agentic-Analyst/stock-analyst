@@ -25,11 +25,11 @@ BASKET=${BASKET:-"TSLA AMD NVDA META AAPL AMZN GOOGL MSFT CRH MC.PA PYPL PCJEWEL
 # provider's statements for it are stale, and Booking sits on a boundary
 # (scripts/valuation_canary_expectations.json), so 10 to 12 of 17 publish on
 # a healthy engine (five or six of them with a confidence alert). The
-# floor fails below 10 of 17: it catches a collapse, not one name flipping,
+# floor fails below 9 of 17: it catches a collapse, not one name flipping,
 # which the pre-deploy --expect gate catches. Install this file together with
 # the engine image that publishes flagged names: against an older image, which
 # withheld them, 5 of 16 publish and this floor fails.
-MIN_PUBLISH_RATE=${MIN_PUBLISH_RATE:-0.55}
+MIN_PUBLISH_RATE=${MIN_PUBLISH_RATE:-0.52}
 # Every basket name is an operating company, so any refusal is a regression.
 MAX_REFUSED=${MAX_REFUSED:-0}
 # Nightly output is about 10 MB; keep a month of it.

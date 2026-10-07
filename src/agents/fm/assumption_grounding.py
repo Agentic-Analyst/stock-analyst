@@ -85,6 +85,9 @@ _POST_CONSENSUS_FADE_YEARS = 8   # NTM3 .. NTM10 reach terminal growth
 _STREET_MARGIN_ANCHOR_FLOOR = -0.05
 _STREET_MARGIN_ANCHOR_CEILING = 0.10
 _STREET_MARGIN_RECOVERY_CAP = 0.05
+# Projected operating costs may compress to this fraction of the company's
+# leanest share of revenue, never below (see ground_assumptions).
+_OPERATING_COST_COMPRESSION = 0.5
 
 
 def _post_consensus_growth_path(
@@ -1708,11 +1711,10 @@ def _operating_cost_ratio_floor(json_data: Dict[str, Any]) -> float:
     """
     The lowest share of revenue the company has spent between gross profit
     and operating income (R&D, SG&A), across the TTM bridge and the annual
-    statements. Projected operating costs may shrink to the company's best
-    year, never to zero: Sandisk's Street-anchored 71.6% operating margin
-    became a 71.6% gross margin, R&D and SG&A at 0% of revenue against $2B a
-    year actually spent (its lowest year: 9.9%). Zero when no period reports
-    both lines.
+    statements: Sandisk's is 9.9%. A period whose share falls outside 0-100%
+    (operating income above gross profit, a year with almost no revenue) says
+    nothing about running costs and is skipped, rather than pulling the
+    floor to zero. Zero when no period qualifies.
     """
     rows = []
     bridge = (json_data or {}).get("ttm_bridge") or {}
@@ -1725,8 +1727,10 @@ def _operating_cost_ratio_floor(json_data: Dict[str, Any]) -> float:
         gross = _number(row, "Gross Profit")
         operating = _number(row, "Operating Income")
         if revenue and revenue > 0 and gross is not None and operating is not None:
-            ratios.append((gross - operating) / revenue)
-    return max(0.0, min(ratios)) if ratios else 0.0
+            ratio = (gross - operating) / revenue
+            if 0.0 <= ratio < 1.0:
+                ratios.append(ratio)
+    return min(ratios) if ratios else 0.0
 
 
 def _working_capital_history(
@@ -1891,14 +1895,16 @@ def ground_assumptions(
         bridge_gross / bridge_revenue
         if bridge_revenue and bridge_gross is not None else gp.get("gross_margins")
     )
-    # Where the gross margin path falls below the operating margin (a Street
-    # case lifting the operating margin past it), gross margin is raised to
-    # the operating margin plus the company's leanest operating-cost ratio
-    # (see _operating_cost_ratio_floor), not to the operating margin itself,
-    # which projected zero R&D and SG&A. Only that case: a floor on every
-    # year moved AMD +5.6% and Amazon -1.3% through cost-of-revenue
-    # working capital, for no error in either.
-    operating_cost_ratio = _operating_cost_ratio_floor(json_data)
+    # Projected gross margin always leaves room for operating costs of at
+    # least half the company's leanest share on record: costs may shrink with
+    # scale (revenue doubling on flat costs halves the share), never to zero.
+    # Sandisk's Street-anchored 71.6% operating margin had become a 71.6%
+    # gross margin, R&D and SG&A at 0% against $2B a year actually spent. At
+    # half, no healthy name in the canary basket is touched: the tightest
+    # projects 0.57x its leanest share (GM), AMD 0.63x, Amazon 0.90x; the
+    # full share moved AMD +5.6% and Amazon -1.3% through cost-of-revenue
+    # working capital. A max(), so the floor has no cliff to step off.
+    operating_cost_floor = _OPERATING_COST_COMPRESSION * _operating_cost_ratio_floor(json_data)
     operating_history = _historical_margin(json_data, "Operating Income")
     operating_anchor = (
         float(t_om) if isinstance(t_om, (int, float)) and not isinstance(t_om, bool)
@@ -1932,8 +1938,7 @@ def ground_assumptions(
         for i in range(min(len(oms), len(ems))):
             ems[i] = max(ems[i], oms[i])
         for i in range(min(len(oms), len(gms))):
-            if gms[i] < oms[i]:
-                gms[i] = oms[i] + operating_cost_ratio
+            gms[i] = max(gms[i], oms[i] + operating_cost_floor)
         if ems:
             a["ebitda_margins"] = ems
         if gms:
@@ -2211,8 +2216,7 @@ def ground_assumptions(
                 a["ebitda_margins"] = [om + da_ratio for om in new_oms]
                 gms = list(a.get("gross_margins") or [])
                 for i in range(min(len(gms), len(new_oms))):
-                    if gms[i] < new_oms[i]:
-                        gms[i] = new_oms[i] + operating_cost_ratio
+                    gms[i] = max(gms[i], new_oms[i] + operating_cost_floor)
                 if gms:
                     a["gross_margins"] = gms
                 a["margin_anchor"] = {

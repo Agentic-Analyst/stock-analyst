@@ -9,8 +9,8 @@ STRONG BUY. Two things let that through:
 2. The Street EPS case lifted its operating margin to the ten-point cap,
    71.6%, and gross margin was then raised only to the operating margin:
    71.6% gross, 71.6% operating, R&D and SG&A at 0% of revenue against $2B a
-   year actually spent. Gross margin now keeps room for operating costs at
-   the lowest share of revenue the company has actually run.
+   year actually spent. Gross margin now always keeps room for operating
+   costs of at least half the company's leanest share of revenue on record.
 
 Run:  python -m pytest tests/test_memory_cycle_and_operating_costs.py -q
 """
@@ -63,6 +63,20 @@ from test_valuation_runway_and_corroboration import (  # noqa: E402
     ("NVDA", "Semiconductors",
      "NVIDIA provides graphics and compute platforms; its GPUs use high-bandwidth "
      "DRAM supplied by memory makers.", False),
+    # Sandisk's manufacturing partner says "flash memory, SSDs", never "NAND".
+    ("285A.T", "Semiconductors",
+     "Kioxia Holdings Corporation engages in research, development, manufacturing, sales, "
+     "and other services of memory and related products for solid state drives (SSDs). "
+     "The company offers flash memory, SSDs, SD memory cards, and other retail products.", True),
+    ("2408.TW", "Semiconductors",
+     "Nanya Technology Corporation researches, develops, manufactures, and sells DRAM "
+     "products.", True),
+    ("8299.TWO", "Semiconductors",
+     "Phison Electronics Corp. designs, manufactures, and sells flash memory controllers "
+     "and peripheral system applications. The company offers solid-state drives (SSDs).", False),
+    # Its customers manufacture; it designs.
+    ("SYNTH", "Semiconductors",
+     "Designs controllers for NAND flash used by SSD manufacturers.", False),
     ("DELL", "Computer Hardware",
      "Dell Technologies designs, develops, manufactures, markets, sells, and supports "
      "servers and all-flash storage solutions.", False),
@@ -146,7 +160,7 @@ def test_a_street_margin_at_the_cap_keeps_room_for_operating_costs(monkeypatch):
     assert grounded["margin_anchor"]["clamped"] is True
     assert oms[0] == pytest.approx(12.468 / 20.248 + 0.10)
     # FY2026 is the leanest year on record: (14.472 - 12.468) / 20.248.
-    floor = (14.472 - 12.468) / 20.248
+    floor = 0.5 * (14.472 - 12.468) / 20.248
     for operating, gross in zip(oms, gms):
         assert gross - operating >= floor - 1e-9
 
@@ -181,14 +195,60 @@ def test_without_both_lines_the_floor_is_zero():
 
 def test_a_path_that_already_leaves_room_is_never_touched(monkeypatch):
     """
-    Only a gross path that fell below the operating margin is raised. Applied
-    to every year, the floor moved AMD +5.6% and Amazon -1.3% through
-    cost-of-revenue working capital (their leanest cost ratios, ~40%, carry
-    acquisition amortization), with nothing wrong in either.
+    Half the leanest share, not all of it: the full share moved AMD +5.6% and
+    Amazon -1.3% through cost-of-revenue working capital (their leanest
+    shares, ~38%, carry acquisition amortization), with nothing wrong in
+    either. Tesla's fixture projects 9.9-11.2 points of room; an 18% leanest
+    share asks 9.
     """
     monkeypatch.setenv("RISK_FREE_USD", "0.04")
-    monkeypatch.setattr(assumption_grounding, "_operating_cost_ratio_floor", lambda _: 0.30)
+    monkeypatch.setattr(assumption_grounding, "_operating_cost_ratio_floor", lambda _: 0.18)
     wide, _ = ground_assumptions(_base_assumptions(), _tesla_like_payload())
     monkeypatch.setattr(assumption_grounding, "_operating_cost_ratio_floor", lambda _: 0.0)
     before, _ = ground_assumptions(_base_assumptions(), _tesla_like_payload())
     assert wide["gross_margins"] == pytest.approx(before["gross_margins"])
+
+
+
+def _grounded_gaps(payload):
+    grounded, _ = ground_assumptions(_base_like(0.616, 0.715), payload)
+    return [g - o for o, g in zip(grounded["operating_margins"], grounded["gross_margins"])]
+
+
+def test_no_cliff_just_above_the_operating_margin(monkeypatch):
+    """
+    A trailing gross margin 0.29pt higher once left R&D and SG&A at
+    0.18% / 0.11% / 0.04% of revenue, then jumped to 9.9% in year four.
+    """
+    monkeypatch.setenv("RISK_FREE_USD", "0.04")
+    payload = _sandisk_like_payload()
+    payload["ttm_bridge"]["income_statement"]["Gross Profit"] = 14.53e9
+    floor = 0.5 * assumption_grounding._operating_cost_ratio_floor(payload)
+    gaps = _grounded_gaps(payload)
+    assert min(gaps) >= floor - 1e-9
+    assert max(gaps) - min(gaps) < 0.01
+
+
+def test_one_odd_year_does_not_switch_the_floor_off(monkeypatch):
+    # Operating income above gross profit (a gain booked in operating income)
+    # once made the minimum negative, the floor zero, and costs 0% again.
+    monkeypatch.setenv("RISK_FREE_USD", "0.04")
+    payload = _sandisk_like_payload()
+    payload["financial_statements"]["income_statement"]["2023-06-30"] = {
+        "Total Revenue": 6.09e9, "Gross Profit": 0.20e9, "Operating Income": 0.25e9,
+        "EBITDA": 0.4e9, "Pretax Income": 0.2e9, "Tax Provision": 0.05e9,
+    }
+    assert assumption_grounding._operating_cost_ratio_floor(payload) == pytest.approx(
+        (14.472 - 12.468) / 20.248)
+    assert min(_grounded_gaps(payload)) > 0.04
+
+
+def test_a_year_with_almost_no_revenue_is_skipped():
+    # Costs 4.5x revenue in a pre-revenue year would ask for a gross margin
+    # above 100%; with nothing else on record there is no floor.
+    payload = copy.deepcopy(_tesla_like_payload())
+    payload["ttm_bridge"] = {}
+    payload["financial_statements"]["income_statement"] = {"2022-12-31": {
+        "Total Revenue": 1.0e6, "Gross Profit": -2.0e6, "Operating Income": -6.5e6,
+    }}
+    assert assumption_grounding._operating_cost_ratio_floor(payload) == 0.0
