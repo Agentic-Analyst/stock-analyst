@@ -354,7 +354,7 @@ class RecommendationEngineV3:
             self._log("📊 CITATION COVERAGE ANALYSIS")
             self._log("="*80)
             self._log(f"Material Sentences: {coverage_details.get('material_sentences', 0)}")
-            self._log(f"Cited Sentences: {coverage_details.get('cited_sentences', 0)}")
+            self._log(f"Cited Sentences: {coverage_details.get('cited_count', 0)}")
             self._log(f"Coverage: {coverage_details.get('coverage_pct', 0):.1f}%")
             self._log("")
             
@@ -381,7 +381,12 @@ class RecommendationEngineV3:
         while self.validator.needs_rewrite(validation_report) and rewrite_attempt < max_rewrite_attempts:
             rewrite_attempt += 1
             self._log(f"\n⚠️  VALIDATION ISSUES DETECTED - Triggering Rewrite (Attempt {rewrite_attempt}/{max_rewrite_attempts})\n", "warning")
-            
+            self._log(
+                f"Issues: {len(validation_report.get('corrections_made') or [])} auto-corrections, "
+                f"{len(validation_report.get('errors') or [])} errors, "
+                f"{len(validation_report.get('warnings') or [])} warnings"
+            )
+
             if validation_report.get("corrections_made"):
                 self._log("Auto-corrections applied:")
                 for correction in validation_report["corrections_made"]:
@@ -451,7 +456,7 @@ class RecommendationEngineV3:
                 self._log("📊 CITATION COVERAGE PROGRESS")
                 self._log("="*80)
                 self._log(f"Attempt {rewrite_attempt}: {coverage_details.get('coverage_pct', 0):.1f}% coverage")
-                self._log(f"  Cited: {coverage_details.get('cited_sentences', 0)}/{coverage_details.get('material_sentences', 0)} sentences")
+                self._log(f"  Cited: {coverage_details.get('cited_count', 0)}/{coverage_details.get('material_sentences', 0)} sentences")
                 self._log("="*80 + "\n")
             
             # If validation passed, break early
@@ -568,7 +573,7 @@ class RecommendationEngineV3:
         coverage = validation_report.get("coverage_details", {})
         if coverage:
             issues_section += f"**Citation Coverage**: {coverage.get('coverage_pct', 0):.1f}% "
-            issues_section += f"({coverage.get('cited_sentences', 0)}/{coverage.get('material_sentences', 0)} sentences cited)\n"
+            issues_section += f"({coverage.get('cited_count', 0)}/{coverage.get('material_sentences', 0)} sentences cited)\n"
             issues_section += "**PRODUCTION REQUIREMENT**: 95%+ coverage (YOU MUST ACHIEVE THIS)\n\n"
             
             # Show uncited sentences if available

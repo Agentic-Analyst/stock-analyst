@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import json
-from src.logger import get_logger
+from src.logger import get_logger, TaskAgentLog
 from src.config import MAX_ARTICLES, MIN_SCORE, MIN_CONFIDENCE
 
 
@@ -200,10 +200,13 @@ class FinancialState:
         Get the logger for the current context.
         Returns the global logger if available, otherwise creates a basic logger with custom methods.
         """
-        # Try to get the global logger first (StockAnalystLogger)
+        # Try to get the global logger first (StockAnalystLogger). Task agents
+        # write to agents.log in the same run folder, scrubbed, not to the
+        # streamed info.log: their lines carry article titles, URLs and
+        # exception text (see TaskAgentLog).
         global_logger = get_logger()
         if global_logger is not None:
-            return global_logger
+            return TaskAgentLog(global_logger)
         
         # Fallback: create a basic logger with custom methods to match StockAnalystLogger
         import logging
