@@ -8,6 +8,7 @@ that method is absent.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, Iterable, Optional
 
 from src.agents.fm.bank_valuation import (
@@ -37,6 +38,24 @@ _COMMODITY_CYCLE_INDUSTRY_HINTS = (
 # Yahoo files memory makers under the same "Semiconductors" industry.
 _MEMORY_CYCLE_SUMMARY_HINTS = ("dram", "nand")
 _MEMORY_CYCLE_INDUSTRY_HINTS = ("semiconductor", "computer hardware")
+# A maker of one kind of memory is as cyclical as one that makes both:
+# Sandisk makes only NAND, missed the both-words match, and published a DCF
+# that held a 72% peak operating margin forever (+109% vs the market; the
+# Street +26%). It has to make the chips: a NAND flash controller designer
+# (Silicon Motion) or a tester of DRAM (Teradyne, filed under Semiconductor
+# Equipment & Materials) sells into the cycle without being priced by it.
+_SINGLE_MEMORY_PRODUCT = re.compile(r"\b(?:nand|dram)\b")
+# Kioxia, Sandisk's manufacturing partner, says "flash memory, SSDs", never
+# "NAND". With drives beside it: Microchip's serial flash comes without them.
+_FLASH_MEMORY = re.compile(r"\bflash memory\b")
+_SOLID_STATE_DRIVES = re.compile(r"\bssds?\b|\bsolid[- ]state drives?\b")
+# The company's own making: "manufactures", "manufacturing", "a manufacturer
+# of", never its customers ("sells to module manufacturers").
+_MAKES = re.compile(r"\bmanufactur(?:e|es|ed|ing|er)\b")
+_MEMORY_CONTROLLER_VENDOR = re.compile(
+    r"\b(?:nand\s+flash|flash|nand|memory)\s+controllers?\b"
+    r"|\bcontrollers?\s+for\s+(?:nand|flash)\b"
+)
 
 _CONGLOMERATE_HINTS = (
     "conglomerate", "diversified industrial", "diversified holdings",
@@ -239,6 +258,23 @@ def _segment_readiness(data: Dict[str, Any], industry: str) -> Dict[str, Any]:
     }
 
 
+def is_memory_maker(industry: str, business_summary: str) -> bool:
+    """A maker of DRAM or NAND chips, read from Yahoo's industry and description."""
+    industry_key = (industry or "").casefold()
+    summary = (business_summary or "").casefold()
+    if not any(hint in industry_key for hint in _MEMORY_CYCLE_INDUSTRY_HINTS):
+        return False
+    if all(hint in summary for hint in _MEMORY_CYCLE_SUMMARY_HINTS):
+        return True
+    if ("equipment" in industry_key or _MAKES.search(summary) is None
+            or _MEMORY_CONTROLLER_VENDOR.search(summary) is not None):
+        return False
+    if _SINGLE_MEMORY_PRODUCT.search(summary) is not None:
+        return True
+    return (_FLASH_MEMORY.search(summary) is not None
+            and _SOLID_STATE_DRIVES.search(summary) is not None)
+
+
 def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, Any]:
     """Select the primary method and determine point-publication suitability."""
     company = (financial_data or {}).get("company_data") or {}
@@ -390,10 +426,7 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
             "receivables, matched funding debt, credit losses, and a reconciled "
             "operating-company plus finance-book sum-of-the-parts valuation"
         )
-    memory_cycle = (
-        any(hint in industry_key for hint in _MEMORY_CYCLE_INDUSTRY_HINTS)
-        and all(hint in business_summary for hint in _MEMORY_CYCLE_SUMMARY_HINTS)
-    )
+    memory_cycle = is_memory_maker(industry_key, business_summary)
     if memory_cycle:
         reasons.append(
             "memory-chip margins follow DRAM and NAND contract prices, so the "

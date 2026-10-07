@@ -20,16 +20,16 @@ set -euo pipefail
 
 DEPLOY_DIR=${DEPLOY_DIR:-/opt/vynn/deploy}
 OUT_ROOT=${OUT_ROOT:-/var/lib/vynn/canary}
-BASKET=${BASKET:-"TSLA AMD NVDA META AAPL AMZN GOOGL MSFT CRH MC.PA PYPL PCJEWELLER.NS MU GM TEX BKNG"}
-# Four basket names are range-only by design, Amazon is range-only while the
+BASKET=${BASKET:-"TSLA AMD NVDA META AAPL AMZN GOOGL MSFT CRH MC.PA PYPL PCJEWELLER.NS MU GM TEX BKNG SNDK"}
+# Five basket names are range-only by design (SNDK, a NAND-only memory maker, the fifth), Amazon is range-only while the
 # provider's statements for it are stale, and Booking sits on a boundary
-# (scripts/valuation_canary_expectations.json), so 10 to 12 of 16 publish on
+# (scripts/valuation_canary_expectations.json), so 10 to 12 of 17 publish on
 # a healthy engine (five or six of them with a confidence alert). The
-# floor fails below 9 of 16: it catches a collapse, not one name flipping,
+# floor fails below 9 of 17: it catches a collapse, not one name flipping,
 # which the pre-deploy --expect gate catches. Install this file together with
 # the engine image that publishes flagged names: against an older image, which
 # withheld them, 5 of 16 publish and this floor fails.
-MIN_PUBLISH_RATE=${MIN_PUBLISH_RATE:-0.55}
+MIN_PUBLISH_RATE=${MIN_PUBLISH_RATE:-0.52}
 # Every basket name is an operating company, so any refusal is a regression.
 MAX_REFUSED=${MAX_REFUSED:-0}
 # Nightly output is about 10 MB; keep a month of it.
