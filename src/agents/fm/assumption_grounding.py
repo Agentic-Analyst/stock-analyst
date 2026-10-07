@@ -1704,6 +1704,31 @@ def _deterministic_margin_path(
     return [start + (target - start) * index / (years - 1) for index in range(years)]
 
 
+def _operating_cost_ratio_floor(json_data: Dict[str, Any]) -> float:
+    """
+    The lowest share of revenue the company has spent between gross profit
+    and operating income (R&D, SG&A), across the TTM bridge and the annual
+    statements. Projected operating costs may shrink to the company's best
+    year, never to zero: Sandisk's Street-anchored 71.6% operating margin
+    became a 71.6% gross margin, R&D and SG&A at 0% of revenue against $2B a
+    year actually spent (its lowest year: 9.9%). Zero when no period reports
+    both lines.
+    """
+    rows = []
+    bridge = (json_data or {}).get("ttm_bridge") or {}
+    if bridge.get("status") == "current":
+        rows.append(bridge.get("income_statement") or {})
+    rows.extend(_ordered_statement_rows(json_data, "income_statement")[:4])
+    ratios = []
+    for row in rows:
+        revenue = _number(row, "Total Revenue", "Operating Revenue")
+        gross = _number(row, "Gross Profit")
+        operating = _number(row, "Operating Income")
+        if revenue and revenue > 0 and gross is not None and operating is not None:
+            ratios.append((gross - operating) / revenue)
+    return max(0.0, min(ratios)) if ratios else 0.0
+
+
 def _working_capital_history(
     json_data: Dict[str, Any], metric: str, cost_base: Optional[str] = None,
 ) -> List[float]:
@@ -1866,6 +1891,14 @@ def ground_assumptions(
         bridge_gross / bridge_revenue
         if bridge_revenue and bridge_gross is not None else gp.get("gross_margins")
     )
+    # Where the gross margin path falls below the operating margin (a Street
+    # case lifting the operating margin past it), gross margin is raised to
+    # the operating margin plus the company's leanest operating-cost ratio
+    # (see _operating_cost_ratio_floor), not to the operating margin itself,
+    # which projected zero R&D and SG&A. Only that case: a floor on every
+    # year moved AMD +5.6% and Amazon -1.3% through cost-of-revenue
+    # working capital, for no error in either.
+    operating_cost_ratio = _operating_cost_ratio_floor(json_data)
     operating_history = _historical_margin(json_data, "Operating Income")
     operating_anchor = (
         float(t_om) if isinstance(t_om, (int, float)) and not isinstance(t_om, bool)
@@ -1899,7 +1932,8 @@ def ground_assumptions(
         for i in range(min(len(oms), len(ems))):
             ems[i] = max(ems[i], oms[i])
         for i in range(min(len(oms), len(gms))):
-            gms[i] = max(gms[i], oms[i])
+            if gms[i] < oms[i]:
+                gms[i] = oms[i] + operating_cost_ratio
         if ems:
             a["ebitda_margins"] = ems
         if gms:
@@ -2177,7 +2211,8 @@ def ground_assumptions(
                 a["ebitda_margins"] = [om + da_ratio for om in new_oms]
                 gms = list(a.get("gross_margins") or [])
                 for i in range(min(len(gms), len(new_oms))):
-                    gms[i] = max(gms[i], new_oms[i])
+                    if gms[i] < new_oms[i]:
+                        gms[i] = new_oms[i] + operating_cost_ratio
                 if gms:
                     a["gross_margins"] = gms
                 a["margin_anchor"] = {

@@ -8,6 +8,7 @@ that method is absent.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, Iterable, Optional
 
 from src.agents.fm.bank_valuation import (
@@ -37,6 +38,14 @@ _COMMODITY_CYCLE_INDUSTRY_HINTS = (
 # Yahoo files memory makers under the same "Semiconductors" industry.
 _MEMORY_CYCLE_SUMMARY_HINTS = ("dram", "nand")
 _MEMORY_CYCLE_INDUSTRY_HINTS = ("semiconductor", "computer hardware")
+# A maker of one kind of memory is as cyclical as one that makes both:
+# Sandisk makes only NAND, missed the both-words match, and published a DCF
+# that held a 72% peak operating margin forever (+109% vs the market; the
+# Street +26%). It has to make the chips: a NAND flash controller designer
+# (Silicon Motion) or a tester of DRAM (Teradyne, filed under Semiconductor
+# Equipment & Materials) sells into the cycle without being priced by it.
+_SINGLE_MEMORY_PRODUCT = re.compile(r"\b(?:nand|dram)\b")
+_MEMORY_CONTROLLER_VENDOR = re.compile(r"\b(?:nand\s+flash|flash|nand|memory)\s+controllers?\b")
 
 _CONGLOMERATE_HINTS = (
     "conglomerate", "diversified industrial", "diversified holdings",
@@ -239,6 +248,22 @@ def _segment_readiness(data: Dict[str, Any], industry: str) -> Dict[str, Any]:
     }
 
 
+def is_memory_maker(industry: str, business_summary: str) -> bool:
+    """A maker of DRAM or NAND chips, read from Yahoo's industry and description."""
+    industry_key = (industry or "").casefold()
+    summary = (business_summary or "").casefold()
+    if not any(hint in industry_key for hint in _MEMORY_CYCLE_INDUSTRY_HINTS):
+        return False
+    if all(hint in summary for hint in _MEMORY_CYCLE_SUMMARY_HINTS):
+        return True
+    return (
+        "equipment" not in industry_key
+        and "manufactur" in summary
+        and _SINGLE_MEMORY_PRODUCT.search(summary) is not None
+        and _MEMORY_CONTROLLER_VENDOR.search(summary) is None
+    )
+
+
 def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, Any]:
     """Select the primary method and determine point-publication suitability."""
     company = (financial_data or {}).get("company_data") or {}
@@ -390,10 +415,7 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
             "receivables, matched funding debt, credit losses, and a reconciled "
             "operating-company plus finance-book sum-of-the-parts valuation"
         )
-    memory_cycle = (
-        any(hint in industry_key for hint in _MEMORY_CYCLE_INDUSTRY_HINTS)
-        and all(hint in business_summary for hint in _MEMORY_CYCLE_SUMMARY_HINTS)
-    )
+    memory_cycle = is_memory_maker(industry_key, business_summary)
     if memory_cycle:
         reasons.append(
             "memory-chip margins follow DRAM and NAND contract prices, so the "
