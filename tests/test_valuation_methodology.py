@@ -334,15 +334,33 @@ def _memory_maker(summary):
     return data
 
 
-def test_memory_chip_maker_is_a_scenario_until_a_mid_cycle_margin_exists():
+def test_memory_chip_maker_is_valued_mid_cycle_when_its_history_places_a_trend():
     """Micron's covered-year margins (~80%) sit on a DRAM/NAND price peak."""
     result = assess_valuation_methodology(_memory_maker(
         "Micron designs, develops, manufactures and sells memory and storage "
         "products, including DRAM, NAND and NOR memory."
     ))
+    assert result["primary_method"] == "dcf_mid_cycle"
+    assert result["publication_allowed"] is True
+    assert result["mid_cycle"]["kind"] == "dram"
+    assert result["mid_cycle"]["operating_margin"] == 0.21
+    assert "mid-cycle" in result["reason"]
+
+
+def test_memory_chip_maker_is_a_scenario_until_a_mid_cycle_margin_exists():
+    """Two reported years cannot place a revenue trend: no mid-cycle value."""
+    data = _memory_maker(
+        "Micron designs, develops, manufactures and sells memory and storage "
+        "products, including DRAM, NAND and NOR memory."
+    )
+    statements = data["financial_statements"]["income_statement"]
+    for period in sorted(statements)[:-2]:
+        statements.pop(period)
+    result = assess_valuation_methodology(data)
     assert result["primary_method"] == "scenario_only_pending_cycle_normalization"
     assert result["publication_allowed"] is False
     assert "DRAM and NAND contract prices" in result["reason"]
+    assert result["mid_cycle"] is None
     # A scenario, not a refusal: the workbook is still built and shown.
     assert result.get("specialized_service") is None
 

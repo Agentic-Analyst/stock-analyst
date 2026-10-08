@@ -544,6 +544,10 @@ class FinancialModelBuilder:
                     "operating_margin_source"
                 ),
                 "margin_anchor": (self.llm_assumptions or {}).get("margin_anchor"),
+                # A memory maker's FY3-FY5 on mid-cycle economics
+                # (src/agents/fm/memory_cycle.py); the boundary publishes a
+                # mid-cycle method only when this is present.
+                "mid_cycle": (self.llm_assumptions or {}).get("mid_cycle"),
             },
         }
         # What the market price requires, for readers that do not run this
@@ -660,7 +664,9 @@ class FinancialModelBuilder:
             summary["A26"] = (
                 "DCF scenario midpoint (not published)"
                 if withheld else
-                ("Blended fair value per share"
+                ("Mid-cycle DCF fair value per share"
+                 if (self.llm_assumptions or {}).get("mid_cycle") else
+                 "Blended fair value per share"
                  if self.summary_builder.comps_included_in_blend
                  else "DCF fair value per share")
             )

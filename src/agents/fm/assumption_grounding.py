@@ -41,6 +41,7 @@ import statistics
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.agents.fm.memory_cycle import apply_mid_cycle, mid_cycle_inputs
 from .financial_metrics import (
     WORKING_CAPITAL_COST_BASE_COGS,
     WORKING_CAPITAL_COST_BASE_REVENUE,
@@ -2397,5 +2398,13 @@ def ground_assumptions(
                f"({a['analyst_count']} analysts, {a['analyst_consensus_source'] or 'source unavailable'})"
                if a["analyst_target_mean"] else "")
         )
+
+    # Memory makers: the Street's covered years, then mid-cycle economics
+    # (src/agents/fm/memory_cycle.py). Last, so nothing above re-anchors it.
+    mid_cycle = mid_cycle_inputs(json_data)
+    if mid_cycle:
+        note = apply_mid_cycle(a, mid_cycle)
+        if note:
+            notes.append(note)
 
     return a, notes

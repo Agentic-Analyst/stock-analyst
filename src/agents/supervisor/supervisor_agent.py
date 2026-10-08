@@ -334,6 +334,13 @@ class SupervisorWorkflowRunner:
             parts.append(f"12-month price target {headline['price_target_12m']}")
         detail = "; ".join(parts) if parts else "published without a point headline"
         answer = f"{self.ticker} audited report headline: {detail}."
+        # A memory maker's value is mid-cycle: say how it was reached, and how
+        # many years of peak-cycle cash flow the price pays for.
+        from src.summary_evidence import mid_cycle_method_note, required_growth_sentence
+        method = mid_cycle_method_note(metrics.get("method_suitability"))
+        if method:
+            peak = required_growth_sentence(metrics.get("market_required_revenue_growth"))
+            answer += f"\n\n{method}" + (f" {peak}" if peak else "")
         # A sound model the Street does not back: the answer stands, and says
         # how far it is from the analysts.
         alert = alert_sentence(metrics.get("confidence_alert"))

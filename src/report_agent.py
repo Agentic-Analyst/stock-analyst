@@ -1400,6 +1400,18 @@ def enforce_valuation_publication_boundary(
     )
 
     suitability = assess_valuation_methodology(financial_data or {})
+    from src.agents.fm.memory_cycle import MID_CYCLE_SCENARIO_REASON
+    model_inputs = data.get("model_inputs") or {}
+    if (suitability.get("primary_method") == "dcf_mid_cycle"
+            and not (isinstance(model_inputs, dict) and model_inputs.get("mid_cycle"))):
+        # A memory maker's workbook built without the mid-cycle rewrite holds
+        # the covered years' peak margins through the terminal value.
+        suitability = {
+            **suitability,
+            "primary_method": "scenario_only_pending_cycle_normalization",
+            "publication_allowed": False,
+            "reason": MID_CYCLE_SCENARIO_REASON,
+        }
     reconstructed_bank_override = None
     if (
         suitability.get("primary_method") == "justified_pb_roe"
@@ -1445,9 +1457,11 @@ def enforce_valuation_publication_boundary(
     )
     bank_valuation = valuation.get("bank") or {}
     peer_comps = (((financial_data or {}).get("industry_data") or {}).get("peer_comps") or {})
+    # A mid-cycle value never blends peers: their multiples sit on the same
+    # price cycle the method exists to normalize (memory_cycle.py).
     comps_publishable = normalize_peer_comps_policy(peer_comps)[
         "included_in_blended_value"
-    ]
+    ] and suitability.get("primary_method") != "dcf_mid_cycle"
     external_expectations = (financial_data or {}).get("external_expectations") or {}
     if not external_expectations:
         external_expectations = build_external_expectations(financial_data or {})
@@ -1627,6 +1641,12 @@ def enforce_valuation_publication_boundary(
         )
         withheld, reason = publication["withheld"], publication["reason"]
         alert = publication["alert"]
+        if (suitability.get("primary_method") == "dcf_mid_cycle"
+                and isinstance(alert, dict) and isinstance(alert.get("detail"), str)):
+            # Peers were left out on purpose, not for want of qualifying ones.
+            alert = {**alert, "detail": alert["detail"].replace(
+                "no independent market-comps valuation qualified",
+                "peers are not blended into a memory maker's mid-cycle value")}
 
     # Financial freshness is a hard input-quality boundary. Refresh time is
     # intentionally ignored: re-downloading an old annual period does not make
@@ -2643,6 +2663,10 @@ def _publishable_valuation_commentary(
             f"The selected methodology is `{_markdown_cell(method, 80)}`; the report "
             "does not treat two terminal-value variants of one DCF as independent evidence."
         )
+    from src.summary_evidence import mid_cycle_method_note
+    mid_cycle = mid_cycle_method_note(reliability.get("method_suitability"))
+    if mid_cycle:
+        lines.append(mid_cycle)
     peer_policy = normalize_peer_comps_policy(data.get("peer_comps") or {})
     if (data.get("peer_comps") or {}):
         lines.append(

@@ -21,6 +21,8 @@ _GROWTH_FIELDS = (
     "best_operating_margin", "required_growth_at_best_margin",
     "required_growth_at_best_margin_beyond_bound", "model_revenue_growth",
     "revenue_source",
+    # A memory maker on mid-cycle economics (src/agents/fm/memory_cycle.py).
+    "kind", "peak_years", "below_mid_cycle", "beyond_bound",
 )
 
 
@@ -39,18 +41,32 @@ def build_market_expectations(
     try:
         from src.external_expectations import required_revenue_growth_from_workbook
         from src.summary_evidence import (
-            model_view_summary, plain_rating_note, required_growth_sentence,
-            supported_valuation_span, unsuitable_method_note,
+            mid_cycle_method_note, model_view_summary, plain_rating_note,
+            required_growth_sentence, supported_valuation_span, unsuitable_method_note,
         )
         from src.valuation_methodology import assess_valuation_methodology
 
-        method_note = unsuitable_method_note(
-            assess_valuation_methodology(financial_data or {})
-        )
+        suitability = assess_valuation_methodology(financial_data or {})
+        recorded = (((computed or {}).get("_vynn") or {}).get("model_inputs") or {})
+        if (suitability.get("primary_method") == "dcf_mid_cycle"
+                and not (isinstance(recorded, dict) and recorded.get("mid_cycle"))):
+            # The boundary withholds a mid-cycle method whose workbook was not
+            # built on it (report_agent): say what the workbook is, a scenario.
+            from src.agents.fm.memory_cycle import MID_CYCLE_SCENARIO_REASON
+            suitability = {**suitability, "primary_method": "scenario_only_pending_cycle_normalization",
+                           "publication_allowed": False, "mid_cycle": None,
+                           "reason": MID_CYCLE_SCENARIO_REASON}
+        method_note = unsuitable_method_note(suitability)
         required: Dict[str, Any] = (
             {} if method_note else required_revenue_growth_from_workbook(computed)
         )
         sentence = None if method_note else required_growth_sentence(required)
+        # A memory maker valued mid-cycle: the dashboard shows this sentence
+        # beside the value, so it says how the value was reached first. Not
+        # `method_note`: api-runner reads that as "scenario only".
+        mid_cycle = mid_cycle_method_note(suitability)
+        if mid_cycle:
+            sentence = " ".join(part for part in (mid_cycle, sentence) if part)
 
         headline = None
         shape = "range"

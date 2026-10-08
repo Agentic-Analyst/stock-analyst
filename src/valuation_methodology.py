@@ -31,31 +31,11 @@ _COMMODITY_CYCLE_INDUSTRY_HINTS = (
 # Memory chips are priced like a commodity: DRAM and NAND contract prices set
 # margins, which swing from deep losses to 60%+ within two years (Micron:
 # -35% in 2023, 66% trailing in 2026). A run-rate DCF capitalizes whichever
-# point of the cycle the covered years happen to sit on, so a memory maker's
-# model is kept as a scenario and no point value is published until a
-# mid-cycle margin exists. Matched on the business description (both words:
-# a GPU designer that mentions buying DRAM is not a memory maker) because
-# Yahoo files memory makers under the same "Semiconductors" industry.
-_MEMORY_CYCLE_SUMMARY_HINTS = ("dram", "nand")
-_MEMORY_CYCLE_INDUSTRY_HINTS = ("semiconductor", "computer hardware")
-# A maker of one kind of memory is as cyclical as one that makes both:
-# Sandisk makes only NAND, missed the both-words match, and published a DCF
-# that held a 72% peak operating margin forever (+109% vs the market; the
-# Street +26%). It has to make the chips: a NAND flash controller designer
-# (Silicon Motion) or a tester of DRAM (Teradyne, filed under Semiconductor
-# Equipment & Materials) sells into the cycle without being priced by it.
-_SINGLE_MEMORY_PRODUCT = re.compile(r"\b(?:nand|dram)\b")
-# Kioxia, Sandisk's manufacturing partner, says "flash memory, SSDs", never
-# "NAND". With drives beside it: Microchip's serial flash comes without them.
-_FLASH_MEMORY = re.compile(r"\bflash memory\b")
-_SOLID_STATE_DRIVES = re.compile(r"\bssds?\b|\bsolid[- ]state drives?\b")
-# The company's own making: "manufactures", "manufacturing", "a manufacturer
-# of", never its customers ("sells to module manufacturers").
-_MAKES = re.compile(r"\bmanufactur(?:e|es|ed|ing|er)\b")
-_MEMORY_CONTROLLER_VENDOR = re.compile(
-    r"\b(?:nand\s+flash|flash|nand|memory)\s+controllers?\b"
-    r"|\bcontrollers?\s+for\s+(?:nand|flash)\b"
-)
+# point of the cycle the covered years happen to sit on, so a memory maker is
+# valued on mid-cycle economics after the Street's covered years
+# (src/agents/fm/memory_cycle.py), and stays a scenario when its reported
+# history cannot place a revenue trend.
+from src.agents.fm.memory_cycle import is_memory_maker, mid_cycle_inputs  # noqa: E402,F401
 
 _CONGLOMERATE_HINTS = (
     "conglomerate", "diversified industrial", "diversified holdings",
@@ -258,23 +238,6 @@ def _segment_readiness(data: Dict[str, Any], industry: str) -> Dict[str, Any]:
     }
 
 
-def is_memory_maker(industry: str, business_summary: str) -> bool:
-    """A maker of DRAM or NAND chips, read from Yahoo's industry and description."""
-    industry_key = (industry or "").casefold()
-    summary = (business_summary or "").casefold()
-    if not any(hint in industry_key for hint in _MEMORY_CYCLE_INDUSTRY_HINTS):
-        return False
-    if all(hint in summary for hint in _MEMORY_CYCLE_SUMMARY_HINTS):
-        return True
-    if ("equipment" in industry_key or _MAKES.search(summary) is None
-            or _MEMORY_CONTROLLER_VENDOR.search(summary) is not None):
-        return False
-    if _SINGLE_MEMORY_PRODUCT.search(summary) is not None:
-        return True
-    return (_FLASH_MEMORY.search(summary) is not None
-            and _SOLID_STATE_DRIVES.search(summary) is not None)
-
-
 def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, Any]:
     """Select the primary method and determine point-publication suitability."""
     company = (financial_data or {}).get("company_data") or {}
@@ -427,7 +390,9 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
             "operating-company plus finance-book sum-of-the-parts valuation"
         )
     memory_cycle = is_memory_maker(industry_key, business_summary)
-    if memory_cycle:
+    mid_cycle_detail = mid_cycle_inputs(financial_data) if memory_cycle else None
+    mid_cycle = bool(mid_cycle_detail)
+    if memory_cycle and not mid_cycle:
         reasons.append(
             "memory-chip margins follow DRAM and NAND contract prices, so the "
             "covered years sit at one point of that cycle; a point call requires "
@@ -464,7 +429,7 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
     primary = "dcf_only"
     if has_captive_finance_segment:
         primary = "scenario_only_pending_operating_finance_sotp"
-    elif memory_cycle:
+    elif memory_cycle and not mid_cycle:
         primary = "scenario_only_pending_cycle_normalization"
     elif segments.get("status") == "ready":
         # Input readiness is not the same as a completed SOTP.  Until segment
@@ -481,7 +446,10 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
         reasons.append(segments["reason"])
     publication_allowed = not reasons
     if publication_allowed:
-        if comps_policy["included_in_blended_value"]:
+        if mid_cycle:
+            # Peers are not blended: their multiples sit on the same cycle.
+            primary = "dcf_mid_cycle"
+        elif comps_policy["included_in_blended_value"]:
             primary = "dcf_plus_market_comps"
         elif comps_policy["usable"] and comps_policy["broad_sector"]:
             primary = "dcf_with_broad_market_cross_check"
@@ -495,6 +463,9 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
         "quality": "appropriate" if publication_allowed else "limited",
         "publication_allowed": publication_allowed,
         "reason": (
+            "Memory-chip maker valued on the Street's covered years, then mid-cycle "
+            "revenue and margins, so the DCF does not capitalize one point of the price cycle."
+            if publication_allowed and mid_cycle else
             "Operating-company DCF is supported by positive current cash generation and aligned history."
             if publication_allowed else
             "The DCF may be shown as an auditable scenario, but no point estimate or directional rating should be published because "
@@ -502,6 +473,11 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
         ),
         "sector": sector or None,
         "industry": industry or None,
+        # What the mid-cycle valuation assumed, for the sentences that say so.
+        "mid_cycle": ({
+            key: mid_cycle_detail[key]
+            for key in ("kind", "operating_margin", "revenue_trend_growth", "source")
+        } if mid_cycle and publication_allowed else None),
         "cash_flow_profile": profile,
         "sotp": segments,
     }

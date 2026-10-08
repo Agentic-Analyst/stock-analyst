@@ -161,6 +161,9 @@ def required_growth_sentence(required: Any) -> Optional[str]:
     """
     if not isinstance(required, dict) or not required.get("available"):
         return None
+    if required.get("kind") == "mid_cycle_peak_years":
+        from src.agents.fm.memory_cycle import peak_years_sentence
+        return peak_years_sentence(required)
     years = int(required.get("years") or 10)
     need = _number(required.get("required_growth"))
     need_bound = required.get("required_growth_beyond_bound")
@@ -404,6 +407,26 @@ def plain_rating_note(reason: Any, method_note: Optional[str] = None, *,
     if not found:
         return f"{stem}."
     return f"{stem}, because " + " and ".join(found[:2]) + "."
+
+
+def mid_cycle_method_note(suitability: Any) -> Optional[str]:
+    """How a memory maker's published value was reached, or None."""
+    if not isinstance(suitability, dict) or suitability.get("primary_method") != "dcf_mid_cycle":
+        return None
+    detail = suitability.get("mid_cycle") or {}
+    margin = _number(detail.get("operating_margin"))
+    if margin is None:
+        return None
+    industry = "DRAM" if detail.get("kind") == "dram" else "NAND"
+    percent = round(margin * 100)
+    # "an 18%", "an 8%", "an 80%", "an 11%": the number as it is spoken.
+    article = "an" if str(percent).startswith("8") or percent in (11, 18) else "a"
+    return (
+        "VYNN values a memory maker on mid-cycle economics: the Street's two covered "
+        f"years, then revenue back to its long-run trend and {article} {percent}% "
+        f"operating margin, the {industry} industry's through-cycle level, so the "
+        "value does not capitalize one point of the price cycle."
+    )
 
 
 def unsuitable_method_note(suitability: Any) -> Optional[str]:
