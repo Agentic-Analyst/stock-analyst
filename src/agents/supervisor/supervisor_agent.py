@@ -191,7 +191,16 @@ class SupervisorWorkflowRunner:
         except Exception:
             symbol = "$"
         span = supported_valuation_span(supported_valuation_values(metrics))
-        if span["shape"] == "single_estimate":
+        if unsuitable_method_note(metrics.get("method_suitability")):
+            # The methodology rules the cash-flow model out for this company
+            # (a memory maker, an unsplit captive lender): its figures are an
+            # audit scenario, never a "supported" range. Sandisk's peak-cycle
+            # DCF, $3,448-3,787, was printed as one.
+            range_text = (
+                "The cash-flow model's figures are kept in the report and "
+                "workbook as an audit scenario, not stated as a valuation."
+            )
+        elif span["shape"] == "single_estimate":
             range_text = (
                 "The supported DCF scenario estimate is "
                 f"{symbol}{span['low']:,.2f} {currency}."
@@ -278,6 +287,8 @@ class SupervisorWorkflowRunner:
             company = basic.get("long_name") or getattr(self.state, "company_name", None)
             figures = view_figures(view, {} if kind == "refused" else (metrics or {}),
                                    headline, benchmark)
+            if unsuitable_method_note((metrics or {}).get("method_suitability")):
+                figures.pop("range", None)   # an audit scenario, not ours to state
             return lead_paragraph(view, company=company, kind=kind, figures=figures)
         except Exception:
             return ""
@@ -673,6 +684,13 @@ class SupervisorWorkflowRunner:
             endpoints = {
                 round(value, 2) for value in supported_valuation_values(metrics)
             }
+            # A scenario-only run has no supported range: its endpoints are the
+            # audit scenario's and are as unpublishable as the midpoint.
+            if unsuitable_method_note(metrics.get("method_suitability")):
+                for value in endpoints:
+                    withheld_point_tokens += [f"{value:,.2f}", f"{value:.2f}"]
+                    if printed(f"{value:,.2f}") or printed(f"{value:.2f}"):
+                        unsafe_valuation = True
             for key in ("fair_value", "average_price"):
                 value = metrics.get(key)
                 if (isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -2238,7 +2256,14 @@ Provide a helpful, informative answer:"""
                             span = supported_valuation_span(
                                 supported_valuation_values(valuation_metrics)
                             )
-                            if span["shape"] == "single_estimate":
+                            if unsuitable_method_note(
+                                    valuation_metrics.get("method_suitability")):
+                                parts.append(
+                                    "No valuation: the cash-flow model is an audit "
+                                    "scenario for this company, and its figures are "
+                                    "not to be stated"
+                                )
+                            elif span["shape"] == "single_estimate":
                                 parts.append(
                                     f"Supported DCF scenario estimate: "
                                     f"{_sym}{span['low']:.2f}; a scenario, not a single fair value"
