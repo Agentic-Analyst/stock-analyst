@@ -1400,6 +1400,22 @@ def enforce_valuation_publication_boundary(
     )
 
     suitability = assess_valuation_methodology(financial_data or {})
+    model_inputs = data.get("model_inputs") or {}
+    if (suitability.get("primary_method") == "dcf_mid_cycle"
+            and not (isinstance(model_inputs, dict) and model_inputs.get("mid_cycle"))):
+        # A memory maker's workbook built without the mid-cycle rewrite holds
+        # the covered years' peak margins through the terminal value.
+        suitability = {
+            **suitability,
+            "primary_method": "scenario_only_pending_cycle_normalization",
+            "publication_allowed": False,
+            "reason": (
+                "The DCF may be shown as an auditable scenario, but no point estimate or "
+                "directional rating should be published because memory-chip margins follow "
+                "DRAM and NAND contract prices, and this workbook was not built on mid-cycle "
+                "revenue and margins."
+            ),
+        }
     reconstructed_bank_override = None
     if (
         suitability.get("primary_method") == "justified_pb_roe"
@@ -2643,6 +2659,10 @@ def _publishable_valuation_commentary(
             f"The selected methodology is `{_markdown_cell(method, 80)}`; the report "
             "does not treat two terminal-value variants of one DCF as independent evidence."
         )
+    from src.summary_evidence import mid_cycle_method_note
+    mid_cycle = mid_cycle_method_note(reliability.get("method_suitability"))
+    if mid_cycle:
+        lines.append(mid_cycle)
     peer_policy = normalize_peer_comps_policy(data.get("peer_comps") or {})
     if (data.get("peer_comps") or {}):
         lines.append(

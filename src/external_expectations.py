@@ -395,6 +395,29 @@ def required_revenue_growth_from_workbook(
     inputs = _workbook_cells(computed, "Model_Inputs")
     historical = _workbook_cells(computed, "Historical")
 
+    # A memory maker valued on mid-cycle economics: revenue growth "at the
+    # best reported margin" would be growth at a peak-cycle margin. What the
+    # price pays for is the years of peak-cycle cash flow before mid-cycle.
+    internal = (computed or {}).get("_vynn") if isinstance(computed, dict) else None
+    mid_cycle = (((internal or {}).get("model_inputs") or {}).get("mid_cycle")
+                 if isinstance(internal, dict) else None)
+    if isinstance(mid_cycle, dict):
+        from src.agents.fm.memory_cycle import peak_years_implied
+        fcf = [_number(dcf.get(f"(16, {column})")) for column in range(2, 12)]
+        timing = _number(_workbook_cells(computed, "Sensitivity").get("(4, 2)"))
+        result = peak_years_implied(
+            [f for f in fcf if f is not None] if all(f is not None for f in fcf) else [],
+            wacc=_number(dcf.get("(12, 2)")) or 0.0,
+            terminal_growth=_number(dcf.get("(23, 2)")) or 0.0,
+            enterprise_value=_number(
+                enterprise_value if enterprise_value is not None else summary.get("(51, 2)")
+            ) or 0.0,
+            street_growth=_number(inputs.get("(4, 3)")) or 0.0,
+            trend_growth=float(mid_cycle.get("revenue_trend_growth") or 0.0),
+            mid_year=timing or 0.0,
+        )
+        return {**result, "kind": "mid_cycle_peak_years"}
+
     def series(row: int) -> list:
         return [projections.get(f"({row}, {column})") for column in range(2, 7)]
 

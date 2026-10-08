@@ -85,7 +85,7 @@ def test_memory_makers_are_recognised_by_what_they_make(ticker, industry, summar
     assert is_memory_maker(industry, summary) is expected, ticker
 
 
-def test_sandisk_is_a_scenario_like_micron():
+def test_sandisk_is_valued_mid_cycle_like_micron():
     from test_valuation_methodology import _operating_company
     from src.valuation_methodology import assess_valuation_methodology
     data = _operating_company()
@@ -95,8 +95,10 @@ def test_sandisk_is_a_scenario_like_micron():
                             "storage devices and solutions using NAND flash technology.",
     })
     result = assess_valuation_methodology(data)
-    assert result["primary_method"] == "scenario_only_pending_cycle_normalization"
-    assert result["publication_allowed"] is False
+    assert result["primary_method"] == "dcf_mid_cycle"
+    assert result["publication_allowed"] is True
+    assert result["mid_cycle"]["kind"] == "nand"
+    assert result["mid_cycle"]["operating_margin"] == 0.18
 
 
 # ── 2. operating costs never projected to zero ──────────────────────────────

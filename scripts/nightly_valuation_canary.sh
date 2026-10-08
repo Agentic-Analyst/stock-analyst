@@ -21,10 +21,11 @@ set -euo pipefail
 DEPLOY_DIR=${DEPLOY_DIR:-/opt/vynn/deploy}
 OUT_ROOT=${OUT_ROOT:-/var/lib/vynn/canary}
 BASKET=${BASKET:-"TSLA AMD NVDA META AAPL AMZN GOOGL MSFT CRH MC.PA PYPL PCJEWELLER.NS MU GM TEX BKNG SNDK"}
-# Five basket names are range-only by design (SNDK, a NAND-only memory maker, the fifth), Amazon is range-only while the
+# Three basket names are range-only by design, Amazon is range-only while the
 # provider's statements for it are stale, and Booking sits on a boundary
-# (scripts/valuation_canary_expectations.json), so 10 to 12 of 17 publish on
-# a healthy engine (five or six of them with a confidence alert). The
+# (scripts/valuation_canary_expectations.json), so 12 to 14 of 17 publish on
+# a healthy engine (seven or eight of them with a confidence alert; the two
+# memory makers, MU and SNDK, on mid-cycle economics). The
 # floor fails below 9 of 17: it catches a collapse, not one name flipping,
 # which the pre-deploy --expect gate catches. Install this file together with
 # the engine image that publishes flagged names: against an older image, which

@@ -21,6 +21,8 @@ _GROWTH_FIELDS = (
     "best_operating_margin", "required_growth_at_best_margin",
     "required_growth_at_best_margin_beyond_bound", "model_revenue_growth",
     "revenue_source",
+    # A memory maker on mid-cycle economics (src/agents/fm/memory_cycle.py).
+    "kind", "peak_years", "below_mid_cycle", "beyond_bound",
 )
 
 
@@ -39,18 +41,23 @@ def build_market_expectations(
     try:
         from src.external_expectations import required_revenue_growth_from_workbook
         from src.summary_evidence import (
-            model_view_summary, plain_rating_note, required_growth_sentence,
-            supported_valuation_span, unsuitable_method_note,
+            mid_cycle_method_note, model_view_summary, plain_rating_note,
+            required_growth_sentence, supported_valuation_span, unsuitable_method_note,
         )
         from src.valuation_methodology import assess_valuation_methodology
 
-        method_note = unsuitable_method_note(
-            assess_valuation_methodology(financial_data or {})
-        )
+        suitability = assess_valuation_methodology(financial_data or {})
+        method_note = unsuitable_method_note(suitability)
         required: Dict[str, Any] = (
             {} if method_note else required_revenue_growth_from_workbook(computed)
         )
         sentence = None if method_note else required_growth_sentence(required)
+        # A memory maker valued mid-cycle: the dashboard shows this sentence
+        # beside the value, so it says how the value was reached first. Not
+        # `method_note`: api-runner reads that as "scenario only".
+        mid_cycle = mid_cycle_method_note(suitability)
+        if mid_cycle and sentence:
+            sentence = f"{mid_cycle} {sentence}"
 
         headline = None
         shape = "range"

@@ -1928,6 +1928,16 @@ class BuildModelTool(_CtxTool):
                     "with this method note.")
         else:
             note = "DCF model built and saved (downloadable)."
+            # A memory maker's value is mid-cycle: the answer must say so, and
+            # what the price pays for, or a far-below-market value reads bare.
+            from src.summary_evidence import mid_cycle_method_note, required_growth_sentence
+            mid_cycle = mid_cycle_method_note(
+                vm.get("method_suitability") if isinstance(vm, dict) else None)
+            if mid_cycle:
+                peak = required_growth_sentence(
+                    vm.get("market_required_revenue_growth") if isinstance(vm, dict) else None)
+                note += (f" {mid_cycle}" + (f" {peak}" if peak else "")
+                         + " Present the fair value with this method note.")
 
         raw_financials = state.financial_data.raw_data if state.financial_data else {}
         raw_financials = raw_financials if isinstance(raw_financials, dict) else {}
