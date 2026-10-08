@@ -47,6 +47,15 @@ def build_market_expectations(
         from src.valuation_methodology import assess_valuation_methodology
 
         suitability = assess_valuation_methodology(financial_data or {})
+        recorded = (((computed or {}).get("_vynn") or {}).get("model_inputs") or {})
+        if (suitability.get("primary_method") == "dcf_mid_cycle"
+                and not (isinstance(recorded, dict) and recorded.get("mid_cycle"))):
+            # The boundary withholds a mid-cycle method whose workbook was not
+            # built on it (report_agent): say what the workbook is, a scenario.
+            from src.agents.fm.memory_cycle import MID_CYCLE_SCENARIO_REASON
+            suitability = {**suitability, "primary_method": "scenario_only_pending_cycle_normalization",
+                           "publication_allowed": False, "mid_cycle": None,
+                           "reason": MID_CYCLE_SCENARIO_REASON}
         method_note = unsuitable_method_note(suitability)
         required: Dict[str, Any] = (
             {} if method_note else required_revenue_growth_from_workbook(computed)
@@ -56,8 +65,8 @@ def build_market_expectations(
         # beside the value, so it says how the value was reached first. Not
         # `method_note`: api-runner reads that as "scenario only".
         mid_cycle = mid_cycle_method_note(suitability)
-        if mid_cycle and sentence:
-            sentence = f"{mid_cycle} {sentence}"
+        if mid_cycle:
+            sentence = " ".join(part for part in (mid_cycle, sentence) if part)
 
         headline = None
         shape = "range"

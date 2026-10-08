@@ -1933,7 +1933,7 @@ class BuildModelTool(_CtxTool):
             from src.summary_evidence import mid_cycle_method_note, required_growth_sentence
             mid_cycle = mid_cycle_method_note(
                 vm.get("method_suitability") if isinstance(vm, dict) else None)
-            if mid_cycle:
+            if mid_cycle and not withheld:
                 peak = required_growth_sentence(
                     vm.get("market_required_revenue_growth") if isinstance(vm, dict) else None)
                 note += (f" {mid_cycle}" + (f" {peak}" if peak else "")

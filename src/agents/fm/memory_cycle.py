@@ -76,6 +76,14 @@ MID_CYCLE = {
 MID_CYCLE_OPERATING_COSTS = 0.15
 # Annual periods needed to place the company's revenue trend.
 MIN_ANNUAL_PERIODS = 3
+# Why a memory maker's workbook built without the mid-cycle rewrite is only a
+# scenario: it holds the covered years' margins through the terminal value.
+MID_CYCLE_SCENARIO_REASON = (
+    "The DCF may be shown as an auditable scenario, but no point estimate or "
+    "directional rating should be published because memory-chip margins follow "
+    "DRAM and NAND contract prices, and this workbook was not built on mid-cycle "
+    "revenue and margins."
+)
 
 
 def is_memory_maker(industry: str, business_summary: str) -> bool:
@@ -161,17 +169,21 @@ def mid_cycle_inputs(financial_data: Dict[str, Any]) -> Optional[Dict[str, Any]]
         "operating_costs": MID_CYCLE_OPERATING_COSTS,
         "source": params["source"],
         "history": history,
-        # The company's reported years average out its own swings: their mean,
-        # at their mean date, grown at the industry trend, is its trend line.
-        "trend_revenue_mean": sum(r["revenue"] for r in history) / len(history),
+        # The company's reported years average out its own swings: their
+        # geometric mean (a trend is log-linear, and one boom year must not
+        # dominate it), at their mean date, grown at the industry trend.
+        "trend_revenue_mean": math.exp(sum(math.log(r["revenue"]) for r in history) / len(history)),
         "trend_centre": centre.isoformat(),
         "base_period_end": base.isoformat() if base else None,
     }
 
 
-def trend_revenue(inputs: Dict[str, Any], years_after_base: float) -> float:
-    """The company's trend revenue at the end of forecast year `years_after_base`."""
-    centre, base = _as_date(inputs["trend_centre"]), _as_date(inputs["base_period_end"])
+def trend_revenue(inputs: Dict[str, Any], years_after_base: float,
+                  base_period_end: Optional[str] = None) -> float:
+    """The company's trend revenue at the end of forecast year `years_after_base`,
+    counted from the projection's base period (the TTM quarter by default)."""
+    centre = _as_date(inputs["trend_centre"])
+    base = _as_date(base_period_end or inputs["base_period_end"])
     span = _years_between(centre, base) + years_after_base
     return inputs["trend_revenue_mean"] * (1 + inputs["revenue_trend_growth"]) ** span
 
@@ -191,8 +203,15 @@ def apply_mid_cycle(a: Dict[str, Any], inputs: Dict[str, Any]) -> Optional[str]:
     margins = list(a.get("operating_margins") or [])
     basis = a.get("modeling_basis") or {}
     base_revenue = basis.get("revenue")
-    if not isinstance(base_revenue, (int, float)) or base_revenue <= 0:
-        base_revenue = inputs["history"][-1]["revenue"]   # fiscal clock: the last year
+    # The projections' own base: the rolling TTM revenue when the model has
+    # one, else the last fiscal year (tab_projections). The trend is counted
+    # from the same period, or FY4 lands up to a year off the trend line.
+    if isinstance(base_revenue, (int, float)) and base_revenue > 0:
+        base_period = ((a.get("forecast_basis") or {}).get("period_end")
+                       or inputs["base_period_end"])
+    else:
+        base_revenue = inputs["history"][-1]["revenue"]
+        base_period = inputs["history"][-1]["period_end"]
     if (len(growth) < 5 or len(margins) < 5
             or not isinstance(base_revenue, (int, float)) or base_revenue <= 0):
         return None
@@ -200,7 +219,7 @@ def apply_mid_cycle(a: Dict[str, Any], inputs: Dict[str, Any]) -> Optional[str]:
     revenue = [float(base_revenue)]
     for g in growth[:2]:
         revenue.append(revenue[-1] * (1 + float(g)))
-    fy2, fy4 = revenue[2], trend_revenue(inputs, 4)
+    fy2, fy4 = revenue[2], trend_revenue(inputs, 4, base_period)
     fy3 = math.sqrt(fy2 * fy4)
     new_growth = [float(growth[0]), float(growth[1]), fy3 / fy2 - 1, fy4 / fy3 - 1,
                   inputs["revenue_trend_growth"]]
@@ -212,8 +231,12 @@ def apply_mid_cycle(a: Dict[str, Any], inputs: Dict[str, Any]) -> Optional[str]:
     gross = list(a.get("gross_margins") or [None] * 5)
     da_ratio = basis.get("da_to_revenue")
     da_ratio = float(da_ratio) if isinstance(da_ratio, (int, float)) else 0.0
+    # Operating costs follow trend revenue, not the cycle: in FY3 the same
+    # dollars are a smaller share of still-elevated revenue.
+    year_revenue = {2: fy3, 3: fy4, 4: fy4 * (1 + inputs["revenue_trend_growth"])}
     for i in range(2, 5):
-        gross[i] = new_margins[i] + inputs["operating_costs"]
+        trend_i = trend_revenue(inputs, i + 1, base_period)
+        gross[i] = new_margins[i] + inputs["operating_costs"] * trend_i / year_revenue[i]
     a["revenue_growth_rates"] = new_growth
     a["operating_margins"] = new_margins
     a["gross_margins"] = gross
@@ -225,6 +248,7 @@ def apply_mid_cycle(a: Dict[str, Any], inputs: Dict[str, Any]) -> Optional[str]:
         "operating_margin": mid,
         "revenue_trend_growth": inputs["revenue_trend_growth"],
         "trend_revenue_fy4": fy4,
+        "base_period_end": base_period,
         "street_revenue_fy2": fy2,
         "source": inputs["source"],
         "history": inputs["history"],
@@ -242,10 +266,10 @@ def apply_mid_cycle(a: Dict[str, Any], inputs: Dict[str, Any]) -> Optional[str]:
     )
 
 
-# How long memory booms have lasted: Micron's operating margin peaked in
-# FY2010, FY2014, FY2018 and FY2022, each one or two years above mid-cycle
-# (SEC XBRL, FY2009-FY2025).
-BOOM_YEARS_OBSERVED = "one to two years"
+# How long memory booms have lasted: Micron's operating margin stood above
+# its through-cycle 21% in FY2017-FY2019 and FY2021-FY2022, and again from
+# FY2025 (SEC XBRL, FY2009-FY2025); FY2010 and FY2014 peaked below it.
+BOOM_YEARS_OBSERVED = "two to three years (FY2017-FY2019, FY2021-FY2022)"
 _MAX_PEAK_YEARS = 25
 
 
@@ -273,6 +297,10 @@ def peak_years_implied(
     if (len(fcf) < 3 or not all(isinstance(f, (int, float)) for f in fcf)
             or wacc <= terminal_growth or not enterprise_value or enterprise_value <= 0):
         return {"available": False}
+    # Only a boom has peak-cycle years to count: the covered years' cash flow
+    # above the mid-cycle path's. In a trough the question has no answer.
+    if fcf[1] <= 0 or fcf[1] <= max(fcf[3:]):
+        return {"available": False, "not_a_boom": True}
     timing = 0.5 if mid_year else 0.0
 
     def value(n: int) -> float:
@@ -306,5 +334,6 @@ def peak_years_sentence(result: Any) -> Optional[str]:
     if not isinstance(years, (int, float)):
         return None
     return (f"At this price, the market pays for about {years:.0f} years of the Street's "
-            f"peak-cycle cash flow before mid-cycle revenue and margins; Micron's memory "
-            f"booms have lasted {BOOM_YEARS_OBSERVED} (FY2009-FY2025).")
+            f"peak-cycle cash flow, extended at its FY2 growth, before mid-cycle revenue and "
+            f"margins; Micron's booms above its through-cycle margin have lasted "
+            f"{BOOM_YEARS_OBSERVED}.")

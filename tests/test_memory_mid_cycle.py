@@ -55,8 +55,9 @@ def test_inputs_place_the_trend_from_the_reported_years():
     assert inputs["kind"] == "nand"
     assert inputs["operating_margin"] == 0.18
     assert len(inputs["history"]) == 3
-    # The mean of FY2024-FY2026 revenue at their mean date.
-    assert inputs["trend_revenue_mean"] == pytest.approx((6.663e9 + 7.355e9 + 20.248e9) / 3)
+    # The geometric mean of FY2024-FY2026 revenue (a trend is log-linear; the
+    # arithmetic mean let one boom year move MU's FY4 trend by 76%).
+    assert inputs["trend_revenue_mean"] == pytest.approx((6.663e9 * 7.355e9 * 20.248e9) ** (1 / 3))
     assert inputs["base_period_end"] == "2026-06-30"
 
 
@@ -96,7 +97,11 @@ def test_covered_years_stay_the_street_case_then_revert(monkeypatch):
     assert revenue[4] == pytest.approx(memory_cycle.trend_revenue(inputs, 4))
     assert revenue[3] == pytest.approx(math.sqrt(revenue[2] * revenue[4]))
 
-    assert all(gm >= om + 0.15 - 1e-12 for gm, om in zip(grounded["gross_margins"][2:], m[2:]))
+    # Operating costs follow trend revenue: 15% of trend dollars every year,
+    # so a smaller share of FY3's still-elevated revenue, never a spike.
+    for i in (2, 3, 4):
+        costs = (grounded["gross_margins"][i] - m[i]) * revenue[i + 1]
+        assert costs == pytest.approx(0.15 * memory_cycle.trend_revenue(inputs, i + 1))
     assert grounded["comps_included_in_blended_value"] is False
     assert grounded["mid_cycle"]["kind"] == "nand"
     assert grounded["revenue_growth_source"].startswith(street["revenue_growth_source"])
@@ -131,8 +136,9 @@ def test_peak_years_recovers_a_known_answer():
         street_growth=0.188, trend_growth=0.09)
     assert result["peak_years"] == pytest.approx(7.0, abs=0.05)
     sentence = memory_cycle.peak_years_sentence(result)
-    assert "about 7 years of the Street's peak-cycle cash flow" in sentence
-    assert "one to two years" in sentence
+    assert "about 7 years of the Street's peak-cycle cash flow, extended at its FY2 growth" in sentence
+    # Micron above its through-cycle 21%: FY2017-FY2019 and FY2021-FY2022.
+    assert "two to three years (FY2017-FY2019, FY2021-FY2022)" in sentence
 
 
 def test_a_price_below_the_mid_cycle_value_and_one_beyond_reach():
@@ -237,3 +243,82 @@ def test_the_dashboard_sentence_says_how_and_is_not_a_scenario_note():
     # api-runner maps method_note to "scenario only": a published value has none.
     assert payload["method_note"] is None
     assert payload["required_growth"]["kind"] == "mid_cycle_peak_years"
+
+
+
+def test_no_peak_years_outside_a_boom():
+    # A trough: the covered years earn less than the mid-cycle path.
+    trough = [-1.0, 1.5, 2.0, 3.0, 3.2, 3.4, 3.6, 3.8, 4.0, 4.2]
+    result = memory_cycle.peak_years_implied(
+        trough, wacc=0.12, terminal_growth=0.025, enterprise_value=100.0,
+        street_growth=0.4, trend_growth=0.09)
+    assert result["available"] is False and result["not_a_boom"] is True
+    assert memory_cycle.peak_years_sentence(result) is None
+
+
+def _peers_qualify(monkeypatch):
+    import src.valuation_methodology as methodology
+    real = methodology.normalize_peer_comps_policy
+    def qualifying(peer_comps):
+        policy = dict(real(peer_comps))
+        policy.update(included_in_blended_value=True, usable=True)
+        return policy
+    monkeypatch.setattr(methodology, "normalize_peer_comps_policy", qualifying)
+
+
+def test_peers_never_enter_a_mid_cycle_value(monkeypatch):
+    """With production's peer setting, a peak-cycle multiple must not blend back in."""
+    from src.report_agent import enforce_valuation_publication_boundary
+    from test_valuation_runway_and_corroboration import _financials, _report_data
+    _peers_qualify(monkeypatch)
+    data = _report_data(exit_value=15.0, exit_multiple=10.0,
+                        model_inputs={"mid_cycle": {"kind": "nand"}})
+    data["valuation"]["summary"]["comps_intrinsic"] = 300.0
+    reliability = enforce_valuation_publication_boundary(
+        copy.deepcopy(data), _memory_financials())["valuation"]["reliability"]
+    assert "market_comps" not in {k for k, v in reliability["legs"].items() if v}
+    alert = reliability.get("confidence_alert") or {}
+    assert "no independent market-comps valuation qualified" not in str(alert.get("detail"))
+    # The same peers still blend for an ordinary company.
+    ordinary = enforce_valuation_publication_boundary(
+        copy.deepcopy(data), _financials())["valuation"]["reliability"]
+    assert ordinary["legs"].get("market_comps") == 300.0
+
+
+def test_the_dashboard_follows_the_workbook_not_the_policy():
+    """A memory maker's workbook built without the rewrite reads as a scenario."""
+    from src.market_expectations import build_market_expectations
+    computed = {"Summary": {"cells": {"(51, 2)": 100.0, "(9, 2)": 1692.42}},
+                "_vynn": {"model_inputs": {}}}
+    payload = build_market_expectations(
+        computed, _memory_financials(), {"point_estimate_withheld": True,
+                                         "range_low": 3000.0, "range_high": 3500.0})
+    assert payload["method_note"] and "not built on mid-cycle" in payload["method_note"]
+    assert not str(payload["sentence"] or "").startswith("VYNN values a memory maker")
+
+
+def test_the_trend_is_counted_from_the_projections_own_base(monkeypatch):
+    """Too few analysts for the rolling clock: the projections start from the
+    last fiscal year, and FY4's trend is counted from that year too."""
+    monkeypatch.setenv("RISK_FREE_USD", "0.04")
+    payload = _sandisk()
+    # A quarter past the fiscal year end: the TTM date and the annual base differ.
+    payload["ttm_bridge"]["latest_period"] = "2026-09-30"
+    for horizon in ("0y", "+1y"):
+        payload["analyst_data"]["revenue_estimates"][horizon]["numberOfAnalysts"] = 3
+        payload["analyst_data"]["earnings_estimates"][horizon]["numberOfAnalysts"] = 3
+    grounded, _ = _grounded(payload)
+    basis = grounded.get("modeling_basis") or {}
+    inputs = memory_cycle.mid_cycle_inputs(payload)
+    if isinstance(basis.get("revenue"), (int, float)) and basis["revenue"] > 0:
+        base, period = basis["revenue"], (grounded.get("forecast_basis") or {}).get(
+            "period_end") or inputs["base_period_end"]
+    else:
+        base, period = inputs["history"][-1]["revenue"], inputs["history"][-1]["period_end"]
+    assert basis.get("revenue") is None                   # the fiscal-year fallback
+    assert period == "2026-06-30"
+    assert grounded["mid_cycle"]["base_period_end"] == period
+    revenue = [base]
+    for rate in grounded["revenue_growth_rates"]:
+        revenue.append(revenue[-1] * (1 + rate))
+    assert revenue[4] == pytest.approx(memory_cycle.trend_revenue(inputs, 4, period))
