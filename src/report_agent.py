@@ -3642,6 +3642,17 @@ def valuation_publication_status(data: Dict[str, Any]) -> str:
     reason = reliability.get('withheld_reason')
     if reason:
         lines.append(str(reason))
+    primary = str((reliability.get("method_suitability") or {}).get("primary_method") or "")
+    if primary.startswith("scenario_only_pending"):
+        # The methodology rules the cash-flow model out for this company (a
+        # memory maker, an unsplit captive lender): the figures above are its
+        # audit scenario, for the reason stated, not a range VYNN supports.
+        lines.append(
+            "VYNN states no fair value, rating or price target for this company: "
+            "the figures above are the cash-flow model run as an audit scenario, "
+            "not a valuation."
+        )
+        return "\n".join(lines) + "\n\n"
     lines.append({
         RANGE: "VYNN shows the range above instead of a single fair value, rating or price target",
         SINGLE_ESTIMATE: (
