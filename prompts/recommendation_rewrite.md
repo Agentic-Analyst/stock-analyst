@@ -58,9 +58,12 @@ reports) carries the [E#] of the item that states it. A model statement (the
 rating, the fair value, the DCF range, the confidence alert's gaps and analyst
 count, copied from the fields above) carries NO [E#]: no news item states
 VYNN's numbers, and the validator checks those figures against the fixed
-numbers instead. A watch or monitoring item cites [E#] only when it restates
-a fact that item's title or snippet gives; a plain "what to watch" item takes
-no citation.
+numbers instead. A sentence must not mix the two: put the news in one
+sentence with its [E#] and VYNN's figures in another without. A watch,
+monitoring or action item that states a figure or a date cites the item whose
+title or snippet gives it (or drops the figure); a plain "what to watch" item
+with no figure takes no citation. Never name a rating other than the fixed
+one as VYNN's.
 
 ## CRITICAL RULES - PRODUCTION STANDARDS
 

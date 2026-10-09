@@ -221,6 +221,11 @@ class RecommendationEngineV3:
         # Step 3: Build evidence pack
         evidence_pack = self.evidence_extractor.build_evidence_pack(screening_data)
         evidence_pack["news_freshness"] = freshness
+        # Whose news this is: the validator never counts the company's own
+        # name as wording a source shares with a claim.
+        evidence_pack["subject"] = {
+            "ticker": ticker, "name": company_data.get('company_name') or None,
+        }
         evidence_pack["articles_analyzed"] = articles_analyzed = (
             (screening_data or {}).get('analysis_summary', {}).get('articles_analyzed', 0)
         )
@@ -459,8 +464,10 @@ class RecommendationEngineV3:
                 self._log(f"  Cited: {coverage_details.get('cited_count', 0)}/{coverage_details.get('material_sentences', 0)} sentences")
                 self._log("="*80 + "\n")
             
-            # If validation passed, break early
-            if validation_report.get("valid"):
+            # Stop only when nothing is left to rewrite: a response can be
+            # valid while its rating or prices were corrected, and then its
+            # prose may still say "We rate Apple a BUY."
+            if not self.validator.needs_rewrite(validation_report):
                 self._log(f"✅ VALIDATION PASSED on attempt {rewrite_attempt} - Output is production-ready\n")
                 break
         else:
@@ -527,8 +534,13 @@ class RecommendationEngineV3:
         """What the rewrite must do about one unsupported cited claim."""
         reason = issue.get("reason")
         if reason == "model_figures_cited_to_news":
-            return ("these figures are VYNN's model outputs, which no news item states: "
-                    "remove the [E#] from this sentence and keep the figures as given")
+            return ("this sentence only restates VYNN's model outputs, which no news item "
+                    "states: remove the [E#] from it and keep the figures as given")
+        if reason == "news_mixed_with_model_figures":
+            return ("this sentence mixes a news claim with VYNN's model figures: split it into "
+                    "a news sentence that says only what the cited title or snippet says, with "
+                    "its [E#], and a separate sentence for VYNN's figures with no [E#]; drop any "
+                    "figure that is in neither")
         if reason == "numbers_not_in_source":
             numbers = ", ".join(issue.get("numbers") or [])
             return (f"{numbers} is not in the cited title, snippet or date: drop the figure, "
@@ -594,9 +606,12 @@ class RecommendationEngineV3:
                 "stands; every field below may be edited, including `watch` items):\n"
             )
             for i, issue in enumerate(unsupported, 1):
+                # json.dumps: generated text may carry newlines or quotes that
+                # would otherwise read as part of these instructions.
                 issues_section += (
-                    f"{i}. `{issue.get('field') or '?'}` cites "
-                    f"{', '.join(issue.get('citations') or [])}: \"{issue.get('claim')}\"\n"
+                    f"{i}. {json.dumps(issue.get('field') or '?')} cites "
+                    f"{', '.join(issue.get('citations') or [])}: "
+                    f"{json.dumps(issue.get('claim') or '')}\n"
                     f"   → {self._support_fix(issue)}\n"
                 )
             issues_section += "\n"
@@ -615,15 +630,19 @@ class RecommendationEngineV3:
                     "snippet states it, or delete the sentence):\n"
                 )
                 for i, sent in enumerate(uncited[:10], 1):
-                    issues_section += f"{i}. {sent[:100]}...\n" if len(sent) > 100 else f"{i}. {sent}\n"
+                    issues_section += f"{i}. {json.dumps(sent[:200])}\n"
                 issues_section += "\n"
             
             # Show examples of good citations
-            cited = coverage.get('cited_sentences', [])
+            # A cited sentence its source does not support is no example.
+            failed = {issue.get("claim") for issue in unsupported}
+            examples = coverage.get('cited_sentences')
+            cited = [sent for sent in (examples if isinstance(examples, list) else [])
+                     if sent.strip()[:300] not in failed]
             if cited:
                 issues_section += "**Examples of GOOD Citations** (keep this pattern):\n"
                 for i, sent in enumerate(cited[:3], 1):
-                    issues_section += f"{i}. {sent[:100]}...\n" if len(sent) > 100 else f"{i}. {sent}\n"
+                    issues_section += f"{i}. {json.dumps(sent[:200])}\n"
                 issues_section += "\n"
         
         # Build iteration-specific guidance
