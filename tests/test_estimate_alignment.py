@@ -324,9 +324,13 @@ def test_a_torn_table_puts_the_year_0y_grows_into_in_fy2():
     assert revenue["+1y"]["avg"] == pytest.approx(44.784e9)         # FY2027, Yahoo's own base
     assert revenue["+1y"]["growth"] == pytest.approx(44.784 / 35.057 - 1)
     assert revenue["+2y"]["avg"] == pytest.approx(52.073e9)         # FY2028
-    # Its EPS has no such base: FY2 EPS is dropped, not taken from FY2028.
-    assert "+1y" not in data["analyst_data"]["earnings_estimates"]
-    assert data["analyst_data"]["earnings_estimates"]["0y"]["avg"] == pytest.approx(17.69)
+    # Its EPS table rolled in full: 0y's year-ago EPS is the four reported
+    # FY2026 quarters, 0y is FY2027; the +1y EPS row does not grow from it
+    # (year-ago 9.75 on 3 analysts), so it is not used.
+    eps = data["analyst_data"]["earnings_estimates"]
+    assert eps["0y"]["avg"] == pytest.approx(13.09) and eps["0y"]["reported"] is True
+    assert eps["+1y"]["avg"] == pytest.approx(17.69)
+    assert "+2y" not in eps
     assert data["analyst_data"]["provider_estimates"]["revenue_estimates"]["+1y"]["avg"] == \
         pytest.approx(52.073e9)
 
@@ -392,3 +396,54 @@ def test_bank_forward_roe_never_counts_a_reported_year():
     assert [row["period"] for row in result["observations"]] == ["+1y"]
     rows[0]["reported"] = False
     assert _forward_consensus_common_roe(expectations, book_value_per_share=150.0, now=now)["status"] == "ready"
+
+
+def test_a_foreign_bank_basis_on_an_unmoved_clock_is_not_torn():
+    """HDB, MUFG, SMFG, MFG: Yahoo's +1y year-ago is on another basis (HDB's is
+    its own 0y low, MUFG's 0.51x), on the same fiscal year as the statements."""
+    data = _jabil()
+    data["company_data"]["basic_info"]["last_fiscal_year_end"] = "2025-08-31"
+    before = copy.deepcopy(data["analyst_data"])
+    assert align_street_estimates(data)["status"] == "aligned"
+    data["analyst_data"].pop("estimate_alignment")
+    assert data["analyst_data"] == before
+
+
+def test_a_seasonal_business_is_checked_against_the_same_quarter_a_year_earlier():
+    """Vail-like: the July quarter Yahoo has and the statements do not is a
+    quarter of the April one, and equal to last July's."""
+    data = _micron()
+    data["financial_statements"]["income_statement"] = {
+        "2025-07-31": {"Total Revenue": 2.96e9}, "2024-07-31": {"Total Revenue": 2.88e9}}
+    data["quarterly_financial_statements"]["income_statement"] = {
+        "2025-07-31": {"Total Revenue": 0.271e9}, "2025-10-31": {"Total Revenue": 0.271e9},
+        "2026-01-31": {"Total Revenue": 1.14e9}, "2026-04-30": {"Total Revenue": 1.30e9}}
+    data["company_data"]["basic_info"]["last_fiscal_year_end"] = "2026-07-31"
+    revenue = data["analyst_data"]["revenue_estimates"]
+    revenue["0q"]["yearAgoRevenue"] = 0.271e9
+    # FY2026 3.05B: the three statement quarters leave 0.339B for July,
+    # 0.26x the April quarter but 1.25x last July's.
+    revenue["0y"].update({"avg": 3.15e9, "yearAgoRevenue": 3.05e9})
+    revenue["+1y"].update({"avg": 3.25e9, "yearAgoRevenue": 3.15e9})
+    data["analyst_data"]["earnings_estimates"]["+1y"]["yearAgoEps"] = 176.15
+    alignment = align_street_estimates(data)
+    assert alignment["status"] == "rolled"
+    assert data["analyst_data"]["revenue_estimates"]["0y"]["avg"] == pytest.approx(3.05e9)
+
+
+def test_a_rolled_bank_keeps_two_forward_horizons():
+    """BAC-like in its January roll window: 0y is the reported year, so the
+    forward ROE leg takes Yahoo's 0y and +1y (our +1y and +2y)."""
+    from datetime import datetime, timezone
+    from src.agents.fm.bank_valuation import _forward_consensus_common_roe
+
+    now = datetime(2026, 10, 9, tzinfo=timezone.utc)
+    data = _micron()
+    align_street_estimates(data)
+    expectations = build_external_expectations(data)
+    assert [row["period"] for row in expectations["forward_estimates"]] == ["0y", "+1y"]
+    assert [row["period"] for row in expectations["forward_estimates_beyond"]] == ["+2y"]
+    expectations["captured_at"] = now.isoformat()
+    result = _forward_consensus_common_roe(expectations, book_value_per_share=600.0, now=now)
+    assert [row["period"] for row in result["observations"]] == ["+1y", "+2y"]
+    assert result["status"] == "ready"

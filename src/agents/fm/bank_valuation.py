@@ -217,10 +217,15 @@ def _forward_consensus_common_roe(
         return result
 
     observations = []
-    for row in (expectations.get("forward_estimates") or [])[:2]:
-        # A reported year's EPS over today's book value is trailing ROE.
-        if not isinstance(row, dict) or row.get("reported"):
-            continue
+    # The first two forward horizons. A reported year's EPS over today's book
+    # value is trailing ROE, so a realigned table's reported 0y is skipped and
+    # its third year (forward_estimates_beyond) takes the second place.
+    forward_rows = [
+        row for row in [*(expectations.get("forward_estimates") or []),
+                        *(expectations.get("forward_estimates_beyond") or [])]
+        if isinstance(row, dict) and not row.get("reported")
+    ][:2]
+    for row in forward_rows:
         eps = _finite(row.get("eps"), positive=True)
         try:
             analyst_count = int(row.get("eps_analyst_count") or 0)
