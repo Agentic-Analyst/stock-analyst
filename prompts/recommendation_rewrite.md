@@ -47,8 +47,8 @@ Take the JSON structure above and rewrite these TEXT fields ONLY:
 5. **`risks`**: Array of statements with [E#] citations
 6. **`scenarios.bull/base/bear.narrative`**: 2-3 sentences each with [E#] citations
 7. **`scenarios.bull/base/bear.watch`** and **`action.watch`**: items to monitor
-8. **`action.buyers`**: 1-2 sentences
-9. **`action.holders`**: 1-2 sentences
+8. **`action.buyers`**: 1-2 of E0's sentences, word for word, with [E0]
+9. **`action.holders`**: 1-2 of E0's sentences, word for word, with [E0]
 10. **`monitoring_plan`**: Array of items to monitor
 
 **E0 is VYNN's own figures and provider market data, not news.** A sentence
@@ -56,7 +56,9 @@ that states VYNN's rating, fair value, range, the share price used, the implied
 return, the analysts' mean target, the confidence alert or a market-data figure
 is one of E0's sentences, copied word for word, ending with [E0] and citing
 nothing else. Never cite E0 for news or a news item for VYNN's figures or view;
-keep the two in separate sentences. Write evidence IDs only as citations in
+keep the two in separate sentences. Quote E0 only in the thesis, the base case
+narrative and the buyers' and holders' lines, which hold E0's sentences and
+nothing else. Write evidence IDs only as citations in
 brackets, never in the text. Any sentence or item that states a figure or a
 date cites the item that gives it, or the figure is deleted.
 

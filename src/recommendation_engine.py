@@ -13,6 +13,7 @@ Design: Numbers = Code, Narrative = LLM, Validation = Code + Critic
 
 import json
 import math
+import threading
 import traceback
 import os
 import re
@@ -436,12 +437,16 @@ class RecommendationEngineV3:
         # Step 6: Validate and auto-correct response
         total_cost = cost
 
+        cost_lock = threading.Lock()
+
         def fact_check(check_prompt: str) -> str:
             # The same model, asked whether each news-cited sentence says
-            # only what its sources state; its cost is the report's.
+            # only what its sources state; its cost is the report's. Called
+            # from several threads at once.
             nonlocal total_cost
             answer, check_cost = llm([{"role": "user", "content": check_prompt}], temperature=0)
-            total_cost += check_cost or 0.0
+            with cost_lock:
+                total_cost += check_cost or 0.0
             return answer
 
         corrected_json, validation_report = self.validator.validate_and_correct(
@@ -1045,9 +1050,14 @@ class RecommendationEngineV3:
                     f"{range_text}"
                 )
             
+            # Every written field prints as the one line the validator read
+            # (RecommendationValidator.printable): a line break inside one
+            # printed two checked fragments as one sentence, or a heading.
+            printable = self.validator.printable
+
             # Thesis
             output.append(f"\n### Investment Thesis\n")
-            output.append(response_data.get('thesis', ''))
+            output.append(printable(response_data.get('thesis', '')))
             
             # Valuation Perspective
             output.append(f"\n### Valuation Perspective\n")
@@ -1082,7 +1092,7 @@ class RecommendationEngineV3:
             for cat in catalysts if isinstance(catalysts, list) else []:
                 stmt = self.validator.printed_statement(cat)
                 if stmt:
-                    output.append(f"- {stmt}")
+                    output.append(f"- {printable(stmt)}")
             
             # Risks
             output.append(f"\n### Key Risks\n")
@@ -1090,7 +1100,7 @@ class RecommendationEngineV3:
             for risk in risks if isinstance(risks, list) else []:
                 stmt = self.validator.printed_statement(risk)
                 if stmt:
-                    output.append(f"- {stmt}")
+                    output.append(f"- {printable(stmt)}")
             
             # Scenarios (if available)
             scenarios = response_data.get('scenarios', {})
@@ -1100,8 +1110,9 @@ class RecommendationEngineV3:
                 for scenario_name, scenario_label in [('bull', 'Bull Case'), ('base', 'Base Case'), ('bear', 'Bear Case')]:
                     scenario = scenarios.get(scenario_name, {})
                     if isinstance(scenario, dict) and scenario:
-                        narrative = scenario.get('narrative', '')
-                        watch = self.validator.printed_items(scenario.get('watch'))
+                        narrative = printable(scenario.get('narrative', ''))
+                        watch = [printable(item) for item in
+                                 self.validator.printed_items(scenario.get('watch'))]
                         output.append(f"**{scenario_label}**: {narrative}")
                         if watch:
                             output.append(f"  - Watch: {', '.join(watch)}\n")
@@ -1110,7 +1121,8 @@ class RecommendationEngineV3:
             action = response_data.get('action') if rated else {}
             if isinstance(action, dict) and action:
                 output.append(f"\n### Recommended Action\n")
-                printed = {key: self.validator.printed_items(action.get(key))
+                printed = {key: [printable(item) for item in
+                                 self.validator.printed_items(action.get(key))]
                            for key in ('buyers', 'holders', 'watch')}
                 if printed['buyers']:
                     output.append(f"**For Buyers**: {' '.join(printed['buyers'])}\n")
@@ -1124,7 +1136,7 @@ class RecommendationEngineV3:
             if monitoring:
                 output.append(f"\n### Monitoring Plan\n")
                 for item in monitoring:
-                    output.append(f"- {item}")
+                    output.append(f"- {printable(item)}")
             
             # Add calculation transparency
             output.append(f"\n---\n### Calculation Methodology\n")
