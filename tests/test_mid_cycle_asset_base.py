@@ -204,6 +204,10 @@ def test_a_mid_cycle_exit_multiple_is_held_to_its_ceiling_from_a_steady_conversi
     # $B$12 > 0 has been tested in an enclosing IF.
     for formula in (gated, held):
         assert formula.startswith("=IF(AND($B$12>0,") and ",IF($K$7/$B$12>=" in formula
+    workbook = openpyxl.Workbook()
+    ws = ValuationExitMultipleDCFBuilder(exit_multiple=10.4).create_tab(workbook)
+    # Row 13 is the multiple applied; row 3 only the reference it starts from.
+    assert ws.cell(row=13, column=1).value == "Exit Multiple applied (EV/EBITDA)"
 
 
 def test_the_run_rate_capex_case_does_not_apply_to_an_asset_base_path():

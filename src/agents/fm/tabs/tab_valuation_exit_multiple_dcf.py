@@ -320,7 +320,7 @@ class ValuationExitMultipleDCFBuilder:
             f"$K$7/$B$12>={MIN_TERMINAL_CONVERSION:.2f}" if self.always_cap
             else "$K$7/$B$12>=0.30"
         )
-        ws.cell(row=13, column=1, value="Exit Multiple (EV/EBITDA)")
+        ws.cell(row=13, column=1, value="Exit Multiple applied (EV/EBITDA)")
         # The conversion test divides by $B$12, so it sits inside its own IF:
         # Excel's AND evaluates every argument, and with zero terminal EBITDA
         # the flat AND made row 13, and every cell reading it, #DIV/0! in the
