@@ -36,9 +36,15 @@ FORM_MEANINGS = {
     "8-K": "material event report",
     "S-1": "registration of a share offering", "S-3": "shelf registration (future share sales)",
     "S-8": "registration of employee-plan shares", "424B4": "final offering prospectus",
-    "424B5": "offering prospectus supplement", "424B3": "prospectus (resale/offering)",
+    "424B5": "offering prospectus supplement",
+    # Banks file hundreds of these for structured notes: not a share sale.
+    "424B3": "prospectus (an offering or resale; for banks usually notes, not shares)",
+    "424B2": "prospectus (for banks usually structured notes, not shares)",
     "SC 13D": "5%+ holder with intent to influence", "SC 13G": "5%+ passive holder",
     "SC 13D/A": "amended 5%+ holder report", "SC 13G/A": "amended 5%+ holder report",
+    # EDGAR's names since the 2024-25 beneficial-ownership rules.
+    "SCHEDULE 13D": "5%+ holder with intent to influence", "SCHEDULE 13G": "5%+ passive holder",
+    "SCHEDULE 13D/A": "amended 5%+ holder report", "SCHEDULE 13G/A": "amended 5%+ holder report",
     "10-Q": "quarterly report", "10-K": "annual report",
 }
 TRANSACTION_CODES = {
@@ -188,7 +194,8 @@ def filing_activity(ticker: str, start: date, end: date, budget_seconds: float =
     }
 
     notices = []
-    for row in [r for r in rows if r.get("form") == "144"][:_MAX_DOCUMENTS]:
+    notice_rows = [r for r in rows if r.get("form") == "144"]
+    for row in notice_rows[:_MAX_DOCUMENTS]:
         parsed = parse_form144(_document(cik, row, deadline) or "")
         if parsed:
             notices.append({"filed": row.get("filingDate"), **parsed})
@@ -199,11 +206,15 @@ def filing_activity(ticker: str, start: date, end: date, budget_seconds: float =
             "market_value": round(sum(n["market_value"] or 0 for n in notices), 2),
             "largest": sorted(notices, key=lambda n: -(n["market_value"] or 0))[:3],
         }
+        if len(notices) < len(notice_rows):
+            # Newest first: the totals leave out the oldest filings.
+            out["form144_notices"]["partial"] = f"totals cover {len(notices)} of {len(notice_rows)} filings (the newest)"
 
     by_code: Dict[str, Dict[str, float]] = defaultdict(lambda: {"shares": 0.0, "value": 0.0, "filings": 0})
     owners: Dict[str, Dict[str, Any]] = {}
     parsed4 = 0
-    for row in [r for r in rows if r.get("form") == "4"][:_MAX_DOCUMENTS]:
+    form4_rows = [r for r in rows if r.get("form") == "4"]
+    for row in form4_rows[:_MAX_DOCUMENTS]:
         parsed = parse_form4(_document(cik, row, deadline) or "")
         if not parsed:
             continue
@@ -230,6 +241,8 @@ def filing_activity(ticker: str, start: date, end: date, budget_seconds: float =
             "top_sellers": sorted(({"owner": k, **v} for k, v in owners.items()),
                                   key=lambda o: -o["shares_sold"])[:3],
         }
+        if parsed4 < len(form4_rows):
+            out["form4_transactions"]["partial"] = f"totals cover {parsed4} of {len(form4_rows)} filings (the newest)"
 
     events = []
     for row in rows:

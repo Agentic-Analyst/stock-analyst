@@ -18,9 +18,19 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
-# Sessions per look-back window. A month of sessions is what "crashed" usually
-# means when the user does not say "today"; the agent can ask for longer.
+# Bars per look-back window. A month is what "crashed" usually means when the
+# user does not say "today"; the agent can ask for longer. A market that trades
+# every day (crypto) counts calendar days: 252 of its bars are 8.3 months, and
+# Bitcoin's "52-week high" came out at $86,603 (September) instead of $115,271.
 WINDOW_SESSIONS = {"5d": 5, "1mo": 21, "3mo": 63, "6mo": 126, "1y": 252}
+WINDOW_DAYS = {"5d": 7, "1mo": 30, "3mo": 91, "6mo": 182, "1y": 365}
+_WINDOW_ALIASES = {
+    "1w": "5d", "1wk": "5d", "week": "5d", "5d": "5d",
+    "1m": "1mo", "1mo": "1mo", "month": "1mo", "30d": "1mo",
+    "3m": "3mo", "3mo": "3mo", "quarter": "3mo",
+    "6m": "6mo", "6mo": "6mo",
+    "1y": "1y", "12mo": "1y", "year": "1y", "52w": "1y", "ytd": "ytd",
+}
 _BIGGEST_DAYS = 5
 _VOLUME_BASE_SESSIONS = 50
 
@@ -105,11 +115,40 @@ def largest_swing(closes, direction: str = "down") -> Optional[Dict[str, Any]]:
     }
 
 
-def biggest_days(daily, sessions: int, count: int = _BIGGEST_DAYS) -> List[Dict[str, Any]]:
+def normalize_window(window: Optional[str]) -> str:
+    """The window the agent asked for, in this module's terms ("3M" is "3mo")."""
+    return _WINDOW_ALIASES.get((window or "1mo").strip().lower(), "1mo")
+
+
+def trades_every_day(closes) -> bool:
+    """Weekend bars: a 24/7 market whose windows count calendar days."""
+    try:
+        return any(stamp.weekday() >= 5 for stamp in closes.index[-30:])
+    except AttributeError:
+        return False
+
+
+def window_bars(window: str, closes) -> int:
+    """Bars in a window: sessions for an exchange, days for a 24/7 market."""
+    if window == "ytd":
+        try:
+            year = closes.index[-1].year
+            return max(1, sum(1 for stamp in closes.index if stamp.year == year))
+        except AttributeError:
+            return 21
+    table = WINDOW_DAYS if trades_every_day(closes) else WINDOW_SESSIONS
+    return table.get(window, table["1mo"])
+
+
+def biggest_days(daily, sessions: int, count: int = _BIGGEST_DAYS,
+                 session_open: bool = False) -> List[Dict[str, Any]]:
     """The largest one-day moves in the last ``sessions``, oldest first.
 
     Volume is compared with the average of the 50 sessions before each day, so
-    a heavy-volume break reads differently from a drift on thin trading.
+    a heavy-volume break reads differently from a drift on thin trading. A
+    session still trading has only part of its volume: SoftBank 41 minutes into
+    Tokyo's session read 0.4x on its way to about 2.6x. Its ratio is marked
+    ``volume_so_far`` instead of being compared as if complete.
     """
     closes = _valid_closes(daily)
     if closes is None or len(closes) < 2:
@@ -127,7 +166,12 @@ def biggest_days(daily, sessions: int, count: int = _BIGGEST_DAYS) -> List[Dict[
             base = volume.iloc[max(0, position - _VOLUME_BASE_SESSIONS):position].dropna()
             today = _finite(volume.iloc[position])
             if today and len(base) >= 10 and float(base.mean()) > 0:
-                row["volume_vs_average"] = round(today / float(base.mean()), 1)
+                ratio = round(today / float(base.mean()), 1)
+                if session_open and position == len(daily.index) - 1:
+                    row["volume_so_far_vs_full_day_average"] = ratio
+                    row["session_in_progress"] = True
+                else:
+                    row["volume_vs_average"] = ratio
         out.append(row)
     return out
 
@@ -137,9 +181,11 @@ def performance(closes, latest: Optional[float]) -> Dict[str, Optional[float]]:
     if closes is None or len(closes) == 0 or not latest:
         return {}
     out: Dict[str, Optional[float]] = {}
-    for label, sessions in (("5d", 5), ("1mo", 21), ("3mo", 63), ("6mo", 126), ("1y", 252)):
-        if len(closes) > sessions:
-            out[label] = _pct(latest, float(closes.iloc[-sessions - 1]))
+    table = WINDOW_DAYS if trades_every_day(closes) else WINDOW_SESSIONS
+    for label in ("5d", "1mo", "3mo", "6mo", "1y"):
+        bars = table[label]
+        if len(closes) > bars:
+            out[label] = _pct(latest, float(closes.iloc[-bars - 1]))
     try:
         year = closes.index[-1].year
         prior = closes[[stamp.year < year for stamp in closes.index]]
@@ -160,7 +206,7 @@ def range_and_listing(daily, latest: Optional[float], history_days_requested: in
     closes = _valid_closes(daily)
     if closes is None:
         return {}
-    year = closes.iloc[-252:]
+    year = closes.iloc[-(365 if trades_every_day(closes) else 252):]
     high_at = year.idxmax()
     low_at = year.idxmin()
     out: Dict[str, Any] = {
@@ -195,6 +241,21 @@ def index_change(index_closes, start_date: str, end_date: str) -> Optional[float
     return _pct(float(closes.iloc[end]), float(closes.iloc[start]))
 
 
+def _from_extreme(scan, latest: float, which: str) -> Optional[Dict[str, Any]]:
+    if scan is None or len(scan) < 2:
+        return None
+    stamp = scan.idxmax() if which == "high" else scan.idxmin()
+    level = float(scan.loc[stamp])
+    return {"date": _day(stamp), "close": round(level, 2), "change_pct": _pct(latest, level)}
+
+
+def day_change(frame) -> Optional[float]:
+    """The last session's change from a frame whose last close is live."""
+    if frame is None or len(frame) < 2:
+        return None
+    return _pct(float(frame["Close"].iloc[-1]), float(frame["Close"].iloc[-2]))
+
+
 def with_live_close(daily, live_price: Optional[float]):
     """Daily bars whose last, still-open session carries the live price.
 
@@ -214,7 +275,8 @@ def with_live_close(daily, live_price: Optional[float]):
 
 def describe_move(daily, live_price: Optional[float], window: str = "1mo",
                   direction: str = "auto", history_days_requested: int = 730,
-                  index_closes=None) -> Optional[Dict[str, Any]]:
+                  index_closes=None, index_name: str = "S&P 500",
+                  session_open: bool = False) -> Optional[Dict[str, Any]]:
     """Everything above for one ticker, or None without usable daily closes."""
     frame = with_live_close(daily, live_price)
     if frame is None:
@@ -222,7 +284,8 @@ def describe_move(daily, live_price: Optional[float], window: str = "1mo",
     closes = frame["Close"]
     latest = float(closes.iloc[-1])
     previous = float(closes.iloc[-2]) if len(closes) >= 2 else None
-    sessions = WINDOW_SESSIONS.get(window, 21)
+    window = normalize_window(window)
+    sessions = window_bars(window, closes)
     scan = closes.iloc[-(sessions + 1):]
     down = largest_swing(scan, "down")
     up = largest_swing(scan, "up")
@@ -233,6 +296,7 @@ def describe_move(daily, live_price: Optional[float], window: str = "1mo",
     else:
         candidates = [e for e in (down, up) if e]
         episode = max(candidates, key=lambda e: abs(e["change_pct"])) if candidates else None
+    today_missing = _finite(daily["Close"].iloc[-1]) is None and _finite(live_price) is None
     out: Dict[str, Any] = {
         "latest_price": round(latest, 2),
         "previous_close": round(previous, 2) if previous is not None else None,
@@ -242,11 +306,26 @@ def describe_move(daily, live_price: Optional[float], window: str = "1mo",
         "performance": performance(closes, latest),
         **range_and_listing(frame, latest, history_days_requested),
         "episode": episode,
-        "biggest_days": biggest_days(frame, sessions),
+        # Where the price stands against the window's extremes: "why is X
+        # down" is about the fall from the high to now, which is not always
+        # the window's largest swing (MU's was a September dip it had since
+        # recovered).
+        "from_window_high": _from_extreme(scan, latest, "high"),
+        "from_window_low": _from_extreme(scan, latest, "low"),
+        "biggest_days": biggest_days(frame, sessions, session_open=session_open),
     }
+    if today_missing:
+        # Today's bar has no close and no live price came back: the figures
+        # above end at the previous session, so do not call it today's move.
+        out["latest_session_missing"] = _day(daily.index[-1])
+        out["note"] = ("Today's price is not available yet; latest_price and day_change_pct "
+                       f"are for the session of {out['as_of_session']}.")
+    if session_open:
+        out["session_in_progress"] = True
     if episode:
         out["episode"] = {**episode, "since_end_pct": _pct(latest, episode["end_close"])}
         market = index_change(index_closes, episode["start_date"], episode["end_date"])
         if market is not None:
-            out["episode"]["sp500_same_dates_pct"] = market
+            out["episode"]["market_index"] = index_name
+            out["episode"]["market_same_dates_pct"] = market
     return out

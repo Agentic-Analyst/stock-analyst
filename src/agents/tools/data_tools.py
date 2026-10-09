@@ -398,12 +398,21 @@ class GetPricesTool(Tool):
             from .yf_resilience import fetch_history, fetch_spot
             import yfinance as yf
             from src.price_moves import latest_and_previous_close
+            from .yf_resilience import live_price
             latest = prev_close = None
             df = fetch_history(ticker, "5d")
             if df is not None and len(df) >= 1:
                 # After the close Yahoo's bar for the day has no Close yet:
-                # the last valid close is then the PREVIOUS close.
+                # the last valid close is then the PREVIOUS close, and the
+                # latest price is the live one.
                 latest, prev_close = latest_and_previous_close(df["Close"])
+                if latest is None and prev_close is not None:
+                    latest = live_price(ticker)
+                    if latest is None:
+                        # No live price: report no change rather than the
+                        # previous close as today's price (a 0.0% day).
+                        return {"latest_price": None, "previous_close": round(prev_close, 2),
+                                "note": "Today's price is not available yet; previous_close is the last close."}
             if latest is None:
                 latest = fetch_spot(ticker)
             if prev_close is None:
@@ -530,10 +539,16 @@ class GetTechnicalsTool(Tool):
             ticker = raw
 
         def _calc():
-            from .yf_resilience import fetch_history
+            from src.price_moves import with_live_close
+            from .yf_resilience import fetch_history, live_price
             df = fetch_history(ticker, "1y")
             if df is None or df.empty or len(df) < 30:
                 return None
+            if df["Close"].isna().iloc[-1]:
+                # Yahoo's evening bar has no close: every average ending on it
+                # came back NaN ("above_sma_50: false"). Use the live price, or
+                # end at the last close when there is none.
+                df = with_live_close(df, live_price(ticker))
             close = df["Close"]
             last = float(close.iloc[-1])
 

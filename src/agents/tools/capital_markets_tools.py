@@ -114,6 +114,12 @@ class PriceOptionTool(Tool):
             s, v = spot, volatility
             if (s is None or v is None) and ticker:
                 hist = fetch_history(ticker.upper(), "6mo")
+                if hist is not None and not hist.empty and hist["Close"].isna().iloc[-1]:
+                    # Yahoo's evening bar has no close: price off the live
+                    # level (a NaN spot made every Greek NaN).
+                    from src.price_moves import with_live_close
+                    from .yf_resilience import live_price
+                    hist = with_live_close(hist, live_price(ticker.upper()))
                 if hist is not None and not hist.empty:
                     if s is None:
                         s = float(hist["Close"].iloc[-1])

@@ -28,19 +28,30 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 FINNHUB_NEWS_URL = "https://finnhub.io/api/v1/company-news"
 _SUMMARY_CHARS = 320
-_MAX_ITEMS = 24
+_MAX_ITEMS = 28
 _PER_SESSION = 5
+_PER_QUIET_SESSION = 3
+_GUARANTEED = 2
+_SAME_STORY = timedelta(hours=36)
 
 # Name endings that headlines drop ("Cerebras", not "Cerebras Systems Inc.").
 _SUFFIXES = re.compile(
-    r"[,.]?\s+(?:inc|incorporated|corp|corporation|co|company|ltd|limited|plc|"
-    r"holdings?|group|systems?|technologies|technology|n\.?v|s\.?a|ag|se)\.?$",
+    r"(?:[,.]?\s+(?:inc|incorporated|corp|corporation|co|company|ltd|limited|plc|"
+    r"holdings?|group|systems?|technologies|technology|n\.?v|s\.?a|ag|se|trust|etf)\.?"
+    r"|\s+(?:and|&)|\.com)$",
     re.I,
 )
 # A first word too common to identify a company on its own.
 _GENERIC_FIRST = {
     "american", "advanced", "general", "united", "first", "international", "global",
     "national", "the", "new", "applied", "digital", "data", "energy", "royal",
+    "state", "spdr", "invesco", "ishares", "vanguard", "vaneck", "grayscale", "proshares",
+}
+# What headlines call a company that its listing name does not say.
+_ALIASES = {
+    "GOOGL": ["Google"], "GOOG": ["Google"], "META": ["Facebook"], "BRK-B": ["Berkshire"],
+    "BRK-A": ["Berkshire"], "IBM": ["IBM"], "XOM": ["Exxon"], "TSM": ["TSMC"],
+    "LLY": ["Lilly"], "JNJ": ["J&J"], "PG": ["P&G"],
 }
 # Roundups and comparisons mention many tickers and explain none of them.
 _ROUNDUP = re.compile(
@@ -51,27 +62,37 @@ _ROUNDUP = re.compile(
     re.I,
 )
 
-try:  # Eastern time decides which session an article belongs to.
-    from zoneinfo import ZoneInfo
-    _EASTERN = ZoneInfo("America/New_York")
-except Exception:  # pragma: no cover - tzdata missing
-    _EASTERN = timezone(timedelta(hours=-4))
+from zoneinfo import ZoneInfo
+
+_EASTERN = ZoneInfo("America/New_York")
 
 
 def company_names(name: Optional[str], ticker: str) -> List[str]:
-    """Strings that identify the company in a headline."""
+    """Strings that identify the company in a headline.
+
+    "The Boeing Company" is "Boeing" in a headline, "Eli Lilly and Company"
+    is "Eli Lilly", "Amazon.com, Inc." is "Amazon" and Alphabet is "Google":
+    matching the listing name as written threw away every Goldman Sachs and
+    Boeing story.
+    """
     names = []
-    base = (ticker or "").split(".")[0].split("-")[0].upper()
+    symbol = (ticker or "").upper()
+    base = symbol.split(".")[0].split("-")[0]
     if len(base) >= 2:
         names.append(base)
     clean = (name or "").strip()
+    if clean.lower().startswith("the "):
+        clean = clean[4:].strip()
     while clean and _SUFFIXES.search(clean):
-        clean = _SUFFIXES.sub("", clean).strip()
+        clean = _SUFFIXES.sub("", clean).strip(" ,.")
     if clean:
         names.append(clean)
         first = clean.split()[0].strip(",.")
         if len(first) >= 4 and first.lower() not in _GENERIC_FIRST and first != clean:
             names.append(first)
+    for alias in _ALIASES.get(symbol, []):
+        if alias not in names:
+            names.append(alias)
     return names
 
 
@@ -87,23 +108,83 @@ def _mentions(text: str, names: Sequence[str]) -> bool:
 
 
 def _tokens(title: str) -> set:
-    return {w for w in re.findall(r"[a-z0-9']+", title.lower()) if len(w) > 2}
+    """Content words, without quotes, possessives or a plural s."""
+    words = re.findall(r"[a-z0-9]+", title.lower().replace("'s ", " "))
+    return {w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+            for w in words if len(w) > 2}
 
 
-def _similar(a: set, b: set) -> bool:
-    return bool(a and b) and len(a & b) / len(a | b) >= 0.5
+_UP = {"soars", "soared", "jumps", "jumped", "surges", "surged", "rises", "rose", "rallies",
+       "rallied", "gains", "gained", "climbs", "climbed", "up", "higher", "upgrade", "upgrades", "raises"}
+_DOWN = {"plunges", "plunged", "falls", "fell", "drops", "dropped", "slides", "slid", "sinks",
+         "sank", "tumbles", "tumbled", "slumps", "slumped", "down", "lower", "downgrade",
+         "downgrades", "cuts", "crash", "crashes", "crashed"}
 
 
-def session_for(published: datetime, sessions: Sequence[str]) -> Optional[str]:
-    """The first trading session an article could move.
+def _figures(title: str) -> set:
+    return set(re.findall(r"\d[\d,.]*", title))
 
-    Before the 4pm close it is that day's session (pre-market news moves the
-    open); after the close it is the next session. ``sessions`` are the
+
+def _similar(a: str, b: str) -> bool:
+    """Two headlines for one story: mostly the same words, the same figures
+    and the same direction. Citi's $45 target is not Mizuho's $43, and a
+    $42.6 million insider sale is not a $1.1 million one."""
+    ta, tb = _tokens(a), _tokens(b)
+    if not (ta and tb) or len(ta & tb) / len(ta | tb) < 0.6:
+        return False
+    if _figures(a) != _figures(b):
+        return False
+    wa, wb = set(re.findall(r"[a-z]+", a.lower())), set(re.findall(r"[a-z]+", b.lower()))
+    return not ((wa & _UP and wb & _DOWN) or (wa & _DOWN and wb & _UP))
+
+
+# Local close (hour, minute) by exchange time zone; a 24-hour market has none.
+_CLOSES = {
+    "America/New_York": (16, 0), "America/Toronto": (16, 0), "Europe/London": (16, 30),
+    "Europe/Paris": (17, 30), "Europe/Berlin": (17, 30), "Europe/Amsterdam": (17, 30),
+    "Europe/Zurich": (17, 30), "Europe/Madrid": (17, 30), "Europe/Milan": (17, 30),
+    "Asia/Tokyo": (15, 30), "Asia/Hong_Kong": (16, 0), "Asia/Shanghai": (15, 0),
+    "Asia/Kolkata": (15, 30), "Asia/Seoul": (15, 30), "Asia/Taipei": (13, 30),
+    "Australia/Sydney": (16, 0),
+}
+# Written after the close ABOUT the close: "Why Sandisk Stock Dropped on
+# Thursday", "Stocks That Explain Today's Market". They explain that day.
+_RETROSPECTIVE = re.compile(
+    r"\bwhy\b.*\b(?:today|on\s+(?:monday|tuesday|wednesday|thursday|friday))\b|"
+    r"\bexplain\s+today'?s\s+market\b|\b(?:today|this\s+session)'?s?\s+(?:biggest\s+)?movers\b|"
+    r"\b(?:soared|jumped|surged|rose|rallied|plunged|fell|dropped|slid|sank|tumbled|slumped)\s+"
+    r"(?:\S+\s+)?(?:today|on\s+(?:monday|tuesday|wednesday|thursday|friday))\b",
+    re.I,
+)
+
+
+def _zone(name: Optional[str]):
+    try:
+        return ZoneInfo(name) if name else _EASTERN
+    except Exception:
+        return _EASTERN
+
+
+def session_for(published: datetime, sessions: Sequence[str], title: str = "",
+                exchange_tz: Optional[str] = "America/New_York") -> Optional[str]:
+    """The trading session an article belongs to.
+
+    Before the listing's close it is that day's session (pre-market news moves
+    the open); after the close it moves the next session, unless the headline
+    looks back at the day that just closed. Times are the exchange's own: a
+    Paris listing closes at 17:30 Paris time. A market without a close (crypto,
+    exchange_tz "UTC") keeps each article on its UTC date. ``sessions`` are the
     trading dates from the price history, oldest first, as YYYY-MM-DD.
     """
-    local = published.astimezone(_EASTERN)
+    zone = _zone(exchange_tz)
+    local = published.astimezone(zone)
     day = local.date().isoformat()
-    after_close = local.hour >= 16
+    close = _CLOSES.get(exchange_tz or "")
+    after_close = bool(close) and (local.hour, local.minute) >= close
+    if after_close and title and _RETROSPECTIVE.search(title):
+        earlier = [s for s in sessions if s <= day]
+        if earlier:
+            return earlier[-1]
     for s in sessions:
         if s > day or (s == day and not after_close):
             return s
@@ -134,16 +215,21 @@ def normalize_finnhub(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def rank_and_align(items: List[Dict[str, Any]], names: Sequence[str],
                    sessions: Sequence[str], focus_sessions: Sequence[str] = (),
-                   max_items: int = _MAX_ITEMS) -> Dict[str, Any]:
+                   max_items: int = _MAX_ITEMS, recent_sessions: Sequence[str] = (),
+                   exchange_tz: Optional[str] = "America/New_York",
+                   require_name: bool = True) -> Dict[str, Any]:
     """Relevant, de-duplicated articles grouped by the session they could move.
 
-    ``focus_sessions`` are the big-move days: their articles are kept first so
-    a busy news week cannot crowd out the day the stock actually fell.
+    ``focus_sessions`` are the big-move days and ``recent_sessions`` the last
+    few: both are covered before quieter days, so a busy news week cannot
+    crowd out the day the stock actually fell or today. A fund or a coin has
+    no company name to look for (``require_name`` False): its feed is about
+    the market it tracks, so every article counts.
     """
     scored = []
     for item in items:
         title, summary = item["title"], item.get("summary") or ""
-        score = 0
+        score = 0 if require_name else 1
         if _mentions(title, names):
             score += 3
         elif _mentions(summary, names):
@@ -155,30 +241,60 @@ def rank_and_align(items: List[Dict[str, Any]], names: Sequence[str],
         scored.append((score, item))
 
     # One story, many outlets: keep the earliest report, count the others.
+    # Only within a day and a half: "Cerebras stock falls" on September 30
+    # and again on October 1 are two days' news, not one story.
     stories: List[Dict[str, Any]] = []
     for score, item in sorted(scored, key=lambda pair: pair[1]["published"]):
-        tokens = _tokens(item["title"])
-        match = next((s for s in stories if _similar(s["_tokens"], tokens)), None)
+        match = next((s for s in stories
+                      if item["published"] - s["published"] <= _SAME_STORY
+                      and _similar(s["title"], item["title"])), None)
         if match:
             match["outlets"] += 1
             match["_score"] = max(match["_score"], score) + 0.5
             if not match.get("summary") and item.get("summary"):
                 match["summary"] = item["summary"]
             continue
-        stories.append({**item, "_tokens": tokens, "_score": float(score), "outlets": 1})
+        stories.append({**item, "_score": float(score), "outlets": 1})
 
     focus = set(focus_sessions)
+    recent = set(recent_sessions)
     for story in stories:
-        story["session"] = session_for(story["published"], sessions) or "after latest session"
+        story["session"] = (session_for(story["published"], sessions, story["title"], exchange_tz)
+                            or "after latest session")
+
+    def tier(story):
+        if story["session"] in focus or story["session"] in recent or story["session"] == "after latest session":
+            return 0
+        return 1
+
+    ranked = sorted(stories, key=lambda s: (tier(s), -s["_score"], s["published"]))
     by_session: Dict[str, List[Dict[str, Any]]] = {}
-    for story in sorted(stories, key=lambda s: (-(s["session"] in focus), -s["_score"], s["published"])):
-        bucket = by_session.setdefault(story["session"], [])
-        if len(bucket) < _PER_SESSION and sum(map(len, by_session.values())) < max_items:
-            bucket.append(story)
+    chosen = set()
+    # First every big-move session and the latest sessions get their top two
+    # stories, so a week of heavy coverage on one day cannot crowd out the day
+    # the stock fell (SNDK: five rally days took all 24 slots and the October 7
+    # "Toshiba storage fears" story behind the selloff never reached the
+    # model). Then the rest fill by rank.
+    for limit in (_GUARANTEED, None):
+        for story in ranked:
+            if id(story) in chosen or len(chosen) >= max_items:
+                continue
+            bucket = by_session.get(story["session"], [])
+            cap = _GUARANTEED if limit else (_PER_SESSION if tier(story) == 0 else _PER_QUIET_SESSION)
+            if limit and tier(story) != 0:
+                continue
+            if len(bucket) >= cap:
+                continue
+            by_session.setdefault(story["session"], []).append(story)
+            chosen.add(id(story))
+    for bucket in by_session.values():
+        bucket.sort(key=lambda s: (-s["_score"], s["published"]))
+
+    zone = _zone(exchange_tz)
 
     def public(story: Dict[str, Any]) -> Dict[str, Any]:
-        local = story["published"].astimezone(_EASTERN)
-        row = {"published_et": local.strftime("%Y-%m-%d %H:%M ET"), "title": story["title"],
+        local = story["published"].astimezone(zone)
+        row = {"published": local.strftime("%Y-%m-%d %H:%M %Z"), "title": story["title"],
                "source": story["source"], "summary": story.get("summary") or None,
                "url": story["url"]}
         if story["outlets"] > 1:
@@ -186,28 +302,44 @@ def rank_and_align(items: List[Dict[str, Any]], names: Sequence[str],
         return row
 
     ordered = sorted(by_session.items(), key=lambda kv: kv[0])
+    stamps = [i["published"] for i in items]
     return {
         "articles_considered": len(items),
         "articles_about_company": len(scored),
+        # The days the feed reaches: a session before `earliest` has no news
+        # because the feed does not go back that far, not because nothing
+        # happened.
+        "coverage": ({"earliest": min(stamps).astimezone(zone).date().isoformat(),
+                      "latest": max(stamps).astimezone(zone).date().isoformat()} if stamps else None),
         "by_session": [{"session": s, "big_move_day": s in focus,
                         "articles": [public(x) for x in rows]} for s, rows in ordered],
     }
 
 
+def finnhub_symbol(ticker: str) -> Optional[str]:
+    """Finnhub's spelling of a US listing (BRK-B is BRK.B); None for others."""
+    symbol = (ticker or "").strip().upper()
+    if not symbol or "." in symbol or symbol.endswith("-USD") or "=" in symbol or symbol.startswith("^"):
+        # A home-market line (MC.PA), a coin, a currency or an index.
+        return None
+    return symbol.replace("-", ".")
+
+
 def fetch_finnhub_news(ticker: str, start: date, end: date, timeout: float = 12.0) -> Optional[List[Dict[str, Any]]]:
     """Finnhub company news between two dates; None without a key or on error."""
     key = (os.getenv("FINNHUB_API_KEY") or "").strip()
-    if not key or not ticker or "-" in ticker or "." in ticker:
-        # Finnhub's company news covers US listings; a coin or a home-market
-        # line falls back to Yahoo.
+    symbol = finnhub_symbol(ticker)
+    if not key or not symbol:
         return None
     try:
         import requests
         response = requests.get(
             FINNHUB_NEWS_URL,
-            params={"symbol": ticker.upper(), "from": start.isoformat(), "to": end.isoformat(), "token": key},
+            params={"symbol": symbol, "from": start.isoformat(), "to": end.isoformat()},
             timeout=timeout,
-            headers={"User-Agent": "VYNN/1.0 (+https://vynnai.com)"},
+            # In a header, as peer_comps and analyst_consensus send it: a URL
+            # with the key in it ends up in exception messages and logs.
+            headers={"User-Agent": "VYNN/1.0 (+https://vynnai.com)", "X-Finnhub-Token": key},
         )
         if response.status_code != 200:
             return None
@@ -234,15 +366,20 @@ def yahoo_items(ticker: str, count: int = 10) -> List[Dict[str, Any]]:
 
 
 def news_for_move(ticker: str, name: Optional[str], start: date, end: date,
-                  sessions: Sequence[str], focus_sessions: Sequence[str] = ()) -> Dict[str, Any]:
+                  sessions: Sequence[str], focus_sessions: Sequence[str] = (),
+                  recent_sessions: Sequence[str] = (), exchange_tz: Optional[str] = "America/New_York",
+                  require_name: bool = True) -> Dict[str, Any]:
     """Ranked, session-aligned articles for a ticker over a date range."""
     names = company_names(name, ticker)
     rows = fetch_finnhub_news(ticker, start, end)
     if rows:
         items, source = normalize_finnhub(rows), "Finnhub company news (headline + summary)"
     else:
-        items, source = yahoo_items(ticker), "Yahoo Finance latest headlines (titles only)"
-    result = rank_and_align(items, names, sessions, focus_sessions)
+        items, source = yahoo_items(ticker), "Yahoo Finance latest headlines (titles only, recent days only)"
+    lo = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
+    items = [i for i in items if i["published"] >= lo]
+    result = rank_and_align(items, names, sessions, focus_sessions, recent_sessions=recent_sessions,
+                            exchange_tz=exchange_tz, require_name=require_name)
     result["source"] = source
     result["matched_names"] = names
     return result
