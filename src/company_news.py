@@ -115,10 +115,22 @@ def _tokens(title: str) -> set:
 
 
 _UP = {"soars", "soared", "jumps", "jumped", "surges", "surged", "rises", "rose", "rallies",
-       "rallied", "gains", "gained", "climbs", "climbed", "up", "higher", "upgrade", "upgrades", "raises"}
+       "rallied", "gains", "gained", "climbs", "climbed", "up", "higher", "upgrade", "upgrades", "raises",
+       "rebounds", "rebounded", "pops", "popped", "spikes", "spiked", "boost", "boosts", "lifts"}
 _DOWN = {"plunges", "plunged", "falls", "fell", "drops", "dropped", "slides", "slid", "sinks",
          "sank", "tumbles", "tumbled", "slumps", "slumped", "down", "lower", "downgrade",
-         "downgrades", "cuts", "crash", "crashes", "crashed"}
+         "downgrades", "cuts", "crash", "crashes", "crashed", "slips", "slipped", "tanks", "tanked",
+         "plummets", "plummeted", "sheds", "loses", "declines", "declined", "selloff", "retreats", "sink"}
+
+
+def describes_move(title: str, change_pct: Optional[float]) -> bool:
+    """Whether a headline reports the session's move ("Cerebras Stock Falls
+    as 19.4 Million-Share Unlock Hits" on a -8.9% day), not an opinion piece
+    or a product story that happened to run that day."""
+    if not change_pct:
+        return False
+    words = set(re.findall(r"[a-z]+", (title or "").lower()))
+    return bool(words & (_DOWN if change_pct < 0 else _UP))
 
 
 def _figures(title: str) -> set:
@@ -217,7 +229,8 @@ def rank_and_align(items: List[Dict[str, Any]], names: Sequence[str],
                    sessions: Sequence[str], focus_sessions: Sequence[str] = (),
                    max_items: int = _MAX_ITEMS, recent_sessions: Sequence[str] = (),
                    exchange_tz: Optional[str] = "America/New_York",
-                   require_name: bool = True) -> Dict[str, Any]:
+                   require_name: bool = True,
+                   session_moves: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """Relevant, de-duplicated articles grouped by the session they could move.
 
     ``focus_sessions`` are the big-move days and ``recent_sessions`` the last
@@ -258,9 +271,15 @@ def rank_and_align(items: List[Dict[str, Any]], names: Sequence[str],
 
     focus = set(focus_sessions)
     recent = set(recent_sessions)
+    moves = session_moves or {}
     for story in stories:
         story["session"] = (session_for(story["published"], sessions, story["title"], exchange_tz)
                             or "after latest session")
+        # The story that reports the day's move leads that day, ahead of an
+        # earlier opinion piece ("Cerebras: Forgotten AI Chip Stock").
+        story["_matches_move"] = describes_move(story["title"], moves.get(story["session"]))
+        if story["_matches_move"]:
+            story["_score"] += 2
 
     def tier(story):
         if story["session"] in focus or story["session"] in recent or story["session"] == "after latest session":
@@ -299,6 +318,11 @@ def rank_and_align(items: List[Dict[str, Any]], names: Sequence[str],
                "url": story["url"]}
         if story["outlets"] > 1:
             row["outlets"] = story["outlets"]
+        if _ROUNDUP.search(story["title"]):
+            # Kept for context, never a day's headline.
+            row["roundup"] = True
+        if story["_matches_move"]:
+            row["reports_the_move"] = True
         return row
 
     ordered = sorted(by_session.items(), key=lambda kv: kv[0])
@@ -405,7 +429,8 @@ def yahoo_items(ticker: str, count: int = 10) -> List[Dict[str, Any]]:
 def news_for_move(ticker: str, name: Optional[str], start: date, end: date,
                   sessions: Sequence[str], focus_sessions: Sequence[str] = (),
                   recent_sessions: Sequence[str] = (), exchange_tz: Optional[str] = "America/New_York",
-                  require_name: bool = True) -> Dict[str, Any]:
+                  require_name: bool = True,
+                  session_moves: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """Ranked, session-aligned articles for a ticker over a date range."""
     names = company_names(name, ticker)
     if ticker.upper().endswith("-USD"):
@@ -425,7 +450,8 @@ def news_for_move(ticker: str, name: Optional[str], start: date, end: date,
     lo = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
     items = [i for i in items if i["published"] >= lo]
     result = rank_and_align(items, names, sessions, focus_sessions, recent_sessions=recent_sessions,
-                            exchange_tz=exchange_tz, require_name=require_name)
+                            exchange_tz=exchange_tz, require_name=require_name,
+                            session_moves=session_moves)
     result["source"] = source
     result["matched_names"] = names
     return result
