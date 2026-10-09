@@ -205,7 +205,10 @@ class ExplainPriceMoveTool(Tool):
 
         start, end = news_window(move)
         sessions = [str(stamp.date()) for stamp in daily.index] if daily is not None else []
-        focus = [d["date"] for d in move.get("biggest_days") or []]
+        # The news is read for the sessions that made the move first, then for
+        # the window's other big days.
+        made_it = [d["date"] for d in (move.get("episode") or {}).get("sessions_that_made_it") or []]
+        focus = made_it or [d["date"] for d in move.get("biggest_days") or []]
         recent = sessions[-2:]
 
         from src.company_news import news_for_move

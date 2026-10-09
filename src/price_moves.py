@@ -141,7 +141,8 @@ def window_bars(window: str, closes) -> int:
 
 
 def biggest_days(daily, sessions: int, count: int = _BIGGEST_DAYS,
-                 session_open: bool = False) -> List[Dict[str, Any]]:
+                 session_open: bool = False, between: Optional[Tuple[str, str]] = None,
+                 sign: int = 0) -> List[Dict[str, Any]]:
     """The largest one-day moves in the last ``sessions``, oldest first.
 
     Volume is compared with the average of the 50 sessions before each day, so
@@ -156,6 +157,12 @@ def biggest_days(daily, sessions: int, count: int = _BIGGEST_DAYS,
     volume = daily["Volume"] if "Volume" in daily else None
     changes = closes.pct_change()
     recent = changes.iloc[-sessions:].dropna()
+    if between:
+        # Only the sessions inside a move (after its start, up to its end),
+        # and only those going its way: a +12% rally day explains no fall.
+        recent = recent[[between[0] < _day(stamp) <= between[1] for stamp in recent.index]]
+    if sign:
+        recent = recent[recent * sign > 0]
     ranked = sorted(recent.items(), key=lambda item: abs(item[1]), reverse=True)[:count]
     out = []
     for stamp, change in sorted(ranked, key=lambda item: item[0]):
@@ -323,7 +330,14 @@ def describe_move(daily, live_price: Optional[float], window: str = "1mo",
     if session_open:
         out["session_in_progress"] = True
     if episode:
-        out["episode"] = {**episode, "since_end_pct": _pct(latest, episode["end_close"])}
+        out["episode"] = {**episode, "since_end_pct": _pct(latest, episode["end_close"]),
+                          # The sessions that made the move: what its drivers
+                          # have to explain (Intel's slide was Sep 25, Sep 28,
+                          # Oct 5, Oct 6 and Oct 8, not September's rallies).
+                          "sessions_that_made_it": biggest_days(
+                              frame, sessions, session_open=session_open,
+                              between=(episode["start_date"], episode["end_date"]),
+                              sign=-1 if episode["direction"] == "down" else 1)}
         market = index_change(index_closes, episode["start_date"], episode["end_date"])
         if market is not None:
             out["episode"]["market_index"] = index_name

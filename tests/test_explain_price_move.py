@@ -105,6 +105,10 @@ def test_the_crash_is_the_slide_not_todays_tick():
     assert days["2026-09-30"]["change_pct"] == -8.87 and days["2026-09-30"]["volume_vs_average"] >= 1.5
     assert "2026-10-08" in [d["date"] for d in price_moves.biggest_days(
         price_moves.with_live_close(_evening(_daily()), 120.0), 21)]   # a live crash today shows up
+    # The sessions inside the slide, falling: what the drivers must explain.
+    made_it = [d["date"] for d in episode["sessions_that_made_it"]]
+    assert "2026-09-30" in made_it and "2026-10-01" in made_it and "2026-10-05" not in made_it   # +9.1% rebound
+    assert all("2026-09-22" < d <= "2026-10-02" for d in made_it)
     # A recent IPO: its first close is part of the story.
     assert move["listed_since"] == "2026-05-14" and move["first_close"] == 311.07
     assert move["since_first_close_pct"] == -46.02
@@ -435,6 +439,7 @@ def test_the_tool_reads_news_and_filings_for_the_sessions_that_moved(monkeypatch
     assert out["status"] == "ok" and out["episode"]["start_date"] == "2026-09-22"
     assert out["latest_price"] == 167.92 and out["day_change_pct"] == -4.07
     assert asked["start"] <= date(2026, 9, 19) and "2026-09-30" in asked["focus"]
+    assert all("2026-09-22" < d <= "2026-10-02" for d in asked["focus"])   # the slide's own sessions
     assert asked["recent"] == ["2026-10-07", "2026-10-08"]
     assert out["sec_filings"]["counts"] == {"144": 3}
     # The market and the sector after the bell: today's live level, not
