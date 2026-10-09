@@ -15,7 +15,9 @@ import re
 import json
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
-from src.model_statements import bind_numbers, is_model_statement, model_facts, subject_names
+from src.model_statements import (
+    bind_numbers, is_model_statement, model_facts, model_statement_gap, subject_names,
+)
 
 
 class RecommendationValidator:
@@ -912,6 +914,9 @@ class RecommendationValidator:
         cited_count = 0
         uncited_sentences = []
         cited_sentences = []
+        # Why each uncited sentence is not a model statement, when it reads
+        # like one: the rewrite is told what to drop, not to cite VYNN's figures.
+        uncited_details = []
         
         for sent in material_sentences:
             if self.EVIDENCE_PATTERN.search(sent):
@@ -919,6 +924,10 @@ class RecommendationValidator:
                 cited_sentences.append(sent)
             else:
                 uncited_sentences.append(sent)
+                uncited_details.append({
+                    "sentence": sent,
+                    "model_gap": model_statement_gap(sent, facts, subject),
+                })
         
         coverage = (cited_count / len(material_sentences)) * 100
         
@@ -930,6 +939,7 @@ class RecommendationValidator:
             "coverage_pct": coverage,
             "model_statements": len(model_statements),
             "uncited_sentences": uncited_sentences[:10],  # Show first 10 for debugging
+            "uncited_details": uncited_details[:10],
             "cited_sentences": cited_sentences[:5]  # Show first 5 examples
         }
         

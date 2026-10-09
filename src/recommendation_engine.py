@@ -530,9 +530,27 @@ class RecommendationEngineV3:
         return final_output, total_cost, evidence_pack
     
     @staticmethod
+    def _uncited_fix(gap: Optional[Dict[str, Any]]) -> str:
+        """What the rewrite must do about one uncited sentence."""
+        if not gap:
+            return ("a news claim: cite the item whose title or snippet states it, "
+                    "or delete the sentence")
+        if gap.get("unbound"):
+            return (f"{', '.join(gap['unbound'])} is not one of VYNN's figures as written "
+                    "(check the value, its sign and what it is the figure of): cite the item "
+                    "that states it, restate VYNN's figure exactly, or delete it")
+        return (f"it restates VYNN's figures but also says {', '.join(gap.get('extra_words') or [])}: "
+                "keep only VYNN's own figures and valuation terms, with no [E#], or delete it")
+
+    @staticmethod
     def _support_fix(issue: Dict[str, Any]) -> str:
         """What the rewrite must do about one unsupported cited claim."""
         reason = issue.get("reason")
+        field = str(issue.get("field") or "")
+        if (".watch" in field or field.startswith(("monitoring_plan", "action."))) \
+                and reason == "wording_not_in_source":
+            return ("an item to monitor: remove its [E#] (an item without a figure or date "
+                    "needs none), or restate only what the cited title or snippet says")
         if reason == "model_figures_cited_to_news":
             return ("this sentence only restates VYNN's model outputs, which no news item "
                     "states: remove the [E#] from it and keep the figures as given")
@@ -623,14 +641,15 @@ class RecommendationEngineV3:
             issues_section += "**PRODUCTION REQUIREMENT**: 95%+ coverage (YOU MUST ACHIEVE THIS)\n\n"
             
             # Show uncited sentences if available
-            uncited = coverage.get('uncited_sentences', [])
-            if uncited:
-                issues_section += (
-                    "**News Claims MISSING Citations** (cite the item whose title or "
-                    "snippet states it, or delete the sentence):\n"
-                )
-                for i, sent in enumerate(uncited[:10], 1):
-                    issues_section += f"{i}. {json.dumps(sent[:200])}\n"
+            details = coverage.get('uncited_details') or [
+                {"sentence": sent} for sent in coverage.get('uncited_sentences', [])]
+            if details:
+                issues_section += "**Uncited Sentences** (fix EACH one as its line says):\n"
+                for i, detail in enumerate(details[:10], 1):
+                    issues_section += (
+                        f"{i}. {json.dumps(str(detail.get('sentence') or '')[:200])}\n"
+                        f"   → {self._uncited_fix(detail.get('model_gap'))}\n"
+                    )
                 issues_section += "\n"
             
             # Show examples of good citations

@@ -59,7 +59,7 @@ _MODEL_WORDS = {
     # Neutral discourse words the captured drafts used about the model.
     "substantial", "significant", "confirm", "separate", "determine", "differ",
     "remain", "follow", "use", "input", "citation", "call", "news", "factor", "whereas",
-    "indicated", "decline",
+    "indicated", "decline", "close", "path", "basis",
 }
 _GLUE = {
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "of", "to",
@@ -93,10 +93,12 @@ _PERCENT_AFTER = re.compile(r"^\s?(?:%|percent\b|per cent\b)")
 _MAGNITUDE_AFTER = re.compile(r"^\s?(?:%\s*)?(?:million|billion|trillion|thousand|bn|mn|[mbk])\b", re.I)
 _MONTHS_AFTER = re.compile(r"^[- ]?months?\b", re.I)
 _COUNT_AFTER = re.compile(r"^[- ]?(?:analysts?|ratings?)\b", re.I)
+# Direction words. Not "under"/"over"/"more"/"less": "a 14.86% return under
+# the 12-month assumption" says nothing about the sign.
 _NEGATIVE = {"below", "downside", "lower", "decline", "declines", "drop", "drops", "fall",
-             "falls", "under", "negative", "less", "short"}
+             "falls", "negative"}
 _POSITIVE = {"above", "upside", "higher", "gain", "gains", "rise", "rises", "premium",
-             "positive", "more", "over"}
+             "positive"}
 _TEXT_PERCENT = re.compile(r"(?<![A-Za-z0-9.])([-+−]?)(\d+(?:\.\d+)?)%(?:\s+(below|above))?")
 
 
@@ -311,6 +313,28 @@ def residual_words(sentence: str, facts: ModelFacts, subject: Set[str] = frozens
     return {w for w in words(sentence)
             if w not in glue and w not in facts.vocabulary and w not in labels
             and w not in subject and w != facts.ticker and len(w) > 1}
+
+
+def model_statement_gap(sentence: str, facts: ModelFacts,
+                        subject: Set[str] = frozenset()) -> Optional[Dict[str, List[str]]]:
+    """What keeps a sentence about the model from being a model statement.
+
+    None when it does not name the model at all (it is news) or when it is
+    one. Otherwise the figures that are not VYNN's and the words beyond the
+    model's, so the rewrite is told what to drop rather than to cite.
+    """
+    text = sentence or ""
+    if not (set(words(text)) & {_stem(w) for w in _ANCHORS}) or is_model_statement(
+            text, facts, subject):
+        return None
+    _, unbound = bind_numbers(text, facts)
+    extra = residual_words(text, facts, subject)
+    # The words as written, not their stems.
+    surface: List[str] = []
+    for word in re.findall(r"[A-Za-z][A-Za-z']*", text):
+        if _stem(word) in extra and word.lower() not in surface:
+            surface.append(word.lower())
+    return {"unbound": unbound, "extra_words": surface}
 
 
 def is_model_statement(sentence: str, facts: ModelFacts, subject: Set[str] = frozenset()) -> bool:

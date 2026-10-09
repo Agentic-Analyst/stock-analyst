@@ -413,7 +413,7 @@ class TestTheLoopConverges:
             # The rewrite is told which watch item failed, where, and why.
             assert '"scenarios.bull.watch[0]" cites E1' in prompt
             assert "Evidence of AI execution during the CEO transition" in prompt
-            assert "in their words, or remove the citation" in prompt
+            assert "an item to monitor: remove its [E#]" in prompt
             return _draft(fixed_seen, watch=["AI execution during the CEO transition"]), 0.0
 
         output, _, pack = engine.generate_recommendation(company, valuation, screening, llm)
@@ -684,3 +684,29 @@ class TestReviewLoop:
         output, pack, calls = self._run(draft, draft)
         assert len(calls) == 4
         assert pack["validation"]["status"] == "degraded"
+
+
+class TestGate53Convergence:
+    """Gate53: three of four runs fell back on one model sentence each."""
+
+    def test_a_return_under_the_assumption_has_no_direction(self):
+        fixed = {**FIXED, "expected_return_pct_12m": 14.86}
+        sentence = ("The published intrinsic value implies a 14.86% return under the explicit "
+                    "12-month convergence assumption.")
+        _, report = _validate(_response(NEWS + " " + sentence), fixed=fixed)
+        assert report["valid"] is True, report["errors"]
+
+    def test_the_rewrite_is_told_what_to_drop_from_a_model_sentence(self):
+        corrected, report = _validate(_response(
+            NEWS + " VYNN's fair value of $226.89 looks attractive to patient holders."
+                   " VYNN's fair value implies 33% upside."))
+        details = report["coverage_details"]["uncited_details"]
+        fixes = [RecommendationEngineV3._uncited_fix(d["model_gap"]) for d in details]
+        assert any("also says" in f and "attractive" in f for f in fixes), fixes
+        assert any(f.startswith("33 is not one of VYNN's figures") for f in fixes), fixes
+
+    def test_a_news_sentence_is_told_to_cite_or_go(self):
+        _, report = _validate(_response(
+            NEWS + " Apple lost its Epic Games appeal, which will cut App Store revenue."))
+        detail = report["coverage_details"]["uncited_details"][0]
+        assert RecommendationEngineV3._uncited_fix(detail["model_gap"]).startswith("a news claim")
