@@ -259,7 +259,9 @@ def _key_headline(result) -> Optional[str]:
     Group N.V.: Which AI Hardware Stock Is a Better Buy in 2026?" — a listicle
     where "Cerebras Stock Falls as 19.4 Million-Share Unlock Hits" (Sep 30,
     -8.9%) belonged. Sessions are tried from the move's largest day down, and
-    a roundup is never the headline.
+    only a story that reports the move is the headline: not a roundup, not an
+    opinion piece ("Cerebras: Forgotten AI Chip Stock") and not a product
+    story that ran that day. Without one there is no headline card.
     """
     news = result.get("news") if isinstance(result, dict) else None
     sessions = (news or {}).get("by_session") if isinstance(news, dict) else None
@@ -270,9 +272,9 @@ def _key_headline(result) -> Optional[str]:
     made_it = sorted((d for d in episode.get("sessions_that_made_it") or [] if isinstance(d, dict)),
                      key=lambda d: -abs(_num(d.get("change_pct")) or 0))
     ordered = [by_day[d.get("date")] for d in made_it if d.get("date") in by_day]
-    ordered += [s for s in sessions if s.get("big_move_day")] + sessions
+    ordered += [s for s in sessions if s.get("big_move_day")]
     for session in ordered:
         for article in session.get("articles") or []:
-            if article.get("title") and not article.get("roundup"):
+            if article.get("title") and article.get("reports_the_move") and not article.get("roundup"):
                 return article["title"]
     return None

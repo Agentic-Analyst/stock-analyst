@@ -429,8 +429,9 @@ def test_the_tool_reads_news_and_filings_for_the_sessions_that_moved(monkeypatch
         "industry": "Semiconductors", "exchange_tz": "America/New_York", "quote_type": "EQUITY"})
     asked = {}
 
-    def news(ticker, name, start, end, sessions, focus, recent, exchange_tz, require_name):
-        asked.update(start=start, focus=focus, recent=recent, tz=exchange_tz, require_name=require_name)
+    def news(ticker, name, start, end, sessions, focus, recent, exchange_tz, require_name, session_moves):
+        asked.update(start=start, focus=focus, recent=recent, tz=exchange_tz, require_name=require_name,
+                     moves=session_moves)
         return {"source": "test", "by_session": []}
 
     monkeypatch.setattr(company_news, "news_for_move", news)
@@ -441,6 +442,7 @@ def test_the_tool_reads_news_and_filings_for_the_sessions_that_moved(monkeypatch
     assert asked["start"] <= date(2026, 9, 19) and "2026-09-30" in asked["focus"]
     assert all("2026-09-22" < d <= "2026-10-02" for d in asked["focus"])   # the slide's own sessions
     assert asked["recent"] == ["2026-10-07", "2026-10-08"]
+    assert asked["moves"]["2026-09-30"] == -8.87
     assert out["sec_filings"]["counts"] == {"144": 3}
     # The market and the sector after the bell: today's live level, not
     # yesterday's close (the evening bars have no Close).
@@ -470,7 +472,8 @@ def test_the_findings_show_the_move_and_its_headline():
               "news": {"by_session": [
                   {"session": "2026-09-29", "big_move_day": False, "articles": [{"title": "Cerebras vs. IonQ"}]},
                   {"session": "2026-09-30", "big_move_day": True,
-                   "articles": [{"title": "Cerebras Stock Falls as 19.4 Million-Share Unlock Hits"}]}]}}
+                   "articles": [{"title": "Cerebras Stock Falls as 19.4 Million-Share Unlock Hits",
+                                 "reports_the_move": True}]}]}}
     cards = extract_findings("explain_price_move", result)
     assert [(c["label"], c["value"]) for c in cards][:2] == [
         ("The move", "-21.7%"), ("Key headline", "Cerebras Stock Falls as 19.4 Million-Share Unlock Hits")]
@@ -483,9 +486,14 @@ def test_the_key_headline_is_the_biggest_days_story_never_a_listicle():
     # on the earliest big-move day.
     from src.agents.findings import extract_findings
     rows = [_row("2026-09-25T09:00:00", "Cerebras Systems vs. Nebius Group N.V.: Which AI Hardware Stock Is a Better Buy in 2026?"),
+            # Then, on the gate: the earliest article of the day, an opinion piece.
+            _row("2026-09-30T07:34:00", "Cerebras: Forgotten AI Chip Stock"),
             _row("2026-09-30T10:28:00", "Cerebras Stock Falls as 19.4 Million-Share Unlock Hits")]
     news = company_news.rank_and_align(company_news.normalize_finnhub(rows), ["CBRS", "Cerebras"],
-                                       ["2026-09-25", "2026-09-30"], ["2026-09-25", "2026-09-30"])
+                                       ["2026-09-25", "2026-09-30"], ["2026-09-25", "2026-09-30"],
+                                       session_moves={"2026-09-25": -3.4, "2026-09-30": -8.87})
+    sept30 = news["by_session"][1]["articles"]
+    assert sept30[0]["title"].startswith("Cerebras Stock Falls") and sept30[0]["reports_the_move"]
     assert news["by_session"][0]["articles"][0]["roundup"] is True
     result = {"status": "ok", "news": news,
               "episode": {"change_pct": -21.65, "start_date": "2026-09-22", "end_date": "2026-10-02",
@@ -493,9 +501,13 @@ def test_the_key_headline_is_the_biggest_days_story_never_a_listicle():
                                                     {"date": "2026-09-30", "change_pct": -8.87}]}}
     cards = {c["label"]: c["value"] for c in extract_findings("explain_price_move", result)}
     assert cards["Key headline"] == "Cerebras Stock Falls as 19.4 Million-Share Unlock Hits"
-    # Only listicles: no headline card rather than a listicle.
-    only = {**result, "news": {"by_session": [news["by_session"][0]]}}
+    # Only a listicle and an opinion piece: no headline card rather than either.
+    only = {**result, "news": {"by_session": [news["by_session"][0],
+                                              {**news["by_session"][1], "articles": [sept30[1]]}]}}
     assert "Key headline" not in {c["label"] for c in extract_findings("explain_price_move", only)}
+    assert company_news.describes_move("Intel stock slips as Musk talks to TSMC", -2.6)
+    assert not company_news.describes_move("What Is Intel Doing In Edge AI?", -5.7)
+    assert not company_news.describes_move("Cerebras Stock Surges After Altman Comment", -8.9)
 
 
 def test_the_agent_is_told_to_explain_the_move_not_todays_tick():

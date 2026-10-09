@@ -208,6 +208,9 @@ class ExplainPriceMoveTool(Tool):
         # The news is read for the sessions that made the move first, then for
         # the window's other big days.
         made_it = [d["date"] for d in (move.get("episode") or {}).get("sessions_that_made_it") or []]
+        session_moves = {d["date"]: d["change_pct"]
+                         for d in (move.get("biggest_days") or [])
+                         + ((move.get("episode") or {}).get("sessions_that_made_it") or [])}
         focus = made_it or [d["date"] for d in move.get("biggest_days") or []]
         recent = sessions[-2:]
 
@@ -217,7 +220,7 @@ class ExplainPriceMoveTool(Tool):
         require_name = identity.get("quote_type") not in _UNNAMED_QUOTE_TYPES and not crypto
         news, filings, fund_frame = await asyncio.gather(
             asyncio.to_thread(news_for_move, ticker, name, start, end, sessions, focus, recent,
-                              exchange_tz, require_name),
+                              exchange_tz, require_name, session_moves),
             asyncio.to_thread(lambda: None if not require_name else filing_activity(ticker, start, end)),
             asyncio.to_thread(lambda: _live_frame(fund[0]) if fund else None),
         )
