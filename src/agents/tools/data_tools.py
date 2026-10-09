@@ -397,14 +397,13 @@ class GetPricesTool(Tool):
             reliable path; fast_info fills gaps when history is throttled."""
             from .yf_resilience import fetch_history, fetch_spot
             import yfinance as yf
+            from src.price_moves import latest_and_previous_close
             latest = prev_close = None
             df = fetch_history(ticker, "5d")
             if df is not None and len(df) >= 1:
-                closes = df["Close"].dropna()
-                if len(closes) >= 1:
-                    latest = float(closes.iloc[-1])
-                if len(closes) >= 2:
-                    prev_close = float(closes.iloc[-2])
+                # After the close Yahoo's bar for the day has no Close yet:
+                # the last valid close is then the PREVIOUS close.
+                latest, prev_close = latest_and_previous_close(df["Close"])
             if latest is None:
                 latest = fetch_spot(ticker)
             if prev_close is None:
