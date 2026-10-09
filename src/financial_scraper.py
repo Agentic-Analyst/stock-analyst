@@ -1275,10 +1275,10 @@ class FinancialScraper:
         # 4. Scrape analyst data
         self._log("info", "Collecting analyst estimates...")
         modeling_data["analyst_data"] = self.scrape_analyst_estimates()
+        # Recorded in analyst_data.estimate_alignment and the model's notes;
+        # not logged: every info.log line reaches the user's live status.
         from src.estimate_alignment import align_street_estimates
-        alignment = align_street_estimates(modeling_data)
-        if alignment.get("status") in ("rolled", "torn"):
-            self._log("warning", "Street estimates realigned: " + alignment["note"])
+        align_street_estimates(modeling_data)
         try:
             from analyst_consensus import collect_consensus
             company_data = modeling_data.get("company_data", {}) or {}
