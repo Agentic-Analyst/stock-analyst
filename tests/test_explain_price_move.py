@@ -477,6 +477,27 @@ def test_the_findings_show_the_move_and_its_headline():
     assert cards[0]["sub"] == "Sep 22 → Oct 2"
 
 
+def test_the_key_headline_is_the_biggest_days_story_never_a_listicle():
+    # Production, 2026-10-09: the card read "Cerebras Systems vs. Nebius Group
+    # N.V.: Which AI Hardware Stock Is a Better Buy in 2026?" — the only article
+    # on the earliest big-move day.
+    from src.agents.findings import extract_findings
+    rows = [_row("2026-09-25T09:00:00", "Cerebras Systems vs. Nebius Group N.V.: Which AI Hardware Stock Is a Better Buy in 2026?"),
+            _row("2026-09-30T10:28:00", "Cerebras Stock Falls as 19.4 Million-Share Unlock Hits")]
+    news = company_news.rank_and_align(company_news.normalize_finnhub(rows), ["CBRS", "Cerebras"],
+                                       ["2026-09-25", "2026-09-30"], ["2026-09-25", "2026-09-30"])
+    assert news["by_session"][0]["articles"][0]["roundup"] is True
+    result = {"status": "ok", "news": news,
+              "episode": {"change_pct": -21.65, "start_date": "2026-09-22", "end_date": "2026-10-02",
+                          "sessions_that_made_it": [{"date": "2026-09-25", "change_pct": -3.4},
+                                                    {"date": "2026-09-30", "change_pct": -8.87}]}}
+    cards = {c["label"]: c["value"] for c in extract_findings("explain_price_move", result)}
+    assert cards["Key headline"] == "Cerebras Stock Falls as 19.4 Million-Share Unlock Hits"
+    # Only listicles: no headline card rather than a listicle.
+    only = {**result, "news": {"by_session": [news["by_session"][0]]}}
+    assert "Key headline" not in {c["label"] for c in extract_findings("explain_price_move", only)}
+
+
 def test_the_agent_is_told_to_explain_the_move_not_todays_tick():
     from src.agents.generalist_agent import SYSTEM_PROMPT
     assert "call `explain_price_move`" in SYSTEM_PROMPT

@@ -220,7 +220,7 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
             shown = Decimal(str(move)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
             add("metric", "The move", f"{shown:+}%",
                 f"{_short_date(episode['start_date'])} → {_short_date(episode['end_date'])}")
-        headline = _key_headline(result.get("news"))
+        headline = _key_headline(result)
         if headline:
             add("news", "Key headline", headline[:90])
 
@@ -251,14 +251,28 @@ def _short_date(day: str) -> str:
         return str(day)
 
 
-def _key_headline(news) -> Optional[str]:
-    """The top article on the first big-move session, else the first article."""
+def _key_headline(result) -> Optional[str]:
+    """The top story on the session that moved the stock most.
+
+    The card used to take the first article of the earliest big-move day, and
+    for Cerebras that day's only article was "Cerebras Systems vs. Nebius
+    Group N.V.: Which AI Hardware Stock Is a Better Buy in 2026?" — a listicle
+    where "Cerebras Stock Falls as 19.4 Million-Share Unlock Hits" (Sep 30,
+    -8.9%) belonged. Sessions are tried from the move's largest day down, and
+    a roundup is never the headline.
+    """
+    news = result.get("news") if isinstance(result, dict) else None
     sessions = (news or {}).get("by_session") if isinstance(news, dict) else None
     if not isinstance(sessions, list):
         return None
-    ordered = [s for s in sessions if s.get("big_move_day")] + sessions
+    by_day = {s.get("session"): s for s in sessions if isinstance(s, dict)}
+    episode = result.get("episode") if isinstance(result.get("episode"), dict) else {}
+    made_it = sorted((d for d in episode.get("sessions_that_made_it") or [] if isinstance(d, dict)),
+                     key=lambda d: -abs(_num(d.get("change_pct")) or 0))
+    ordered = [by_day[d.get("date")] for d in made_it if d.get("date") in by_day]
+    ordered += [s for s in sessions if s.get("big_move_day")] + sessions
     for session in ordered:
         for article in session.get("articles") or []:
-            if article.get("title"):
+            if article.get("title") and not article.get("roundup"):
                 return article["title"]
     return None

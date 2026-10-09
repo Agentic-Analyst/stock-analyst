@@ -299,6 +299,9 @@ def rank_and_align(items: List[Dict[str, Any]], names: Sequence[str],
                "url": story["url"]}
         if story["outlets"] > 1:
             row["outlets"] = story["outlets"]
+        if _ROUNDUP.search(story["title"]):
+            # Kept for context, never a day's headline.
+            row["roundup"] = True
         return row
 
     ordered = sorted(by_session.items(), key=lambda kv: kv[0])
