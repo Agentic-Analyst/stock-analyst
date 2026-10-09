@@ -153,7 +153,7 @@ class TestModelEvidence:
                          "VYNN's fair value, its published intrinsic value and 12-month "
                          "convergence target, is $226.89 per share.",
                          "VYNN's DCF scenario range is $206.61 to $247.17.",
-                         "The current price at the run is $340.42.",
+                         "VYNN's reference share price at the run is $340.42.",
                          "The implied 12-month return is -33.35% (33.35% downside).",
                          "The analysts' mean target is $328.09 (39 analysts).",
                          FIXED["target_assumption"], FIXED["confidence_alert_text"],
@@ -161,6 +161,15 @@ class TestModelEvidence:
             assert fragment in text, fragment
         assert "(not news)" in E0["source_article_title"]
         assert E0["id"] == "E0" and E0["type"] == "vynn_model"
+
+    def test_every_e0_sentence_quoted_verbatim_is_supported(self):
+        # Gate57: "The current price at the run is $333.25 [E0]" shared no
+        # countable word with E0 and stalled two runs; E0 must pass its own check.
+        import re
+        for sentence in re.split(RecommendationValidator.SENTENCE_PATTERN, E0["snippet"]):
+            sentence = sentence.strip().rstrip(".")
+            if sentence:
+                assert _issue_for(f"{sentence} [E0].") is None, sentence
 
     @pytest.mark.parametrize("sentence", [
         "VYNN's fair value is $226.89 per share, against a current price at the run of $340.42 [E0].",

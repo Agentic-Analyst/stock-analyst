@@ -113,7 +113,11 @@ def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
         sentences.append(f"VYNN's DCF scenario range is {money(m12['range_low'])} to "
                          f"{money(m12['range_high'])}")
     if money(fixed_numbers.get("current_price")):
-        sentences.append(f"The current price at the run is {money(fixed_numbers['current_price'])}")
+        # Not "The current price at the run is ...": "current" and "price" are
+        # support stopwords and "run" is too short, so that sentence shared no
+        # word with E0 even quoted verbatim (gate57: JPM and TSLA fell back on it).
+        sentences.append(f"VYNN's reference share price at the run is "
+                         f"{money(fixed_numbers['current_price'])}")
     expected = fixed_numbers.get("expected_return_pct_12m")
     if isinstance(expected, (int, float)) and not isinstance(expected, bool):
         sentences.append(f"The implied 12-month return is {_signed_pct(expected)}")
