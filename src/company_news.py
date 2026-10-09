@@ -325,18 +325,16 @@ def finnhub_symbol(ticker: str) -> Optional[str]:
     return symbol.replace("-", ".")
 
 
-def fetch_finnhub_news(ticker: str, start: date, end: date, timeout: float = 12.0) -> Optional[List[Dict[str, Any]]]:
-    """Finnhub company news between two dates; None without a key or on error."""
-    key = (os.getenv("FINNHUB_API_KEY") or "").strip()
-    symbol = finnhub_symbol(ticker)
-    if not key or not symbol:
-        return None
+FINNHUB_MARKET_NEWS_URL = "https://finnhub.io/api/v1/news"
+_CHUNK_DAYS = 7
+_MAX_CHUNKS = 8
+
+
+def _finnhub_get(url: str, params: Dict[str, Any], key: str, timeout: float) -> Optional[list]:
     try:
         import requests
         response = requests.get(
-            FINNHUB_NEWS_URL,
-            params={"symbol": symbol, "from": start.isoformat(), "to": end.isoformat()},
-            timeout=timeout,
+            url, params=params, timeout=timeout,
             # In a header, as peer_comps and analyst_consensus send it: a URL
             # with the key in it ends up in exception messages and logs.
             headers={"User-Agent": "VYNN/1.0 (+https://vynnai.com)", "X-Finnhub-Token": key},
@@ -347,6 +345,45 @@ def fetch_finnhub_news(ticker: str, start: date, end: date, timeout: float = 12.
         return rows if isinstance(rows, list) else None
     except Exception:
         return None
+
+
+def fetch_finnhub_news(ticker: str, start: date, end: date, timeout: float = 12.0) -> Optional[List[Dict[str, Any]]]:
+    """Finnhub company news between two dates; None without a key or on error.
+
+    Asked a week at a time, newest first: one call stops at about 230
+    articles, so for a heavily covered name (Goldman Sachs: 419 in a month)
+    a single month-long call reached back only to September 23 and missed
+    the sessions that moved the stock.
+    """
+    key = (os.getenv("FINNHUB_API_KEY") or "").strip()
+    symbol = finnhub_symbol(ticker)
+    if not key or not symbol:
+        return None
+    rows: Dict[Any, Dict[str, Any]] = {}
+    answered = False
+    hi = end
+    for _ in range(_MAX_CHUNKS):
+        if hi < start:
+            break
+        lo = max(start, hi - timedelta(days=_CHUNK_DAYS - 1))
+        chunk = _finnhub_get(FINNHUB_NEWS_URL, {"symbol": symbol, "from": lo.isoformat(),
+                                                "to": hi.isoformat()}, key, timeout)
+        if chunk is None:
+            break
+        answered = True
+        for row in chunk:
+            if isinstance(row, dict):
+                rows[row.get("id") or (row.get("headline"), row.get("datetime"))] = row
+        hi = lo - timedelta(days=1)
+    return list(rows.values()) if answered else None
+
+
+def fetch_finnhub_crypto_news(timeout: float = 12.0) -> Optional[List[Dict[str, Any]]]:
+    """Finnhub's crypto market news (the latest ~100, with summaries)."""
+    key = (os.getenv("FINNHUB_API_KEY") or "").strip()
+    if not key:
+        return None
+    return _finnhub_get(FINNHUB_MARKET_NEWS_URL, {"category": "crypto"}, key, timeout)
 
 
 def yahoo_items(ticker: str, count: int = 10) -> List[Dict[str, Any]]:
@@ -371,10 +408,19 @@ def news_for_move(ticker: str, name: Optional[str], start: date, end: date,
                   require_name: bool = True) -> Dict[str, Any]:
     """Ranked, session-aligned articles for a ticker over a date range."""
     names = company_names(name, ticker)
-    rows = fetch_finnhub_news(ticker, start, end)
+    if ticker.upper().endswith("-USD"):
+        # A coin has no company news: Finnhub's crypto market feed (the last
+        # day or two, with summaries) and Yahoo's headlines for the pair.
+        coin = re.sub(r"\s+USD$", "", name or "", flags=re.I).strip()
+        names = [n for n in [ticker.upper().split("-")[0], coin] if n]
+        items = normalize_finnhub(fetch_finnhub_crypto_news() or []) + yahoo_items(ticker)
+        source = "Finnhub crypto market news (headline + summary) and Yahoo Finance headlines"
+        rows = None
+    else:
+        rows = fetch_finnhub_news(ticker, start, end)
     if rows:
         items, source = normalize_finnhub(rows), "Finnhub company news (headline + summary)"
-    else:
+    elif not ticker.upper().endswith("-USD"):
         items, source = yahoo_items(ticker), "Yahoo Finance latest headlines (titles only, recent days only)"
     lo = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
     items = [i for i in items if i["published"] >= lo]

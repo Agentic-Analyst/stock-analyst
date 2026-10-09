@@ -232,6 +232,30 @@ def test_finnhub_gets_the_key_in_a_header_and_us_spellings(monkeypatch):
     assert seen["headers"]["X-Finnhub-Token"] == "k-secret" and "k-secret" not in seen["url"]
 
 
+def test_finnhub_is_asked_a_week_at_a_time(monkeypatch):
+    # One call stops at ~230 articles: Goldman's month-long call reached back
+    # only to September 23. Weekly calls, newest first, cover the window.
+    asked = []
+
+    class _Response:
+        status_code = 200
+
+        def __init__(self, params):
+            self.params = params
+
+        def json(self):
+            stamp = datetime.fromisoformat(self.params["to"] + "T12:00:00-04:00").timestamp()
+            return [{"id": self.params["to"], "datetime": stamp, "headline": "Goldman " + self.params["to"]}]
+
+    import requests
+    monkeypatch.setattr(requests, "get", lambda url, params=None, timeout=None, headers=None:
+                        asked.append((params["from"], params["to"])) or _Response(params))
+    monkeypatch.setenv("FINNHUB_API_KEY", "k")
+    rows = company_news.fetch_finnhub_news("GS", date(2026, 9, 8), date(2026, 10, 9))
+    assert asked[0] == ("2026-10-03", "2026-10-09") and asked[-1][0] == "2026-09-08"
+    assert len(asked) == 5 and len(rows) == 5
+
+
 def test_after_close_news_belongs_to_the_next_session():
     sessions = ["2026-09-30", "2026-10-01", "2026-10-02", "2026-10-05"]
     et = lambda s: datetime.fromisoformat(s + "-04:00")
