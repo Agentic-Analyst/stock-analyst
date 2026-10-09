@@ -11,20 +11,23 @@ forced a rewrite of every draft.
 Two attempts to exempt "model statements" heuristically were broken by
 independent reviews (PR #48), so nothing the model writes is exempted here:
 
-1. VYNN's own figures are an evidence item, E0, built by the engine. A
-   sentence restating them cites [E0] and passes main's support check
-   against E0's text, plus E0-only rules that make it stricter: one of E0's
-   figures or its rating, no other rating, two shared words, no word E0
-   does not say, no negation E0 does not make.
+1. VYNN's own figures are an evidence item, E0, built by the engine as
+   standalone sentences. A sentence citing [E0] cites it alone and is one of
+   those sentences, word for word. (A first version checked E0 by shared
+   words, and a review reversed it with E0's own words: "VYNN's fair value
+   is 33% above the market price [E0]" against an alert saying 33% below.)
 2. Coverage skips only text the engine wrote itself (the 12-month driver),
    matched exactly; no phrase excuses a sentence.
-3. The rewrite is shown each failing sentence, JSON-quoted, with its reason;
-   its advice is only ever to cite a source that states it, restate what
-   the source says, or delete it.
+3. The rewrite is shown each failing sentence, JSON-quoted, with its reason,
+   and E0's sentences; its advice is only ever to cite a source that states
+   it, restate what the source says, or delete it.
 4. Replacing the engine's own texts never forces a rewrite; the loop stops
    only when a response is valid and nothing in it was corrected.
-5. Main's checker is otherwise unchanged, except that the company's own name
-   is never shared wording and printed items with a figure or date must cite.
+5. Main's checker is otherwise unchanged, except where it is stricter: the
+   company's own name is never shared wording; a news-cited sentence never
+   names VYNN; no evidence ID is printed outside brackets; printed items
+   with a figure or date must cite; and an uncited figure, or a rejected
+   claim back without its citation, fails whatever the coverage.
 """
 
 import json
@@ -147,42 +150,60 @@ def test_the_base_response_is_valid():
 # --- 1. E0 ------------------------------------------------------------------
 
 class TestModelEvidence:
-    def test_e0_states_each_figure_with_its_role(self):
-        text = E0["snippet"]
-        for fragment in ("VYNN's rating is STRONG SELL, at low confidence.",
-                         "VYNN's fair value, its published intrinsic value and 12-month "
-                         "convergence target, is $226.89 per share.",
-                         "VYNN's DCF scenario range is $206.61 to $247.17.",
-                         "VYNN's reference share price at the run is $340.42.",
-                         "The implied 12-month return is -33.35% (33.35% downside).",
-                         "The analysts' mean target is $328.09 (39 analysts).",
-                         FIXED["target_assumption"], FIXED["confidence_alert_text"],
-                         "P/E ratio 36.89x", "net margin 26.9%", "52-week range $200.00 to $360.00"):
-            assert fragment in text, fragment
+    def test_e0_is_standalone_sentences(self):
+        assert E0["snippet"] == " ".join([
+            "VYNN's rating is STRONG SELL, at low confidence.",
+            "VYNN's fair value and 12-month target is $226.89 per share.",
+            "VYNN's DCF scenario range is $206.61 to $247.17.",
+            "The share price used for this valuation is $340.42.",
+            "The implied 12-month return is -33.35%.",
+            "The mean target of 39 analysts is $328.09.",
+            FIXED["target_assumption"], FIXED["confidence_alert_text"],
+            "The P/E ratio is 36.89x.", "The net margin is 26.9%.",
+            "The 52-week range is $200.00 to $360.00.",
+        ])
         assert "(not news)" in E0["source_article_title"]
         assert E0["id"] == "E0" and E0["type"] == "vynn_model"
 
     def test_every_e0_sentence_quoted_verbatim_is_supported(self):
         # Gate57: "The current price at the run is $333.25 [E0]" shared no
         # countable word with E0 and stalled two runs; E0 must pass its own check.
-        import re
-        for sentence in re.split(RecommendationValidator.SENTENCE_PATTERN, E0["snippet"]):
-            sentence = sentence.strip().rstrip(".")
-            if sentence:
-                assert _issue_for(f"{sentence} [E0].") is None, sentence
+        sentences = RecommendationValidator.model_statements(E0)
+        assert len(sentences) == 11
+        for sentence in sentences:
+            assert _issue_for(f"{sentence.rstrip('.')} [E0].") is None, sentence
+
+    def test_an_alert_naming_the_streets_rating_passes_quoted(self):
+        # A rating-word alert failed the old "no other rating" rule even quoted.
+        fixed = {**FIXED, "confidence_alert_text": (
+            "Low confidence: VYNN rates Apple a STRONG SELL, while 39 analysts rate it a Buy.")}
+        pack = {**PACK, "evidence": [model_evidence_item(fixed, CONTEXT, "$")] + NEWS}
+        assert _issue_for("Low confidence: VYNN rates Apple a STRONG SELL, while 39 analysts "
+                          "rate it a Buy [E0].", pack=pack, fixed=fixed) is None
 
     @pytest.mark.parametrize("sentence", [
+        "VYNN's rating is STRONG SELL, at low confidence [E0].",
+        "vynn’s rating is strong sell, at low confidence [E0]",
+        "VYNN's rating is STRONG SELL [E0], at low confidence.",
+        "The implied 12-month return is −33.35% [E0].",
+        "  The 52-week range is   $200.00 to $360.00 [E0].",
+    ])
+    def test_a_quotation_may_differ_only_in_case_spacing_and_typography(self, sentence):
+        assert _issue_for(sentence) is None
+
+    @pytest.mark.parametrize("sentence", [
+        # Paraphrases, however faithful: E0 is quoted, not restated.
         "VYNN's fair value is $226.89 per share, against a current price at the run of $340.42 [E0].",
         "The DCF scenario range is $206.61 to $247.17 [E0].",
         "The rating is STRONG SELL at low confidence [E0].",
-        "VYNN's fair value is 33% below the market price, while the mean target of 39 analysts is 4% below it [E0].",
-        "The 12-month case assumes convergence to the currently published intrinsic value; "
-        "it is not a statistically forecast market price [E0].",
-        "The implied 12-month return is -33.35% [E0].",
         "Apple's P/E ratio is 36.89x in the provider market data [E0].",
+        "VYNN's calculator lists a published intrinsic value of $226.89 per share [E0].",
+        # Part of a sentence, or two run together.
+        "VYNN's fair value is 33% below the market price [E0].",
+        "VYNN's rating is STRONG SELL, at low confidence, and the P/E ratio is 36.89x [E0].",
     ])
-    def test_a_restatement_citing_e0_is_supported(self, sentence):
-        assert _issue_for(sentence) is None
+    def test_anything_but_a_quotation_fails(self, sentence):
+        assert "word for word" in _issue_for(sentence)
 
     @pytest.mark.parametrize("sentence", [
         # News claims laundered through E0.
@@ -198,6 +219,15 @@ class TestModelEvidence:
         "VYNN's fair value is not 33% below the market price [E0].",
         "VYNN does not rate Apple a STRONG SELL [E0].",
         "VYNN's fair value is 4% below the market price, a substantial disagreement [E0].",
+        "The implied 12-month return is 33.35% [E0].",
+        "The implied 12-month return is up 33.35% [E0].",
+        # Roles swapped.
+        "VYNN's fair value and 12-month target is $340.42 per share [E0].",
+        "The mean target of 39 analysts is $226.89 [E0].",
+        "The mean target of 39 analysts is STRONG SELL [E0].",
+        # Advice in E0's words.
+        "VYNN's fair value and 12-month target is $226.89 per share, so add now [E0].",
+        "VYNN's fair value of $226.89 per share is far too low [E0].",
         # Another rating.
         "VYNN rates Apple a STRONG BUY [E0].",
         "VYNN rates Apple a Buy, with low confidence [E0].",
@@ -205,12 +235,64 @@ class TestModelEvidence:
     def test_e0_launders_nothing(self, sentence):
         assert _issue_for(sentence) is not None, sentence
 
-    def test_the_rewrite_is_told_which_words_e0_does_not_use(self):
-        # Gate55: drafts framed E0's figures ("VYNN's calculator lists ...",
-        # "The model states that ..."), and reasons given as stems ("list,
-        # stat") had the rewrite swap one framing verb for another.
-        reason = _issue_for("VYNN's calculator lists a published intrinsic value of $226.89 per share [E0].")
-        assert "(calculator, lists)" in reason and "no framing of your own" in reason
+    @pytest.mark.parametrize("alert", [
+        # review50 r1/r5/r9: an alert in the other direction puts "above" in E0.
+        ("Low confidence: VYNN's fair value is 33% below the market price, while the mean "
+         "target of 39 analysts is 15% above it. That is a large gap between VYNN and the "
+         "Street, so treat this as VYNN's own view and weigh both."),
+        ("Low confidence: VYNN's fair value is 94% below the market price, while the mean "
+         "target of 37 analysts is 5% above it."),
+    ])
+    @pytest.mark.parametrize("sentence", [
+        "VYNN's fair value is 33% above the market price [E0].",
+        "VYNN's fair value is 94% above the market price [E0].",
+        "VYNN's fair value is above the market price [E0].",
+        "The mean target of 39 analysts is 33% below the market price, while VYNN's fair value "
+        "is 15% above it [E0].",
+    ])
+    def test_an_opposite_alert_lends_e0_no_direction(self, alert, sentence):
+        fixed = {**FIXED, "confidence_alert_text": alert}
+        pack = {**PACK, "evidence": [model_evidence_item(fixed, CONTEXT, "$")] + NEWS}
+        assert _issue_for(sentence, pack=pack, fixed=fixed) is not None
+
+    @pytest.mark.parametrize("sentence", [
+        # review50 r2: a news item cited beside E0 lent it "upside".
+        "The implied 12-month return is 33.35% upside [E0][E2].",
+        "The implied 12-month return is -33.35% [E0][E2].",
+        "VYNN's fair value and 12-month target is $226.89 per share [E0] [E1].",
+    ])
+    def test_e0_is_cited_alone(self, sentence):
+        assert "cite E0 alone" in _issue_for(sentence)
+
+    @pytest.mark.parametrize("sentence", [
+        # A news item never states VYNN's view.
+        "VYNN's fair value is 4% above the record Apple set after the Duo launch [E2].",
+        "VYNN rates Apple a STRONG SELL despite the iPhone Duo launch [E2].",
+    ])
+    def test_a_news_citation_never_carries_vynns_view(self, sentence):
+        assert "VYNN's view" in _issue_for(sentence)
+
+    @pytest.mark.parametrize("sentence", [
+        "VYNN's fair value and 12-month target is $226.89 per share per E0 [E0].",
+        "VYNN's fair value and 12-month target is $226.89 per share (see E0).",
+        "Apple stock climbed 4% after the Duo launch, as E2 reports [E2].",
+    ])
+    def test_an_evidence_id_is_never_printed_as_a_word(self, sentence):
+        assert "appears only as a citation in brackets" in _issue_for(sentence)
+
+    def test_an_evidence_list_field_is_not_prose(self):
+        _, report = _validate(_response())
+        assert not report.get("citation_support_issues")
+
+    def test_a_figure_that_says_nothing_is_left_out(self):
+        fixed = {**FIXED, "expected_return_pct_12m": float("nan"),
+                 "inputs": {**FIXED["inputs"], "analyst_count": 0}}
+        text = model_evidence_item(fixed, {**CONTEXT, "week_52_low": 0, "week_52_high": 0}, "$")["snippet"]
+        for absent in ("nan", "implied 12-month return", "mean target of 0", "52-week", "$0.00"):
+            assert absent not in text, absent
+        one = model_evidence_item({**FIXED, "inputs": {**FIXED["inputs"], "analyst_count": 1}},
+                                  CONTEXT, "$")["snippet"]
+        assert "The mean target of 1 analyst is $328.09." in one
 
     def test_another_rating_beside_e0_figures_fails(self):
         # Every word and figure is E0's; only the label is not.
@@ -249,6 +331,54 @@ class TestCoverage:
             rejected_claims={claim})
         assert report["valid"] is False
         assert any("EU fine" in u for u in report["coverage_details"]["uncited_sentences"])
+        assert any("came back without a citation" in e for e in report["errors"])
+
+    def test_a_rejected_claim_fails_even_at_full_coverage(self):
+        # review50 r3 B: back uncited among 21 material sentences, it shipped
+        # at 95.2%. Twenty cited sentences around it change nothing now.
+        claim = "Apple's App Store fallout keeps weighing on iPhone demand"
+        padding = " ".join(["Fiscal third-quarter revenue reached $109.4 billion [E1]."] * 20)
+        _, report = RecommendationValidator().validate_and_correct(
+            json.dumps(_response(THESIS + " " + padding + " " + claim + ".")), FIXED, PACK,
+            rejected_claims={claim + " [E2]."})
+        assert report["coverage_details"]["coverage_pct"] >= 95.0
+        assert report["valid"] is False
+        assert report["returning_rejected_claims"] == [claim]
+
+    def test_an_uncited_figure_fails_even_at_full_coverage(self):
+        padding = " ".join(["Fiscal third-quarter revenue reached $109.4 billion [E1]."] * 20)
+        _, report = _validate(_response(
+            THESIS + " " + padding + " Apple shares fell 12% after the DOJ antitrust suit."))
+        assert report["coverage_details"]["coverage_pct"] >= 95.0
+        assert report["valid"] is False
+        assert report["uncited_figures"] == ["Apple shares fell 12% after the DOJ antitrust suit"]
+
+    @pytest.mark.parametrize("watch", ["Revenue below $90B", "Trim above $400."])
+    def test_a_short_item_with_a_figure_must_cite(self, watch):
+        # review50 r7: under four words, these went unchecked.
+        _, report = _validate(_response(watch=[watch]))
+        assert report["valid"] is False
+
+    def test_a_short_sentence_with_a_figure_must_cite(self):
+        _, report = _validate(_response(THESIS + " Margins hit 46%."))
+        assert report["uncited_figures"] == ["Margins hit 46%"]
+
+    @pytest.mark.parametrize("shape", [
+        {"watch": 5}, {"action_watch": True}, {"watch": "Revenue below $90 billion in Q4"},
+        {"monitoring": "Next quarterly results"},
+    ])
+    def test_an_item_field_of_another_shape_never_crashes(self, shape):
+        response = _response()
+        if "watch" in shape:
+            response["scenarios"]["bull"]["watch"] = shape["watch"]
+        if "action_watch" in shape:
+            response["action"]["watch"] = shape["action_watch"]
+        if "monitoring" in shape:
+            response["monitoring_plan"] = shape["monitoring"]
+        _, report = _validate(response)
+        # A lone string item is still an item: one with a figure must cite.
+        figure = shape.get("watch") == "Revenue below $90 billion in Q4"
+        assert (report["uncited_figures"] == ["Revenue below $90 billion in Q4"]) is figure
 
     def test_the_engine_writes_the_driver_and_it_is_not_counted(self):
         driver = "Strong iPhone demand, up 25% this year, will lift the target."
@@ -314,7 +444,26 @@ class TestRewriteFeedback:
         for phrase in ("remove the [e#]", "remove its [e#]", "remove the citation",
                        "drop the [e#]", "drop its [e#]", "needs no citation", "takes no citation"):
             assert phrase not in prompt, phrase
-        assert "e0 for vynn's own figures" in prompt
+        assert "use one of e0's sentences for vynn's own figures" in prompt
+
+    def test_the_rewrite_is_shown_e0s_sentences(self):
+        corrected, report = _validate(_response(
+            THESIS + " VYNN's calculator lists a fair value of $226.89 per share [E0]."))
+        prompt = self._prompt(report, corrected)
+        assert "is not one of E0's sentences word for word" in prompt
+        assert "**E0's Sentences**" in prompt
+        for sentence in RecommendationValidator.model_statements(E0):
+            assert json.dumps(sentence) in prompt
+
+    def test_the_rewrite_is_shown_what_blocks_the_report(self):
+        claim = "Apple's App Store fallout keeps weighing on iPhone demand"
+        corrected, report = RecommendationValidator().validate_and_correct(
+            json.dumps(_response(THESIS + " " + claim + ". Apple shares fell 12% in a day.")),
+            FIXED, PACK, rejected_claims={claim + " [E2]."})
+        prompt = self._prompt(report, corrected)
+        assert "Came Back Without a Citation" in prompt and json.dumps(claim) in prompt
+        assert "Stating a Figure Without a Citation" in prompt
+        assert json.dumps("Apple shares fell 12% in a day") in prompt
 
     def test_watch_items_are_in_the_rewrites_scope(self):
         corrected, report = _validate(_response(watch=["Apple's App Store fine fallout [E1]"]))
@@ -388,16 +537,16 @@ def _run(first, rewrite):
 
 class TestLoop:
     def test_a_valid_first_draft_with_a_model_sentence_ships_without_a_rewrite(self):
-        extra = " The DCF scenario range is $206.61 to $247.17 [E0]."
+        extra = " VYNN's DCF scenario range is $206.61 to $247.17 [E0]."
         output, pack, calls = _run(lambda f: _draft(f, thesis_extra=extra), None)
         assert len(calls) == 1
         assert pack["validation"]["status"] == "passed"
-        assert "The DCF scenario range is $206.61 to $247.17 [E0]" in output
+        assert "VYNN's DCF scenario range is $206.61 to $247.17 [E0]" in output
         assert pack["evidence"][0]["id"] == "E0"
         assert pack["subject"] == {"ticker": "AAPL", "name": "Apple Inc."}
 
     def test_an_uncited_model_sentence_is_cited_to_e0_in_one_rewrite(self):
-        bare = " The DCF scenario range is $206.61 to $247.17."
+        bare = " VYNN's DCF scenario range is $206.61 to $247.17."
 
         def rewrite(fixed, prompt):
             assert json.dumps(bare.strip().rstrip(".")) in prompt
@@ -439,6 +588,24 @@ class TestLoop:
 
         output, pack, calls = _run(lambda f: draft(f, True), lambda f, p: draft(f, False))
         assert "EU fine" not in output
+        assert pack["validation"]["status"] == "degraded"
+
+    def test_a_news_item_cited_beside_e0_never_ships(self):
+        # review50 r3 A: told "adds words E0 does not use (upside)", the rewrite
+        # cited a news item that says "upside" beside E0, and shipped.
+        claim = " The implied 12-month return is 33.35% upside"
+        output, pack, calls = _run(lambda f: _draft(f, thesis_extra=claim + " [E0]."),
+                                   lambda f, p: _draft(f, thesis_extra=claim + " [E0][E1]."))
+        assert "33.35% upside" not in output
+        assert pack["validation"]["status"] == "degraded"
+
+    def test_a_rejected_claim_back_uncited_never_ships_however_well_cited_the_rest(self):
+        # review50 r3 B, end to end.
+        padding = "".join(" Apple stock climbed 4% after the iPhone Duo launch [E1]." for _ in range(20))
+        claim = " Apple's App Store fallout keeps weighing on iPhone demand"
+        output, pack, calls = _run(lambda f: _draft(f, thesis_extra=padding + claim + " [E1]."),
+                                   lambda f, p: _draft(f, thesis_extra=padding + claim + "."))
+        assert "App Store fallout" not in output
         assert pack["validation"]["status"] == "degraded"
 
     def test_a_watch_item_stripped_of_its_citation_never_ships_a_claim_with_a_figure(self):

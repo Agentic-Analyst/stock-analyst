@@ -36,7 +36,7 @@ load_dotenv()
 
 from llms.config import get_llm
 from logger import StockAnalystLogger
-from recommendation_engine import RecommendationEngineV3
+from recommendation_engine import MODEL_EVIDENCE_TYPE, RecommendationEngineV3
 from src.external_expectations import (
     align_forward_estimates_to_forecast_basis,
     build_external_expectations,
@@ -3951,7 +3951,7 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
         
         for evidence in evidence_list:
             eid = _markdown_cell(evidence.get('id', 'N/A'), 20)
-            etype = _markdown_cell(
+            etype = "VYNN figures" if evidence.get('type') == MODEL_EVIDENCE_TYPE else _markdown_cell(
                 str(evidence.get('type', 'N/A')).replace('_', ' ').title(), 80
             )
             date = _markdown_cell(evidence.get('date', 'N/A'), 40)
@@ -3979,7 +3979,13 @@ def integrate_report_sections(sections: Dict[str, str], data: Dict[str, Any]) ->
         for evidence in evidence_list:
             eid = _markdown_cell(evidence.get('id', 'N/A'), 20)
             title = _markdown_cell(evidence.get('title', 'N/A'), 300)
-            snippet = _markdown_cell(evidence.get('snippet', 'N/A'), 700)
+            # E0 is VYNN's own text, bounded by the engine, and every sentence
+            # of it may be cited: cut at 700 characters, a reader could not
+            # check a P/E or a 52-week range the narrative cites to it.
+            snippet = _markdown_cell(
+                evidence.get('snippet', 'N/A'),
+                3000 if evidence.get('type') == MODEL_EVIDENCE_TYPE else 700,
+            )
             raw_source = evidence.get('source', 'N/A')
             source = _markdown_cell(raw_source, 100)
             source_title = _markdown_cell(

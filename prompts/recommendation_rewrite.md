@@ -51,15 +51,14 @@ Take the JSON structure above and rewrite these TEXT fields ONLY:
 9. **`action.holders`**: 1-2 sentences
 10. **`monitoring_plan`**: Array of items to monitor
 
-**E0 is VYNN's own model outputs and provider market data, not news.** A
-sentence that restates VYNN's rating, fair value, range, the price at the run,
-the implied return, the confidence alert or a market-data figure cites [E0]
-and says only what E0's text says, with its figures as written there, in E0's
-own words: a sentence citing [E0] may use no word E0 does not, so it adds no
-framing of its own ("VYNN's model shows/states/lists/notes/indicates that"). Never
-cite E0 for news or a news item for VYNN's figures; keep the two in separate
-sentences. An item to monitor or act on that states a figure or a date cites
-the item that gives it.
+**E0 is VYNN's own figures and provider market data, not news.** A sentence
+that states VYNN's rating, fair value, range, the share price used, the implied
+return, the analysts' mean target, the confidence alert or a market-data figure
+is one of E0's sentences, copied word for word, ending with [E0] and citing
+nothing else. Never cite E0 for news or a news item for VYNN's figures or view;
+keep the two in separate sentences. Write evidence IDs only as citations in
+brackets, never in the text. Any sentence or item that states a figure or a
+date cites the item that gives it, or the figure is deleted.
 
 ## CRITICAL RULES - PRODUCTION STANDARDS
 
@@ -75,7 +74,7 @@ the item that gives it.
 - Change the JSON structure or field names
 - Leave ANY material sentence without a citation
 - Attach a news citation to a model-derived valuation, rating, or target fact
-  (cite [E0] for those)
+  (use one of E0's sentences, word for word, for those)
 
 ✅ **DO**:
 - Keep ALL numeric fields EXACTLY as shown above

@@ -16,12 +16,10 @@ import json
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 # The evidence item the engine builds from its own deterministic outputs (the
-# rating, the fair value and its range, the price at the run, the implied
-# return, the confidence alert) and provider market data. A sentence that
-# restates VYNN's figures cites it, and is checked against its text like any
-# news claim against its source.
+# rating, the fair value and its range, the price used, the implied return,
+# the confidence alert) and provider market data. A sentence that restates
+# VYNN's figures cites it alone and is one of its sentences, word for word.
 MODEL_EVIDENCE_ID = "E0"
-RATING_LABELS = re.compile(r"\b(strong\s+buy|strong\s+sell|buy|sell|hold)\b", re.IGNORECASE)
 
 
 class RecommendationValidator:
@@ -173,6 +171,20 @@ class RecommendationValidator:
             rejected_claims,
         )
 
+        returning = validation_report.get("returning_rejected_claims") or []
+        if citation_enforcement and returning:
+            validation_report["errors"].append(
+                f"{len(returning)} claim(s) an earlier attempt failed on came back "
+                f"without a citation"
+            )
+            validation_report["valid"] = False
+        uncited_figures = validation_report.get("uncited_figures") or []
+        if citation_enforcement and uncited_figures:
+            validation_report["errors"].append(
+                f"{len(uncited_figures)} sentence(s) state a figure no cited source gives"
+            )
+            validation_report["valid"] = False
+
         # PRODUCTION REQUIREMENT: 95% minimum coverage (only meaningful when
         # there is evidence available to cite)
         if citation_enforcement and coverage < 95.0:
@@ -292,21 +304,40 @@ class RecommendationValidator:
     @classmethod
     def _support_failure(
         cls, sentence: str, cited_ids: Set[str], evidence_by_id: Dict[str, Dict[str, Any]],
-        subject: Optional[Set[str]] = None, rating: Optional[str] = None,
+        subject: Optional[Set[str]] = None,
     ) -> Optional[str]:
         """Why the cited text does not support the sentence, or None.
 
-        Main's check, unchanged, plus two things that only make it stricter:
+        Main's check, unchanged, plus three things that only make it stricter:
         the company's own name is never wording a source shares with a claim
         (every article about Microsoft says "Microsoft", and at nine letters
-        it carried any claim alone), and a sentence citing the model item E0
-        must state one of its figures or its rating, name no other rating,
-        use no word its cited sources do not, and negate nothing they do not.
-        E0 is the engine's own text, so a restatement needs no other word;
-        "VYNN's fair value implies 33% upside [E0]" (the model says 33%
-        downside) and "VYNN's fair value is not 33% below the market price
-        [E0]" share every other word with it.
+        it carried any claim alone); a sentence naming VYNN states VYNN's
+        view, which no news item gives; and a sentence citing the model item
+        E0 cites it alone and is one of E0's sentences, word for word.
+
+        E0 is checked by exact quotation, not by shared words: a restatement
+        built from E0's own words can still reverse it. "VYNN's fair value is
+        33% above the market price [E0]" shares every word with an alert
+        saying the fair value is 33% below it and the Street's target 15%
+        above, and "The implied 12-month return is 33.35% upside [E0][E2]"
+        borrowed "upside" from the news item cited beside E0.
         """
+        claim = cls.EVIDENCE_PATTERN.sub("", sentence)
+        if MODEL_EVIDENCE_ID in cited_ids:
+            if cited_ids != {MODEL_EVIDENCE_ID}:
+                return (f"it cites {MODEL_EVIDENCE_ID} together with another item: state VYNN's "
+                        f"figures and the news in separate sentences, and cite "
+                        f"{MODEL_EVIDENCE_ID} alone")
+            if cls.quote_key(sentence) in {
+                cls.quote_key(statement)
+                for statement in cls.model_statements(evidence_by_id.get(MODEL_EVIDENCE_ID))
+            }:
+                return None
+            return (f"it is not one of {MODEL_EVIDENCE_ID}'s sentences word for word: copy one "
+                    f"exactly, or delete it")
+        if re.search(r"\bVYNN\b", claim, re.IGNORECASE):
+            return (f"it states VYNN's view but cites news: VYNN's figures cite "
+                    f"{MODEL_EVIDENCE_ID} alone, as one of its sentences word for word")
         evidence = " ".join(
             " ".join(str(item.get(field) or "") for field in (
                 # ``title`` is the upstream LLM's derived insight and
@@ -320,7 +351,6 @@ class RecommendationValidator:
         )
         if not evidence.strip():
             return "the cited item has no source text"
-        claim = cls.EVIDENCE_PATTERN.sub("", sentence)
         claim_numbers = cls._support_numbers(claim)
         evidence_numbers = cls._support_numbers(evidence)
         if claim_numbers and not claim_numbers.issubset(evidence_numbers):
@@ -328,41 +358,25 @@ class RecommendationValidator:
             return f"{missing} is not in the cited source"
         overlap = (cls._support_tokens(claim).intersection(cls._support_tokens(evidence))
                    - (subject or set()))
-        if MODEL_EVIDENCE_ID in cited_ids:
-            labels = {" ".join(label.lower().split()) for label in RATING_LABELS.findall(claim)}
-            fixed = " ".join(str(rating or "").lower().split())
-            if labels - {fixed}:
-                return f"it names a rating ({', '.join(sorted(labels - {fixed}))}) that {MODEL_EVIDENCE_ID} does not"
-            model_numbers = cls._support_numbers(" ".join(
-                str((evidence_by_id.get(MODEL_EVIDENCE_ID) or {}).get(field) or "")
-                for field in ("source_article_title", "snippet")))
-            if not (claim_numbers & model_numbers) and not (fixed and fixed in labels):
-                return f"it states none of {MODEL_EVIDENCE_ID}'s figures or its rating"
-            novel = cls._support_tokens(claim) - cls._support_tokens(evidence) - (subject or set())
-            if novel:
-                # The words as written, not their stems: "lists, states", not
-                # "list, stat", or the rewrite swaps one framing verb for another.
-                written = []
-                for word in re.findall(r"[A-Za-z][A-Za-z0-9'’-]{2,}", claim):
-                    if cls._support_tokens(word) & novel and word.lower() not in written:
-                        written.append(word.lower())
-                return (f"it adds words {MODEL_EVIDENCE_ID} does not use ({', '.join(written)}): "
-                        f"write the figures in {MODEL_EVIDENCE_ID}'s own words, with no framing "
-                        f"of your own")
-            # "not" is too short to be a token, and E0 itself says "not news":
-            # a negation must stand in the cited text before the same word.
-            def pairs(text):
-                words = re.findall(r"[a-z0-9.%$]+", text.lower().replace("n't", " not"))
-                return {(a, b) for a, b in zip(words, words[1:]) if a in cls._NEGATIONS}
-            negated = pairs(claim) - pairs(evidence)
-            if negated:
-                return ("it negates what the cited sources do not: "
-                        + ", ".join(" ".join(pair) for pair in sorted(negated)))
         if len(overlap) >= 2 or any(len(token) >= 7 for token in overlap):
             return None
         return "its wording is not what the cited source says"
 
-    _NEGATIONS = {"not", "no", "never", "neither", "nor", "without"}
+    @classmethod
+    def model_statements(cls, item: Any) -> List[str]:
+        """E0's sentences, split exactly as the narrative's sentences are."""
+        snippet = str((item or {}).get("snippet") or "") if isinstance(item, dict) else ""
+        return [part.strip() for part in re.split(cls.SENTENCE_PATTERN, snippet) if part.strip()]
+
+    @classmethod
+    def quote_key(cls, sentence: str) -> str:
+        """A sentence as quoted: no citations, case, spacing or typographic variants."""
+        text = cls.EVIDENCE_PATTERN.sub("", sentence or "")
+        for variant, plain in (("\u2019", "'"), ("\u2018", "'"), ("\u201c", '"'),
+                               ("\u201d", '"'), ("\u2212", "-")):
+            text = text.replace(variant, plain)
+        text = re.sub(r"\s+([,;:.!?])", r"\1", " ".join(text.split()))
+        return text.strip().rstrip(".;:!?").strip().lower()
 
     @classmethod
     def _subject_tokens(cls, evidence_pack: Any, fixed_numbers: Any) -> Set[str]:
@@ -389,14 +403,31 @@ class RecommendationValidator:
         if not evidence_by_id:
             return []
         subject = self._subject_tokens(evidence_pack, fixed_numbers)
-        rating = (fixed_numbers or {}).get("rating")
         issues = []
         for field, text in self._all_text_with_paths(response_data):
+            # A catalyst's or risk's "evidence": ["E2"] list is a field, not prose.
+            if re.fullmatch(r"\s*\[?E\d+\]?\s*", text or ""):
+                continue
             for sentence in re.split(self.SENTENCE_PATTERN, text or ""):
                 cited = {f"E{number}" for number in self.EVIDENCE_PATTERN.findall(sentence)}
+                # "per E0", "(see E3)": an ID printed as a word reads as part
+                # of the sentence, and the E0 quotation check never sees it.
+                named = {
+                    match.upper() for match in re.findall(
+                        r"\bE\d+\b", self.EVIDENCE_PATTERN.sub("", sentence), re.IGNORECASE)
+                } & set(evidence_by_id)
+                if named:
+                    issues.append({
+                        "claim": sentence.strip()[:300],
+                        "citations": sorted(cited),
+                        "field": field,
+                        "reason": (f"it names {', '.join(sorted(named))} in its text: an "
+                                   f"evidence ID appears only as a citation in brackets"),
+                    })
+                    continue
                 if not cited or not cited.issubset(evidence_by_id):
                     continue
-                reason = self._support_failure(sentence, cited, evidence_by_id, subject, rating)
+                reason = self._support_failure(sentence, cited, evidence_by_id, subject)
                 if reason:
                     issues.append({
                         "claim": sentence.strip()[:300],
@@ -474,6 +505,15 @@ class RecommendationValidator:
                 yield path, node
 
         yield from walk(response_data or {}, "")
+
+    @staticmethod
+    def _printed_items(value: Any) -> List[str]:
+        """A printed list field's items; a lone string is one item."""
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [str(item) for item in value if item is not None]
+        return []
 
     @classmethod
     def claim_key(cls, sentence: str) -> str:
@@ -818,12 +858,12 @@ class RecommendationValidator:
         for scenario_type in ['bull', 'base', 'bear']:
             scenario = scenarios.get(scenario_type, {})
             if isinstance(scenario, dict):
-                items.extend(str(item) for item in scenario.get('watch') or [])
+                items.extend(self._printed_items(scenario.get('watch')))
         action = response_data.get('action', {})
         if isinstance(action, dict):
-            items.extend(str(action.get(key) or '') for key in ('buyers', 'holders'))
-            items.extend(str(item) for item in action.get('watch') or [])
-        items.extend(str(item) for item in response_data.get('monitoring_plan', []) or [])
+            for key in ('buyers', 'holders', 'watch'):
+                items.extend(self._printed_items(action.get(key)))
+        items.extend(self._printed_items(response_data.get('monitoring_plan')))
         item_sentences = [
             sentence.strip()
             for text in items
@@ -857,8 +897,9 @@ class RecommendationValidator:
             sent_clean = sent.strip()
             word_count = len(sent_clean.split())
             
-            # Skip very short sentences (connectors like "However,")
-            if word_count < 4:
+            # Skip very short sentences (connectors like "However,"); a short
+            # one stating a figure ("Revenue below $90B.") is still a claim.
+            if word_count < 4 and not any(char.isdigit() for char in sent_clean):
                 continue
             # Text the engine wrote, matched exactly, is not the model's claim.
             if sent_clean in engine_sentences:
@@ -875,12 +916,12 @@ class RecommendationValidator:
             if has_claim or has_numbers:
                 material_sentences.append(sent_clean)
 
-        material_sentences.extend(
-            sentence for sentence in item_sentences if len(sentence.split()) >= 4)
+        material_sentences.extend(item_sentences)
 
         # A sentence an earlier attempt cited and failed on, back with only its
         # citation removed, is the same claim uncited: in any printed field,
         # figure or not. Matched exactly once citations are stripped.
+        returning = []
         if rejected_claims:
             rejected = {self.claim_key(claim) for claim in rejected_claims}
             for text in key_texts + items:
@@ -888,9 +929,20 @@ class RecommendationValidator:
                     sentence = sentence.strip()
                     if (sentence and sentence not in engine_sentences
                             and not self.EVIDENCE_PATTERN.search(sentence)
-                            and self.claim_key(sentence) in rejected
-                            and sentence not in material_sentences):
-                        material_sentences.append(sentence)
+                            and self.claim_key(sentence) in rejected):
+                        returning.append(sentence)
+                        if sentence not in material_sentences:
+                            material_sentences.append(sentence)
+        # Neither may ship whatever the coverage: a rejected claim back
+        # without its citation, or any figure no source gives. At 95%, one
+        # uncited sentence in twenty passed ("Apple shares fell 12% after the
+        # DOJ antitrust suit" shipped at 95.2% once its failed [E1] was gone).
+        report["returning_rejected_claims"] = returning
+        report["uncited_figures"] = [
+            sentence for sentence in material_sentences
+            if not self.EVIDENCE_PATTERN.search(sentence)
+            and any(char.isdigit() for char in sentence)
+        ]
         
         if not material_sentences:
             report["coverage_details"] = {

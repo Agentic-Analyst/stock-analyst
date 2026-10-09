@@ -12,6 +12,7 @@ Design: Numbers = Code, Narrative = LLM, Validation = Code + Critic
 """
 
 import json
+import math
 import traceback
 import os
 import re
@@ -28,6 +29,9 @@ from src.confidence_alert import (
     report_rating_heading, single_fair_value_line, support_shape,
 )
 from src.summary_evidence import compact_publication_reason
+
+# The evidence type of E0, VYNN's own figures: the report labels it as such.
+MODEL_EVIDENCE_TYPE = "vynn_model"
 
 
 def no_single_value_lines(fixed_numbers: Dict[str, Any], ccy: str) -> Tuple[str, list, str]:
@@ -75,10 +79,9 @@ def _symbol_for(code):
     return _CCY.get(code, f"{code} ")
 
 
-def _signed_pct(value: float) -> str:
-    """-33.35 -> "-33.35% (33.35% downside)": both forms a sentence may write."""
-    direction = "downside" if value < 0 else "upside"
-    return f"{value:+.2f}% ({abs(value):.2f}% {direction})"
+def _finite(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) \
+        and math.isfinite(value)
 
 
 def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
@@ -86,72 +89,64 @@ def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
     """E0: VYNN's own deterministic figures as a citable evidence item.
 
     A sentence that restates the rating, the fair value, its range, the price
-    at the run, the implied return or the confidence alert cites [E0] and is
-    checked against this text like a news claim against its source: its
-    figures must be here, its wording must be here. Built only from
-    FIXED_NUMBERS and the company context the explainer is shown, formatted
-    as it is shown there.
+    used, the implied return or the confidence alert cites [E0] alone and is
+    one of these sentences, word for word: the validator checks E0 by exact
+    quotation, so each sentence here must be true and complete on its own.
+    Built only from FIXED_NUMBERS and the company context the explainer is
+    shown, formatted as it is shown there. A figure that is missing, not
+    finite or (for the 52-week range) zero says nothing, so it is left out.
     """
     def money(value):
-        return f"{ccy}{value:,.2f}" if isinstance(value, (int, float)) and \
-            not isinstance(value, bool) else None
+        return f"{ccy}{value:,.2f}" if _finite(value) else None
 
-    # Plain sentences, one figure each: the narrative restates E0 in E0's own
-    # words, so E0 must read as a report would. Gate56 printed "VYNN model
-    # outputs, computed by VYNN's calculator (not news): rating ..." as a
-    # holders' recommendation.
     sentences = []
     rating = fixed_numbers.get("rating")
     if rating:
         confidence = fixed_numbers.get("rating_confidence")
-        sentences.append(f"VYNN's rating is {rating}" + (f", at {confidence} confidence" if confidence else ""))
+        sentences.append(f"VYNN's rating is {rating}"
+                         + (f", at {confidence} confidence" if confidence else "") + ".")
     m12 = (fixed_numbers.get("targets") or {}).get("m12") or {}
     if money(m12.get("price")):
-        sentences.append(f"VYNN's fair value, its published intrinsic value and 12-month "
-                         f"convergence target, is {money(m12['price'])} per share")
+        sentences.append(f"VYNN's fair value and 12-month target is {money(m12['price'])} per share.")
     if money(m12.get("range_low")) and money(m12.get("range_high")):
         sentences.append(f"VYNN's DCF scenario range is {money(m12['range_low'])} to "
-                         f"{money(m12['range_high'])}")
+                         f"{money(m12['range_high'])}.")
     if money(fixed_numbers.get("current_price")):
-        # Not "The current price at the run is ...": "current" and "price" are
-        # support stopwords and "run" is too short, so that sentence shared no
-        # word with E0 even quoted verbatim (gate57: JPM and TSLA fell back on it).
-        sentences.append(f"VYNN's reference share price at the run is "
-                         f"{money(fixed_numbers['current_price'])}")
+        sentences.append(f"The share price used for this valuation is "
+                         f"{money(fixed_numbers['current_price'])}.")
     expected = fixed_numbers.get("expected_return_pct_12m")
-    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
-        sentences.append(f"The implied 12-month return is {_signed_pct(expected)}")
+    if _finite(expected):
+        sentences.append(f"The implied 12-month return is {expected:+.2f}%.")
     inputs = fixed_numbers.get("inputs") or {}
-    if money(inputs.get("analyst_target")) and inputs.get("analyst_count"):
-        sentences.append(f"The analysts' mean target is {money(inputs['analyst_target'])} "
-                         f"({inputs['analyst_count']} analysts)")
-    text = " ".join(sentence + "." for sentence in sentences)
-    for sentence in (fixed_numbers.get("target_assumption"), fixed_numbers.get("confidence_alert_text")):
-        if sentence:
-            text += f" {sentence}"
-    market = [
-        f"{label} {context.get(key)}"
-        for label, key in (
-            ("P/E ratio", "pe_ratio"), ("EV/EBITDA", "ev_ebitda"), ("price-to-book", "pb_ratio"),
-            ("revenue growth", "revenue_growth"), ("net margin", "net_margin"),
-            ("return on equity", "roe"), ("debt-to-equity", "debt_equity"),
-        )
-        if isinstance(context.get(key), str) and context.get(key) != "N/A"
-    ]
-    low, high = money(context.get("week_52_low")), money(context.get("week_52_high"))
-    if low and high:
-        market.append(f"52-week range {low} to {high}")
-    if market:
-        text += " Provider market data: " + "; ".join(market) + "."
+    count = inputs.get("analyst_count")
+    if money(inputs.get("analyst_target")) and _finite(count) and count >= 1:
+        count = int(count)
+        sentences.append(f"The mean target of {count} analyst{'' if count == 1 else 's'} is "
+                         f"{money(inputs['analyst_target'])}.")
+    for text in (fixed_numbers.get("target_assumption"), fixed_numbers.get("confidence_alert_text")):
+        if isinstance(text, str) and text.strip():
+            sentences.append(text.strip())
+    for label, key in (
+        ("The P/E ratio is", "pe_ratio"), ("EV/EBITDA is", "ev_ebitda"),
+        ("The price-to-book ratio is", "pb_ratio"), ("Revenue growth is", "revenue_growth"),
+        ("The net margin is", "net_margin"), ("Return on equity is", "roe"),
+        ("Debt-to-equity is", "debt_equity"),
+    ):
+        value = context.get(key)
+        if isinstance(value, str) and value.strip() and value.strip() != "N/A":
+            sentences.append(f"{label} {value.strip()}.")
+    low, high = context.get("week_52_low"), context.get("week_52_high")
+    if money(low) and money(high) and 0 < low <= high:
+        sentences.append(f"The 52-week range is {money(low)} to {money(high)}.")
     return {
         "id": "E0",
-        "type": "vynn_model",
+        "type": MODEL_EVIDENCE_TYPE,
         "date": fixed_numbers.get("as_of"),
-        "source": "VYNN model",
-        "source_article_title": "VYNN model outputs (not news)",
-        "title": "VYNN's own deterministic outputs and provider market data (not news)",
-        "snippet": text,
-        "source_quality": "vynn_model",
+        "source": "VYNN",
+        "source_article_title": "VYNN's own figures (not news)",
+        "title": "VYNN's valuation figures and provider market data (not news)",
+        "snippet": " ".join(sentences),
+        "source_quality": "computed",
     }
 
 
@@ -690,6 +685,39 @@ class RecommendationEngineV3:
                     f"{json.dumps(issue.get('claim') or '')} — {issue.get('reason') or 'unsupported'}\n"
                 )
             issues_section += "\n"
+
+        returning = validation_report.get("returning_rejected_claims") or []
+        if returning:
+            issues_section += (
+                "**Claims That Failed Before and Came Back Without a Citation** (these block "
+                "the report: delete each, or cite a source that states it):\n"
+            )
+            for i, sent in enumerate(returning[:10], 1):
+                issues_section += f"{i}. {json.dumps(sent[:200])}\n"
+            issues_section += "\n"
+
+        figures = validation_report.get("uncited_figures") or []
+        if figures:
+            issues_section += (
+                "**Sentences Stating a Figure Without a Citation** (these block the report: "
+                "cite the news item that states the figure, use one of E0's sentences below "
+                "for VYNN's own figures, or delete the figure):\n"
+            )
+            for i, sent in enumerate(figures[:10], 1):
+                issues_section += f"{i}. {json.dumps(sent[:200])}\n"
+            issues_section += "\n"
+
+        model_item = next((ev for ev in evidence_pack.get("evidence", [])
+                           if isinstance(ev, dict) and ev.get("type") == MODEL_EVIDENCE_TYPE), None)
+        statements = self.validator.model_statements(model_item)
+        if statements:
+            issues_section += (
+                "**E0's Sentences** (a sentence citing [E0] is exactly one of these, word for "
+                "word, followed by [E0], and cites nothing else):\n"
+            )
+            for i, sent in enumerate(statements, 1):
+                issues_section += f"{i}. {json.dumps(sent)}\n"
+            issues_section += "\n"
         
         coverage = validation_report.get("coverage_details", {})
         if coverage:
@@ -701,8 +729,9 @@ class RecommendationEngineV3:
             uncited = coverage.get('uncited_sentences', [])
             if uncited:
                 issues_section += (
-                    "**Sentences MISSING Citations** (for EACH: cite a source that states it, "
-                    "a news item or E0 for VYNN's own figures, or delete the sentence or item):\n"
+                    "**Sentences MISSING Citations** (for EACH: cite a news item that states it, "
+                    "use one of E0's sentences for VYNN's own figures, or delete the sentence "
+                    "or item):\n"
                 )
                 for i, sent in enumerate(uncited[:10], 1):
                     issues_section += f"{i}. {json.dumps(sent[:200])}\n"
@@ -727,7 +756,8 @@ class RecommendationEngineV3:
 - Rewrite unsupported claims so they say no more than the publisher headline
   and snippet below actually establish
 - Remove a claim when no evidence item directly supports it
-- Cite [E0] for VYNN's own figures and only E0; cite news items only for news
+- For VYNN's own figures, use one of E0's sentences word for word, citing only
+  [E0]; cite news items only for news
 """
         elif attempt == 2:
             iteration_guidance = """
