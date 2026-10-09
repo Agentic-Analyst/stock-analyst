@@ -269,29 +269,62 @@ class RecommendationValidator:
             normalized.add(value)
         return normalized
 
-    # A compound the claim hyphenates is the same words a source spaces out:
-    # "free-cash-flow" is "free cash flow", "capital-spending" is "capital
-    # spending". Validator only: the article screener keeps its tokens.
+    # A compound the claim hyphenates is the same words a source may space
+    # out: "free-cash-flow" is "free cash flow". The compound is joined into
+    # one token ("freecashflow") and matched against the source's runs of two
+    # and three words joined the same way, never split into generic parts
+    # ("long-term" into "long" and "term"). Validator only: the article
+    # screener keeps its tokens.
     _HYPHENATED = re.compile(r"(?<=[A-Za-z])-(?=[A-Za-z])")
+    _WORD = re.compile(r"[A-Za-z][A-Za-z0-9']*")
     _ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+    _MONTHS = (
+        "january", "february", "march", "april", "may", "june", "july",
+        "august", "september", "october", "november", "december",
+    )
 
     @classmethod
-    def _date_numbers(cls, value: Any) -> Set[str]:
-        """The year and day of an evidence item's publication date.
+    def _claim_tokens(cls, text: str) -> Tuple[Set[str], Set[str]]:
+        """The claim's tokens, and which of them are joined compounds."""
+        compounds: Set[str] = set()
+        for word in re.findall(r"[A-Za-z][A-Za-z0-9']*(?:-[A-Za-z][A-Za-z0-9']*)+", text):
+            compounds |= cls._support_tokens(word.replace("-", ""))
+        return cls._support_tokens(cls._HYPHENATED.sub("", text)), compounds
+
+    @classmethod
+    def _source_tokens(cls, text: str) -> Set[str]:
+        tokens = cls._support_tokens(cls._HYPHENATED.sub("", text))
+        words = cls._WORD.findall(cls._HYPHENATED.sub(" ", text))
+        for size in (2, 3):
+            for start in range(len(words) - size + 1):
+                tokens |= cls._support_tokens("".join(words[start:start + size]))
+        return tokens
+
+    @classmethod
+    def _date_numbers(cls, value: Any, claim: str) -> Set[str]:
+        """The year, and the day, of an evidence item's publication date.
 
         The explainer is shown each item's date and told to state a date only
-        when the evidence supplies it, so "reported in September 2026 [E2]"
-        is supported by E2's date, not by its snippet. Numbers only: the month
-        name never counts as shared wording.
+        when the evidence supplies it, so "reported on September 11, 2026
+        [E2]" is supported by E2's date, not by its snippet. The day counts
+        only beside its month's name, so a "$11 million" is never read as the
+        11th; and the date adds numbers only, never shared wording.
         """
         match = cls._ISO_DATE.match(str(value or ""))
         if not match:
             return set()
-        return {match.group(1), str(int(match.group(3)))}
+        numbers = {match.group(1)}
+        month = int(match.group(2))
+        if 1 <= month <= 12:
+            name = cls._MONTHS[month - 1]
+            day = str(int(match.group(3)))
+            if re.search(rf"\b(?:{name}|{name[:3]}\.?)\s+{day}\b", claim, re.IGNORECASE):
+                numbers.add(day)
+        return numbers
 
     @classmethod
     def _cited_source(
-        cls, cited_ids: Set[str], evidence_by_id: Dict[str, Dict[str, Any]],
+        cls, cited_ids: Set[str], evidence_by_id: Dict[str, Dict[str, Any]], claim: str = "",
     ) -> Tuple[str, Set[str]]:
         """The cited items' publisher text, and the numbers it supports."""
         evidence = " ".join(
@@ -307,7 +340,8 @@ class RecommendationValidator:
         )
         numbers = cls._support_numbers(evidence)
         for evidence_id in cited_ids:
-            numbers |= cls._date_numbers((evidence_by_id.get(evidence_id) or {}).get("date"))
+            numbers |= cls._date_numbers(
+                (evidence_by_id.get(evidence_id) or {}).get("date"), claim)
         return evidence, numbers
 
     @classmethod
@@ -315,17 +349,21 @@ class RecommendationValidator:
         cls, sentence: str, cited_ids: Set[str], evidence_by_id: Dict[str, Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
         """Why the cited publisher text does not support the sentence, or None."""
-        evidence, evidence_numbers = cls._cited_source(cited_ids, evidence_by_id)
+        claim = cls.EVIDENCE_PATTERN.sub("", sentence)
+        evidence, evidence_numbers = cls._cited_source(cited_ids, evidence_by_id, claim)
         if not evidence.strip():
             return {"reason": "no_source_text"}
-        claim = cls.EVIDENCE_PATTERN.sub("", sentence)
         claim_numbers = cls._support_numbers(claim)
         missing = sorted(claim_numbers - evidence_numbers)
         if missing:
             return {"reason": "numbers_not_in_source", "numbers": missing}
-        claim_tokens = cls._support_tokens(cls._HYPHENATED.sub(" ", claim))
-        overlap = claim_tokens.intersection(cls._support_tokens(cls._HYPHENATED.sub(" ", evidence)))
-        if len(overlap) >= 2 or any(len(token) >= 7 for token in overlap):
+        claim_tokens, compounds = cls._claim_tokens(claim)
+        overlap = claim_tokens.intersection(cls._source_tokens(evidence))
+        # A compound counts as one shared word, never as a long word that
+        # suffices alone: "long-term" must not carry a claim by itself.
+        if len(overlap) >= 2 or any(
+            len(token) >= 7 and token not in compounds for token in overlap
+        ):
             return None
         # A data table shares few words with any sentence about it ("P/E Ratio
         # 345.73 EPS (TTM) $ 1.08"): two of its exact figures, each specific (a
@@ -452,22 +490,38 @@ class RecommendationValidator:
 
         yield from walk(response_data or {}, "")
 
-    # Words that tie a sentence to the deterministic outputs, not to the news.
+    # Words that name the deterministic outputs. Never words news also uses
+    # for its own claims ("analysts", "target", "upside"): those would let a
+    # news sentence that happens to share a model figure go uncited.
     _MODEL_ANCHOR = re.compile(
         r"\b(?:intrinsic[- ]value|fair value|dcf|valuation|model(?:'s|’s)?|"
-        r"rating|target|convergence|confidence|alert|analysts?|street(?:'s|’s)?|"
-        r"consensus|expected return|downside|upside|vynn(?:'s|’s)?|wacc|"
-        r"discount rate|terminal)\b",
+        r"rating|convergence|alert|vynn(?:'s|’s)?|wacc|discount rate|"
+        r"terminal value|expected return)\b",
         re.IGNORECASE,
+    )
+    # The FIXED_NUMBERS a sentence may restate: the price, the case and its
+    # range, the rating's alert (gaps, analyst count, its own sentence), and
+    # the valuation legs. Not the internal scores (catalyst, momentum,
+    # volatility, freshness ages), whose small numbers collide with news.
+    _STATED_FIGURES = (
+        ("current_price",), ("expected_return_pct_12m",), ("target_assumption",),
+        ("targets",), ("confidence_alert",), ("confidence_alert_text",),
+        ("inputs", "raw_val_gap_pct"), ("inputs", "adj_val_gap_pct"),
+        ("inputs", "valuation_value"), ("inputs", "analyst_target"),
+        ("inputs", "analyst_target_gap_pct"), ("inputs", "analyst_count"),
+        ("inputs", "analyst_rating_count"),
+        ("inputs", "valuation_reliability", "legs"),
+        ("inputs", "valuation_reliability", "range_low"),
+        ("inputs", "valuation_reliability", "range_high"),
     )
 
     @classmethod
     def _model_figures(cls, fixed_numbers: Optional[Dict[str, Any]]) -> List[float]:
-        """Every figure FIXED_NUMBERS states, in the units a sentence would use.
+        """The figures FIXED_NUMBERS states, in the units a sentence would use.
 
         Fractions are also read as percentages (a -0.036 gap is "4% below"),
-        and the numbers inside its text fields (the alert's "39 analysts")
-        count as its own.
+        and the numbers inside its sentences (the alert's "39 analysts", the
+        "12-month" case) count as its own.
         """
         figures: List[float] = []
 
@@ -478,7 +532,7 @@ class RecommendationValidator:
                 value = abs(float(node))
                 if value == value and value != float("inf"):
                     figures.append(value)
-                    if value <= 10:
+                    if value <= 1.5:
                         figures.append(value * 100)
             elif isinstance(node, str):
                 for number in cls._support_numbers(node):
@@ -493,7 +547,11 @@ class RecommendationValidator:
                 for value in node:
                     walk(value)
 
-        walk(fixed_numbers or {})
+        for path in cls._STATED_FIGURES:
+            node: Any = fixed_numbers or {}
+            for key in path:
+                node = node.get(key) if isinstance(node, dict) else None
+            walk(node)
         return figures
 
     @staticmethod

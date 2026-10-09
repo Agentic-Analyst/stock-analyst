@@ -256,6 +256,38 @@ class TestLaunderingStillFails:
         assert report["valid"] is False
 
 
+class TestReviewFindings:
+    """Allowances the adversarial review tried to turn into laundering."""
+
+    def test_the_dates_day_counts_only_beside_its_month(self):
+        # E2 is dated 2026-09-11; "11 complaints" is not the 11th.
+        thesis = NEWS + " The iPhone Duo launch drew 11 complaints in its first week [E2]."
+        _, report = _validate(_response(thesis))
+        issue = report["citation_support_issues"][0]
+        assert issue["reason"] == "numbers_not_in_source"
+        assert issue["numbers"] == ["11"]
+
+    def test_a_generic_compound_never_carries_a_claim_alone(self):
+        pack = {"evidence": PACK["evidence"] + [{
+            "id": "E5", "type": "risk_market", "date": "2026-09-20",
+            "source_article_title": "Investors weigh the long term",
+            "snippet": "Investors are thinking about the long term as rates settle.",
+        }]}
+        thesis = NEWS + " Apple's long-term plans face a DOJ antitrust trial [E5]."
+        _, report = _validate(_response(thesis), pack=pack)
+        assert report["valid"] is False
+        assert report["citation_support_issues"][0]["citations"] == ["E5"]
+
+    def test_news_words_are_not_model_anchors(self):
+        # "Analysts" and a 10 that equals an internal score (10.23) once made
+        # this a model statement; it is news and must cite.
+        fixed = {**FIXED, "inputs": {"catalyst_score_pct": 10.23, "analyst_count": 39}}
+        thesis = NEWS + " Analysts expect iPhone sales to rise 10% next year."
+        _, report = _validate(_response(thesis), fixed=fixed)
+        assert report["valid"] is False
+        assert any("rise 10%" in s for s in report["coverage_details"]["uncited_sentences"])
+
+
 class TestRewriteTrigger:
     def test_replacing_the_valuation_perspective_alone_triggers_no_rewrite(self):
         validator = RecommendationValidator()
