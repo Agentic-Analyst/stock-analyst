@@ -44,18 +44,12 @@ def build_market_expectations(
             mid_cycle_method_note, model_view_summary, plain_rating_note,
             required_growth_sentence, supported_valuation_span, unsuitable_method_note,
         )
-        from src.valuation_methodology import assess_valuation_methodology
+        from src.valuation_methodology import built_method_suitability
 
-        suitability = assess_valuation_methodology(financial_data or {})
-        recorded = (((computed or {}).get("_vynn") or {}).get("model_inputs") or {})
-        if (suitability.get("primary_method") == "dcf_mid_cycle"
-                and not (isinstance(recorded, dict) and recorded.get("mid_cycle"))):
-            # The boundary withholds a mid-cycle method whose workbook was not
-            # built on it (report_agent): say what the workbook is, a scenario.
-            from src.agents.fm.memory_cycle import MID_CYCLE_SCENARIO_REASON
-            suitability = {**suitability, "primary_method": "scenario_only_pending_cycle_normalization",
-                           "publication_allowed": False, "mid_cycle": None,
-                           "reason": MID_CYCLE_SCENARIO_REASON}
+        # The boundary withholds a mid-cycle method whose workbook was not
+        # built on it (report_agent): say what the workbook is, a scenario.
+        suitability = built_method_suitability(
+            financial_data or {}, ((computed or {}).get("_vynn") or {}).get("model_inputs"))
         method_note = unsuitable_method_note(suitability)
         required: Dict[str, Any] = (
             {} if method_note else required_revenue_growth_from_workbook(computed)

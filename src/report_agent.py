@@ -555,14 +555,16 @@ def build_street_reconciliation_table(
     comps = (valuation.get("summary") or {}).get("comps_intrinsic")
     if isinstance(comps, (int, float)) and comps > 0:
         comps_gap = comps / market - 1 if isinstance(market, (int, float)) and market > 0 else None
-        from src.valuation_methodology import normalize_peer_comps_policy
+        from src.valuation_methodology import normalize_peer_comps_policy, peers_blended
         policy = normalize_peer_comps_policy(peer_comps)
         confidence = policy["confidence"]
         role = policy["role"]
+        included = peers_blended(
+            peer_comps, (valuation.get("reliability") or {}).get("method_suitability"))
         headline += (
             f"| Peer-multiple cross-check | {money(comps)} | {format_percent(comps_gap)} | "
             f"{_markdown_cell(role)}; {confidence} confidence; "
-            f"{'included' if policy['included_in_blended_value'] else 'excluded'} from blend |\n"
+            f"{'included' if included else 'excluded'} from blend |\n"
         )
     mean_target = target.get("mean")
     if isinstance(mean_target, (int, float)) and mean_target > 0:
@@ -744,7 +746,21 @@ def build_street_reconciliation_table(
               "while holding WACC and terminal growth fixed; it is a diagnostic, "
               "not a calibrated fair value."
         )
+    mid_cycle_value = (
+        ((valuation.get("reliability") or {}).get("method_suitability") or {}).get(
+            "primary_method") == "dcf_mid_cycle"
+    )
     if (market_path_scale.get("available")
+            and market_path_scale["scale"] >= 3.0 and mid_cycle_value):
+        note += (
+            f" **Mid-cycle scope:** current market EV requires "
+            f"{market_path_scale['scale']:.2f}x the modeled FCF path. The model "
+            "holds the Street's peak-cycle cash flow for the covered years, then "
+            "mid-cycle revenue and margins, so the gap is the price paying for the "
+            "peak to last longer, not cash flow left out of the model. This gap "
+            "does not validate the market price."
+        )
+    elif (market_path_scale.get("available")
             and market_path_scale["scale"] >= 3.0):
         note += (
             f" **Model-scope warning:** current market EV requires "
@@ -1394,24 +1410,11 @@ def enforce_valuation_publication_boundary(
         valuation_publication_decision,
     )
     from src.financial_freshness import financial_statement_freshness
-    from src.valuation_methodology import (
-        assess_valuation_methodology,
-        normalize_peer_comps_policy,
-    )
+    from src.valuation_methodology import built_method_suitability, peers_blended
 
-    suitability = assess_valuation_methodology(financial_data or {})
-    from src.agents.fm.memory_cycle import MID_CYCLE_SCENARIO_REASON
-    model_inputs = data.get("model_inputs") or {}
-    if (suitability.get("primary_method") == "dcf_mid_cycle"
-            and not (isinstance(model_inputs, dict) and model_inputs.get("mid_cycle"))):
-        # A memory maker's workbook built without the mid-cycle rewrite holds
-        # the covered years' peak margins through the terminal value.
-        suitability = {
-            **suitability,
-            "primary_method": "scenario_only_pending_cycle_normalization",
-            "publication_allowed": False,
-            "reason": MID_CYCLE_SCENARIO_REASON,
-        }
+    # A memory maker's workbook built without the mid-cycle rewrite holds the
+    # covered years' peak margins through the terminal value: a scenario.
+    suitability = built_method_suitability(financial_data or {}, data.get("model_inputs"))
     reconstructed_bank_override = None
     if (
         suitability.get("primary_method") == "justified_pb_roe"
@@ -1457,11 +1460,7 @@ def enforce_valuation_publication_boundary(
     )
     bank_valuation = valuation.get("bank") or {}
     peer_comps = (((financial_data or {}).get("industry_data") or {}).get("peer_comps") or {})
-    # A mid-cycle value never blends peers: their multiples sit on the same
-    # price cycle the method exists to normalize (memory_cycle.py).
-    comps_publishable = normalize_peer_comps_policy(peer_comps)[
-        "included_in_blended_value"
-    ] and suitability.get("primary_method") != "dcf_mid_cycle"
+    comps_publishable = peers_blended(peer_comps, suitability)
     external_expectations = (financial_data or {}).get("external_expectations") or {}
     if not external_expectations:
         external_expectations = build_external_expectations(financial_data or {})
@@ -2669,11 +2668,15 @@ def _publishable_valuation_commentary(
         lines.append(mid_cycle)
     peer_policy = normalize_peer_comps_policy(data.get("peer_comps") or {})
     if (data.get("peer_comps") or {}):
+        from src.valuation_methodology import peers_blended
+        included = peers_blended(data.get("peer_comps"), reliability.get("method_suitability"))
         lines.append(
             "The peer-multiple result is "
-            + ("included as an independent valuation leg" if peer_policy["included_in_blended_value"]
+            + ("included as an independent valuation leg" if included
                else "shown only as a cross-check and excluded from the headline value")
-            + f" ({peer_policy['confidence']} confidence; {peer_policy['role']})."
+            + f" ({peer_policy['confidence']} confidence; {peer_policy['role']})"
+            + ("; peers' multiples sit on the same memory-price cycle the mid-cycle "
+               "value normalizes." if mid_cycle and not included else ".")
         )
     reverse = valuation.get("reverse_dcf") or {}
     implied = reverse.get("market_implied_vs_model")
@@ -2814,12 +2817,15 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
             )
         summary_table += "| FCF DCF | _not applied — balance-sheet financial_ |\n"
     comps = valuation['summary'].get('comps_intrinsic')
-    from src.valuation_methodology import normalize_peer_comps_policy
+    from src.valuation_methodology import normalize_peer_comps_policy, peers_blended
     peer_policy = normalize_peer_comps_policy(data.get('peer_comps') or {})
+    # The boundary's rule: a mid-cycle value never blends peers.
+    peers_in_value = peers_blended(
+        data.get('peer_comps') or {}, reliability.get('method_suitability'))
     if isinstance(comps, (int, float)) and comps > 0 and not bank:
         comps_label = (
             "Present-Valued Comparable Companies"
-            if peer_policy['included_in_blended_value'] else
+            if peers_in_value else
             "Broad-Sector Peer Multiple (context only; excluded from fair value)"
             if peer_policy['broad_sector'] else
             "Peer Multiple (context only; excluded from fair value)"
@@ -2855,9 +2861,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
         )
     elif (isinstance(comps, (int, float)) and comps > 0
           and valuation['summary'].get(
-              'comps_included_in_blended_value',
-              peer_policy['included_in_blended_value'],
-          )):
+              'comps_included_in_blended_value', peers_in_value)):
         label = "**Blended Fair Value (50% DCF view / 50% present-valued market comps)**"
     elif n_in < n_all:
         label = "**DCF Fair Value (valid terminal approaches only)**"

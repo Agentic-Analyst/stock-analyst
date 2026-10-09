@@ -743,6 +743,10 @@ def external_benchmark(financial_data: Dict[str, Any],
             metrics.get("analyst_target_implied_fcf_vs_model")),
         "market_implied_fcf_path_delta": _number(
             metrics.get("market_implied_fcf_path_vs_model")),
+        # A memory maker valued mid-cycle: a market several times its cash-flow
+        # path is the price paying for the peak to last, which the answer
+        # states, not cash flow the model leaves out.
+        "mid_cycle_value": bool(mid_cycle_method_note(metrics.get("method_suitability"))),
         "analyst_target_implied_fcf_path_delta": _number(
             metrics.get("analyst_target_implied_fcf_path_vs_model")),
         "market_implied_wacc": _number(metrics.get("market_implied_wacc")),
@@ -1019,7 +1023,15 @@ def render_external_benchmark(value: Dict[str, Any]) -> str:
               "WACC and terminal growth fixed (diagnostic only)"
         )
     market_path = value.get("market_implied_fcf_path_delta")
-    if market_path is not None and market_path + 1 >= 3.0:
+    if market_path is not None and market_path + 1 >= 3.0 and value.get("mid_cycle_value"):
+        parts.append(
+            f"mid-cycle scope: current market EV requires {market_path + 1:.2f}x "
+            "the modeled FCF path; the model holds the Street's peak-cycle cash flow "
+            "for the covered years, then mid-cycle revenue and margins, so the gap is "
+            "the price paying for the peak to last longer, not cash flow left out of "
+            "the model (the gap does not validate the market price)"
+        )
+    elif market_path is not None and market_path + 1 >= 3.0:
         parts.append(
             f"model-scope warning: current market EV requires {market_path + 1:.2f}x "
             "the modeled FCF path; the method outputs value only that modeled "
@@ -1207,7 +1219,15 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
             + " the model FCF path at unchanged WACC and terminal growth "
               "(diagnostic only)."
         )
-    if market_path is not None and market_path + 1 >= 3.0:
+    if market_path is not None and market_path + 1 >= 3.0 and value.get("mid_cycle_value"):
+        lines.append(
+            f"- Mid-cycle scope: current market EV requires {market_path + 1:.2f}× "
+            "the modeled FCF path. The model holds the Street's peak-cycle cash flow "
+            "for the covered years, then mid-cycle revenue and margins, so the gap is "
+            "the price paying for the peak to last longer, not cash flow left out of "
+            "the model. This gap does not validate the market price."
+        )
+    elif market_path is not None and market_path + 1 >= 3.0:
         lines.append(
             f"- Model-scope warning: current market EV requires {market_path + 1:.2f}× "
             "the modeled FCF path. The method outputs therefore value only the "

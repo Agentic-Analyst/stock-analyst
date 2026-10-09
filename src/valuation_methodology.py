@@ -481,3 +481,45 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
         "cash_flow_profile": profile,
         "sotp": segments,
     }
+
+
+def withhold_unbuilt_mid_cycle(suitability: Any, model_inputs: Any) -> Any:
+    """The methodology as it applies to one built workbook.
+
+    A memory maker is published on mid-cycle economics only when its workbook
+    was built on them (``_vynn.model_inputs.mid_cycle``). One built without
+    the rewrite holds the covered years' peak margins through the terminal
+    value, so it stays an audit scenario. The report boundary, the chat model
+    agent, report follow-ups and the dashboard all read the method through
+    this, so none of them can publish what another withholds.
+    """
+    if (isinstance(suitability, dict)
+            and suitability.get("primary_method") == "dcf_mid_cycle"
+            and not (isinstance(model_inputs, dict) and model_inputs.get("mid_cycle"))):
+        from src.agents.fm.memory_cycle import MID_CYCLE_SCENARIO_REASON
+        return {
+            **suitability,
+            "primary_method": "scenario_only_pending_cycle_normalization",
+            "publication_allowed": False,
+            "mid_cycle": None,
+            "reason": MID_CYCLE_SCENARIO_REASON,
+        }
+    return suitability
+
+
+def built_method_suitability(financial_data: Dict[str, Any], model_inputs: Any) -> Dict[str, Any]:
+    """``assess_valuation_methodology`` for the workbook built from this data."""
+    return withhold_unbuilt_mid_cycle(
+        assess_valuation_methodology(financial_data or {}), model_inputs)
+
+
+def peers_blended(peer_comps: Any, suitability: Any) -> bool:
+    """Whether a qualifying peer leg enters the value.
+
+    Never for a mid-cycle value: peers' multiples sit on the same price cycle
+    the method exists to normalize (memory_cycle.py), and a Sandisk peer leg
+    on FY2 peak EBITDA came to 5.8x the mid-cycle DCF.
+    """
+    method = suitability.get("primary_method") if isinstance(suitability, dict) else None
+    return bool(normalize_peer_comps_policy(peer_comps)["included_in_blended_value"]
+                and method != "dcf_mid_cycle")

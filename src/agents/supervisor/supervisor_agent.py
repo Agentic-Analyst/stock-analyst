@@ -587,6 +587,9 @@ class SupervisorWorkflowRunner:
                 and math.isfinite(float(whole_path))
                 and float(whole_path) + 1 >= 3.0
                 and not (
+                    # A mid-cycle value's gap is the peak lasting longer, and
+                    # the answer says so instead of calling the model partial.
+                    "peak" in lower if benchmark.get("mid_cycle_value") else
                     ("modeled cash-flow" in lower or "modeled fcf" in lower
                      or "operating cash-flow" in lower)
                     and "not a comprehensive" in lower

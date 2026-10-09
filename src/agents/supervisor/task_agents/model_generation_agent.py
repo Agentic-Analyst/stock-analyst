@@ -265,11 +265,16 @@ async def model_generation_agent(
         # Extract valuation metrics from computed values JSON
         valuation_metrics = {}
         assumptions = {}
+        # What the workbook was built on (a memory maker's mid-cycle rewrite),
+        # so this agent reads the method exactly as the report boundary does.
+        recorded_model_inputs = {}
         if computed_values_path and Path(computed_values_path).exists():
             try:
                 import json
                 with open(computed_values_path, 'r') as f:
                     computed_data = json.load(f)
+                recorded_model_inputs = ((computed_data.get("_vynn") or {}).get(
+                    "model_inputs") or {})
                 integrity = ((computed_data.get("_vynn") or {}).get(
                     "formula_integrity") or {})
                 if integrity and integrity.get("status") != "ready":
@@ -611,9 +616,20 @@ async def model_generation_agent(
                         # reverse DCF and the publication boundary remain valid.
                         pass
                     peer_comps = ((raw.get("industry_data") or {}).get("peer_comps") or {})
-                    from src.valuation_methodology import normalize_peer_comps_policy
+                    from src.valuation_methodology import (
+                        built_method_suitability,
+                        normalize_peer_comps_policy,
+                        peers_blended,
+                    )
                     comps_policy = normalize_peer_comps_policy(peer_comps)
-                    comps_publishable = comps_policy["included_in_blended_value"]
+                    # The report boundary's rule, not a second copy of it: a
+                    # mid-cycle value never blends peers. Counting Sandisk's
+                    # peer leg here withheld the chat answer ("methods
+                    # disagree by more than 2.5x") while the report published.
+                    comps_publishable = peers_blended(
+                        peer_comps,
+                        built_method_suitability(raw, recorded_model_inputs),
+                    )
                     valuation_metrics["comps_included_in_blended_value"] = comps_publishable
                     valuation_metrics["comps_confidence"] = comps_policy["confidence"]
                     valuation_metrics["comps_role"] = comps_policy["role"]
@@ -883,7 +899,11 @@ async def model_generation_agent(
         # value or rating merely because every formula evaluated.
         try:
             raw = state.financial_data.raw_data if state.financial_data else {}
-            suitability = assess_valuation_methodology(raw or {})
+            # As the report boundary reads it: a mid-cycle method whose
+            # workbook was not built on it is a scenario here too, so the
+            # chat answer's audit-scenario checks see what the report sees.
+            from src.valuation_methodology import built_method_suitability
+            suitability = built_method_suitability(raw or {}, recorded_model_inputs)
             valuation_metrics["method_suitability"] = suitability
             if not suitability.get("publication_allowed"):
                 valuation_metrics["point_estimate_withheld"] = True

@@ -776,6 +776,19 @@ def _rehydrate_report_guard_state(base: Path, ticker: str, content: str):
         except Exception:
             pass
 
+    if financial_data:
+        # The methodology as the report boundary applied it. Without it a
+        # follow-up on a scenario-only report (a memory maker before mid-cycle,
+        # a captive lender) fell back to "The supported valuation-method range
+        # is $3,656.10-$4,014.84", the audit scenario; with it, a follow-up on
+        # a mid-cycle report says how the value was reached.
+        try:
+            from src.valuation_methodology import built_method_suitability
+            metrics["method_suitability"] = built_method_suitability(
+                financial_data, (computed.get("_vynn") or {}).get("model_inputs"))
+        except Exception:
+            pass
+
     company = financial_data.get("company_data") or {}
     basic = company.get("basic_info") or {}
     market = company.get("market_data") or {}
@@ -2464,10 +2477,23 @@ class ReadReportTool(_CtxTool):
             "valuation_confidence": metrics.get("valuation_confidence"),
             **_alert_payload(metrics, withheld=withheld),
         }
+        from src.summary_evidence import (
+            mid_cycle_method_note,
+            required_growth_sentence,
+            unsuitable_method_note,
+        )
+        scenario_only = unsuitable_method_note(metrics.get("method_suitability"))
         if metrics.get("point_estimate_withheld"):
             publication["no_single_fair_value_reason"] = metrics.get(
                 "publication_withheld_reason")
-            if supported:
+            if scenario_only:
+                # The methodology rules the cash-flow model out: its figures
+                # are an audit scenario, never a supported range to restate.
+                publication["valuation_scenario_only"] = (
+                    "The cash-flow model's figures are kept in the report as an "
+                    "audit scenario, not stated as a valuation."
+                )
+            elif supported:
                 from src.summary_evidence import supported_valuation_span
                 support = supported_valuation_span(supported)
                 publication["valuation_support_shape"] = support["shape"]
@@ -2483,6 +2509,12 @@ class ReadReportTool(_CtxTool):
                 "fair_value": metrics.get("fair_value"),
                 "upside_vs_market": metrics.get("upside_vs_market"),
             })
+            mid_cycle = mid_cycle_method_note(metrics.get("method_suitability"))
+            if mid_cycle:
+                peak = required_growth_sentence(
+                    metrics.get("market_required_revenue_growth"))
+                publication["valuation_method_note"] = " ".join(
+                    part for part in (mid_cycle, peak) if part)
         # Cap the payload so a huge report doesn't blow the context; the model gets
         # plenty to summarize / extract cases from.
         MAX = 24000
