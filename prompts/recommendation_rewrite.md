@@ -40,31 +40,41 @@ including every number.
 
 Take the JSON structure above and rewrite these TEXT fields ONLY:
 
-1. **`thesis`**: 2-4 sentences with [E#] citations
-2. **`valuation_perspective`**: 2-3 sentences using only deterministic model fields; do not attach news [E#] citations
+1. **`thesis`**: 2-4 sentences; [E#] on every news claim
+2. **`valuation_perspective`**: keep exactly as given (it is fixed text)
 3. **`price_targets.m3.driver`**: empty string (the fixed target is null)
 4. **`price_targets.m6.driver`**: empty string (the fixed target is null)
-5. **`price_targets.m12.driver`**: explain the deterministic intrinsic-value convergence basis; do not invent a news-driven return adjustment
+5. **`price_targets.m12.driver`**: explain the deterministic intrinsic-value convergence basis, with NO [E#]; do not invent a news-driven return adjustment
 6. **`catalysts`**: Array of statements with [E#] citations
 7. **`risks`**: Array of statements with [E#] citations
-8. **`scenarios.bull/base/bear.narrative`**: 2-3 sentences each with [E#] citations
-9. **`action.buyers`**: 1-2 sentences
-10. **`action.holders`**: 1-2 sentences
-11. **`monitoring_plan`**: Array of items with [E#] citations
+8. **`scenarios.bull/base/bear.narrative`**: 2-3 sentences each; [E#] on every news claim
+9. **`scenarios.bull/base/bear.watch`** and **`action.watch`**: short items to monitor
+10. **`action.buyers`**: 1-2 sentences
+11. **`action.holders`**: 1-2 sentences
+12. **`monitoring_plan`**: Array of items to monitor
+
+**Two kinds of sentence.** A news claim (what happened, what a source
+reports) carries the [E#] of the item that states it. A model statement (the
+rating, the fair value, the DCF range, the confidence alert's gaps and analyst
+count, copied from the fields above) carries NO [E#]: no news item states
+VYNN's numbers, and the validator checks those figures against the fixed
+numbers instead. A watch or monitoring item cites [E#] only when it restates
+a fact that item's title or snippet gives; a plain "what to watch" item takes
+no citation.
 
 ## CRITICAL RULES - PRODUCTION STANDARDS
 
 ❌ **DO NOT**:
 - Change ANY numeric fields (price, range_low, range_high, rating)
 - Cite evidence IDs not in the valid list above
-- Make specific claims without [E#] citations
+- Make specific news claims without [E#] citations
 - Invent facts or figures not in evidence
 - Use a citation for a claim that its `source_article_title` and `snippet` do
   not directly support; topical similarity is not support
 - Add sector/peer averages or event dates unless the exact fact is present in
   the cited evidence
 - Change the JSON structure or field names
-- Leave ANY material sentence without a citation
+- Leave a news claim without a citation
 - Attach a news citation to a model-derived valuation, rating, or target fact
 
 ✅ **DO**:
@@ -75,7 +85,7 @@ Take the JSON structure above and rewrite these TEXT fields ONLY:
 - Remove or qualify any unsupported claim instead of decorating it with the
   nearest citation. If a date is not supplied, omit it or say it is unavailable
 - Be professional, specific, and compelling
-- ACHIEVE 95%+ citation coverage (THIS IS MANDATORY)
+- ACHIEVE 95%+ citation coverage of news claims (THIS IS MANDATORY)
 - Cite primary sources when discussing financial figures
 - Keep every price-target driver empty when its corrected price is null
 

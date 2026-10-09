@@ -13,7 +13,7 @@ If validation fails, auto-corrects and triggers LLM text-only rewrite.
 
 import re
 import json
-from typing import Dict, Any, List, Tuple, Set
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 
 class RecommendationValidator:
@@ -140,19 +140,23 @@ class RecommendationValidator:
         # every sentence carrying [E#] has actual topical or numeric support in
         # the cited evidence. This catches citation laundering: attaching an
         # unrelated but valid headline to a confident claim.
-        support_issues = self._validate_citation_support(response_data, evidence_pack)
+        support_issues = self._validate_citation_support(
+            response_data, evidence_pack, fixed_numbers)
         if citation_enforcement and support_issues:
             validation_report["errors"].append(
                 f"{len(support_issues)} cited claim(s) are not supported by their evidence"
             )
-            validation_report["citation_support_issues"] = support_issues[:10]
+            # The rewrite is shown every one of these by field: a count alone
+            # left the same claims standing through all three attempts.
+            validation_report["citation_support_issues"] = support_issues[:25]
             validation_report["valid"] = False
 
         # 3. Check citation coverage
         coverage = self._check_citation_coverage(
             response_data,
             valid_evidence_ids,
-            validation_report
+            validation_report,
+            fixed_numbers,
         )
 
         # PRODUCTION REQUIREMENT: 95% minimum coverage (only meaningful when
@@ -265,10 +269,31 @@ class RecommendationValidator:
             normalized.add(value)
         return normalized
 
+    # A compound the claim hyphenates is the same words a source spaces out:
+    # "free-cash-flow" is "free cash flow", "capital-spending" is "capital
+    # spending". Validator only: the article screener keeps its tokens.
+    _HYPHENATED = re.compile(r"(?<=[A-Za-z])-(?=[A-Za-z])")
+    _ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+
     @classmethod
-    def _citation_supported(
-        cls, sentence: str, cited_ids: Set[str], evidence_by_id: Dict[str, Dict[str, Any]],
-    ) -> bool:
+    def _date_numbers(cls, value: Any) -> Set[str]:
+        """The year and day of an evidence item's publication date.
+
+        The explainer is shown each item's date and told to state a date only
+        when the evidence supplies it, so "reported in September 2026 [E2]"
+        is supported by E2's date, not by its snippet. Numbers only: the month
+        name never counts as shared wording.
+        """
+        match = cls._ISO_DATE.match(str(value or ""))
+        if not match:
+            return set()
+        return {match.group(1), str(int(match.group(3)))}
+
+    @classmethod
+    def _cited_source(
+        cls, cited_ids: Set[str], evidence_by_id: Dict[str, Dict[str, Any]],
+    ) -> Tuple[str, Set[str]]:
+        """The cited items' publisher text, and the numbers it supports."""
         evidence = " ".join(
             " ".join(str(item.get(field) or "") for field in (
                 # ``title`` is the upstream LLM's derived insight and
@@ -280,18 +305,50 @@ class RecommendationValidator:
             for evidence_id in cited_ids
             for item in [evidence_by_id.get(evidence_id) or {}]
         )
+        numbers = cls._support_numbers(evidence)
+        for evidence_id in cited_ids:
+            numbers |= cls._date_numbers((evidence_by_id.get(evidence_id) or {}).get("date"))
+        return evidence, numbers
+
+    @classmethod
+    def _support_failure(
+        cls, sentence: str, cited_ids: Set[str], evidence_by_id: Dict[str, Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Why the cited publisher text does not support the sentence, or None."""
+        evidence, evidence_numbers = cls._cited_source(cited_ids, evidence_by_id)
         if not evidence.strip():
-            return False
+            return {"reason": "no_source_text"}
         claim = cls.EVIDENCE_PATTERN.sub("", sentence)
         claim_numbers = cls._support_numbers(claim)
-        evidence_numbers = cls._support_numbers(evidence)
-        if claim_numbers and not claim_numbers.issubset(evidence_numbers):
-            return False
-        overlap = cls._support_tokens(claim).intersection(cls._support_tokens(evidence))
-        return len(overlap) >= 2 or any(len(token) >= 7 for token in overlap)
+        missing = sorted(claim_numbers - evidence_numbers)
+        if missing:
+            return {"reason": "numbers_not_in_source", "numbers": missing}
+        claim_tokens = cls._support_tokens(cls._HYPHENATED.sub(" ", claim))
+        overlap = claim_tokens.intersection(cls._support_tokens(cls._HYPHENATED.sub(" ", evidence)))
+        if len(overlap) >= 2 or any(len(token) >= 7 for token in overlap):
+            return None
+        # A data table shares few words with any sentence about it ("P/E Ratio
+        # 345.73 EPS (TTM) $ 1.08"): two of its exact figures, each specific (a
+        # decimal or three digits) and printed in the publisher text itself,
+        # not the date or a year, entail the sentence when a word is shared too.
+        specific = {
+            number for number in claim_numbers & cls._support_numbers(evidence)
+            if ("." in number or len(number.lstrip("+-")) >= 3)
+            and not re.fullmatch(r"(?:19|20)\d\d", number)
+        }
+        if overlap and len(specific) >= 2:
+            return None
+        return {"reason": "wording_not_in_source"}
+
+    @classmethod
+    def _citation_supported(
+        cls, sentence: str, cited_ids: Set[str], evidence_by_id: Dict[str, Dict[str, Any]],
+    ) -> bool:
+        return cls._support_failure(sentence, cited_ids, evidence_by_id) is None
 
     def _validate_citation_support(
         self, response_data: Dict[str, Any], evidence_pack: Dict[str, Any],
+        fixed_numbers: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         evidence_by_id = {
             str(item.get("id")): item
@@ -300,17 +357,30 @@ class RecommendationValidator:
         }
         if not evidence_by_id:
             return []
+        figures = self._model_figures(fixed_numbers)
         issues = []
-        for text in self._all_text(response_data):
+        for field, text in self._all_text_with_paths(response_data):
             for sentence in re.split(self.SENTENCE_PATTERN, text or ""):
                 cited = {f"E{number}" for number in self.EVIDENCE_PATTERN.findall(sentence)}
-                if cited and cited.issubset(evidence_by_id) and not self._citation_supported(
-                    sentence, cited, evidence_by_id
+                if not cited or not cited.issubset(evidence_by_id):
+                    continue
+                failure = self._support_failure(sentence, cited, evidence_by_id)
+                if failure is None:
+                    continue
+                issue = {
+                    "claim": sentence.strip()[:300],
+                    "citations": sorted(cited),
+                    "field": field,
+                    **failure,
+                }
+                # A model figure (the fair value, the DCF range, the alert's
+                # gaps) is never in a news source: the sentence needs no
+                # citation, not a better one.
+                if failure["reason"] == "numbers_not_in_source" and all(
+                    self._is_model_figure(number, figures) for number in failure["numbers"]
                 ):
-                    issues.append({
-                        "claim": sentence.strip()[:300],
-                        "citations": sorted(cited),
-                    })
+                    issue["reason"] = "model_figures_cited_to_news"
+                issues.append(issue)
         return issues
 
     def strip_unsupported_citations(
@@ -366,7 +436,95 @@ class RecommendationValidator:
 
         walk(response_data or {})
         return values
-    
+
+    @staticmethod
+    def _all_text_with_paths(response_data: Dict[str, Any]) -> Iterator[Tuple[str, str]]:
+        """Every string field with its path ("scenarios.bear.watch[0]")."""
+        def walk(node, path):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    yield from walk(value, f"{path}.{key}" if path else str(key))
+            elif isinstance(node, list):
+                for index, value in enumerate(node):
+                    yield from walk(value, f"{path}[{index}]")
+            elif isinstance(node, str):
+                yield path, node
+
+        yield from walk(response_data or {}, "")
+
+    # Words that tie a sentence to the deterministic outputs, not to the news.
+    _MODEL_ANCHOR = re.compile(
+        r"\b(?:intrinsic[- ]value|fair value|dcf|valuation|model(?:'s|’s)?|"
+        r"rating|target|convergence|confidence|alert|analysts?|street(?:'s|’s)?|"
+        r"consensus|expected return|downside|upside|vynn(?:'s|’s)?|wacc|"
+        r"discount rate|terminal)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _model_figures(cls, fixed_numbers: Optional[Dict[str, Any]]) -> List[float]:
+        """Every figure FIXED_NUMBERS states, in the units a sentence would use.
+
+        Fractions are also read as percentages (a -0.036 gap is "4% below"),
+        and the numbers inside its text fields (the alert's "39 analysts")
+        count as its own.
+        """
+        figures: List[float] = []
+
+        def walk(node):
+            if isinstance(node, bool) or node is None:
+                return
+            if isinstance(node, (int, float)):
+                value = abs(float(node))
+                if value == value and value != float("inf"):
+                    figures.append(value)
+                    if value <= 10:
+                        figures.append(value * 100)
+            elif isinstance(node, str):
+                for number in cls._support_numbers(node):
+                    try:
+                        figures.append(abs(float(number)))
+                    except ValueError:
+                        pass
+            elif isinstance(node, dict):
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, (list, tuple)):
+                for value in node:
+                    walk(value)
+
+        walk(fixed_numbers or {})
+        return figures
+
+    @staticmethod
+    def _is_model_figure(number: str, figures: List[float]) -> bool:
+        """True when `number` as written is one of the figures, rounded as written."""
+        try:
+            value = abs(float(number))
+        except ValueError:
+            return False
+        decimals = len(number.split(".", 1)[1]) if "." in number else 0
+        return any(round(figure, decimals) == round(value, decimals) for figure in figures)
+
+    @classmethod
+    def _is_model_statement(
+        cls, sentence: str, fixed_numbers: Optional[Dict[str, Any]], figures: List[float],
+    ) -> bool:
+        """
+        An uncited sentence that states the deterministic outputs, not news:
+        it names them ("the fixed valuation", "the alert", "the DCF range") and
+        every figure it gives is one FIXED_NUMBERS holds, or, giving none, it
+        names the fixed rating. The contract forbids a news citation on such a
+        sentence; a figure the model does not hold keeps it a claim to cite.
+        """
+        if cls.EVIDENCE_PATTERN.search(sentence) or not cls._MODEL_ANCHOR.search(sentence):
+            return False
+        numbers = cls._support_numbers(sentence)
+        if numbers:
+            return all(cls._is_model_figure(number, figures) for number in numbers)
+        rating = str((fixed_numbers or {}).get("rating") or "").strip()
+        return bool(rating) and re.search(rf"\b{re.escape(rating)}\b", sentence) is not None
+
     def _extract_json(self, response: str) -> Dict[str, Any]:
         """Extract JSON from LLM response with robust cleaning."""
         if '```json' in response:
@@ -404,6 +562,11 @@ class RecommendationValidator:
         """
         corrections_needed = False
         corrected_data = response_data.copy()
+        # Corrections the prose may now contradict (a rating or a price it
+        # restated). Replacing the valuation perspective with the fixed text
+        # happens on every response and leaves no other field stale, so it
+        # alone never sends a valid narrative back for a rewrite.
+        narrative = report.setdefault("narrative_corrections", [])
 
         reliability = (fixed_numbers.get('inputs') or {}).get(
             'valuation_reliability') or {}
@@ -433,9 +596,11 @@ class RecommendationValidator:
         
         # 1. Check rating
         if response_data.get('rating') != fixed_numbers['rating']:
-            report["corrections_made"].append(
+            correction = (
                 f"Rating corrected: {response_data.get('rating')} → {fixed_numbers['rating']}"
             )
+            report["corrections_made"].append(correction)
+            narrative.append(correction)
             corrected_data['rating'] = fixed_numbers['rating']
             corrections_needed = True
         
@@ -460,25 +625,29 @@ class RecommendationValidator:
             
             # Check price
             if actual.get('price') != expected['price']:
-                report["corrections_made"].append(
-                    f"{period} price: {actual.get('price')} → {expected['price']}"
-                )
+                correction = f"{period} price: {actual.get('price')} → {expected['price']}"
+                report["corrections_made"].append(correction)
+                narrative.append(correction)
                 corrected_data['price_targets'][period]['price'] = expected['price']
                 corrections_needed = True
             
             # Check range_low
             if actual.get('range_low') != expected['range_low']:
-                report["corrections_made"].append(
+                correction = (
                     f"{period} range_low: {actual.get('range_low')} → {expected['range_low']}"
                 )
+                report["corrections_made"].append(correction)
+                narrative.append(correction)
                 corrected_data['price_targets'][period]['range_low'] = expected['range_low']
                 corrections_needed = True
             
             # Check range_high
             if actual.get('range_high') != expected['range_high']:
-                report["corrections_made"].append(
+                correction = (
                     f"{period} range_high: {actual.get('range_high')} → {expected['range_high']}"
                 )
+                report["corrections_made"].append(correction)
+                narrative.append(correction)
                 corrected_data['price_targets'][period]['range_high'] = expected['range_high']
                 corrections_needed = True
         
@@ -594,20 +763,29 @@ class RecommendationValidator:
         self,
         response_data: Dict[str, Any],
         valid_evidence_ids: Set[str],
-        report: Dict[str, Any]
+        report: Dict[str, Any],
+        fixed_numbers: Optional[Dict[str, Any]] = None,
     ) -> float:
         """
-        Check what percentage of material sentences have citations.
+        Check what percentage of material news sentences have citations.
         Returns coverage percentage.
         
-        Checks ALL text fields:
+        Checks:
         - thesis
-        - valuation_perspective
         - price_targets.m3/m6/m12.driver
         - catalysts[].statement
         - risks[].statement
         - scenarios.bull/base/bear.narrative
+
+        A sentence that states only FIXED_NUMBERS facts (the rating, the DCF
+        range, the alert's gaps, "the published intrinsic value under an
+        explicit 12-month convergence assumption") is a model statement, not
+        an uncited claim: the contract forbids citing news for it. Counting
+        the 12-month driver's sentence failed every run on that sentence
+        alone. A news claim in any of these fields still has to cite, and a
+        cited sentence in any field is still support-checked.
         """
+        figures = self._model_figures(fixed_numbers)
         # Collect sentences from ALL key fields
         key_texts = []
         
@@ -616,7 +794,7 @@ class RecommendationValidator:
         # DCF range, publication boundary, or model-derived target.
         key_texts.append(response_data.get('thesis', ''))
         
-        # Price target drivers (often missed!)
+        # Price target drivers: model statements, unless they carry news.
         price_targets = response_data.get('price_targets', {})
         for period in ['m3', 'm6', 'm12']:
             target_row = price_targets.get(period, {}) or {}
@@ -666,6 +844,7 @@ class RecommendationValidator:
         # Filter to material sentences
         # Criteria: >= 4 words AND (has factual claim keywords OR mentions specific entities)
         material_sentences = []
+        model_statements = []
         factual_keywords = [
             'revenue', 'growth', 'earnings', 'sales', 'margin', 'profit',
             'risk', 'catalyst', 'competitive', 'regulatory', 'launch', 'product',
@@ -716,14 +895,19 @@ class RecommendationValidator:
             # Also include sentences with numbers, percentages, dollar amounts
             has_numbers = any(char.isdigit() for char in sent_clean)
             
-            if has_claim or has_numbers:
-                material_sentences.append(sent_clean)
+            if not (has_claim or has_numbers):
+                continue
+            if self._is_model_statement(sent_clean, fixed_numbers, figures):
+                model_statements.append(sent_clean)
+                continue
+            material_sentences.append(sent_clean)
         
         if not material_sentences:
             report["coverage_details"] = {
                 "material_sentences": 0,
                 "cited_sentences": 0,
                 "cited_count": 0,
+                "model_statements": len(model_statements),
                 "coverage_pct": 100.0
             }
             return 100.0  # No material claims to cite
@@ -748,6 +932,7 @@ class RecommendationValidator:
             # example sentences (it once held both, and the list won).
             "cited_count": cited_count,
             "coverage_pct": coverage,
+            "model_statements": len(model_statements),
             "uncited_sentences": uncited_sentences[:10],  # Show first 10 for debugging
             "cited_sentences": cited_sentences[:5]  # Show first 5 examples
         }
@@ -798,7 +983,7 @@ class RecommendationValidator:
         """
         Check if LLM needs to rewrite text due to corrections.
         PRODUCTION STANDARD: Trigger rewrite if:
-        - Auto-corrections applied
+        - A correction the prose may contradict (rating, prices)
         - Any validation errors
         - Coverage below 95%
 
@@ -811,7 +996,7 @@ class RecommendationValidator:
         if validation_report.get("citation_enforcement_bypassed"):
             return False
         return (
-            validation_report.get("auto_corrected", False) or
+            bool(validation_report.get("narrative_corrections")) or
             len(validation_report.get("errors", [])) > 0 or
             validation_report.get("coverage_details", {}).get("coverage_pct", 100) < 95.0
         )

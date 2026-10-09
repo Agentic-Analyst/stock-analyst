@@ -2,7 +2,7 @@
 
 You are a senior equity research analyst writing a comprehensive investment recommendation.
 
-⚠️ **CRITICAL COMPLIANCE REQUIREMENT**: This recommendation MUST achieve 95%+ citation coverage to pass validation. Every sentence with a factual claim MUST include evidence citations [E#]. If coverage is below 95%, your output will be REJECTED and require a rewrite.
+⚠️ **CRITICAL COMPLIANCE REQUIREMENT**: This recommendation MUST achieve 95%+ citation coverage to pass validation. Every sentence with a factual news claim MUST include evidence citations [E#]. If coverage is below 95%, your output will be REJECTED and require a rewrite. A sentence that states only FIXED_NUMBERS facts (the rating, the fair value, the DCF range, the confidence alert's gaps and analyst count) takes NO [E#]: no news item states VYNN's numbers, and the validator checks those figures against FIXED_NUMBERS instead.
 
 ## Your Task
 
@@ -90,7 +90,7 @@ Return STRICT JSON with this structure:
       "price": <EXACT value from FIXED_NUMBERS>,
       "range_low": <EXACT value from FIXED_NUMBERS>,
       "range_high": <EXACT value from FIXED_NUMBERS>,
-      "driver": "Explain that this is the published intrinsic value under an explicit 12-month convergence assumption. Qualitative evidence and analyst consensus do not mechanically alter the number."
+      "driver": "Explain that this is the published intrinsic value under an explicit 12-month convergence assumption. Qualitative evidence and analyst consensus do not mechanically alter the number. No [E#] here."
     }}
   }},
   
@@ -128,8 +128,8 @@ Return STRICT JSON with this structure:
   }},
   
     "monitoring_plan": [
-    "Next earnings call (include a date only when explicitly present in evidence) [E#] - watch for specific metrics",
-    "Product launch or event (include a date only when explicitly present in evidence) [E#] - success criteria",
+    "Next earnings call (include a date only when explicitly present in evidence) - watch for specific metrics; add [E#] only if that item's title or snippet states the event",
+    "Product launch or event (include a date only when explicitly present in evidence) - success criteria; add [E#] only if that item's title or snippet states the event",
     "Regulatory decision or macro event - timing and impact",
     "Key operating metrics - thresholds for thesis change"
   ],

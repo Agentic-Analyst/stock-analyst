@@ -522,6 +522,20 @@ class RecommendationEngineV3:
 
         return final_output, total_cost, evidence_pack
     
+    @staticmethod
+    def _support_fix(issue: Dict[str, Any]) -> str:
+        """What the rewrite must do about one unsupported cited claim."""
+        reason = issue.get("reason")
+        if reason == "model_figures_cited_to_news":
+            return ("these figures are VYNN's model outputs, which no news item states: "
+                    "remove the [E#] from this sentence and keep the figures as given")
+        if reason == "numbers_not_in_source":
+            numbers = ", ".join(issue.get("numbers") or [])
+            return (f"{numbers} is not in the cited title, snippet or date: drop the figure, "
+                    "cite the item that states it, or remove the citation and the claim")
+        return ("the cited title and snippet do not say this: restate only what they say, "
+                "in their words, or remove the citation (and the claim if it is news)")
+
     def _build_rewrite_prompt(
         self,
         corrected_json: Dict[str, Any],
@@ -569,6 +583,23 @@ class RecommendationEngineV3:
             for warning in validation_report["warnings"]:
                 issues_section += f"- {warning}\n"
             issues_section += "\n"
+
+        # Each claim its cited source does not support, where it is and why.
+        # Given only the count, the model rewrote other sentences and left
+        # these standing through all three attempts.
+        unsupported = validation_report.get("citation_support_issues") or []
+        if unsupported:
+            issues_section += (
+                "**Cited Claims Their Sources Do Not Support** (fix EACH one where it "
+                "stands; every field below may be edited, including `watch` items):\n"
+            )
+            for i, issue in enumerate(unsupported, 1):
+                issues_section += (
+                    f"{i}. `{issue.get('field') or '?'}` cites "
+                    f"{', '.join(issue.get('citations') or [])}: \"{issue.get('claim')}\"\n"
+                    f"   → {self._support_fix(issue)}\n"
+                )
+            issues_section += "\n"
         
         coverage = validation_report.get("coverage_details", {})
         if coverage:
@@ -579,7 +610,10 @@ class RecommendationEngineV3:
             # Show uncited sentences if available
             uncited = coverage.get('uncited_sentences', [])
             if uncited:
-                issues_section += "**Sentences MISSING Citations** (add [E#] to these):\n"
+                issues_section += (
+                    "**News Claims MISSING Citations** (cite the item whose title or "
+                    "snippet states it, or delete the sentence):\n"
+                )
                 for i, sent in enumerate(uncited[:10], 1):
                     issues_section += f"{i}. {sent[:100]}...\n" if len(sent) > 100 else f"{i}. {sent}\n"
                 issues_section += "\n"
