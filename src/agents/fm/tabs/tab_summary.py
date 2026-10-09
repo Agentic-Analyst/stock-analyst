@@ -15,7 +15,7 @@ This module creates the Summary tab following investment banking standards:
 All formulas reference the correct cells from existing tabs:
 - Valuation (DCF): B12 (WACC), B23 (g), B27 (EV), B30 (Cash), B31 (Debt), 
                    B32 (Investments), B33 (Equity Value), B36 (Shares), B37 (Value/Share)
-- Valuation (Exit Multiple): B2 (WACC), B3 (Exit Multiple), B17 (EV), 
+- Valuation (Exit Multiple): B2 (WACC), B13 (Exit Multiple applied), B17 (EV), 
                              B22 (Equity Value), B25 (Value/Share)
 - Projections: F3 (Revenue FY5), F21 (EBITDA FY5), F19 (FCF FY5)
 - Sensitivity: B2 (MYD Toggle)
@@ -141,7 +141,7 @@ class SummaryTabBuilder:
         4: WACC (Perpetual DCF) = Valuation (DCF)!B12
         5: Terminal Growth g = Valuation (DCF)!B23
         6: WACC (Exit Multiple DCF) = Valuation (Exit Multiple)!B2
-        7: Exit Multiple (EV/EBITDA) = Valuation (Exit Multiple)!B3
+        7: Exit Multiple (EV/EBITDA) = Valuation (Exit Multiple)!B13
         8: Shares Outstanding = Valuation (DCF)!B36
         9: Current Market Price = Historical!F2
         10: Market Capitalization = B8*B9

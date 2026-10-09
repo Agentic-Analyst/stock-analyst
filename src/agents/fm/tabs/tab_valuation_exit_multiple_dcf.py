@@ -25,9 +25,9 @@ class ValuationExitMultipleDCFBuilder:
     Builds the Valuation (Exit Multiple DCF) tab.
     
     This tab contains:
-    - WACC and Discounting Inputs (rows 2-5): WACC, Exit Multiple, Tax Rate, Periods
+    - WACC and Discounting Inputs (rows 2-5): WACC, current EV/EBITDA reference, Tax Rate, Periods
     - FCF Forecast (rows 7-10): FCF, Discount Factors, PV of FCFs, Sum
-    - Terminal Value (rows 12-15): EBITDA, Exit Multiple, TV, PV of TV
+    - Terminal Value (rows 12-15): EBITDA, Exit Multiple applied, TV, PV of TV
     - Enterprise Value (row 17): Sum of PV FCFs + PV of TV
     - Equity Bridge (rows 19-22): Cash, Debt, Investments, Equity Value
     - Value per Share (rows 24-25): Shares, Intrinsic Value
@@ -120,7 +120,7 @@ class ValuationExitMultipleDCFBuilder:
         Set up WACC and Discounting Inputs section (rows 2-5).
         
         Row 2: WACC (from Perpetual Growth DCF tab)
-        Row 3: Terminal EV/EBITDA Multiple (from Assumptions)
+        Row 3: Current EV/EBITDA, the reference the exit multiple starts from
         Row 4: Tax Rate (from Assumptions)
         Row 5: Discount Periods (Years) - count of projection years
         """
@@ -140,8 +140,9 @@ class ValuationExitMultipleDCFBuilder:
             fill_type="solid"
         )
         
-        # Row 3: Terminal EV/EBITDA Multiple
-        ws.cell(row=3, column=1, value="Terminal EV/EBITDA Multiple")
+        # Row 3: today's EV/EBITDA, the reference the exit multiple starts
+        # from; row 13 is the multiple the terminal value applies.
+        ws.cell(row=3, column=1, value="Current EV/EBITDA (reference)")
         ws.cell(row=3, column=1).font = Font(bold=True)
         # Note: Markdown specifies Assumptions!B12, but we need to add this to Assumptions tab
         # For now, use a default value and add a note
@@ -228,7 +229,7 @@ class ValuationExitMultipleDCFBuilder:
         Set up Terminal Value section (rows 12-15).
         
         Row 12: Terminal Year EBITDA (FY10, using the DCF stage-2 growth path)
-        Row 13: Exit Multiple (reference to B3)
+        Row 13: Exit Multiple applied: B3, held to the sustainable-growth ceiling
         Row 14: Terminal Value (Un-discounted) = EBITDA × Multiple
         Row 15: PV of Terminal Value = TV / (1+WACC)^(10-MYD)
         """
@@ -295,7 +296,7 @@ class ValuationExitMultipleDCFBuilder:
         # collapses. `g_cap` is currency-specific: 4% for USD when rates allow,
         # but lower for currencies such as JPY.
         cap = self.growth_cap
-        ws.cell(row=13, column=1, value="Exit Multiple (EV/EBITDA)")
+        ws.cell(row=13, column=1, value="Exit Multiple applied (EV/EBITDA)")
         ws.cell(
             row=13, column=2,
             value=(

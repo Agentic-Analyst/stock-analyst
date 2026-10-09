@@ -142,7 +142,7 @@ class SensitivityTabBuilder:
         # Row 8: Exit Multiple — the one the exit leg applied ($B$13), after
         # the sustainable-growth ceiling, not today's reference multiple
         # ($B$3). Centred on the reference, the grid's base cell sat beside an
-        # anchor computed at another multiple (Micron: base $452 at 10.4x,
+        # anchor computed at another multiple (Micron: base $365 at 10.4x,
         # anchor $330 at 5.0x).
         ws.cell(row=8, column=1, value="Exit Multiple applied (from Exit DCF)")
         ws.cell(row=8, column=2, value="='Valuation (Exit Multiple)'!$B$13")

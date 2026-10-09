@@ -2710,7 +2710,7 @@ def exit_multiple_text(dcf_exit: Dict[str, Any]) -> str:
         return "N/A"
     text = f"{applied:.1f}x"
     if (isinstance(reference, (int, float)) and not isinstance(reference, bool)
-            and reference - applied >= 0.05):
+            and reference > applied and f"{reference:.1f}" != f"{applied:.1f}"):
         text += (f" (today's {reference:.1f}x, held to what a sustainable "
                  "growth rate justifies)")
     return text

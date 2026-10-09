@@ -70,3 +70,13 @@ def test_an_unheld_multiple_prints_alone_and_a_missing_one_is_na():
     assert exit_multiple_text({"exit_multiple": 11.9, "exit_multiple_reference": 11.9}) == "11.9x"
     assert exit_multiple_text({"exit_multiple": 0, "exit_multiple_reference": 0}) == "N/A"
     assert exit_multiple_text({"exit_multiple": None}) == "N/A"
+
+
+def test_a_ceiling_within_rounding_prints_one_number():
+    assert exit_multiple_text({"exit_multiple": 10.36, "exit_multiple_reference": 10.41}) == "10.4x"
+
+
+def test_the_exit_tab_names_the_reference_and_the_applied_multiple(micron):
+    exit_tab = micron["Valuation (Exit Multiple)"]["cells"]
+    assert exit_tab["(3, 1)"] == "Current EV/EBITDA (reference)"
+    assert exit_tab["(13, 1)"] == "Exit Multiple applied (EV/EBITDA)"
