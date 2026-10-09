@@ -200,6 +200,10 @@ def test_a_mid_cycle_exit_multiple_is_held_to_its_ceiling_from_a_steady_conversi
     held = multiple_formula(True)
     assert "$K$7/$B$12>=0.30" not in held and "$K$7/$B$12>=0.15" in held
     assert "MIN($B$3,($K$7/$B$12)" in held
+    # Excel evaluates every AND argument: the division only runs once
+    # $B$12 > 0 has been tested in an enclosing IF.
+    for formula in (gated, held):
+        assert formula.startswith("=IF(AND($B$12>0,") and ",IF($K$7/$B$12>=" in formula
 
 
 def test_the_run_rate_capex_case_does_not_apply_to_an_asset_base_path():

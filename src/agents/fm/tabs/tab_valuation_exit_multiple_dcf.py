@@ -321,12 +321,18 @@ class ValuationExitMultipleDCFBuilder:
             else "$K$7/$B$12>=0.30"
         )
         ws.cell(row=13, column=1, value="Exit Multiple (EV/EBITDA)")
+        # The conversion test divides by $B$12, so it sits inside its own IF:
+        # Excel's AND evaluates every argument, and with zero terminal EBITDA
+        # the flat AND made row 13, and every cell reading it, #DIV/0! in the
+        # downloaded workbook (the Python evaluator short-circuits, so the
+        # JSON never showed it).
         ws.cell(
             row=13, column=2,
             value=(
-                f'=IF(AND($B$12>0,$B$2>{cap + 0.005:.10f},{conversion_gate}),'
+                f'=IF(AND($B$12>0,$B$2>{cap + 0.005:.10f}),'
+                f'IF({conversion_gate},'
                 f'MIN($B$3,($K$7/$B$12)*{1 + cap:.10f}/($B$2-{cap:.10f})),'
-                '$B$3)'
+                '$B$3),$B$3)'
             ),
         )
         ws.cell(row=13, column=2).number_format = '0.0"x"'
