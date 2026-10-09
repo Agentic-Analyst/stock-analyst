@@ -57,11 +57,17 @@ def fetch_spot(symbol: str) -> Optional[float]:
     import yfinance as yf
 
     df = fetch_history(symbol, "5d", attempts=2)
+    stale = None
     if df is not None and not df.empty:
         try:
-            px = float(df["Close"].dropna().iloc[-1])
+            # A last bar without a Close is today's session after the bell:
+            # the latest valid close is yesterday's, so ask fast_info first
+            # and fall back to it only when fast_info has nothing either.
+            px = float(df["Close"].iloc[-1])
             if px > 0:
                 return px
+            valid = df["Close"].dropna()
+            stale = float(valid.iloc[-1]) if len(valid) else None
         except Exception:
             pass
 
@@ -74,4 +80,28 @@ def fetch_spot(symbol: str) -> Optional[float]:
         except Exception:
             pass
         time.sleep(_BASE_DELAY)
+    return stale
+
+
+def live_price(symbol: str) -> Optional[float]:
+    """
+    Today's price when the daily bar has no close yet (Yahoo's evening bar):
+      1. fast_info.last_price;
+      2. the last 5-minute bar of today's session.
+    None when neither answers — callers must then not present the previous
+    session's close as today's price.
+    """
+    import yfinance as yf
+
+    try:
+        px = getattr(yf.Ticker(symbol).fast_info, "last_price", None)
+        if px and float(px) > 0:
+            return float(px)
+    except Exception:
+        pass
+    df = fetch_history(symbol, "1d", interval="5m", attempts=2)
+    if df is not None and not df.empty:
+        closes = df["Close"].dropna()
+        if len(closes):
+            return float(closes.iloc[-1])
     return None

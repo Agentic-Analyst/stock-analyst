@@ -211,6 +211,19 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
             title = top.get("title") if isinstance(top, dict) else None
             add("news", "Latest headline", (title or "")[:90] or None)
 
+    elif tool == "explain_price_move":
+        episode = result.get("episode") if isinstance(result.get("episode"), dict) else {}
+        move = _num(episode.get("change_pct"))
+        if move is not None and episode.get("start_date") and episode.get("end_date"):
+            # Half-up, as the answer's prose rounds it: -21.65 is "-21.7%".
+            from decimal import ROUND_HALF_UP, Decimal
+            shown = Decimal(str(move)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+            add("metric", "The move", f"{shown:+}%",
+                f"{_short_date(episode['start_date'])} → {_short_date(episode['end_date'])}")
+        headline = _key_headline(result.get("news"))
+        if headline:
+            add("news", "Key headline", headline[:90])
+
     elif tool == "write_report":
         us = result.get("listing_view") if isinstance(result.get("listing_view"), dict) else {}
         fv = (_money(us.get("fair_value"), "USD") if us.get("fair_value")
@@ -226,3 +239,26 @@ def extract_findings(tool: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
             add("compare", "Peers compared", ", ".join(str(x) for x in n[:5]))
 
     return out[:2]   # never flood the panel from a single tool
+
+
+def _short_date(day: str) -> str:
+    """2026-09-30 -> Sep 30."""
+    try:
+        from datetime import date
+        d = date.fromisoformat(str(day)[:10])
+        return f"{d:%b} {d.day}"
+    except ValueError:
+        return str(day)
+
+
+def _key_headline(news) -> Optional[str]:
+    """The top article on the first big-move session, else the first article."""
+    sessions = (news or {}).get("by_session") if isinstance(news, dict) else None
+    if not isinstance(sessions, list):
+        return None
+    ordered = [s for s in sessions if s.get("big_move_day")] + sessions
+    for session in ordered:
+        for article in session.get("articles") or []:
+            if article.get("title"):
+                return article["title"]
+    return None
