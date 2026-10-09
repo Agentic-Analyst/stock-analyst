@@ -117,26 +117,34 @@ def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
         return f"{ccy}{value:,.2f}" if _finite(value) else None
 
     sentences = []
+    # VYNN's own: what may stand outside the thesis (the base case, the
+    # buyers' and holders' lines). The price used, the Street's target and
+    # market data read there as a scenario's or an advice's own figure.
+    own = []
     rating = fixed_numbers.get("rating")
     if rating:
         confidence = fixed_numbers.get("rating_confidence")
         sentences.append(f"VYNN's rating is {rating}"
                          + (f", at {confidence} confidence" if confidence else "") + ".")
+        own.append(sentences[-1])
     m12 = (fixed_numbers.get("targets") or {}).get("m12") or {}
     if money(m12.get("price")):
         sentences.append(f"VYNN's fair value and 12-month target is {money(m12['price'])} per share.")
+        own.append(sentences[-1])
     # The report's "method range": every supported leg, comps and bank
     # methods included, so never "DCF". One value is no range.
     if money(m12.get("range_low")) and money(m12.get("range_high")) \
             and money(m12["range_low"]) != money(m12["range_high"]):
         sentences.append(f"VYNN's valuation methods range from {money(m12['range_low'])} to "
                          f"{money(m12['range_high'])}.")
+        own.append(sentences[-1])
     if money(fixed_numbers.get("current_price")):
         sentences.append(f"The share price used for this valuation is "
                          f"{money(fixed_numbers['current_price'])}.")
     expected = fixed_numbers.get("expected_return_pct_12m")
     if _finite(expected):
         sentences.append(f"The implied 12-month return is {expected:+.2f}%.")
+        own.append(sentences[-1])
     inputs = fixed_numbers.get("inputs") or {}
     count = inputs.get("analyst_count")
     if money(inputs.get("analyst_target")) and _finite(count) and count >= 1:
@@ -146,6 +154,7 @@ def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
     for text in (fixed_numbers.get("target_assumption"), fixed_numbers.get("confidence_alert_text")):
         if isinstance(text, str) and text.strip():
             sentences.append(_one_sentence(text))
+            own.append(sentences[-1])
     for label, key in (
         ("The P/E ratio is", "pe_ratio"), ("EV/EBITDA is", "ev_ebitda"),
         ("The price-to-book ratio is", "pb_ratio"), ("Revenue growth is", "revenue_growth"),
@@ -166,6 +175,7 @@ def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
         "source_article_title": "VYNN's own figures (not news)",
         "title": "VYNN's valuation figures and provider market data (not news)",
         "snippet": " ".join(sentences),
+        "own_statements": own,
         "source_quality": "computed",
     }
 
@@ -1114,22 +1124,29 @@ class RecommendationEngineV3:
                         watch = [printable(item) for item in
                                  self.validator.printed_items(scenario.get('watch'))]
                         output.append(f"**{scenario_label}**: {narrative}")
+                        # One item a line, as each was checked: joined with
+                        # ", " two items read as one sentence (review50e).
+                        for item in watch:
+                            output.append(f"  - Watch: {item}")
                         if watch:
-                            output.append(f"  - Watch: {', '.join(watch)}\n")
+                            output.append("")
             
             # Action
             action = response_data.get('action') if rated else {}
             if isinstance(action, dict) and action:
                 output.append(f"\n### Recommended Action\n")
-                printed = {key: [printable(item) for item in
-                                 self.validator.printed_items(action.get(key))]
-                           for key in ('buyers', 'holders', 'watch')}
+                # Joined, then made one line: exactly the text the validator read.
+                printed = {key: printable(" ".join(self.validator.printed_items(action.get(key))))
+                           for key in ('buyers', 'holders')}
+                printed['watch'] = [printable(item) for item in
+                                    self.validator.printed_items(action.get('watch'))]
                 if printed['buyers']:
-                    output.append(f"**For Buyers**: {' '.join(printed['buyers'])}\n")
+                    output.append(f"**For Buyers**: {printed['buyers']}\n")
                 if printed['holders']:
-                    output.append(f"**For Holders**: {' '.join(printed['holders'])}\n")
+                    output.append(f"**For Holders**: {printed['holders']}\n")
                 if printed['watch']:
-                    output.append(f"**Key Metrics to Monitor**: {', '.join(printed['watch'])}")
+                    output.append("**Key Metrics to Monitor**:")
+                    output.extend(f"- {item}" for item in printed['watch'])
             
             # Monitoring Plan
             monitoring = self.validator.printed_items(response_data.get('monitoring_plan'))
