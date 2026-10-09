@@ -149,13 +149,17 @@ def test_the_base_response_is_valid():
 class TestModelEvidence:
     def test_e0_states_each_figure_with_its_role(self):
         text = E0["snippet"]
-        for fragment in ("rating STRONG SELL (low confidence)", "fair value", "$226.89 per share",
-                         "DCF scenario range $206.61 to $247.17", "current price at the run $340.42",
-                         "implied 12-month return -33.35% (33.35% downside)",
-                         "analysts' mean target $328.09 (39 analysts)", FIXED["target_assumption"],
-                         FIXED["confidence_alert_text"], "P/E ratio 36.89x", "net margin 26.9%",
-                         "52-week range $200.00 to $360.00", "(not news)"):
+        for fragment in ("VYNN's rating is STRONG SELL, at low confidence.",
+                         "VYNN's fair value, its published intrinsic value and 12-month "
+                         "convergence target, is $226.89 per share.",
+                         "VYNN's DCF scenario range is $206.61 to $247.17.",
+                         "The current price at the run is $340.42.",
+                         "The implied 12-month return is -33.35% (33.35% downside).",
+                         "The analysts' mean target is $328.09 (39 analysts).",
+                         FIXED["target_assumption"], FIXED["confidence_alert_text"],
+                         "P/E ratio 36.89x", "net margin 26.9%", "52-week range $200.00 to $360.00"):
             assert fragment in text, fragment
+        assert "(not news)" in E0["source_article_title"]
         assert E0["id"] == "E0" and E0["type"] == "vynn_model"
 
     @pytest.mark.parametrize("sentence", [
@@ -197,7 +201,7 @@ class TestModelEvidence:
         # "The model states that ..."), and reasons given as stems ("list,
         # stat") had the rewrite swap one framing verb for another.
         reason = _issue_for("VYNN's calculator lists a published intrinsic value of $226.89 per share [E0].")
-        assert "(lists)" in reason and "no framing of your own" in reason
+        assert "(calculator, lists)" in reason and "no framing of your own" in reason
 
     def test_another_rating_beside_e0_figures_fails(self):
         # Every word and figure is E0's; only the label is not.

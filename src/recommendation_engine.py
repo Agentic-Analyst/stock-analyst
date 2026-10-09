@@ -96,27 +96,32 @@ def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
         return f"{ccy}{value:,.2f}" if isinstance(value, (int, float)) and \
             not isinstance(value, bool) else None
 
-    parts = []
+    # Plain sentences, one figure each: the narrative restates E0 in E0's own
+    # words, so E0 must read as a report would. Gate56 printed "VYNN model
+    # outputs, computed by VYNN's calculator (not news): rating ..." as a
+    # holders' recommendation.
+    sentences = []
     rating = fixed_numbers.get("rating")
     if rating:
         confidence = fixed_numbers.get("rating_confidence")
-        parts.append(f"rating {rating}" + (f" ({confidence} confidence)" if confidence else ""))
+        sentences.append(f"VYNN's rating is {rating}" + (f", at {confidence} confidence" if confidence else ""))
     m12 = (fixed_numbers.get("targets") or {}).get("m12") or {}
     if money(m12.get("price")):
-        parts.append(f"fair value (published intrinsic value, the 12-month convergence "
-                     f"target) {money(m12['price'])} per share")
+        sentences.append(f"VYNN's fair value, its published intrinsic value and 12-month "
+                         f"convergence target, is {money(m12['price'])} per share")
     if money(m12.get("range_low")) and money(m12.get("range_high")):
-        parts.append(f"DCF scenario range {money(m12['range_low'])} to {money(m12['range_high'])}")
+        sentences.append(f"VYNN's DCF scenario range is {money(m12['range_low'])} to "
+                         f"{money(m12['range_high'])}")
     if money(fixed_numbers.get("current_price")):
-        parts.append(f"current price at the run {money(fixed_numbers['current_price'])}")
+        sentences.append(f"The current price at the run is {money(fixed_numbers['current_price'])}")
     expected = fixed_numbers.get("expected_return_pct_12m")
     if isinstance(expected, (int, float)) and not isinstance(expected, bool):
-        parts.append(f"implied 12-month return {_signed_pct(expected)}")
+        sentences.append(f"The implied 12-month return is {_signed_pct(expected)}")
     inputs = fixed_numbers.get("inputs") or {}
     if money(inputs.get("analyst_target")) and inputs.get("analyst_count"):
-        parts.append(f"analysts' mean target {money(inputs['analyst_target'])} "
-                     f"({inputs['analyst_count']} analysts)")
-    text = "VYNN model outputs, computed by VYNN's calculator (not news): " + "; ".join(parts) + "."
+        sentences.append(f"The analysts' mean target is {money(inputs['analyst_target'])} "
+                         f"({inputs['analyst_count']} analysts)")
+    text = " ".join(sentence + "." for sentence in sentences)
     for sentence in (fixed_numbers.get("target_assumption"), fixed_numbers.get("confidence_alert_text")):
         if sentence:
             text += f" {sentence}"
@@ -139,7 +144,7 @@ def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
         "type": "vynn_model",
         "date": fixed_numbers.get("as_of"),
         "source": "VYNN model",
-        "source_article_title": "VYNN model outputs",
+        "source_article_title": "VYNN model outputs (not news)",
         "title": "VYNN's own deterministic outputs and provider market data (not news)",
         "snippet": text,
         "source_quality": "vynn_model",
