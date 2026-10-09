@@ -137,6 +137,14 @@ def test_d_and_a_is_held_at_the_highest_share_observed_through_the_cycle():
     path = memory_cycle.asset_base_path(inputs, inputs["base_period_end"], [30e9] * 5)
     assert path["da_share_held_at_maximum"] is True
     assert path["da_share_of_trend_revenue"] == memory_cycle.MAX_DA_SHARE_OF_TREND
+    assert path["trailing_da_share_of_trend_revenue"] == pytest.approx(0.45)
+    base = inputs["base_period_end"]
+    trend = [memory_cycle.trend_revenue(inputs, i + 1, base) for i in range(5)]
+    # The Street's covered years add back the trailing D&A their EBIT was
+    # earned on; the ceiling starts with the first mid-cycle year.
+    assert path["da"][:2] == pytest.approx([0.45 * t for t in trend[:2]])
+    assert path["da"][2:] == pytest.approx([0.30 * t for t in trend[2:]])
+    assert path["capex"][4] == pytest.approx(-1.1 * 0.30 * trend[4])
 
 
 def test_a_path_the_workbook_would_refuse_is_never_recorded():
@@ -252,3 +260,12 @@ def test_micron_exit_leg_is_held_to_its_own_economics():
     exit_value = exit_tab["(25, 2)"] if isinstance(exit_tab.get("(25, 2)"), (int, float)) else None
     if exit_value is not None:
         assert abs(exit_value / perpetual - 1) < 0.05
+
+
+def test_a_refused_asset_base_says_why(monkeypatch):
+    monkeypatch.setenv("RISK_FREE_USD", "0.04")
+    inputs = memory_cycle.mid_cycle_inputs(_sandisk())
+    trend_then = memory_cycle.trend_revenue(inputs, 0, "2026-06-30")
+    grounded, notes = _grounded(_sandisk_with_spend(1e8, -2.0 * trend_then))
+    assert grounded["mid_cycle"]["asset_base"] is None
+    assert any("do not form a plausible asset base" in note for note in notes)

@@ -261,14 +261,18 @@ def asset_base_path(
     capex_share = float(capex_ttm) / trend_then
     if capex_share < -_MAX_CAPEX_SHARE_OF_TREND:
         return None
+    # The ceiling applies from FY3, the first mid-cycle year: in the Street's
+    # covered years EBIT is the Street's, and the trailing D&A it was earned
+    # on is added back as it is.
     da_held = da_share > MAX_DA_SHARE_OF_TREND
-    da_share = min(da_share, MAX_DA_SHARE_OF_TREND)
+    mid_cycle_da_share = min(da_share, MAX_DA_SHARE_OF_TREND)
     da, capex = [], []
     for i, progress in enumerate(_CAPEX_GLIDE):
         trend_i = trend_revenue(inputs, i + 1, base_period)
-        da.append(da_share * trend_i)
+        share_i = da_share if i < 2 else mid_cycle_da_share
+        da.append(share_i * trend_i)
         capex.append(trend_i * (capex_share * (1 - progress)
-                                - CAPEX_TO_DA_AT_MATURITY * da_share * progress))
+                                - CAPEX_TO_DA_AT_MATURITY * mid_cycle_da_share * progress))
     da_ratios = [d / r for d, r in zip(da, revenue[:5])]
     capex_ratios = [c / r for c, r in zip(capex, revenue[:5])]
     # The workbook takes the per-year ratios only inside these bounds; a path
@@ -278,7 +282,8 @@ def asset_base_path(
                     for v in capex_ratios)):
         return None
     return {
-        "da_share_of_trend_revenue": da_share,
+        "da_share_of_trend_revenue": mid_cycle_da_share,
+        "trailing_da_share_of_trend_revenue": da_share,
         "da_share_held_at_maximum": da_held,
         "capex_share_of_trend_revenue": capex_share,
         "trailing_period_end": ttm_end,
@@ -364,8 +369,9 @@ def apply_mid_cycle(a: Dict[str, Any], inputs: Dict[str, Any]) -> Optional[str]:
         "source": inputs["source"],
         "history": inputs["history"],
         "asset_base": ({k: asset_base[k] for k in (
-            "da_share_of_trend_revenue", "da_share_held_at_maximum",
-            "capex_share_of_trend_revenue", "trailing_period_end", "da", "capex")}
+            "da_share_of_trend_revenue", "trailing_da_share_of_trend_revenue",
+            "da_share_held_at_maximum", "capex_share_of_trend_revenue",
+            "trailing_period_end", "da", "capex")}
             if asset_base else None),
     }
     a["operating_margin_source"] = "mid_cycle_after_street_covered_years"
@@ -383,9 +389,12 @@ def apply_mid_cycle(a: Dict[str, Any], inputs: Dict[str, Any]) -> Optional[str]:
             f"twelve months to {asset_base['trailing_period_end']}, capex at that intensity "
             f"through FY2 and converging to {CAPEX_TO_DA_AT_MATURITY:.1f}x D&A by FY5"
         )
-    else:
+    elif inputs.get("ttm_depreciation") is None or inputs.get("ttm_capex") is None:
         assets = ("; D&A and capex at the trailing share of projected revenue "
                   "(no current trailing twelve months)")
+    else:
+        assets = ("; D&A and capex at the trailing share of projected revenue (the "
+                  "trailing twelve months' D&A and capex do not form a plausible asset base)")
     return (
         f"Mid-cycle ({label} maker): FY1-FY2 on the Street case; revenue from "
         f"{fy2 / 1e9:,.1f}B (FY2) to its trend {fy4 / 1e9:,.1f}B by FY4, then "

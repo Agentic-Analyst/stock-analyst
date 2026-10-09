@@ -299,7 +299,7 @@ class ValuationExitMultipleDCFBuilder:
         # collapses. `g_cap` is currency-specific: 4% for USD when rates allow,
         # but lower for currencies such as JPY.
         #
-        # A mid-cycle model is held to the ceiling whatever its conversion.
+        # A mid-cycle model is held to the ceiling from a lower conversion.
         # Its projection is built to be steady (capex on the asset base,
         # converging to 1.1x D&A), and a memory maker's D&A is legitimately
         # half its EBITDA, so its conversion sits near 20% without anything
@@ -309,9 +309,12 @@ class ValuationExitMultipleDCFBuilder:
         # EBITDA, put the exit leg 23% above the perpetuity leg.
         #
         # It keeps a floor: the conversion terminal_value.py itself requires of
-        # a steady terminal year, so the two never disagree about one. Below
-        # it the terminal is not steady, the input stays, and the legs part
-        # instead of agreeing on it.
+        # a steady terminal year (15%), so the two never disagree about one.
+        # Below it the terminal is not steady: the input stays, the legs part
+        # instead of agreeing on a broken terminal, and terminal_value.py
+        # reports the projection as not steady. With D&A held at Micron's
+        # highest share of trend revenue (memory_cycle.MAX_DA_SHARE_OF_TREND)
+        # a mid-cycle model stays above it.
         cap = self.growth_cap
         conversion_gate = (
             f"$K$7/$B$12>={MIN_TERMINAL_CONVERSION:.2f}" if self.always_cap
