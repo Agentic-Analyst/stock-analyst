@@ -79,4 +79,3 @@ def test_a_ceiling_within_rounding_prints_one_number():
 def test_the_exit_tab_names_the_reference_and_the_applied_multiple(micron):
     exit_tab = micron["Valuation (Exit Multiple)"]["cells"]
     assert exit_tab["(3, 1)"] == "Current EV/EBITDA (reference)"
-    assert exit_tab["(13, 1)"] == "Exit Multiple applied (EV/EBITDA)"

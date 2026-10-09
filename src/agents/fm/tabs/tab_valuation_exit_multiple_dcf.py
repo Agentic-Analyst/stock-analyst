@@ -296,7 +296,7 @@ class ValuationExitMultipleDCFBuilder:
         # collapses. `g_cap` is currency-specific: 4% for USD when rates allow,
         # but lower for currencies such as JPY.
         cap = self.growth_cap
-        ws.cell(row=13, column=1, value="Exit Multiple applied (EV/EBITDA)")
+        ws.cell(row=13, column=1, value="Exit Multiple (EV/EBITDA)")
         ws.cell(
             row=13, column=2,
             value=(
