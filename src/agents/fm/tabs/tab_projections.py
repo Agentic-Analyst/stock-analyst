@@ -13,7 +13,8 @@ Professional-grade financial model following investment banking standards:
 - Unlevered FCF = NOPAT + D&A + Capex - ΔNWC (leases treated as debt)
 """
 
-from typing import Any, Dict, Optional
+import math
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
@@ -364,11 +365,19 @@ class ProjectionsTabBuilder:
             isinstance(da_ratio, (int, float)) and not isinstance(da_ratio, bool)
             and 0 <= float(da_ratio) <= 0.50
         )
+        # A memory maker's D&A and capex follow its asset base, not the price
+        # cycle its revenue rides (memory_cycle.asset_base_path): one ratio
+        # per year, both or neither.
+        da_by_year = self._year_ratios("da_to_revenue_by_year", 0.0, 1.0)
+        capex_by_year = self._year_ratios("capex_to_revenue_by_year", -2.0, 0.0)
+        if da_by_year is None or capex_by_year is None:
+            da_by_year = capex_by_year = None
         for i in range(self.projection_years):
             col = 2 + i
             col_letter = chr(64 + col)  # B, C, D, E, F
             
             formula = (
+                f'={col_letter}3*{da_by_year[i]:.12f}' if da_by_year else
                 f'={col_letter}3*{float(da_ratio):.12f}' if use_ttm_da else
                 f'=Historical!$F$18*({col_letter}3/Historical!$F$3)'
             )
@@ -393,7 +402,9 @@ class ProjectionsTabBuilder:
             col_letter = chr(64 + col)  # B, C, D, E, F
             frac = i / max(1, self.projection_years - 1)  # 0 .. 1 across FY1..FY5
 
-            if use_ttm_capex and use_ttm_da:
+            if capex_by_year:
+                formula = f'={col_letter}3*{capex_by_year[i]:.12f}'
+            elif use_ttm_capex and use_ttm_da:
                 formula = (
                     f'={col_letter}3*({float(capex_ratio):.12f}*{1 - frac:.2f}'
                     f'-1.1*{float(da_ratio):.12f}*{frac:.2f})'
@@ -407,6 +418,19 @@ class ProjectionsTabBuilder:
             ws.cell(row=13, column=col, value=formula)
             ws.cell(row=13, column=col).number_format = ExcelFormats.CURRENCY
     
+    def _year_ratios(self, key: str, low: float, high: float) -> Optional[List[float]]:
+        """One finite ratio per projection year within [low, high], or None."""
+        values = self.modeling_basis.get(key)
+        if not isinstance(values, (list, tuple)) or len(values) < self.projection_years:
+            return None
+        ratios = []
+        for value in values[:self.projection_years]:
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not low <= value <= high):
+                return None
+            ratios.append(float(value))
+        return ratios
+
     def _setup_nwc_section(self, ws: Worksheet) -> None:
         """
         Set up Working Capital section (rows 14-18).

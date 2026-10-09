@@ -45,7 +45,8 @@ class ValuationExitMultipleDCFBuilder:
     
     def __init__(self, projection_years: int = 5, exit_multiple: float = 20.0,
                  growth_cap: float = 0.04, available: Optional[bool] = None,
-                 modeling_basis: Optional[Dict[str, Any]] = None):
+                 modeling_basis: Optional[Dict[str, Any]] = None,
+                 always_cap: bool = False):
         """
         Initialize the Exit Multiple DCF builder.
 
@@ -60,6 +61,8 @@ class ValuationExitMultipleDCFBuilder:
                 multiple, already bounded by the cash-flow currency's rate.
         """
         self.projection_years = projection_years
+        # A mid-cycle model (memory_cycle.py): see the exit-multiple cap.
+        self.always_cap = bool(always_cap)
         self.modeling_basis = modeling_basis or {}
         self.horizon_prefix = (
             "NTM" if (self.modeling_basis.get("forecast_basis") or {}).get(
@@ -294,12 +297,22 @@ class ValuationExitMultipleDCFBuilder:
         # WACC must also sit comfortably above the cap or the denominator
         # collapses. `g_cap` is currency-specific: 4% for USD when rates allow,
         # but lower for currencies such as JPY.
+        #
+        # A mid-cycle model is held to the ceiling whatever its conversion.
+        # Its projection is built to be steady (capex on the asset base,
+        # converging to 1.1x D&A), and a memory maker's D&A is legitimately
+        # half its EBITDA, so its conversion sits near 20% without anything
+        # being broken. Ungated, the input is today's EV/EBITDA, which prices
+        # the same cycle the method normalizes, the reason peers are never
+        # blended into it: Micron's 10.4x on boom EBITDA, applied to mid-cycle
+        # EBITDA, put the exit leg 23% above the perpetuity leg.
         cap = self.growth_cap
+        conversion_gate = "$K$7>0" if self.always_cap else "$K$7/$B$12>=0.30"
         ws.cell(row=13, column=1, value="Exit Multiple (EV/EBITDA)")
         ws.cell(
             row=13, column=2,
             value=(
-                f'=IF(AND($B$12>0,$B$2>{cap + 0.005:.10f},$K$7/$B$12>=0.30),'
+                f'=IF(AND($B$12>0,$B$2>{cap + 0.005:.10f},{conversion_gate}),'
                 f'MIN($B$3,($K$7/$B$12)*{1 + cap:.10f}/($B$2-{cap:.10f})),'
                 '$B$3)'
             ),

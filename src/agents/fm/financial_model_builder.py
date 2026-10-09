@@ -302,6 +302,7 @@ class FinancialModelBuilder:
             growth_cap=self.llm_assumptions.get('sustainable_growth_cap', 0.04),
             available=self.llm_assumptions.get('exit_multiple_available'),
             modeling_basis=modeling_basis,
+            always_cap=bool(self.llm_assumptions.get('mid_cycle')),
         )
         self.sensitivity_builder = SensitivityTabBuilder(modeling_basis=modeling_basis)
         self.summary_builder = SummaryTabBuilder(

@@ -84,6 +84,20 @@ def build_reinvestment_sensitivity(
     fewer than three complete annual observations.
     """
     basis = modeling_basis if isinstance(modeling_basis, dict) else {}
+    if basis.get("capex_to_revenue_by_year"):
+        # A memory maker's capex follows its asset base year by year
+        # (memory_cycle.asset_base_path); the run-rate-versus-history case
+        # below assumes the trailing ratio on projected revenue.
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "status": "unavailable",
+            "included_in_intrinsic_value": False,
+            "reason": (
+                "Capex follows the asset base at trend revenue, not a trailing "
+                "share of projected revenue, so the run-rate capex case does not apply."
+            ),
+            "annual_observations": _annual_capex_ratios(financial_data or {}),
+        }
     reported_ratio = _number(basis.get("capex_to_revenue"))
     da_ratio = _number(basis.get("da_to_revenue"))
     history = _annual_capex_ratios(financial_data or {})
