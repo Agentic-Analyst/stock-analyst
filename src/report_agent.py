@@ -1857,7 +1857,12 @@ def extract_valuation(computed_values: Dict[str, Any]) -> Dict[str, Any]:
             'enterprise_value': exit_tab.get('(17, 2)', 0),  # Enterprise Value (EV) - row 17, not 18!
             'equity_value': exit_tab.get('(22, 2)', 0),  # Equity Value (Firm Value)
             'intrinsic_value_per_share': exit_tab.get('(25, 2)', 0),  # Intrinsic Value per Share - row 25, not 24!
-            'exit_multiple': exit_tab.get('(3, 2)', 0),  # Terminal EV/EBITDA Multiple
+            # The multiple the exit leg applied (row 13, after the
+            # sustainable-growth ceiling), and today's reference it started
+            # from (row 3). The report printed the reference beside a value
+            # computed at the applied one: Apple "29.7x" against 17.5x.
+            'exit_multiple': exit_tab.get('(13, 2)', 0),
+            'exit_multiple_reference': exit_tab.get('(3, 2)', 0),
         },
         'summary': {
             'dcf_intrinsic': summary.get('(18, 2)', 0),
@@ -2696,6 +2701,21 @@ def _publishable_valuation_commentary(
     return text
 
 
+def exit_multiple_text(dcf_exit: Dict[str, Any]) -> str:
+    """The exit multiple the valuation applied, and today's reference when the
+    sustainable-growth ceiling held it below that."""
+    applied = dcf_exit.get('exit_multiple')
+    reference = dcf_exit.get('exit_multiple_reference')
+    if not isinstance(applied, (int, float)) or isinstance(applied, bool) or not applied:
+        return "N/A"
+    text = f"{applied:.1f}x"
+    if (isinstance(reference, (int, float)) and not isinstance(reference, bool)
+            and reference - applied >= 0.05):
+        text += (f" (today's {reference:.1f}x, held to what a sustainable "
+                 "growth rate justifies)")
+    return text
+
+
 def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     """Generate Financial Model & Valuation section with pre-built tables."""
     assumptions = data['assumptions']
@@ -2771,8 +2791,7 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
     # DCF Exit Multiple results
     dcf_exit_table = "| Metric | Value |\n"
     dcf_exit_table += "|--------|-------|\n"
-    exit_multiple = valuation['dcf_exit']['exit_multiple']
-    exit_multiple_str = f"{exit_multiple:.1f}x" if exit_multiple else "N/A"
+    exit_multiple_str = exit_multiple_text(valuation['dcf_exit'])
     dcf_exit_table += f"| Exit Multiple (EV/EBITDA) | {exit_multiple_str} |\n"
     dcf_exit_table += f"| Terminal Enterprise Value | {format_number(valuation['dcf_exit']['terminal_ev'])} |\n"
     dcf_exit_table += f"| Enterprise Value | {format_number(valuation['dcf_exit']['enterprise_value'])} |\n"
