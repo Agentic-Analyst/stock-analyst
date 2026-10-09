@@ -589,6 +589,9 @@ def _estimate(rows: Any, period: str, *, positive_values: bool) -> Dict[str, Any
         "high": _number(row.get("high"), positive=positive_values),
         "growth": _number(row.get("growth")),
         "analyst_count": _count(row.get("numberOfAnalysts")),
+        # A year the company has reported, realigned into the table
+        # (src/estimate_alignment.py): not a forecast.
+        "reported": row.get("reported") is True,
     }
 
 
@@ -821,12 +824,18 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
     listing_currency = basic.get("listing_currency") or basic.get("currency")
     financial_currency = basic.get("currency") or listing_currency
     fx_rate = market.get("fx_listing_to_financial")
+    # Yahoo's forward P/E is struck on its own "+1y"; after a realignment
+    # (src/estimate_alignment.py) that is the provider table's row, not ours.
+    provider_forward = (((analyst.get("provider_estimates") or {}).get("earnings_estimates")
+                         or {}).get("+1y"))
     eps_unit = _infer_eps_source_currency(
         analyst=analyst,
         basic=basic,
         market=market,
         valuation=valuation,
-        forward_eps=raw_eps[1].get("average"),
+        forward_eps=(_number(provider_forward.get("avg"))
+                     if isinstance(provider_forward, dict)
+                     else raw_eps[1].get("average")),
     )
     eps_source_currency = eps_unit.get("currency")
     eps = []
@@ -859,6 +868,7 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
         )
         years.append({
             "period": period,
+            "reported": revenue_row["reported"],
             "revenue": revenue_row["average"],
             "revenue_growth": revenue_row["growth"],
             "revenue_analyst_count": revenue_row["analyst_count"],
@@ -1227,6 +1237,9 @@ def align_forward_estimates_to_forecast_basis(
             if net_income is not None and revenue is not None and revenue > 0
             else None
         ),
+        # The share of this rolling year that is the reported year.
+        "reported": False,
+        "reported_share": (1.0 - progress) if current.get("reported") else 0.0,
         "forecast_alignment": {
             "basis": "rolling_twelve_months",
             "fiscal_year_progress": progress,

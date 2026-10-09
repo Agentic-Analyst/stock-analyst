@@ -218,7 +218,8 @@ def _forward_consensus_common_roe(
 
     observations = []
     for row in (expectations.get("forward_estimates") or [])[:2]:
-        if not isinstance(row, dict):
+        # A reported year's EPS over today's book value is trailing ROE.
+        if not isinstance(row, dict) or row.get("reported"):
             continue
         eps = _finite(row.get("eps"), positive=True)
         try:

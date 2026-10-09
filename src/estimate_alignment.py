@@ -35,8 +35,20 @@ _SAME_YEAR_REVENUE_TOLERANCE = 0.02
 # for its current quarter matches one statement quarter to the dollar, give or
 # take restatement rounding.
 _SAME_QUARTER_REVENUE_TOLERANCE = 0.005
+# A consistent table chains: "+1y" grows from "0y" (its year-ago revenue is
+# "0y"'s average). Every consistent table checked (MU, COST, AZO, the banks)
+# matches exactly.
+_CHAIN_TOLERANCE = 0.005
 # A fiscal year is 52 or 53 weeks; its end moves a few days year to year.
 _ONE_YEAR_DAYS = (300, 430)
+# The reported year less its quarters already in the statements leaves the
+# quarters Yahoo has and the statements do not; each must look like a quarter
+# of that company (Micron's implied FY2026 Q4: 1.3x its May quarter). Toyota's
+# and Sony's year-ago figures are on another basis (0.36x and 0.06x their
+# statements) and leave a negative quarter.
+_IMPLIED_QUARTER_BOUNDS = (0.5, 2.5)
+# One year's revenue against the next, wherever the table is realigned.
+_YEAR_ON_YEAR_BOUNDS = (0.5, 5.0)
 
 
 def _date(value: Any) -> Optional[date]:
@@ -73,22 +85,70 @@ def _latest(rows: Any) -> Optional[tuple]:
     return max(dated) if dated else None
 
 
+def _chains(current_year: Dict[str, Any], next_year: Any) -> bool:
+    """Whether Yahoo's "+1y" grows from its "0y" (True when it cannot say)."""
+    base = _positive((next_year or {}).get("yearAgoRevenue")) if isinstance(next_year, dict) else None
+    average = _positive(current_year.get("avg"))
+    return base is None or average is None or abs(base / average - 1.0) <= _CHAIN_TOLERANCE
+
+
+def _torn(current_year: Dict[str, Any], next_year: Any) -> Optional[Dict[str, Any]]:
+    """
+    A half-rolled table: "0y" is the year after the statements but "+1y" grows
+    from a different base, the year after it. Jabil, Accenture and FactSet on
+    9 October 2026: "0y" FY2026 (year-ago = the FY2025 statement), "+1y"
+    FY2028, FY2027 only as "+1y"'s year-ago revenue ($44.78B against "0y"'s
+    $35.06B for Jabil). Read as the year after "0y", "+1y" put FY2028 in FY2.
+    """
+    if _chains(current_year, next_year):
+        return None
+    base = _positive(next_year.get("yearAgoRevenue"))
+    average = _positive(current_year.get("avg"))
+    plausible = (_YEAR_ON_YEAR_BOUNDS[0] <= base / average <= _YEAR_ON_YEAR_BOUNDS[1]
+                 if base and average else False)
+    return {"status": "torn", "next_year_base_revenue": base, "next_year_base_plausible": plausible}
+
+
+def _implied_quarters_plausible(data: Dict[str, Any], reported: float, latest_end: date,
+                                latest_revenue: float, provider_year_end: date) -> bool:
+    quarters = ((data.get("quarterly_financial_statements") or {}).get("income_statement") or {})
+    inside = []
+    for period, row in quarters.items() if isinstance(quarters, dict) else []:
+        when, revenue = _date(period), _revenue(row)
+        if when is not None and revenue is not None and latest_end < when <= provider_year_end:
+            inside.append((when, revenue))
+    missing = 4 - len(inside)
+    if missing >= 4:
+        return _YEAR_ON_YEAR_BOUNDS[0] <= reported / latest_revenue <= _YEAR_ON_YEAR_BOUNDS[1]
+    implied = reported - sum(revenue for _, revenue in inside)
+    if missing <= 0:
+        return abs(implied) <= _SAME_YEAR_REVENUE_TOLERANCE * reported
+    latest_quarter = max(inside)[1]
+    per_quarter = implied / missing
+    return _IMPLIED_QUARTER_BOUNDS[0] <= per_quarter / latest_quarter <= _IMPLIED_QUARTER_BOUNDS[1]
+
+
 def estimate_alignment(modeling_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Whether Yahoo's "0y" is the year after the latest annual statement.
 
-    "rolled" needs two independent signs that Yahoo has seen one more fiscal
-    year reported than the statements carry: its last fiscal year end is a
-    year after the latest annual statement's, and its current quarter's
-    year-ago revenue is a statement quarter from inside that newer year. A
-    provider whose revenue definition differs from the statements' (Ford,
-    Deere, the oil majors) fails the year-ago match in every period, so the
-    year-ago figure alone never decides it.
+    "rolled" needs every sign that Yahoo has seen one more fiscal year reported
+    than the statements carry: its last fiscal year end is a year after the
+    latest annual statement's; its current quarter's year-ago revenue is a
+    statement quarter from inside that newer year; its table chains ("+1y"
+    grows from "0y"); and the reported year it implies leaves plausible
+    quarters once the statements' quarters of that year are taken out. A
+    year-ago figure equal to the latest statement is never a roll, even in a
+    flat year: it cannot be told from a table that has not rolled, and a flat
+    year moves the model little either way. A provider whose revenue
+    definition differs from the statements' (Ford, Deere, the oil majors) on
+    the same fiscal year is aligned.
     """
     data = modeling_data if isinstance(modeling_data, dict) else {}
     analyst = data.get("analyst_data") if isinstance(data.get("analyst_data"), dict) else {}
     revenue_rows = analyst.get("revenue_estimates") or {}
     current_year = revenue_rows.get("0y") if isinstance(revenue_rows, dict) else None
+    next_year = revenue_rows.get("+1y") if isinstance(revenue_rows, dict) else None
     statements = (data.get("financial_statements") or {}).get("income_statement")
     latest = _latest(statements)
     if not isinstance(current_year, dict) or latest is None:
@@ -96,20 +156,25 @@ def estimate_alignment(modeling_data: Dict[str, Any]) -> Dict[str, Any]:
     latest_end, latest_revenue = latest
     result: Dict[str, Any] = {"latest_annual_statement_end": latest_end.isoformat()}
     year_ago = _positive(current_year.get("yearAgoRevenue"))
-    if year_ago is not None and abs(year_ago / latest_revenue - 1.0) <= _SAME_YEAR_REVENUE_TOLERANCE:
-        return {**result, "status": "aligned"}
-
     basic = ((data.get("company_data") or {}).get("basic_info") or {})
     provider_year_end = _date(basic.get("last_fiscal_year_end"))
-    if provider_year_end is None or year_ago is None:
-        return {**result, "status": "unverified"}
-    result["provider_last_fiscal_year_end"] = provider_year_end.isoformat()
-    lag = (provider_year_end - latest_end).days
-    if lag < _ONE_YEAR_DAYS[0]:
-        # Same fiscal year on both clocks; the provider defines revenue
-        # differently from the statements.
-        return {**result, "status": "aligned", "year_ago_revenue_ratio": year_ago / latest_revenue}
-    if lag > _ONE_YEAR_DAYS[1]:
+    if provider_year_end is not None:
+        result["provider_last_fiscal_year_end"] = provider_year_end.isoformat()
+    lag = (provider_year_end - latest_end).days if provider_year_end is not None else None
+
+    same_year = (year_ago is not None
+                 and abs(year_ago / latest_revenue - 1.0) <= _SAME_YEAR_REVENUE_TOLERANCE)
+    if same_year or (lag is not None and lag < _ONE_YEAR_DAYS[0] and year_ago is not None):
+        torn = _torn(current_year, next_year)
+        if torn:
+            return {**result, **torn}
+        aligned = {**result, "status": "aligned"}
+        if not same_year:
+            # Same fiscal year on both clocks; the provider defines revenue
+            # differently from the statements.
+            aligned["year_ago_revenue_ratio"] = year_ago / latest_revenue
+        return aligned
+    if lag is None or year_ago is None or lag > _ONE_YEAR_DAYS[1]:
         return {**result, "status": "unverified"}
 
     current_quarter = revenue_rows.get("0q") if isinstance(revenue_rows, dict) else None
@@ -123,7 +188,9 @@ def estimate_alignment(modeling_data: Dict[str, Any]) -> Dict[str, Any]:
                     and latest_end < when <= provider_year_end
                     and abs(revenue / quarter_year_ago - 1.0) <= _SAME_QUARTER_REVENUE_TOLERANCE):
                 matched = when
-    if matched is None:
+    if (matched is None or not _chains(current_year, next_year)
+            or not _implied_quarters_plausible(data, year_ago, latest_end, latest_revenue,
+                                               provider_year_end)):
         return {**result, "status": "unverified"}
     return {
         **result,
@@ -134,6 +201,42 @@ def estimate_alignment(modeling_data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _realign_torn(analyst: Dict[str, Any], alignment: Dict[str, Any]) -> None:
+    """
+    "+1y" becomes the year "0y" grows into, from Yahoo's own base for its
+    "+1y"; Yahoo's "+1y" is kept as "+2y". Its EPS has no such base (Jabil's
+    "+1y" year-ago EPS is half its "0y", on three analysts), so FY2 EPS is
+    dropped rather than taken from the wrong year.
+    """
+    revenue = analyst.get("revenue_estimates") or {}
+    eps = analyst.get("earnings_estimates") or {}
+    analyst["provider_estimates"] = {
+        "revenue_estimates": copy.deepcopy(revenue),
+        "earnings_estimates": copy.deepcopy(eps),
+    }
+    next_year = revenue.get("+1y") or {}
+    aligned = {key: value for key, value in revenue.items() if key != "+1y"}
+    if alignment.get("next_year_base_plausible"):
+        base = alignment["next_year_base_revenue"]
+        current = _positive((revenue.get("0y") or {}).get("avg"))
+        aligned["+1y"] = {
+            "avg": base,
+            "numberOfAnalysts": next_year.get("numberOfAnalysts"),
+            "growth": base / current - 1.0 if current else None,
+            "currency": next_year.get("currency"),
+            "implied_from_next_year": True,
+        }
+        aligned["+2y"] = dict(next_year)
+    analyst["revenue_estimates"] = aligned
+    analyst["earnings_estimates"] = {key: value for key, value in eps.items() if key != "+1y"}
+    alignment["note"] = (
+        "Yahoo's +1y had rolled a year past its 0y; "
+        + ("+1y is the year 0y grows into, from Yahoo's own base, and Yahoo's +1y is +2y; "
+           if alignment.get("next_year_base_plausible") else "+1y revenue is not used; ")
+        + "FY2 EPS is not used."
+    )
+
+
 def align_street_estimates(modeling_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Realign the annual estimate rows in place when Yahoo's clock has rolled
@@ -141,11 +244,17 @@ def align_street_estimates(modeling_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     data = modeling_data if isinstance(modeling_data, dict) else {}
     analyst = data.get("analyst_data")
-    if not isinstance(analyst, dict):
+    # An empty table (the estimate scrape failed) stays empty: a recorded
+    # alignment would make it look like analyst data.
+    if not isinstance(analyst, dict) or not analyst:
         return {"status": "unknown"}
     if isinstance(analyst.get("estimate_alignment"), dict):
         return analyst["estimate_alignment"]
     alignment = estimate_alignment(data)
+    if alignment.get("status") == "torn":
+        _realign_torn(analyst, alignment)
+        analyst["estimate_alignment"] = alignment
+        return alignment
     if alignment.get("status") != "rolled":
         analyst["estimate_alignment"] = alignment
         return alignment

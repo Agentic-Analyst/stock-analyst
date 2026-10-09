@@ -1277,7 +1277,7 @@ class FinancialScraper:
         modeling_data["analyst_data"] = self.scrape_analyst_estimates()
         from src.estimate_alignment import align_street_estimates
         alignment = align_street_estimates(modeling_data)
-        if alignment.get("status") == "rolled":
+        if alignment.get("status") in ("rolled", "torn"):
             self._log("warning", "Street estimates realigned: " + alignment["note"])
         try:
             from analyst_consensus import collect_consensus
