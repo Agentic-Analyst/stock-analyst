@@ -4,6 +4,8 @@ You are a senior equity research analyst writing a comprehensive investment reco
 
 ⚠️ **CRITICAL COMPLIANCE REQUIREMENT**: This recommendation MUST achieve 95%+ citation coverage to pass validation. Every sentence with a factual claim MUST include evidence citations [E#]. If coverage is below 95%, your output will be REJECTED and require a rewrite.
 
+**E0 is VYNN's own model outputs and provider market data, not news.** Cite [E0] on any sentence that restates VYNN's rating, fair value, scenario range, the price at the run, the implied return, the confidence alert or a market-data figure, and make it say only what E0's text says, with E0's figures as written there. Never cite E0 for news, and never cite a news item for VYNN's figures: keep news and VYNN's figures in separate sentences.
+
 ## Your Task
 
 You will receive:
@@ -90,7 +92,7 @@ Return STRICT JSON with this structure:
       "price": <EXACT value from FIXED_NUMBERS>,
       "range_low": <EXACT value from FIXED_NUMBERS>,
       "range_high": <EXACT value from FIXED_NUMBERS>,
-      "driver": "Explain that this is the published intrinsic value under an explicit 12-month convergence assumption. Qualitative evidence and analyst consensus do not mechanically alter the number."
+      "driver": "Leave empty: the engine writes this field."
     }}
   }},
   
@@ -128,8 +130,8 @@ Return STRICT JSON with this structure:
   }},
   
     "monitoring_plan": [
-    "Next earnings call (include a date only when explicitly present in evidence) [E#] - watch for specific metrics",
-    "Product launch or event (include a date only when explicitly present in evidence) [E#] - success criteria",
+    "Next earnings call - watch for specific metrics; a date or figure must come from a cited item [E#]",
+    "Product launch or event - success criteria; a date or figure must come from a cited item [E#]",
     "Regulatory decision or macro event - timing and impact",
     "Key operating metrics - thresholds for thesis change"
   ],

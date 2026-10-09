@@ -75,6 +75,77 @@ def _symbol_for(code):
     return _CCY.get(code, f"{code} ")
 
 
+def _signed_pct(value: float) -> str:
+    """-33.35 -> "-33.35% (33.35% downside)": both forms a sentence may write."""
+    direction = "downside" if value < 0 else "upside"
+    return f"{value:+.2f}% ({abs(value):.2f}% {direction})"
+
+
+def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
+                        ccy: str) -> Dict[str, Any]:
+    """E0: VYNN's own deterministic figures as a citable evidence item.
+
+    A sentence that restates the rating, the fair value, its range, the price
+    at the run, the implied return or the confidence alert cites [E0] and is
+    checked against this text like a news claim against its source: its
+    figures must be here, its wording must be here. Built only from
+    FIXED_NUMBERS and the company context the explainer is shown, formatted
+    as it is shown there.
+    """
+    def money(value):
+        return f"{ccy}{value:,.2f}" if isinstance(value, (int, float)) and \
+            not isinstance(value, bool) else None
+
+    parts = []
+    rating = fixed_numbers.get("rating")
+    if rating:
+        confidence = fixed_numbers.get("rating_confidence")
+        parts.append(f"rating {rating}" + (f" ({confidence} confidence)" if confidence else ""))
+    m12 = (fixed_numbers.get("targets") or {}).get("m12") or {}
+    if money(m12.get("price")):
+        parts.append(f"fair value (published intrinsic value, the 12-month convergence "
+                     f"target) {money(m12['price'])} per share")
+    if money(m12.get("range_low")) and money(m12.get("range_high")):
+        parts.append(f"DCF scenario range {money(m12['range_low'])} to {money(m12['range_high'])}")
+    if money(fixed_numbers.get("current_price")):
+        parts.append(f"current price at the run {money(fixed_numbers['current_price'])}")
+    expected = fixed_numbers.get("expected_return_pct_12m")
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        parts.append(f"implied 12-month return {_signed_pct(expected)}")
+    inputs = fixed_numbers.get("inputs") or {}
+    if money(inputs.get("analyst_target")) and inputs.get("analyst_count"):
+        parts.append(f"analysts' mean target {money(inputs['analyst_target'])} "
+                     f"({inputs['analyst_count']} analysts)")
+    text = "VYNN model outputs, computed by VYNN's calculator (not news): " + "; ".join(parts) + "."
+    for sentence in (fixed_numbers.get("target_assumption"), fixed_numbers.get("confidence_alert_text")):
+        if sentence:
+            text += f" {sentence}"
+    market = [
+        f"{label} {context.get(key)}"
+        for label, key in (
+            ("P/E ratio", "pe_ratio"), ("EV/EBITDA", "ev_ebitda"), ("price-to-book", "pb_ratio"),
+            ("revenue growth", "revenue_growth"), ("net margin", "net_margin"),
+            ("return on equity", "roe"), ("debt-to-equity", "debt_equity"),
+        )
+        if isinstance(context.get(key), str) and context.get(key) != "N/A"
+    ]
+    low, high = money(context.get("week_52_low")), money(context.get("week_52_high"))
+    if low and high:
+        market.append(f"52-week range {low} to {high}")
+    if market:
+        text += " Provider market data: " + "; ".join(market) + "."
+    return {
+        "id": "E0",
+        "type": "vynn_model",
+        "date": fixed_numbers.get("as_of"),
+        "source": "VYNN model",
+        "source_article_title": "VYNN model outputs",
+        "title": "VYNN's own deterministic outputs and provider market data (not news)",
+        "snippet": text,
+        "source_quality": "vynn_model",
+    }
+
+
 class RecommendationEngineV3:
     """
     Evidence-based recommendation engine with deterministic calculations
@@ -298,6 +369,15 @@ class RecommendationEngineV3:
                 fixed_numbers, evidence_pack, validation
             ), 0.0, evidence_pack
 
+        # VYNN's own figures as a citable item, and whose news this is.
+        evidence_pack['evidence'] = [
+            model_evidence_item(fixed_numbers, self._company_context(company_data),
+                                getattr(self, "_ccy", "$"))
+        ] + list(evidence_pack.get('evidence') or [])
+        evidence_pack["subject"] = {
+            "ticker": ticker, "name": company_data.get('company_name') or None,
+        }
+
         # Step 4: Build prompt
         prompt = self._build_explainer_prompt(
             fixed_numbers,
@@ -377,6 +457,12 @@ class RecommendationEngineV3:
         max_rewrite_attempts = 3
         rewrite_attempt = 0
         evidence_safe_fallback = None
+        # Claims an attempt cited and failed on: one that comes back with its
+        # citation simply removed is still a claim to cite or delete.
+        rejected_claims = {
+            issue.get("claim") for issue in validation_report.get("citation_support_issues") or []
+            if issue.get("claim")
+        }
         
         while self.validator.needs_rewrite(validation_report) and rewrite_attempt < max_rewrite_attempts:
             rewrite_attempt += 1
@@ -437,8 +523,13 @@ class RecommendationEngineV3:
             
             # Re-validate the rewrite
             final_json, validation_report = self.validator.validate_and_correct(
-                rewrite_response, fixed_numbers, evidence_pack
+                rewrite_response, fixed_numbers, evidence_pack, rejected_claims
             )
+            rejected_claims |= {
+                issue.get("claim")
+                for issue in validation_report.get("citation_support_issues") or []
+                if issue.get("claim")
+            }
             
             # Update corrected_json if we got valid output
             if final_json:
@@ -459,8 +550,10 @@ class RecommendationEngineV3:
                 self._log(f"  Cited: {coverage_details.get('cited_count', 0)}/{coverage_details.get('material_sentences', 0)} sentences")
                 self._log("="*80 + "\n")
             
-            # If validation passed, break early
-            if validation_report.get("valid"):
+            # Stop only when nothing is left to rewrite: a response can be
+            # valid while its rating or prices were corrected, and its prose
+            # may still say "We rate Apple a BUY."
+            if not self.validator.needs_rewrite(validation_report):
                 self._log(f"✅ VALIDATION PASSED on attempt {rewrite_attempt} - Output is production-ready\n")
                 break
         else:
@@ -569,6 +662,25 @@ class RecommendationEngineV3:
             for warning in validation_report["warnings"]:
                 issues_section += f"- {warning}\n"
             issues_section += "\n"
+
+        # Each failing claim, where it is and why: given only a count, the
+        # model rewrote other sentences and left these standing through all
+        # three attempts. The text is JSON-quoted: it is generated, and a
+        # newline in it must not read as part of these instructions.
+        unsupported = validation_report.get("citation_support_issues") or []
+        if unsupported:
+            issues_section += (
+                "**Cited Sentences Their Sources Do Not Support** (for EACH: cite a source that "
+                "states it, restate only what the cited source says, or delete the sentence "
+                "or item; every field may be edited, including `watch` items):\n"
+            )
+            for i, issue in enumerate(unsupported, 1):
+                issues_section += (
+                    f"{i}. {json.dumps(issue.get('field') or '?')} cites "
+                    f"{', '.join(issue.get('citations') or [])}: "
+                    f"{json.dumps(issue.get('claim') or '')} — {issue.get('reason') or 'unsupported'}\n"
+                )
+            issues_section += "\n"
         
         coverage = validation_report.get("coverage_details", {})
         if coverage:
@@ -579,17 +691,24 @@ class RecommendationEngineV3:
             # Show uncited sentences if available
             uncited = coverage.get('uncited_sentences', [])
             if uncited:
-                issues_section += "**Sentences MISSING Citations** (add [E#] to these):\n"
+                issues_section += (
+                    "**Sentences MISSING Citations** (for EACH: cite a source that states it, "
+                    "a news item or E0 for VYNN's own figures, or delete the sentence or item):\n"
+                )
                 for i, sent in enumerate(uncited[:10], 1):
-                    issues_section += f"{i}. {sent[:100]}...\n" if len(sent) > 100 else f"{i}. {sent}\n"
+                    issues_section += f"{i}. {json.dumps(sent[:200])}\n"
                 issues_section += "\n"
             
-            # Show examples of good citations
-            cited = coverage.get('cited_sentences', [])
+            # Show examples of good citations; a cited sentence its source
+            # does not support is no example.
+            failed = {issue.get("claim") for issue in unsupported}
+            examples = coverage.get('cited_sentences')
+            cited = [sent for sent in (examples if isinstance(examples, list) else [])
+                     if sent.strip()[:300] not in failed]
             if cited:
                 issues_section += "**Examples of GOOD Citations** (keep this pattern):\n"
                 for i, sent in enumerate(cited[:3], 1):
-                    issues_section += f"{i}. {sent[:100]}...\n" if len(sent) > 100 else f"{i}. {sent}\n"
+                    issues_section += f"{i}. {json.dumps(sent[:200])}\n"
                 issues_section += "\n"
         
         # Build iteration-specific guidance
@@ -599,8 +718,7 @@ class RecommendationEngineV3:
 - Rewrite unsupported claims so they say no more than the publisher headline
   and snippet below actually establish
 - Remove a claim when no evidence item directly supports it
-- Add [E#] only to source-backed news claims; leave deterministic valuation
-  fields uncited
+- Cite [E0] for VYNN's own figures and only E0; cite news items only for news
 """
         elif attempt == 2:
             iteration_guidance = """
@@ -649,7 +767,18 @@ class RecommendationEngineV3:
         
         # Prepare additional context
         # company_data comes from extract_company_overview() which has proper structure
-        #
+        context = self._company_context(company_data)
+        
+        # Format prompt
+        prompt = template.format(
+            fixed_numbers_json=json.dumps(fixed_numbers, indent=2),
+            evidence_pack_json=json.dumps(evidence_pack, indent=2),
+            company_context=json.dumps(context, indent=2)
+        )
+        return self._explainer_overrides(prompt, fixed_numbers, evidence_pack, citations_enabled)
+
+    def _company_context(self, company_data: Dict[str, Any]) -> Dict[str, Any]:
+        """The company context the explainer is shown, and E0 restates."""
         # Ratios are rounded BEFORE the model sees them. The explainer is told not
         # to alter any number it is given, so a raw float arrives in the report
         # verbatim — a shipped LVMH note read "20.927107x earnings ... 3.3263094x
@@ -669,7 +798,7 @@ class RecommendationEngineV3:
                 return "N/A"
             return f"{value * 100:.1f}%"
 
-        context = {
+        return {
             "company_name": company_data.get('company_name', 'N/A'),
             "sector": company_data.get('sector', self.sector),
             "market_cap": company_data.get('market_cap', 'N/A'),
@@ -683,14 +812,12 @@ class RecommendationEngineV3:
             "week_52_low": company_data.get('week_52_low', 0),
             "week_52_high": company_data.get('week_52_high', 0)
         }
-        
-        # Format prompt
-        prompt = template.format(
-            fixed_numbers_json=json.dumps(fixed_numbers, indent=2),
-            evidence_pack_json=json.dumps(evidence_pack, indent=2),
-            company_context=json.dumps(context, indent=2)
-        )
 
+    def _explainer_overrides(
+        self, prompt: str, fixed_numbers: Dict[str, Any], evidence_pack: Dict[str, Any],
+        citations_enabled: bool,
+    ) -> str:
+        """The explainer prompt's overrides for an empty pack or no single value."""
         if not citations_enabled:
             # The template unconditionally mandates [E#] citations; when the
             # evidence pack is empty that demand would force fabrication.

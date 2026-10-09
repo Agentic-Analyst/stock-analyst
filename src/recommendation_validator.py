@@ -13,7 +13,15 @@ If validation fails, auto-corrects and triggers LLM text-only rewrite.
 
 import re
 import json
-from typing import Dict, Any, List, Tuple, Set
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+
+# The evidence item the engine builds from its own deterministic outputs (the
+# rating, the fair value and its range, the price at the run, the implied
+# return, the confidence alert) and provider market data. A sentence that
+# restates VYNN's figures cites it, and is checked against its text like any
+# news claim against its source.
+MODEL_EVIDENCE_ID = "E0"
+RATING_LABELS = re.compile(r"\b(strong\s+buy|strong\s+sell|buy|sell|hold)\b", re.IGNORECASE)
 
 
 class RecommendationValidator:
@@ -47,10 +55,15 @@ class RecommendationValidator:
         self,
         llm_response: str,
         fixed_numbers: Dict[str, Any],
-        evidence_pack: Dict[str, Any]
+        evidence_pack: Dict[str, Any],
+        rejected_claims: Optional[Set[str]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Validate LLM response and auto-correct if needed.
+
+        `rejected_claims`: cited sentences an earlier attempt failed on. One
+        that comes back with only its citation removed is still an uncited
+        claim, in whichever printed field it stands.
         
         Returns:
             (corrected_json, validation_report)
@@ -140,19 +153,24 @@ class RecommendationValidator:
         # every sentence carrying [E#] has actual topical or numeric support in
         # the cited evidence. This catches citation laundering: attaching an
         # unrelated but valid headline to a confident claim.
-        support_issues = self._validate_citation_support(response_data, evidence_pack)
+        support_issues = self._validate_citation_support(
+            response_data, evidence_pack, fixed_numbers)
         if citation_enforcement and support_issues:
             validation_report["errors"].append(
                 f"{len(support_issues)} cited claim(s) are not supported by their evidence"
             )
-            validation_report["citation_support_issues"] = support_issues[:10]
+            # The rewrite is shown each one: given a count alone, it left the
+            # same claims standing through all three attempts.
+            validation_report["citation_support_issues"] = support_issues[:25]
             validation_report["valid"] = False
 
         # 3. Check citation coverage
         coverage = self._check_citation_coverage(
             response_data,
             valid_evidence_ids,
-            validation_report
+            validation_report,
+            fixed_numbers,
+            rejected_claims,
         )
 
         # PRODUCTION REQUIREMENT: 95% minimum coverage (only meaningful when
@@ -269,6 +287,26 @@ class RecommendationValidator:
     def _citation_supported(
         cls, sentence: str, cited_ids: Set[str], evidence_by_id: Dict[str, Dict[str, Any]],
     ) -> bool:
+        return cls._support_failure(sentence, cited_ids, evidence_by_id) is None
+
+    @classmethod
+    def _support_failure(
+        cls, sentence: str, cited_ids: Set[str], evidence_by_id: Dict[str, Dict[str, Any]],
+        subject: Optional[Set[str]] = None, rating: Optional[str] = None,
+    ) -> Optional[str]:
+        """Why the cited text does not support the sentence, or None.
+
+        Main's check, unchanged, plus two things that only make it stricter:
+        the company's own name is never wording a source shares with a claim
+        (every article about Microsoft says "Microsoft", and at nine letters
+        it carried any claim alone), and a sentence citing the model item E0
+        must state one of its figures or its rating, name no other rating,
+        use no word its cited sources do not, and negate nothing they do not.
+        E0 is the engine's own text, so a restatement needs no other word;
+        "VYNN's fair value implies 33% upside [E0]" (the model says 33%
+        downside) and "VYNN's fair value is not 33% below the market price
+        [E0]" share every other word with it.
+        """
         evidence = " ".join(
             " ".join(str(item.get(field) or "") for field in (
                 # ``title`` is the upstream LLM's derived insight and
@@ -281,17 +319,59 @@ class RecommendationValidator:
             for item in [evidence_by_id.get(evidence_id) or {}]
         )
         if not evidence.strip():
-            return False
+            return "the cited item has no source text"
         claim = cls.EVIDENCE_PATTERN.sub("", sentence)
         claim_numbers = cls._support_numbers(claim)
         evidence_numbers = cls._support_numbers(evidence)
         if claim_numbers and not claim_numbers.issubset(evidence_numbers):
-            return False
-        overlap = cls._support_tokens(claim).intersection(cls._support_tokens(evidence))
-        return len(overlap) >= 2 or any(len(token) >= 7 for token in overlap)
+            missing = ", ".join(sorted(claim_numbers - evidence_numbers))
+            return f"{missing} is not in the cited source"
+        overlap = (cls._support_tokens(claim).intersection(cls._support_tokens(evidence))
+                   - (subject or set()))
+        if MODEL_EVIDENCE_ID in cited_ids:
+            labels = {" ".join(label.lower().split()) for label in RATING_LABELS.findall(claim)}
+            fixed = " ".join(str(rating or "").lower().split())
+            if labels - {fixed}:
+                return f"it names a rating ({', '.join(sorted(labels - {fixed}))}) that {MODEL_EVIDENCE_ID} does not"
+            model_numbers = cls._support_numbers(" ".join(
+                str((evidence_by_id.get(MODEL_EVIDENCE_ID) or {}).get(field) or "")
+                for field in ("source_article_title", "snippet")))
+            if not (claim_numbers & model_numbers) and not (fixed and fixed in labels):
+                return f"it states none of {MODEL_EVIDENCE_ID}'s figures or its rating"
+            novel = cls._support_tokens(claim) - cls._support_tokens(evidence) - (subject or set())
+            if novel:
+                return f"it says {', '.join(sorted(novel))}, which the cited sources do not"
+            # "not" is too short to be a token, and E0 itself says "not news":
+            # a negation must stand in the cited text before the same word.
+            def pairs(text):
+                words = re.findall(r"[a-z0-9.%$]+", text.lower().replace("n't", " not"))
+                return {(a, b) for a, b in zip(words, words[1:]) if a in cls._NEGATIONS}
+            negated = pairs(claim) - pairs(evidence)
+            if negated:
+                return ("it negates what the cited sources do not: "
+                        + ", ".join(" ".join(pair) for pair in sorted(negated)))
+        if len(overlap) >= 2 or any(len(token) >= 7 for token in overlap):
+            return None
+        return "its wording is not what the cited source says"
+
+    _NEGATIONS = {"not", "no", "never", "neither", "nor", "without"}
+
+    @classmethod
+    def _subject_tokens(cls, evidence_pack: Any, fixed_numbers: Any) -> Set[str]:
+        """The company's own name and ticker, from the pack the engine labels."""
+        subject = (evidence_pack or {}).get("subject") if isinstance(evidence_pack, dict) else None
+        subject = subject if isinstance(subject, dict) else {}
+        name = subject.get("name") if isinstance(subject.get("name"), str) else ""
+        ticker = str(subject.get("ticker") or (fixed_numbers or {}).get("ticker") or "")
+        corporate = {"inc", "incorporated", "corp", "corporation", "company", "holding",
+                     "holdings", "group", "limited", "plc", "ltd", "the", "and"}
+        words = [w for w in re.findall(r"[A-Za-z][A-Za-z']*", f"{name} {ticker.split('.')[0]}")
+                 if w.lower() not in corporate]
+        return cls._support_tokens(" ".join(words))
 
     def _validate_citation_support(
         self, response_data: Dict[str, Any], evidence_pack: Dict[str, Any],
+        fixed_numbers: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         evidence_by_id = {
             str(item.get("id")): item
@@ -300,16 +380,21 @@ class RecommendationValidator:
         }
         if not evidence_by_id:
             return []
+        subject = self._subject_tokens(evidence_pack, fixed_numbers)
+        rating = (fixed_numbers or {}).get("rating")
         issues = []
-        for text in self._all_text(response_data):
+        for field, text in self._all_text_with_paths(response_data):
             for sentence in re.split(self.SENTENCE_PATTERN, text or ""):
                 cited = {f"E{number}" for number in self.EVIDENCE_PATTERN.findall(sentence)}
-                if cited and cited.issubset(evidence_by_id) and not self._citation_supported(
-                    sentence, cited, evidence_by_id
-                ):
+                if not cited or not cited.issubset(evidence_by_id):
+                    continue
+                reason = self._support_failure(sentence, cited, evidence_by_id, subject, rating)
+                if reason:
                     issues.append({
                         "claim": sentence.strip()[:300],
                         "citations": sorted(cited),
+                        "field": field,
+                        "reason": reason,
                     })
         return issues
 
@@ -366,6 +451,40 @@ class RecommendationValidator:
 
         walk(response_data or {})
         return values
+
+    @staticmethod
+    def _all_text_with_paths(response_data: Dict[str, Any]) -> Iterator[Tuple[str, str]]:
+        """Every string field with its path ("scenarios.bear.watch[0]")."""
+        def walk(node, path):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    yield from walk(value, f"{path}.{key}" if path else str(key))
+            elif isinstance(node, list):
+                for index, value in enumerate(node):
+                    yield from walk(value, f"{path}[{index}]")
+            elif isinstance(node, str):
+                yield path, node
+
+        yield from walk(response_data or {}, "")
+
+    @classmethod
+    def claim_key(cls, sentence: str) -> str:
+        """A sentence without its citations, for exact comparison across attempts."""
+        text = cls.EVIDENCE_PATTERN.sub("", sentence or "")
+        return " ".join(text.split()).strip().rstrip(".;:").strip().lower()
+
+    @staticmethod
+    def engine_driver(fixed_numbers: Dict[str, Any]) -> str:
+        """The 12-month driver the engine writes itself: the target assumption.
+
+        The report never prints a driver. The model was asked to explain the
+        convergence basis there and its sentence ("the published intrinsic
+        value under an explicit 12-month convergence assumption") failed
+        citation coverage in all 16 captured attempts.
+        """
+        return str((fixed_numbers or {}).get("target_assumption") or (
+            "The 12-month case assumes convergence to the currently published "
+            "intrinsic value; it is not a statistically forecast market price."))
     
     def _extract_json(self, response: str) -> Dict[str, Any]:
         """Extract JSON from LLM response with robust cleaning."""
@@ -404,6 +523,11 @@ class RecommendationValidator:
         """
         corrections_needed = False
         corrected_data = response_data.copy()
+        # Corrections the prose may now contradict (a rating or a price it
+        # restated). The engine's own texts (valuation perspective, 12-month
+        # driver) replace whatever the model wrote there on every response and
+        # leave nothing else stale, so they alone never force a rewrite.
+        narrative = report.setdefault("narrative_corrections", [])
 
         reliability = (fixed_numbers.get('inputs') or {}).get(
             'valuation_reliability') or {}
@@ -433,9 +557,11 @@ class RecommendationValidator:
         
         # 1. Check rating
         if response_data.get('rating') != fixed_numbers['rating']:
-            report["corrections_made"].append(
+            correction = (
                 f"Rating corrected: {response_data.get('rating')} → {fixed_numbers['rating']}"
             )
+            report["corrections_made"].append(correction)
+            narrative.append(correction)
             corrected_data['rating'] = fixed_numbers['rating']
             corrections_needed = True
         
@@ -457,28 +583,37 @@ class RecommendationValidator:
                 )
                 corrected_data['price_targets'][period]['driver'] = ''
                 corrections_needed = True
+            elif expected.get('price') is not None and \
+                    actual.get('driver') != self.engine_driver(fixed_numbers):
+                report["corrections_made"].append(f"{period} driver set to the target assumption")
+                corrected_data['price_targets'][period]['driver'] = self.engine_driver(fixed_numbers)
+                corrections_needed = True
             
             # Check price
             if actual.get('price') != expected['price']:
-                report["corrections_made"].append(
-                    f"{period} price: {actual.get('price')} → {expected['price']}"
-                )
+                correction = f"{period} price: {actual.get('price')} → {expected['price']}"
+                report["corrections_made"].append(correction)
+                narrative.append(correction)
                 corrected_data['price_targets'][period]['price'] = expected['price']
                 corrections_needed = True
             
             # Check range_low
             if actual.get('range_low') != expected['range_low']:
-                report["corrections_made"].append(
+                correction = (
                     f"{period} range_low: {actual.get('range_low')} → {expected['range_low']}"
                 )
+                report["corrections_made"].append(correction)
+                narrative.append(correction)
                 corrected_data['price_targets'][period]['range_low'] = expected['range_low']
                 corrections_needed = True
             
             # Check range_high
             if actual.get('range_high') != expected['range_high']:
-                report["corrections_made"].append(
+                correction = (
                     f"{period} range_high: {actual.get('range_high')} → {expected['range_high']}"
                 )
+                report["corrections_made"].append(correction)
+                narrative.append(correction)
                 corrected_data['price_targets'][period]['range_high'] = expected['range_high']
                 corrections_needed = True
         
@@ -594,20 +729,35 @@ class RecommendationValidator:
         self,
         response_data: Dict[str, Any],
         valid_evidence_ids: Set[str],
-        report: Dict[str, Any]
+        report: Dict[str, Any],
+        fixed_numbers: Optional[Dict[str, Any]] = None,
+        rejected_claims: Optional[Set[str]] = None,
     ) -> float:
         """
         Check what percentage of material sentences have citations.
         Returns coverage percentage.
         
-        Checks ALL text fields:
+        Checks:
         - thesis
-        - valuation_perspective
         - price_targets.m3/m6/m12.driver
         - catalysts[].statement
         - risks[].statement
         - scenarios.bull/base/bear.narrative
+        - every printed watch, monitoring and action item that states a
+          figure or a date: a source (a news item, or E0 for VYNN's own
+          figures) must give it
+
+        Every sentence counts unless it is text the engine wrote itself (the
+        12-month driver), matched exactly. No phrase excuses a sentence: "The
+        bear case reflects Apple losing its appeal" is a claim, and a sentence
+        restating VYNN's figures cites E0.
         """
+        engine_sentences = {
+            sentence.strip()
+            for text in (self.engine_driver(fixed_numbers or {}),)
+            for sentence in re.split(self.SENTENCE_PATTERN, text)
+            if sentence.strip()
+        }
         # Collect sentences from ALL key fields
         key_texts = []
         
@@ -652,6 +802,27 @@ class RecommendationValidator:
                 narrative = scenario.get('narrative', '')
                 if narrative:
                     key_texts.append(narrative)
+
+        # Printed items to monitor and act on: counted only when they state a
+        # figure or a date. "Next quarterly results" needs no source; "the
+        # earnings call on October 30, 2026" does.
+        items = []
+        for scenario_type in ['bull', 'base', 'bear']:
+            scenario = scenarios.get(scenario_type, {})
+            if isinstance(scenario, dict):
+                items.extend(str(item) for item in scenario.get('watch') or [])
+        action = response_data.get('action', {})
+        if isinstance(action, dict):
+            items.extend(str(action.get(key) or '') for key in ('buyers', 'holders'))
+            items.extend(str(item) for item in action.get('watch') or [])
+        items.extend(str(item) for item in response_data.get('monitoring_plan', []) or [])
+        item_sentences = [
+            sentence.strip()
+            for text in items
+            for sentence in re.split(self.SENTENCE_PATTERN, text or "")
+            if sentence.strip()
+            and self._support_numbers(self.EVIDENCE_PATTERN.sub("", sentence))
+        ]
         
         # Extract sentences from all collected texts
         sentences = []
@@ -681,34 +852,11 @@ class RecommendationValidator:
             # Skip very short sentences (connectors like "However,")
             if word_count < 4:
                 continue
+            # Text the engine wrote, matched exactly, is not the model's claim.
+            if sent_clean in engine_sentences:
+                continue
             
             sent_lower = sent_clean.lower()
-            
-            # Skip self-referential statements about the recommendation's own calculations
-            # These don't need evidence citations
-            self_ref_patterns = [
-                'the current price',
-                'priced at',
-                'price target',
-                'expected return',
-                'the base case',
-                'the bull case',
-                'the bear case',
-                'scenario aligns',
-                'target of $',
-                'target reflects',
-                'p/e ratio is',
-                'p/e ratio of',
-                'pe ratio is',
-                'pe ratio of',
-                'current p/e',
-                'current pe',
-                'not applicable'
-            ]
-            
-            is_self_ref = any(pattern in sent_lower for pattern in self_ref_patterns)
-            if is_self_ref:
-                continue
             
             # Check if sentence has factual claim
             has_claim = any(keyword in sent_lower for keyword in factual_keywords)
@@ -718,11 +866,28 @@ class RecommendationValidator:
             
             if has_claim or has_numbers:
                 material_sentences.append(sent_clean)
+
+        material_sentences.extend(
+            sentence for sentence in item_sentences if len(sentence.split()) >= 4)
+
+        # A sentence an earlier attempt cited and failed on, back with only its
+        # citation removed, is the same claim uncited: in any printed field,
+        # figure or not. Matched exactly once citations are stripped.
+        if rejected_claims:
+            rejected = {self.claim_key(claim) for claim in rejected_claims}
+            for text in key_texts + items:
+                for sentence in re.split(self.SENTENCE_PATTERN, text or ""):
+                    sentence = sentence.strip()
+                    if (sentence and sentence not in engine_sentences
+                            and not self.EVIDENCE_PATTERN.search(sentence)
+                            and self.claim_key(sentence) in rejected
+                            and sentence not in material_sentences):
+                        material_sentences.append(sentence)
         
         if not material_sentences:
             report["coverage_details"] = {
                 "material_sentences": 0,
-                "cited_sentences": 0,
+                "cited_sentences": [],
                 "cited_count": 0,
                 "coverage_pct": 100.0
             }
@@ -798,7 +963,7 @@ class RecommendationValidator:
         """
         Check if LLM needs to rewrite text due to corrections.
         PRODUCTION STANDARD: Trigger rewrite if:
-        - Auto-corrections applied
+        - A correction the prose may contradict (rating, prices)
         - Any validation errors
         - Coverage below 95%
 
@@ -811,7 +976,7 @@ class RecommendationValidator:
         if validation_report.get("citation_enforcement_bypassed"):
             return False
         return (
-            validation_report.get("auto_corrected", False) or
+            bool(validation_report.get("narrative_corrections")) or
             len(validation_report.get("errors", [])) > 0 or
             validation_report.get("coverage_details", {}).get("coverage_pct", 100) < 95.0
         )

@@ -41,16 +41,23 @@ including every number.
 Take the JSON structure above and rewrite these TEXT fields ONLY:
 
 1. **`thesis`**: 2-4 sentences with [E#] citations
-2. **`valuation_perspective`**: 2-3 sentences using only deterministic model fields; do not attach news [E#] citations
-3. **`price_targets.m3.driver`**: empty string (the fixed target is null)
-4. **`price_targets.m6.driver`**: empty string (the fixed target is null)
-5. **`price_targets.m12.driver`**: explain the deterministic intrinsic-value convergence basis; do not invent a news-driven return adjustment
-6. **`catalysts`**: Array of statements with [E#] citations
-7. **`risks`**: Array of statements with [E#] citations
-8. **`scenarios.bull/base/bear.narrative`**: 2-3 sentences each with [E#] citations
-9. **`action.buyers`**: 1-2 sentences
-10. **`action.holders`**: 1-2 sentences
-11. **`monitoring_plan`**: Array of items with [E#] citations
+2. **`valuation_perspective`**: keep exactly as given (the engine writes it)
+3. **`price_targets.*.driver`**: keep exactly as given (the engine writes them)
+4. **`catalysts`**: Array of statements with [E#] citations
+5. **`risks`**: Array of statements with [E#] citations
+6. **`scenarios.bull/base/bear.narrative`**: 2-3 sentences each with [E#] citations
+7. **`scenarios.bull/base/bear.watch`** and **`action.watch`**: items to monitor
+8. **`action.buyers`**: 1-2 sentences
+9. **`action.holders`**: 1-2 sentences
+10. **`monitoring_plan`**: Array of items to monitor
+
+**E0 is VYNN's own model outputs and provider market data, not news.** A
+sentence that restates VYNN's rating, fair value, range, the price at the run,
+the implied return, the confidence alert or a market-data figure cites [E0]
+and says only what E0's text says, with its figures as written there. Never
+cite E0 for news or a news item for VYNN's figures; keep the two in separate
+sentences. An item to monitor or act on that states a figure or a date cites
+the item that gives it.
 
 ## CRITICAL RULES - PRODUCTION STANDARDS
 
@@ -66,6 +73,7 @@ Take the JSON structure above and rewrite these TEXT fields ONLY:
 - Change the JSON structure or field names
 - Leave ANY material sentence without a citation
 - Attach a news citation to a model-derived valuation, rating, or target fact
+  (cite [E0] for those)
 
 ✅ **DO**:
 - Keep ALL numeric fields EXACTLY as shown above
