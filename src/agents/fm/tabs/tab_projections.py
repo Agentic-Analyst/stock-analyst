@@ -24,6 +24,10 @@ from ..financial_model_builder import ExcelFormats
 from ..financial_metrics import WORKING_CAPITAL_COST_BASE_REVENUE
 
 
+# Per-year D&A and capex ratios to projected revenue the workbook accepts
+# (memory_cycle.asset_base_path writes them and checks the same bounds).
+YEAR_RATIO_BOUNDS = {"da": (0.0, 1.0), "capex": (-2.0, 0.0)}
+
 class ProjectionsTabBuilder:
     """
     Builds the Projections tab - 5-year forward projections with professional analytics.
@@ -368,8 +372,8 @@ class ProjectionsTabBuilder:
         # A memory maker's D&A and capex follow its asset base, not the price
         # cycle its revenue rides (memory_cycle.asset_base_path): one ratio
         # per year, both or neither.
-        da_by_year = self._year_ratios("da_to_revenue_by_year", 0.0, 1.0)
-        capex_by_year = self._year_ratios("capex_to_revenue_by_year", -2.0, 0.0)
+        da_by_year = self._year_ratios("da_to_revenue_by_year", *YEAR_RATIO_BOUNDS["da"])
+        capex_by_year = self._year_ratios("capex_to_revenue_by_year", *YEAR_RATIO_BOUNDS["capex"])
         if da_by_year is None or capex_by_year is None:
             da_by_year = capex_by_year = None
         for i in range(self.projection_years):

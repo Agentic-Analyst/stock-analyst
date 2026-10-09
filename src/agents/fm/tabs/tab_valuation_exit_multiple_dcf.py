@@ -18,6 +18,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 from ..financial_model_builder import ExcelFormats
+from ..terminal_value import MIN_TERMINAL_CONVERSION
 
 
 class ValuationExitMultipleDCFBuilder:
@@ -306,8 +307,16 @@ class ValuationExitMultipleDCFBuilder:
         # the same cycle the method normalizes, the reason peers are never
         # blended into it: Micron's 10.4x on boom EBITDA, applied to mid-cycle
         # EBITDA, put the exit leg 23% above the perpetuity leg.
+        #
+        # It keeps a floor: the conversion terminal_value.py itself requires of
+        # a steady terminal year, so the two never disagree about one. Below
+        # it the terminal is not steady, the input stays, and the legs part
+        # instead of agreeing on it.
         cap = self.growth_cap
-        conversion_gate = "$K$7>0" if self.always_cap else "$K$7/$B$12>=0.30"
+        conversion_gate = (
+            f"$K$7/$B$12>={MIN_TERMINAL_CONVERSION:.2f}" if self.always_cap
+            else "$K$7/$B$12>=0.30"
+        )
         ws.cell(row=13, column=1, value="Exit Multiple (EV/EBITDA)")
         ws.cell(
             row=13, column=2,
