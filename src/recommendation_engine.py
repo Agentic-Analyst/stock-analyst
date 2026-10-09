@@ -84,6 +84,23 @@ def _finite(value: Any) -> bool:
         and math.isfinite(value)
 
 
+def _one_sentence(text: str) -> str:
+    """Several sentences as one, so none is quoted without the others.
+
+    The alert's "That is a large gap between VYNN and the Street, ..." quoted
+    alone after a news sentence would point "That" at the news.
+    """
+    parts = [part.strip() for part in re.split(RecommendationValidator.SENTENCE_PATTERN, text)
+             if part.strip()]
+    joined = parts[0] if parts else ""
+    for part in parts[1:]:
+        # "That is ..." continues as "that is ..."; "VYNN's ..." keeps its case.
+        if len(part) > 1 and part[0].isupper() and part[1].islower():
+            part = part[0].lower() + part[1:]
+        joined += "; " + part
+    return joined + "."
+
+
 def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
                         ccy: str) -> Dict[str, Any]:
     """E0: VYNN's own deterministic figures as a citable evidence item.
@@ -108,8 +125,11 @@ def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
     m12 = (fixed_numbers.get("targets") or {}).get("m12") or {}
     if money(m12.get("price")):
         sentences.append(f"VYNN's fair value and 12-month target is {money(m12['price'])} per share.")
-    if money(m12.get("range_low")) and money(m12.get("range_high")):
-        sentences.append(f"VYNN's DCF scenario range is {money(m12['range_low'])} to "
+    # The report's "method range": every supported leg, comps and bank
+    # methods included, so never "DCF". One value is no range.
+    if money(m12.get("range_low")) and money(m12.get("range_high")) \
+            and money(m12["range_low"]) != money(m12["range_high"]):
+        sentences.append(f"VYNN's valuation methods range from {money(m12['range_low'])} to "
                          f"{money(m12['range_high'])}.")
     if money(fixed_numbers.get("current_price")):
         sentences.append(f"The share price used for this valuation is "
@@ -125,7 +145,7 @@ def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
                          f"{money(inputs['analyst_target'])}.")
     for text in (fixed_numbers.get("target_assumption"), fixed_numbers.get("confidence_alert_text")):
         if isinstance(text, str) and text.strip():
-            sentences.append(text.strip())
+            sentences.append(_one_sentence(text))
     for label, key in (
         ("The P/E ratio is", "pe_ratio"), ("EV/EBITDA is", "ev_ebitda"),
         ("The price-to-book ratio is", "pb_ratio"), ("Revenue growth is", "revenue_growth"),
@@ -464,8 +484,9 @@ class RecommendationEngineV3:
         # Claims an attempt cited and failed on: one that comes back with its
         # citation simply removed is still a claim to cite or delete.
         rejected_claims = {
-            issue.get("claim") for issue in validation_report.get("citation_support_issues") or []
-            if issue.get("claim")
+            issue.get("sentence") or issue.get("claim")
+            for issue in validation_report.get("citation_support_issues") or []
+            if issue.get("sentence") or issue.get("claim")
         }
         
         while self.validator.needs_rewrite(validation_report) and rewrite_attempt < max_rewrite_attempts:
@@ -530,9 +551,9 @@ class RecommendationEngineV3:
                 rewrite_response, fixed_numbers, evidence_pack, rejected_claims
             )
             rejected_claims |= {
-                issue.get("claim")
+                issue.get("sentence") or issue.get("claim")
                 for issue in validation_report.get("citation_support_issues") or []
-                if issue.get("claim")
+                if issue.get("sentence") or issue.get("claim")
             }
             
             # Update corrected_json if we got valid output
@@ -696,17 +717,6 @@ class RecommendationEngineV3:
                 issues_section += f"{i}. {json.dumps(sent[:200])}\n"
             issues_section += "\n"
 
-        figures = validation_report.get("uncited_figures") or []
-        if figures:
-            issues_section += (
-                "**Sentences Stating a Figure Without a Citation** (these block the report: "
-                "cite the news item that states the figure, use one of E0's sentences below "
-                "for VYNN's own figures, or delete the figure):\n"
-            )
-            for i, sent in enumerate(figures[:10], 1):
-                issues_section += f"{i}. {json.dumps(sent[:200])}\n"
-            issues_section += "\n"
-
         model_item = next((ev for ev in evidence_pack.get("evidence", [])
                            if isinstance(ev, dict) and ev.get("type") == MODEL_EVIDENCE_TYPE), None)
         statements = self.validator.model_statements(model_item)
@@ -723,17 +733,18 @@ class RecommendationEngineV3:
         if coverage:
             issues_section += f"**Citation Coverage**: {coverage.get('coverage_pct', 0):.1f}% "
             issues_section += f"({coverage.get('cited_count', 0)}/{coverage.get('material_sentences', 0)} sentences cited)\n"
-            issues_section += "**PRODUCTION REQUIREMENT**: 95%+ coverage (YOU MUST ACHIEVE THIS)\n\n"
+            issues_section += ("**PRODUCTION REQUIREMENT**: every printed sentence and item cites "
+                               "a source that states it (YOU MUST ACHIEVE THIS)\n\n")
             
             # Show uncited sentences if available
             uncited = coverage.get('uncited_sentences', [])
             if uncited:
                 issues_section += (
-                    "**Sentences MISSING Citations** (for EACH: cite a news item that states it, "
-                    "use one of E0's sentences for VYNN's own figures, or delete the sentence "
-                    "or item):\n"
+                    "**Sentences MISSING Citations** (these block the report; for EACH: cite a "
+                    "news item that states it, use one of E0's sentences for VYNN's own figures, "
+                    "or delete the sentence or item):\n"
                 )
-                for i, sent in enumerate(uncited[:10], 1):
+                for i, sent in enumerate(uncited[:25], 1):
                     issues_section += f"{i}. {json.dumps(sent[:200])}\n"
                 issues_section += "\n"
             
@@ -1055,17 +1066,21 @@ class RecommendationEngineV3:
             
             # Catalysts
             output.append(f"\n### Catalysts to Watch\n")
+            # Printed exactly as the validator reads them: a row without a
+            # statement printed as its raw dict, unchecked.
             catalysts = response_data.get('catalysts', [])
-            for cat in catalysts:
-                stmt = cat.get('statement', cat) if isinstance(cat, dict) else cat
-                output.append(f"- {stmt}")
+            for cat in catalysts if isinstance(catalysts, list) else []:
+                stmt = self.validator.printed_statement(cat)
+                if stmt:
+                    output.append(f"- {stmt}")
             
             # Risks
             output.append(f"\n### Key Risks\n")
             risks = response_data.get('risks', [])
-            for risk in risks:
-                stmt = risk.get('statement', risk) if isinstance(risk, dict) else risk
-                output.append(f"- {stmt}")
+            for risk in risks if isinstance(risks, list) else []:
+                stmt = self.validator.printed_statement(risk)
+                if stmt:
+                    output.append(f"- {stmt}")
             
             # Scenarios (if available)
             scenarios = response_data.get('scenarios', {})
@@ -1076,7 +1091,7 @@ class RecommendationEngineV3:
                     scenario = scenarios.get(scenario_name, {})
                     if scenario:
                         narrative = scenario.get('narrative', '')
-                        watch = scenario.get('watch', [])
+                        watch = self.validator.printed_items(scenario.get('watch'))
                         output.append(f"**{scenario_label}**: {narrative}")
                         if watch:
                             output.append(f"  - Watch: {', '.join(watch)}\n")
@@ -1085,15 +1100,17 @@ class RecommendationEngineV3:
             action = response_data.get('action', {}) if rated else {}
             if action:
                 output.append(f"\n### Recommended Action\n")
-                if action.get('buyers'):
-                    output.append(f"**For Buyers**: {action['buyers']}\n")
-                if action.get('holders'):
-                    output.append(f"**For Holders**: {action['holders']}\n")
-                if action.get('watch'):
-                    output.append(f"**Key Metrics to Monitor**: {', '.join(action['watch'])}")
+                printed = {key: self.validator.printed_items(action.get(key))
+                           for key in ('buyers', 'holders', 'watch')}
+                if printed['buyers']:
+                    output.append(f"**For Buyers**: {' '.join(printed['buyers'])}\n")
+                if printed['holders']:
+                    output.append(f"**For Holders**: {' '.join(printed['holders'])}\n")
+                if printed['watch']:
+                    output.append(f"**Key Metrics to Monitor**: {', '.join(printed['watch'])}")
             
             # Monitoring Plan
-            monitoring = response_data.get('monitoring_plan', [])
+            monitoring = self.validator.printed_items(response_data.get('monitoring_plan'))
             if monitoring:
                 output.append(f"\n### Monitoring Plan\n")
                 for item in monitoring:

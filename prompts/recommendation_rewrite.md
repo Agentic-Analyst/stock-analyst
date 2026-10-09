@@ -84,7 +84,7 @@ date cites the item that gives it, or the figure is deleted.
 - Remove or qualify any unsupported claim instead of decorating it with the
   nearest citation. If a date is not supplied, omit it or say it is unavailable
 - Be professional, specific, and compelling
-- ACHIEVE 95%+ citation coverage (THIS IS MANDATORY)
+- Cite a source that states it on EVERY sentence and item (THIS IS MANDATORY)
 - Cite primary sources when discussing financial figures
 - Keep every price-target driver empty when its corrected price is null
 

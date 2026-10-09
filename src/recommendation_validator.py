@@ -171,27 +171,15 @@ class RecommendationValidator:
             rejected_claims,
         )
 
-        returning = validation_report.get("returning_rejected_claims") or []
-        if citation_enforcement and returning:
+        uncited = validation_report.get("uncited_printed_sentences") or []
+        if citation_enforcement and uncited:
             validation_report["errors"].append(
-                f"{len(returning)} claim(s) an earlier attempt failed on came back "
-                f"without a citation"
-            )
-            validation_report["valid"] = False
-        uncited_figures = validation_report.get("uncited_figures") or []
-        if citation_enforcement and uncited_figures:
-            validation_report["errors"].append(
-                f"{len(uncited_figures)} sentence(s) state a figure no cited source gives"
+                f"{len(uncited)} printed sentence(s) or item(s) cite no source"
             )
             validation_report["valid"] = False
 
-        # PRODUCTION REQUIREMENT: 95% minimum coverage (only meaningful when
-        # there is evidence available to cite)
-        if citation_enforcement and coverage < 95.0:
-            validation_report["errors"].append(
-                f"Citation coverage {coverage:.1f}% is below required 95% threshold"
-            )
-            validation_report["valid"] = False
+        # Main's 95% allowance is gone: every uncited printed sentence is an
+        # error above, and one uncited claim in twenty shipped under it.
         
         # 4. Check for unsupported claims
         unsupported = self._check_unsupported_claims(
@@ -356,11 +344,49 @@ class RecommendationValidator:
         if claim_numbers and not claim_numbers.issubset(evidence_numbers):
             missing = ", ".join(sorted(claim_numbers - evidence_numbers))
             return f"{missing} is not in the cited source"
+        # Shared words carry no direction: "Apple stock fell 4% after the
+        # iPhone Duo launch" shares every word but one with "Apple stock
+        # climbed 4% after ... the iPhone Duo". A movement the claim states
+        # must be one its source states.
+        for direction, claim_words, source_words in cls._DIRECTIONS:
+            stated = cls._words(claim) & claim_words
+            if stated and not cls._words(evidence) & (claim_words | source_words):
+                return (f"the cited source does not say anything {direction} "
+                        f"({', '.join(sorted(stated))})")
         overlap = (cls._support_tokens(claim).intersection(cls._support_tokens(evidence))
                    - (subject or set()))
         if len(overlap) >= 2 or any(len(token) >= 7 for token in overlap):
             return None
         return "its wording is not what the cited source says"
+
+    _RISES = {
+        "rise", "rises", "rose", "risen", "rising", "climb", "climbs", "climbed", "climbing",
+        "gain", "gains", "gained", "gaining", "jump", "jumps", "jumped", "jumping",
+        "surge", "surges", "surged", "surging", "soar", "soars", "soared", "soaring",
+        "rally", "rallies", "rallied", "rallying", "increase", "increases", "increased",
+        "increasing", "grew", "grow", "grows", "growing", "beat", "beats", "upgrade",
+        "upgrades", "upgraded",
+    }
+    _FALLS = {
+        "fall", "falls", "fell", "fallen", "falling", "drop", "drops", "dropped", "dropping",
+        "decline", "declines", "declined", "declining", "slump", "slumps", "slumped",
+        "plunge", "plunges", "plunged", "plunging", "slide", "slides", "slid", "sliding",
+        "sink", "sinks", "sank", "sunk", "sinking", "decrease", "decreases", "decreased",
+        "decreasing", "miss", "misses", "missed", "downgrade", "downgrades", "downgraded",
+        "tumble", "tumbles", "tumbled", "tumbling", "shrink", "shrinks", "shrank", "shrunk",
+    }
+    # (direction, words a claim states it with, more words a source may use)
+    _DIRECTIONS = (
+        ("rose", _RISES, {"up", "higher", "record", "growth", "above", "improved", "boosted",
+                          "expanded", "accelerated", "positive", "strong", "stronger"}),
+        ("fell", _FALLS, {"down", "lower", "below", "loss", "losses", "cut", "cuts", "reduced",
+                          "reduction", "weak", "weaker", "weakened", "slowed", "slowdown",
+                          "negative", "decelerated"}),
+    )
+
+    @staticmethod
+    def _words(text: str) -> Set[str]:
+        return set(re.findall(r"[a-z]+", (text or "").lower()))
 
     @classmethod
     def model_statements(cls, item: Any) -> List[str]:
@@ -376,7 +402,8 @@ class RecommendationValidator:
                                ("\u201d", '"'), ("\u2212", "-")):
             text = text.replace(variant, plain)
         text = re.sub(r"\s+([,;:.!?])", r"\1", " ".join(text.split()))
-        return text.strip().rstrip(".;:!?").strip().lower()
+        # Only a final period: "...at low confidence? [E0]" asks what E0 states.
+        return text.strip().rstrip(".").strip().lower()
 
     @classmethod
     def _subject_tokens(cls, evidence_pack: Any, fixed_numbers: Any) -> Set[str]:
@@ -419,6 +446,7 @@ class RecommendationValidator:
                 if named:
                     issues.append({
                         "claim": sentence.strip()[:300],
+                        "sentence": sentence.strip(),
                         "citations": sorted(cited),
                         "field": field,
                         "reason": (f"it names {', '.join(sorted(named))} in its text: an "
@@ -431,6 +459,7 @@ class RecommendationValidator:
                 if reason:
                     issues.append({
                         "claim": sentence.strip()[:300],
+                        "sentence": sentence.strip(),
                         "citations": sorted(cited),
                         "field": field,
                         "reason": reason,
@@ -507,12 +536,12 @@ class RecommendationValidator:
         yield from walk(response_data or {}, "")
 
     @staticmethod
-    def _printed_items(value: Any) -> List[str]:
+    def printed_items(value: Any) -> List[str]:
         """A printed list field's items; a lone string is one item."""
         if isinstance(value, str):
             return [value]
         if isinstance(value, list):
-            return [str(item) for item in value if item is not None]
+            return [item for item in value if isinstance(item, str)]
         return []
 
     @classmethod
@@ -676,47 +705,11 @@ class RecommendationValidator:
         Check that all cited evidence IDs exist in evidence pack.
         Returns list of invalid IDs (the caller decides error vs. bypass).
         """
-        # Collect all text fields to check
-        text_fields = [
-            response_data.get('thesis', ''),
-            response_data.get('valuation_perspective', '')
-        ]
-        
-        # Add price target drivers
-        for period in ['m3', 'm6', 'm12']:
-            driver = response_data.get('price_targets', {}).get(period, {}).get('driver', '')
-            text_fields.append(driver)
-        
-        # Add catalysts
-        for cat in response_data.get('catalysts', []):
-            if isinstance(cat, dict):
-                text_fields.append(cat.get('statement', ''))
-            else:
-                text_fields.append(str(cat))
-        
-        # Add risks
-        for risk in response_data.get('risks', []):
-            if isinstance(risk, dict):
-                text_fields.append(risk.get('statement', ''))
-            else:
-                text_fields.append(str(risk))
-        
-        # Add scenarios
-        scenarios = response_data.get('scenarios', {})
-        for scenario_type in ['bull', 'base', 'bear']:
-            scenario = scenarios.get(scenario_type, {})
-            if isinstance(scenario, dict):
-                text_fields.append(scenario.get('narrative', ''))
-        
-        # Add action
-        action = response_data.get('action', {})
-        if isinstance(action, dict):
-            text_fields.append(action.get('buyers', ''))
-            text_fields.append(action.get('holders', ''))
-        
-        # Add monitoring plan
-        for item in response_data.get('monitoring_plan', []):
-            text_fields.append(str(item))
+        # Every string anywhere in the response: the printed watch items
+        # were never read here, so "[E99]" on one counted as a citation and
+        # skipped the support check; and a None or a number in a printed
+        # field raised TypeError.
+        text_fields = self._all_text(response_data)
         
         # Find all cited evidence IDs
         cited_ids = set()
@@ -782,23 +775,18 @@ class RecommendationValidator:
         rejected_claims: Optional[Set[str]] = None,
     ) -> float:
         """
-        Check what percentage of material sentences have citations.
-        Returns coverage percentage.
-        
-        Checks:
-        - thesis
-        - price_targets.m3/m6/m12.driver
-        - catalysts[].statement
-        - risks[].statement
-        - scenarios.bull/base/bear.narrative
-        - every printed watch, monitoring and action item that states a
-          figure or a date: a source (a news item, or E0 for VYNN's own
-          figures) must give it
+        Every printed sentence the model wrote, and the share that cites.
 
-        Every sentence counts unless it is text the engine wrote itself (the
-        12-month driver), matched exactly. No phrase excuses a sentence: "The
-        bear case reflects Apple losing its appeal" is a claim, and a sentence
-        restating VYNN's figures cites E0.
+        Counted: the thesis, each catalyst and risk statement, each scenario
+        narrative and watch item, the buyers', holders' and watch lines, and
+        each monitoring-plan item: every sentence the report prints from the
+        model, exactly as `_format_final_output` prints it. Only text the
+        engine wrote itself is excluded, matched exactly.
+
+        Main counted a sentence only when it had a digit or one of a list of
+        claim words, so "Tim Cook resigned as CEO amid an accounting scandal."
+        shipped uncited. No sentence is excused now, and an uncited one fails
+        validation whatever the share: a source states it, or it is cut.
         """
         engine_sentences = {
             sentence.strip()
@@ -806,178 +794,64 @@ class RecommendationValidator:
             for sentence in re.split(self.SENTENCE_PATTERN, text)
             if sentence.strip()
         }
-        # Collect sentences from ALL key fields
-        key_texts = []
-        
-        # Core news narrative. Valuation perspective is validated against the
-        # deterministic FixedNumbers contract; news citations cannot support a
-        # DCF range, publication boundary, or model-derived target.
-        key_texts.append(response_data.get('thesis', ''))
-        
-        # Price target drivers (often missed!)
-        price_targets = response_data.get('price_targets', {})
-        for period in ['m3', 'm6', 'm12']:
-            target_row = price_targets.get(period, {}) or {}
-            driver = target_row.get('driver', '') if target_row.get('price') is not None else ''
-            if driver:
-                key_texts.append(driver)
-        
-        # Catalyst statements
-        catalysts = response_data.get('catalysts', [])
-        for cat in catalysts:
-            if isinstance(cat, dict):
-                stmt = cat.get('statement', '')
-            else:
-                stmt = str(cat)
-            if stmt:
-                key_texts.append(stmt)
-        
-        # Risk statements
-        risks = response_data.get('risks', [])
-        for risk in risks:
-            if isinstance(risk, dict):
-                stmt = risk.get('statement', '')
-            else:
-                stmt = str(risk)
-            if stmt:
-                key_texts.append(stmt)
-        
-        # Scenario narratives
-        scenarios = response_data.get('scenarios', {})
-        for scenario_type in ['bull', 'base', 'bear']:
-            scenario = scenarios.get(scenario_type, {})
-            if isinstance(scenario, dict):
-                narrative = scenario.get('narrative', '')
-                if narrative:
-                    key_texts.append(narrative)
-
-        # Printed items to monitor and act on: counted only when they state a
-        # figure or a date. "Next quarterly results" needs no source; "the
-        # earnings call on October 30, 2026" does.
-        items = []
-        for scenario_type in ['bull', 'base', 'bear']:
-            scenario = scenarios.get(scenario_type, {})
-            if isinstance(scenario, dict):
-                items.extend(self._printed_items(scenario.get('watch')))
-        action = response_data.get('action', {})
-        if isinstance(action, dict):
-            for key in ('buyers', 'holders', 'watch'):
-                items.extend(self._printed_items(action.get(key)))
-        items.extend(self._printed_items(response_data.get('monitoring_plan')))
-        item_sentences = [
-            sentence.strip()
-            for text in items
-            for sentence in re.split(self.SENTENCE_PATTERN, text or "")
-            if sentence.strip()
-            and self._support_numbers(self.EVIDENCE_PATTERN.sub("", sentence))
-        ]
-        
-        # Extract sentences from all collected texts
         sentences = []
-        for text in key_texts:
-            if text:
-                # Split by sentence boundaries (handles U.S., Inc., etc.)
-                text_sentences = re.split(self.SENTENCE_PATTERN, text)
-                # Clean and filter empty strings
-                text_sentences = [s.strip() for s in text_sentences if s.strip()]
-                sentences.extend(text_sentences)
-        
-        # Filter to material sentences
-        # Criteria: >= 4 words AND (has factual claim keywords OR mentions specific entities)
-        material_sentences = []
-        factual_keywords = [
-            'revenue', 'growth', 'earnings', 'sales', 'margin', 'profit',
-            'risk', 'catalyst', 'competitive', 'regulatory', 'launch', 'product',
-            'will', 'could', 'expected', 'anticipated', 'indicates', 'suggests',
-            'shows', 'driven', 'quarter', 'year', 'increase', 'decrease',
-            'strong', 'weak', 'high', 'low', 'impact', 'potential', 'likely'
-        ]
-        
-        for sent in sentences:
-            sent_clean = sent.strip()
-            word_count = len(sent_clean.split())
-            
-            # Skip very short sentences (connectors like "However,"); a short
-            # one stating a figure ("Revenue below $90B.") is still a claim.
-            if word_count < 4 and not any(char.isdigit() for char in sent_clean):
-                continue
-            # Text the engine wrote, matched exactly, is not the model's claim.
-            if sent_clean in engine_sentences:
-                continue
-            
-            sent_lower = sent_clean.lower()
-            
-            # Check if sentence has factual claim
-            has_claim = any(keyword in sent_lower for keyword in factual_keywords)
-            
-            # Also include sentences with numbers, percentages, dollar amounts
-            has_numbers = any(char.isdigit() for char in sent_clean)
-            
-            if has_claim or has_numbers:
-                material_sentences.append(sent_clean)
+        for text in self.printed_texts(response_data):
+            for sentence in re.split(self.SENTENCE_PATTERN, text):
+                sentence = sentence.strip()
+                if re.search(r"[A-Za-z0-9]", sentence) and sentence not in engine_sentences:
+                    sentences.append(sentence)
 
-        material_sentences.extend(item_sentences)
+        uncited = [s for s in sentences if not self.EVIDENCE_PATTERN.search(s)]
+        rejected = {self.claim_key(claim) for claim in rejected_claims or ()}
+        report["uncited_printed_sentences"] = uncited
+        # A claim an earlier attempt cited and failed on, back with only its
+        # citation removed: named apart in the rewrite's feedback.
+        report["returning_rejected_claims"] = [
+            s for s in uncited if self.claim_key(s) in rejected]
 
-        # A sentence an earlier attempt cited and failed on, back with only its
-        # citation removed, is the same claim uncited: in any printed field,
-        # figure or not. Matched exactly once citations are stripped.
-        returning = []
-        if rejected_claims:
-            rejected = {self.claim_key(claim) for claim in rejected_claims}
-            for text in key_texts + items:
-                for sentence in re.split(self.SENTENCE_PATTERN, text or ""):
-                    sentence = sentence.strip()
-                    if (sentence and sentence not in engine_sentences
-                            and not self.EVIDENCE_PATTERN.search(sentence)
-                            and self.claim_key(sentence) in rejected):
-                        returning.append(sentence)
-                        if sentence not in material_sentences:
-                            material_sentences.append(sentence)
-        # Neither may ship whatever the coverage: a rejected claim back
-        # without its citation, or any figure no source gives. At 95%, one
-        # uncited sentence in twenty passed ("Apple shares fell 12% after the
-        # DOJ antitrust suit" shipped at 95.2% once its failed [E1] was gone).
-        report["returning_rejected_claims"] = returning
-        report["uncited_figures"] = [
-            sentence for sentence in material_sentences
-            if not self.EVIDENCE_PATTERN.search(sentence)
-            and any(char.isdigit() for char in sentence)
-        ]
-        
-        if not material_sentences:
-            report["coverage_details"] = {
-                "material_sentences": 0,
-                "cited_sentences": [],
-                "cited_count": 0,
-                "coverage_pct": 100.0
-            }
-            return 100.0  # No material claims to cite
-        
-        # Count cited sentences and track which ones lack citations
-        cited_count = 0
-        uncited_sentences = []
-        cited_sentences = []
-        
-        for sent in material_sentences:
-            if self.EVIDENCE_PATTERN.search(sent):
-                cited_count += 1
-                cited_sentences.append(sent)
-            else:
-                uncited_sentences.append(sent)
-        
-        coverage = (cited_count / len(material_sentences)) * 100
-        
+        cited_sentences = [s for s in sentences if self.EVIDENCE_PATTERN.search(s)]
+        coverage = 100.0 if not sentences else len(cited_sentences) / len(sentences) * 100
         report["coverage_details"] = {
-            "material_sentences": len(material_sentences),
+            "material_sentences": len(sentences),
             # The count has its own key: "cited_sentences" below holds the
             # example sentences (it once held both, and the list won).
-            "cited_count": cited_count,
+            "cited_count": len(cited_sentences),
             "coverage_pct": coverage,
-            "uncited_sentences": uncited_sentences[:10],  # Show first 10 for debugging
-            "cited_sentences": cited_sentences[:5]  # Show first 5 examples
+            "uncited_sentences": uncited[:25],
+            "cited_sentences": cited_sentences[:5],
         }
-        
         return coverage
+
+    @classmethod
+    def printed_texts(cls, response_data: Dict[str, Any]) -> List[str]:
+        """Every text the narrative prints from the model, as it prints it."""
+        data = response_data if isinstance(response_data, dict) else {}
+        texts = []
+
+        def add(value):
+            texts.extend(cls.printed_items(value))
+
+        add(data.get("thesis") if isinstance(data.get("thesis"), str) else None)
+        for key in ("catalysts", "risks"):
+            for row in data.get(key) if isinstance(data.get(key), list) else []:
+                add(cls.printed_statement(row))
+        scenarios = data.get("scenarios") if isinstance(data.get("scenarios"), dict) else {}
+        for name in ("bull", "base", "bear"):
+            scenario = scenarios.get(name)
+            if isinstance(scenario, dict):
+                add(scenario.get("narrative") if isinstance(scenario.get("narrative"), str) else None)
+                add(scenario.get("watch"))
+        action = data.get("action") if isinstance(data.get("action"), dict) else {}
+        for key in ("buyers", "holders", "watch"):
+            add(action.get(key))
+        add(data.get("monitoring_plan"))
+        return [text for text in texts if text.strip()]
+
+    @staticmethod
+    def printed_statement(row: Any) -> Optional[str]:
+        """A catalyst's or risk's printed text: its statement, or the row if a string."""
+        statement = row.get("statement") if isinstance(row, dict) else row
+        return statement if isinstance(statement, str) and statement.strip() else None
     
     def _check_unsupported_claims(
         self,
@@ -993,12 +867,14 @@ class RecommendationValidator:
         
         # Extract all evidence snippets for content checking
         evidence_content = ' '.join([
-            ev.get('snippet', '')
+            str(ev.get('snippet') or '')
             for ev in evidence_pack.get('evidence', [])
+            if isinstance(ev, dict)
         ]).lower()
         
         # Check thesis for unsupported specific figures
-        thesis = response_data.get('thesis', '')
+        thesis = response_data.get('thesis')
+        thesis = thesis if isinstance(thesis, str) else ''
         
         # Common unsupported claim patterns
         unsupported_patterns = [
