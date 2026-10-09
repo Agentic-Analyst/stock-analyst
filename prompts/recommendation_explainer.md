@@ -16,6 +16,7 @@ You will receive:
 ## CRITICAL RULES
 
 **DO NOT**:
+- ❌ Use headings, bold, lists, quotes, tables, links or HTML inside any text field: write plain sentences
 - ❌ Invent, change, or restate ANY numeric value from FIXED_NUMBERS
 - ❌ Create price targets or short-horizon paths different from those provided
 - ❌ Change the rating
@@ -71,7 +72,7 @@ Return STRICT JSON with this structure:
 {{
   "rating": "<MUST match FIXED_NUMBERS.rating exactly>",
   
-  "thesis": "Each sentence about company performance, market conditions, products, or competition MUST have [E#]. Example: 'Apple reported Q3 revenue growth of 10% YoY [E1], driven by strong iPhone sales [E2]. However, competitive pressures in AI [E8] and regulatory challenges [E10] create headwinds for the stock.'",
+  "thesis": "Each sentence cites a source that states everything it says, with no conclusion of your own added. Example: 'Apple reported Q3 revenue growth of 10% YoY [E1]. iPhone sales rose 12% in the quarter [E2].'",
   
   "valuation_perspective": "Explain only the deterministic FIXED_NUMBERS valuation status, range, and methodology. Do NOT attach [E#] news citations to model-derived facts, and do not add sector/peer comparisons that are absent from FIXED_NUMBERS.",
   
@@ -167,9 +168,11 @@ Return STRICT JSON with this structure:
 
 ## EXAMPLE EVIDENCE CITATION
 
-Good: "Q3 2025 revenue grew 10% YoY to $94B, driven by strong iPhone and Services performance [E1], indicating robust consumer demand despite macro headwinds."
+Good (the source says exactly this): "Q3 2025 revenue grew 10% YoY to $94B, driven by iPhone and Services [E1]."
 
 Bad: "The company had strong earnings." (no citation, not specific)
+
+Bad: "Q3 2025 revenue grew 10% YoY to $94B [E1], indicating robust consumer demand despite macro headwinds." (the source says nothing about demand or headwinds: a cited sentence may say only what its source states, and a model checks each one)
 
 ## CALCULATION TRANSPARENCY
 

@@ -90,8 +90,9 @@ date cites the item that gives it, or the figure is deleted.
 
 ## Example of Good Citations
 
-✅ "Apple reported Q3 revenue growth of 10% YoY [E1], driven by strong iPhone sales [E2]."
-✅ "Regulatory challenges in the EU pose ongoing risks [E10], while AI competition intensifies [E8][E11]."
+✅ "Apple reported Q3 revenue growth of 10% YoY [E1]." (when E1 states exactly that)
+❌ "Apple reported Q3 revenue growth of 10% YoY [E1], showing its pricing power." (adds a conclusion E1 does not state - FAILS the fact check)
+❌ "Buy the shares now: Apple launched the iPhone Duo [E2]." (advice no source states - FAILS)
 ❌ "Apple had strong revenue growth." (no citation - FAILS VALIDATION)
 ❌ "Revenue reached $94B [E99]." (invalid evidence ID - FAILS VALIDATION)
 

@@ -90,8 +90,7 @@ def _one_sentence(text: str) -> str:
     The alert's "That is a large gap between VYNN and the Street, ..." quoted
     alone after a news sentence would point "That" at the news.
     """
-    parts = [part.strip() for part in re.split(RecommendationValidator.SENTENCE_PATTERN, text)
-             if part.strip()]
+    parts = RecommendationValidator.sentences(text)
     joined = parts[0] if parts else ""
     for part in parts[1:]:
         # "That is ..." continues as "that is ..."; "VYNN's ..." keeps its case.
@@ -436,18 +435,25 @@ class RecommendationEngineV3:
         
         # Step 6: Validate and auto-correct response
         total_cost = cost
+
+        def fact_check(check_prompt: str) -> str:
+            # The same model, asked whether each news-cited sentence says
+            # only what its sources state; its cost is the report's.
+            nonlocal total_cost
+            answer, check_cost = llm([{"role": "user", "content": check_prompt}], temperature=0)
+            total_cost += check_cost or 0.0
+            return answer
+
         corrected_json, validation_report = self.validator.validate_and_correct(
-            response, fixed_numbers, evidence_pack
+            response, fixed_numbers, evidence_pack, fact_check=fact_check
         )
         
-        # If JSON parsing failed completely, cannot proceed
+        # A draft that cannot be read is not rewritten from nothing: the
+        # evidence-safe recommendation below prints the rating. It raised
+        # here, and the whole section read "Section unavailable".
         if corrected_json is None:
-            self._log("\n❌ CRITICAL ERROR: JSON parsing failed completely", "error")
-            self._log("="*80, "error")
-            self._log("VALIDATION REPORT:", "error")
-            self._log(json.dumps(validation_report, indent=2), "error")
-            self._log("="*80, "error")
-            raise ValueError("LLM response is not valid JSON. Cannot proceed.")
+            self._log("Recommendation draft could not be read; using the evidence-safe "
+                      "recommendation.", "warning")
         
         if verbose:
             self._log("VALIDATION REPORT\n" + json.dumps(validation_report, indent=2))
@@ -478,7 +484,7 @@ class RecommendationEngineV3:
             self._log("="*80 + "\n")
         
         # Step 7: Multi-pass rewrite loop until 95%+ coverage or max attempts
-        max_rewrite_attempts = 3
+        max_rewrite_attempts = 3 if corrected_json is not None else 0
         rewrite_attempt = 0
         evidence_safe_fallback = None
         # Claims an attempt cited and failed on: one that comes back with its
@@ -548,7 +554,8 @@ class RecommendationEngineV3:
             
             # Re-validate the rewrite
             final_json, validation_report = self.validator.validate_and_correct(
-                rewrite_response, fixed_numbers, evidence_pack, rejected_claims
+                rewrite_response, fixed_numbers, evidence_pack, rejected_claims,
+                fact_check=fact_check,
             )
             rejected_claims |= {
                 issue.get("sentence") or issue.get("claim")
@@ -618,8 +625,10 @@ class RecommendationEngineV3:
             )
 
         # Step 8: Format final output
+        # The validated object itself: re-parsing its JSON text let a "/*"
+        # in one field and "*/" in another strip what lay between.
         final_output = evidence_safe_fallback or self._format_final_output(
-            json.dumps(corrected_json), fixed_numbers, validation_report
+            corrected_json, fixed_numbers, validation_report
         )
 
         if verbose:
@@ -971,14 +980,15 @@ class RecommendationEngineV3:
     
     def _format_final_output(
         self,
-        llm_response: str,
+        llm_response: Any,
         fixed_numbers: Dict[str, Any],
         validation_result: Dict[str, Any]
     ) -> str:
-        """Format final markdown output."""
+        """Format final markdown output from the validated response (or its JSON text)."""
         
         try:
-            response_data = self.validator._extract_json(llm_response)
+            response_data = llm_response if isinstance(llm_response, dict) \
+                else self.validator._extract_json(llm_response)
             
             # Build markdown output
             output = []
@@ -1084,12 +1094,12 @@ class RecommendationEngineV3:
             
             # Scenarios (if available)
             scenarios = response_data.get('scenarios', {})
-            if scenarios:
+            if isinstance(scenarios, dict) and scenarios:
                 output.append(f"\n### Scenario Analysis\n")
                 
                 for scenario_name, scenario_label in [('bull', 'Bull Case'), ('base', 'Base Case'), ('bear', 'Bear Case')]:
                     scenario = scenarios.get(scenario_name, {})
-                    if scenario:
+                    if isinstance(scenario, dict) and scenario:
                         narrative = scenario.get('narrative', '')
                         watch = self.validator.printed_items(scenario.get('watch'))
                         output.append(f"**{scenario_label}**: {narrative}")
@@ -1097,8 +1107,8 @@ class RecommendationEngineV3:
                             output.append(f"  - Watch: {', '.join(watch)}\n")
             
             # Action
-            action = response_data.get('action', {}) if rated else {}
-            if action:
+            action = response_data.get('action') if rated else {}
+            if isinstance(action, dict) and action:
                 output.append(f"\n### Recommended Action\n")
                 printed = {key: self.validator.printed_items(action.get(key))
                            for key in ('buyers', 'holders', 'watch')}
