@@ -54,7 +54,9 @@ Take the JSON structure above and rewrite these TEXT fields ONLY:
 **E0 is VYNN's own model outputs and provider market data, not news.** A
 sentence that restates VYNN's rating, fair value, range, the price at the run,
 the implied return, the confidence alert or a market-data figure cites [E0]
-and says only what E0's text says, with its figures as written there. Never
+and says only what E0's text says, with its figures as written there, in E0's
+own words: a sentence citing [E0] may use no word E0 does not, so it adds no
+framing of its own ("VYNN's model shows/states/lists/notes/indicates that"). Never
 cite E0 for news or a news item for VYNN's figures; keep the two in separate
 sentences. An item to monitor or act on that states a figure or a date cites
 the item that gives it.

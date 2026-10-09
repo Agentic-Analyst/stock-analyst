@@ -340,7 +340,15 @@ class RecommendationValidator:
                 return f"it states none of {MODEL_EVIDENCE_ID}'s figures or its rating"
             novel = cls._support_tokens(claim) - cls._support_tokens(evidence) - (subject or set())
             if novel:
-                return f"it says {', '.join(sorted(novel))}, which the cited sources do not"
+                # The words as written, not their stems: "lists, states", not
+                # "list, stat", or the rewrite swaps one framing verb for another.
+                written = []
+                for word in re.findall(r"[A-Za-z][A-Za-z0-9'’-]{2,}", claim):
+                    if cls._support_tokens(word) & novel and word.lower() not in written:
+                        written.append(word.lower())
+                return (f"it adds words {MODEL_EVIDENCE_ID} does not use ({', '.join(written)}): "
+                        f"write the figures in {MODEL_EVIDENCE_ID}'s own words, with no framing "
+                        f"of your own")
             # "not" is too short to be a token, and E0 itself says "not news":
             # a negation must stand in the cited text before the same word.
             def pairs(text):

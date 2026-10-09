@@ -192,6 +192,13 @@ class TestModelEvidence:
     def test_e0_launders_nothing(self, sentence):
         assert _issue_for(sentence) is not None, sentence
 
+    def test_the_rewrite_is_told_which_words_e0_does_not_use(self):
+        # Gate55: drafts framed E0's figures ("VYNN's calculator lists ...",
+        # "The model states that ..."), and reasons given as stems ("list,
+        # stat") had the rewrite swap one framing verb for another.
+        reason = _issue_for("VYNN's calculator lists a published intrinsic value of $226.89 per share [E0].")
+        assert "(lists)" in reason and "no framing of your own" in reason
+
     def test_another_rating_beside_e0_figures_fails(self):
         # Every word and figure is E0's; only the label is not.
         assert _issue_for("VYNN's fair value is $226.89 per share, a STRONG BUY [E0].") is not None
