@@ -24,6 +24,10 @@ The mid-cycle levels come from SEC XBRL annual filings (10-K), read
   year. NAND has more suppliers than DRAM and structurally lower returns.
 - Operating costs (gross profit less operating income) ran 15% of revenue for
   Micron, pooled FY2009-FY2025, growing with trend revenue, not the cycle.
+- Depreciation and capital spending follow the fabs, not the price: Micron's
+  capex was $8.9B in the FY2018 boom (29% of revenue) and $9.8B in the FY2019
+  bust (42%), $12.1B in FY2022 and $7.7B in FY2023. Scaled with a tripled,
+  price-driven revenue they would build plants no mid-cycle year earns on.
 
 No memory maker in that history ever reported a full year above about 61%.
 """
@@ -74,6 +78,23 @@ MID_CYCLE = {
 }
 # Gross profit less operating income, as a share of trend revenue.
 MID_CYCLE_OPERATING_COSTS = 0.15
+# The engine's maturity convention (tab_projections): capex converges to 1.1x
+# D&A by FY5, which the terminal value inherits.
+CAPEX_TO_DA_AT_MATURITY = 1.1
+# D&A against trend revenue (a log-linear fit of each 10-K history): Micron
+# FY2009-FY2025 17.8%-29.2%, pooled 24.4%; old SanDisk FY2010-FY2015, whose
+# fabs sit in the Kioxia joint venture, 3.0%-7.5%. A trailing share above the
+# highest observed is held there: the through-cycle operating margin was
+# earned on that much depreciation, and more would leave the terminal year
+# converting too little of its EBITDA to be steady (terminal_value.py).
+MAX_DA_SHARE_OF_TREND = 0.30
+# Capex beyond 1.5x trend revenue is a data problem (a one-off acquisition
+# booked as capex), not an asset base. Micron's highest was 50%; its trailing
+# 78% is a real build-out, which the glide below winds down.
+_MAX_CAPEX_SHARE_OF_TREND = 1.5
+# Capex keeps today's intensity through the Street's covered years, the way
+# Micron's rose into the FY2018 boom and its first bust year, then converges.
+_CAPEX_GLIDE = (0.0, 0.0, 1 / 3, 2 / 3, 1.0)
 # Annual periods needed to place the company's revenue trend.
 MIN_ANNUAL_PERIODS = 3
 # Why a memory maker's workbook built without the mid-cycle rewrite is only a
@@ -175,6 +196,21 @@ def mid_cycle_inputs(financial_data: Dict[str, Any]) -> Optional[Dict[str, Any]]
         "trend_revenue_mean": math.exp(sum(math.log(r["revenue"]) for r in history) / len(history)),
         "trend_centre": centre.isoformat(),
         "base_period_end": base.isoformat() if base else None,
+        # The trailing twelve months' D&A and capex in dollars, for the asset
+        # base (asset_base_path); only from a current bridge.
+        **_trailing_asset_spend(bridge),
+    }
+
+
+def _trailing_asset_spend(bridge: Any) -> Dict[str, Any]:
+    if not isinstance(bridge, dict) or bridge.get("status") != "current":
+        return {}
+    normalized = bridge.get("normalized") or {}
+    period = _as_date(bridge.get("latest_period"))
+    return {
+        "ttm_depreciation": _number(normalized, "depreciation_and_amortization"),
+        "ttm_capex": _number(normalized, "capital_expenditure"),
+        "ttm_period_end": period.isoformat() if period else None,
     }
 
 
@@ -186,6 +222,76 @@ def trend_revenue(inputs: Dict[str, Any], years_after_base: float,
     base = _as_date(base_period_end or inputs["base_period_end"])
     span = _years_between(centre, base) + years_after_base
     return inputs["trend_revenue_mean"] * (1 + inputs["revenue_trend_growth"]) ** span
+
+
+def asset_base_path(
+    inputs: Dict[str, Any], base_period: Optional[str], revenue: List[float],
+) -> Optional[Dict[str, Any]]:
+    """
+    D&A and capex on the company's asset base: trend revenue, not the price.
+
+    The engine scales both with projected revenue (tab_projections), which for
+    a memory maker in a boom is price: Micron's trailing capex, 28% of revenue
+    that had tripled, became $86B and $84B a year in the Street's two covered
+    years, building plant no mid-cycle year earns on, while D&A on the trend
+    years stayed at the boom's 10% of revenue ($5B a year on $100B+ of plant).
+
+    Here the trailing twelve months' D&A and capex dollars are measured
+    against the TREND revenue at the end of those twelve months, which
+    removes the price, and grow with trend revenue. D&A keeps that share (at
+    most MAX_DA_SHARE_OF_TREND); capex keeps today's intensity through the
+    covered years, then converges to the engine's usual 1.1x D&A by FY5, so the
+    terminal year is no more and no less mature than any other company's.
+    Returns the per-year ratios to projected revenue, or None (the engine's
+    path is kept) without a current trailing twelve months, with implausible
+    shares, or with ratios the workbook would refuse.
+    """
+    from src.agents.fm.tabs.tab_projections import YEAR_RATIO_BOUNDS
+
+    da_ttm, capex_ttm = inputs.get("ttm_depreciation"), inputs.get("ttm_capex")
+    ttm_end = inputs.get("ttm_period_end")
+    if (not ttm_end or len(revenue) < 5
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                       and math.isfinite(v) for v in (da_ttm, capex_ttm))):
+        return None
+    trend_then = trend_revenue(inputs, 0, ttm_end)
+    if not trend_then > 0 or da_ttm < 0 or capex_ttm > 0:
+        return None
+    da_share = float(da_ttm) / trend_then
+    capex_share = float(capex_ttm) / trend_then
+    if capex_share < -_MAX_CAPEX_SHARE_OF_TREND:
+        return None
+    # The ceiling applies from FY3, the first mid-cycle year: in the Street's
+    # covered years EBIT is the Street's, and the trailing D&A it was earned
+    # on is added back as it is.
+    da_held = da_share > MAX_DA_SHARE_OF_TREND
+    mid_cycle_da_share = min(da_share, MAX_DA_SHARE_OF_TREND)
+    da, capex = [], []
+    for i, progress in enumerate(_CAPEX_GLIDE):
+        trend_i = trend_revenue(inputs, i + 1, base_period)
+        share_i = da_share if i < 2 else mid_cycle_da_share
+        da.append(share_i * trend_i)
+        capex.append(trend_i * (capex_share * (1 - progress)
+                                - CAPEX_TO_DA_AT_MATURITY * mid_cycle_da_share * progress))
+    da_ratios = [d / r for d, r in zip(da, revenue[:5])]
+    capex_ratios = [c / r for c, r in zip(capex, revenue[:5])]
+    # The workbook takes the per-year ratios only inside these bounds; a path
+    # it would refuse must not be recorded as the one it built.
+    if not (all(YEAR_RATIO_BOUNDS["da"][0] <= v <= YEAR_RATIO_BOUNDS["da"][1] for v in da_ratios)
+            and all(YEAR_RATIO_BOUNDS["capex"][0] <= v <= YEAR_RATIO_BOUNDS["capex"][1]
+                    for v in capex_ratios)):
+        return None
+    return {
+        "da_share_of_trend_revenue": mid_cycle_da_share,
+        "trailing_da_share_of_trend_revenue": da_share,
+        "da_share_held_at_maximum": da_held,
+        "capex_share_of_trend_revenue": capex_share,
+        "trailing_period_end": ttm_end,
+        "da": da,
+        "capex": capex,
+        "da_to_revenue_by_year": da_ratios,
+        "capex_to_revenue_by_year": capex_ratios,
+    }
 
 
 def apply_mid_cycle(a: Dict[str, Any], inputs: Dict[str, Any]) -> Optional[str]:
@@ -231,6 +337,11 @@ def apply_mid_cycle(a: Dict[str, Any], inputs: Dict[str, Any]) -> Optional[str]:
     gross = list(a.get("gross_margins") or [None] * 5)
     da_ratio = basis.get("da_to_revenue")
     da_ratio = float(da_ratio) if isinstance(da_ratio, (int, float)) else 0.0
+    projected = [float(base_revenue)]
+    for g in new_growth:
+        projected.append(projected[-1] * (1 + g))
+    asset_base = (asset_base_path(inputs, base_period, projected[1:])
+                  if isinstance(a.get("modeling_basis"), dict) else None)
     # Operating costs follow trend revenue, not the cycle: in FY3 the same
     # dollars are a smaller share of still-elevated revenue.
     year_revenue = {2: fy3, 3: fy4, 4: fy4 * (1 + inputs["revenue_trend_growth"])}
@@ -240,7 +351,12 @@ def apply_mid_cycle(a: Dict[str, Any], inputs: Dict[str, Any]) -> Optional[str]:
     a["revenue_growth_rates"] = new_growth
     a["operating_margins"] = new_margins
     a["gross_margins"] = gross
-    a["ebitda_margins"] = [m + da_ratio for m in new_margins]
+    if asset_base:
+        basis["da_to_revenue_by_year"] = asset_base["da_to_revenue_by_year"]
+        basis["capex_to_revenue_by_year"] = asset_base["capex_to_revenue_by_year"]
+        a["ebitda_margins"] = [m + d for m, d in zip(new_margins, asset_base["da_to_revenue_by_year"])]
+    else:
+        a["ebitda_margins"] = [m + da_ratio for m in new_margins]
     # Peak-cycle peers on peak-cycle earnings would put the cycle back in.
     a["comps_included_in_blended_value"] = False
     a["mid_cycle"] = {
@@ -252,17 +368,38 @@ def apply_mid_cycle(a: Dict[str, Any], inputs: Dict[str, Any]) -> Optional[str]:
         "street_revenue_fy2": fy2,
         "source": inputs["source"],
         "history": inputs["history"],
+        "asset_base": ({k: asset_base[k] for k in (
+            "da_share_of_trend_revenue", "trailing_da_share_of_trend_revenue",
+            "da_share_held_at_maximum", "capex_share_of_trend_revenue",
+            "trailing_period_end", "da", "capex")}
+            if asset_base else None),
     }
     a["operating_margin_source"] = "mid_cycle_after_street_covered_years"
     # FY1-FY2 are still the consensus case: keep the source's prefix, which
     # the model records as near-term revenue anchored to the Street.
     a["revenue_growth_source"] = f"{a.get('revenue_growth_source') or 'model'}_then_mid_cycle_trend"
     label = "DRAM" if inputs["kind"] == "dram" else "NAND"
+    if asset_base:
+        held = (" (held at the highest observed through the cycle)"
+                if asset_base["da_share_held_at_maximum"] else "")
+        assets = (
+            f"; D&A and capex on the asset base, not the price: "
+            f"{asset_base['da_share_of_trend_revenue'] * 100:.1f}%{held} and "
+            f"{-asset_base['capex_share_of_trend_revenue'] * 100:.1f}% of trend revenue over the "
+            f"twelve months to {asset_base['trailing_period_end']}, capex at that intensity "
+            f"through FY2 and converging to {CAPEX_TO_DA_AT_MATURITY:.1f}x D&A by FY5"
+        )
+    elif inputs.get("ttm_depreciation") is None or inputs.get("ttm_capex") is None:
+        assets = ("; D&A and capex at the trailing share of projected revenue "
+                  "(no current trailing twelve months)")
+    else:
+        assets = ("; D&A and capex at the trailing share of projected revenue (the "
+                  "trailing twelve months' D&A and capex do not form a plausible asset base)")
     return (
         f"Mid-cycle ({label} maker): FY1-FY2 on the Street case; revenue from "
         f"{fy2 / 1e9:,.1f}B (FY2) to its trend {fy4 / 1e9:,.1f}B by FY4, then "
         f"{inputs['revenue_trend_growth'] * 100:.1f}% a year; operating margin "
-        f"{om2 * 100:.1f}% to {mid * 100:.0f}% ({inputs['source']})"
+        f"{om2 * 100:.1f}% to {mid * 100:.0f}% ({inputs['source']}){assets}"
     )
 
 
