@@ -186,7 +186,7 @@ def test_a_clean_draft_logs_no_rewrite_needed(monkeypatch):
     log = _Capture()
     engine = RecommendationEngineV3(sector="default", logger=log)
     monkeypatch.setattr(engine.validator, "validate_and_correct",
-                        lambda response, fixed, pack, *_, **__: ({"thesis": "ok"}, {"valid": True}))
+                        lambda response, fixed, pack: ({"thesis": "ok"}, {"valid": True}))
     monkeypatch.setattr(engine.validator, "needs_rewrite", lambda report: False)
     engine.generate_recommendation(
         _COMPANY, _VALUATION, _SCREENING, lambda messages, temperature=0.6: (_DRAFT, 0.0)
@@ -195,19 +195,17 @@ def test_a_clean_draft_logs_no_rewrite_needed(monkeypatch):
 
 
 def test_unparseable_json_logs_the_failure_not_the_report(monkeypatch):
-    # An unreadable draft once raised and the section read "Section
-    # unavailable"; it now gets the evidence-safe recommendation.
     from src.recommendation_engine import RecommendationEngineV3
     monkeypatch.delenv("VYNN_VERBOSE_RECOMMENDATION_LOGS", raising=False)
     log = _Capture()
     engine = RecommendationEngineV3(sector="default", logger=log)
-    output, _, pack = engine.generate_recommendation(
-        _COMPANY, _VALUATION, _SCREENING,
-        lambda messages, temperature=0.6: ("not json: " + _SNIPPET, 0.0),
-    )
-    assert "could not be read" in log.text
-    assert _SNIPPET not in log.text and _SNIPPET not in output
-    assert pack["validation"]["status"] == "degraded"
+    with pytest.raises(ValueError):
+        engine.generate_recommendation(
+            _COMPANY, _VALUATION, _SCREENING,
+            lambda messages, temperature=0.6: ("not json: " + _SNIPPET, 0.0),
+        )
+    assert "JSON parsing failed completely" in log.text
+    assert _SNIPPET not in log.text
 
 
 def test_the_rewrite_prompt_states_the_cited_count_not_the_sentences():
