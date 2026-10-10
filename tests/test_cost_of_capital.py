@@ -724,6 +724,41 @@ class TestReportAssemblyRuns:
         report = integrate_report_sections(self._sections(), data)
         assert "| WACC |" in report
 
+    def test_the_appendix_prints_vynns_figures_in_full_and_by_name(self):
+        """
+        E0, VYNN's own figures, is cited sentence by sentence. Cut at 700
+        characters, its P/E and 52-week range were cited but not printed, and
+        it read "Vynn Model" and "VYNN model (vynn_model)" beside the news.
+        """
+        from src.recommendation_engine import model_evidence_item
+        from src.report_agent import integrate_report_sections
+        fixed = {
+            "as_of": "2026-10-09", "rating": "STRONG SELL", "rating_confidence": "low",
+            "current_price": 340.42, "expected_return_pct_12m": -33.35,
+            "target_assumption": "The 12-month case assumes convergence to the currently "
+                                 "published intrinsic value; it is not a statistically forecast "
+                                 "market price.",
+            "targets": {"m12": {"price": 226.89, "range_low": 206.61, "range_high": 247.17}},
+            "confidence_alert_text": (
+                "Low confidence: VYNN's fair value is 33% below the market price, while the mean "
+                "target of 39 analysts is 15% above it. That is a large gap between VYNN and the "
+                "Street, so treat this as VYNN's own view and weigh both."),
+            "inputs": {"analyst_target": 391.48, "analyst_count": 39},
+        }
+        e0 = model_evidence_item(fixed, {
+            "pe_ratio": "36.89x", "ev_ebitda": "27.10x", "net_margin": "26.9%",
+            "debt_equity": "1.54x", "week_52_low": 200.0, "week_52_high": 360.0}, "$")
+        assert len(e0["snippet"]) > 700
+        sections = self._sections()
+        sections["evidence_pack"] = {"evidence": [e0]}
+
+        report = integrate_report_sections(sections, self._data())
+
+        assert "| E0 | VYNN figures | 2026-10-09 | computed |" in report
+        assert "- **Publisher**: VYNN (computed)" in report
+        assert "The 52-week range is $200.00 to $360.00." in report
+        assert "vynn\\_model" not in report and "Vynn Model" not in report
+
     def test_appendix_survives_and_escapes_hostile_source_fields(self):
         from src.report_agent import integrate_report_sections
         data = self._data()
