@@ -13,7 +13,7 @@ for financial modeling and analysis.
 
 from __future__ import annotations
 import os, json, argparse, pathlib, time, math
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Dict, List, Optional, Any, Union
 import pandas as pd
 import numpy as np
@@ -55,6 +55,17 @@ def _frame_records(frame: Any, *, key_field: Optional[str] = None) -> Dict[str, 
                   else index)
         output[key] = record
     return output
+
+
+def _epoch_date(value: Any) -> Optional[str]:
+    """A Yahoo epoch-seconds field as an ISO date, or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) \
+            or value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _fx_rate(from_ccy, to_ccy):
@@ -818,6 +829,11 @@ class FinancialScraper:
                     # the price is converted to match (see market_data).
                     "currency": _reporting_currency(info),
                     "listing_currency": _listing_ccy(info),
+                    # Yahoo's own fiscal clock. Its estimate table rolls to the
+                    # next fiscal year when a year is reported, weeks before its
+                    # statements carry that year (src/estimate_alignment.py).
+                    "last_fiscal_year_end": _epoch_date(info.get("lastFiscalYearEnd")),
+                    "most_recent_quarter": _epoch_date(info.get("mostRecentQuarter")),
                 },
                 
                 # 2. Share/Market Data (Critical for modeling)
@@ -1259,6 +1275,10 @@ class FinancialScraper:
         # 4. Scrape analyst data
         self._log("info", "Collecting analyst estimates...")
         modeling_data["analyst_data"] = self.scrape_analyst_estimates()
+        # Recorded in analyst_data.estimate_alignment and the model's notes;
+        # not logged: every info.log line reaches the user's live status.
+        from src.estimate_alignment import align_street_estimates
+        align_street_estimates(modeling_data)
         try:
             from analyst_consensus import collect_consensus
             company_data = modeling_data.get("company_data", {}) or {}

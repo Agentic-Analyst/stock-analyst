@@ -589,6 +589,9 @@ def _estimate(rows: Any, period: str, *, positive_values: bool) -> Dict[str, Any
         "high": _number(row.get("high"), positive=positive_values),
         "growth": _number(row.get("growth")),
         "analyst_count": _count(row.get("numberOfAnalysts")),
+        # A year the company has reported, realigned into the table
+        # (src/estimate_alignment.py): not a forecast.
+        "reported": row.get("reported") is True,
     }
 
 
@@ -810,23 +813,34 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
 
     revenue_rows = analyst.get("revenue_estimates") or {}
     eps_rows = analyst.get("earnings_estimates") or {}
+    # "+2y" exists only after a realignment (src/estimate_alignment.py); it is
+    # kept apart from the two covered years every comparison reads.
+    periods = ("0y", "+1y") + (
+        ("+2y",) if isinstance(revenue_rows, dict) and isinstance(eps_rows, dict)
+        and ("+2y" in revenue_rows or "+2y" in eps_rows) else ())
     revenue = [
         _estimate(revenue_rows, period, positive_values=True)
-        for period in ("0y", "+1y")
+        for period in periods
     ]
     raw_eps = [
         _estimate(eps_rows, period, positive_values=False)
-        for period in ("0y", "+1y")
+        for period in periods
     ]
     listing_currency = basic.get("listing_currency") or basic.get("currency")
     financial_currency = basic.get("currency") or listing_currency
     fx_rate = market.get("fx_listing_to_financial")
+    # Yahoo's forward P/E is struck on its own "+1y"; after a realignment
+    # (src/estimate_alignment.py) that is the provider table's row, not ours.
+    provider_forward = (((analyst.get("provider_estimates") or {}).get("earnings_estimates")
+                         or {}).get("+1y"))
     eps_unit = _infer_eps_source_currency(
         analyst=analyst,
         basic=basic,
         market=market,
         valuation=valuation,
-        forward_eps=raw_eps[1].get("average"),
+        forward_eps=(_number(provider_forward.get("avg"))
+                     if isinstance(provider_forward, dict)
+                     else raw_eps[1].get("average")),
     )
     eps_source_currency = eps_unit.get("currency")
     eps = []
@@ -847,7 +861,7 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
         )
         eps.append(normalized)
     years = []
-    for index, period in enumerate(("0y", "+1y")):
+    for index, period in enumerate(periods):
         revenue_row, eps_row = revenue[index], eps[index]
         implied_net_income = (
             eps_row["average"] * shares
@@ -859,6 +873,7 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
         )
         years.append({
             "period": period,
+            "reported": revenue_row["reported"],
             "revenue": revenue_row["average"],
             "revenue_growth": revenue_row["growth"],
             "revenue_analyst_count": revenue_row["analyst_count"],
@@ -947,8 +962,8 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
     rating_coverage = max(
         (row["analyst_count"] for row in qualified_ratings), default=0
     )
-    revenue_coverage = max((row["revenue_analyst_count"] for row in years), default=0)
-    eps_coverage = max((row["eps_analyst_count"] for row in years), default=0)
+    revenue_coverage = max((row["revenue_analyst_count"] for row in years[:2]), default=0)
+    eps_coverage = max((row["eps_analyst_count"] for row in years[:2]), default=0)
     raw_observations = consensus.get("analyst_observations") or {}
     raw_observations = (
         raw_observations if isinstance(raw_observations, dict) else {}
@@ -1035,9 +1050,9 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
             if raw_rating_coverage < 5 else
             "No current recommendation evidence with adequate coverage is available."
         )
-    if not any(row["revenue"] is not None for row in years):
+    if not any(row["revenue"] is not None for row in years[:2]):
         warnings.append("Forward revenue estimates are unavailable.")
-    if not any(row["eps"] is not None for row in years):
+    if not any(row["eps"] is not None for row in years[:2]):
         warnings.append("Forward EPS estimates are unavailable.")
     if (
         str(listing_currency or "").upper() != str(financial_currency or "").upper()
@@ -1134,7 +1149,10 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
             "included_in_intrinsic_value": False,
             "content_policy": "structured_metadata_only_no_licensed_prose",
         },
-        "forward_estimates": years,
+        "forward_estimates": years[:2],
+        # A realigned table's third year: only the bank leg reads it, so a
+        # reported year in 0y still leaves two forward horizons.
+        "forward_estimates_beyond": years[2:],
         "valuation_cross_check": {
             # P/E has no useful interpretation at zero or negative earnings.
             "forward_pe_at_market": price / forward_eps
@@ -1227,6 +1245,9 @@ def align_forward_estimates_to_forecast_basis(
             if net_income is not None and revenue is not None and revenue > 0
             else None
         ),
+        # The share of this rolling year that is the reported year.
+        "reported": False,
+        "reported_share": (1.0 - progress) if current.get("reported") else 0.0,
         "forecast_alignment": {
             "basis": "rolling_twelve_months",
             "fiscal_year_progress": progress,

@@ -93,6 +93,7 @@ _OPERATING_COST_COMPRESSION = 0.5
 
 def _post_consensus_growth_path(
     covered_growth: float, terminal: float, periods: int,
+    fade_years: int = _POST_CONSENSUS_FADE_YEARS,
 ) -> List[float]:
     """Growth for the years after Street coverage: a ten-year linear fade.
 
@@ -100,10 +101,12 @@ def _post_consensus_growth_path(
     ``_POST_CONSENSUS_GROWTH_CAP``) and moves in equal steps toward terminal
     growth, reaching it eight periods later (NTM10). A declining company
     starts below terminal and recovers on the same line rather than snapping
-    back to growth.
+    back to growth. A third covered year (a realigned table) fades in seven,
+    so terminal growth still arrives at NTM10, where stage 2 of the perpetuity
+    tab puts it.
     """
     start = min(float(covered_growth), _POST_CONSENSUS_GROWTH_CAP)
-    step = (start - float(terminal)) / _POST_CONSENSUS_FADE_YEARS
+    step = (start - float(terminal)) / fade_years
     return [start - step * k for k in range(1, periods + 1)]
 
 # Damodaran, "Ratings, Interest Coverage Ratios and Default Spread",
@@ -1327,9 +1330,21 @@ def _rolling_consensus_revenue_path(
     if not -0.50 <= covered_growth <= _ABSOLUTE_CONSENSUS_GROWTH_MAX:
         return None
     annual_targets = [current_fiscal, next_fiscal]
-    # Four post-consensus annual steps supply the endpoints needed to blend
-    # five rolling periods when fiscal progress is non-zero.
-    for growth in _post_consensus_growth_path(covered_growth, terminal_growth, 4):
+    counts = {"0y": current_count, "+1y": next_count}
+    # A third covered year exists only when the reported year was realigned
+    # into 0y (src/estimate_alignment.py); it is the Street's, not a fade.
+    if "+2y" in qualified_revenue:
+        third_fiscal, third_count = qualified_revenue["+2y"]
+        third_growth = third_fiscal / next_fiscal - 1.0
+        if -0.50 <= third_growth <= _ABSOLUTE_CONSENSUS_GROWTH_MAX:
+            annual_targets.append(third_fiscal)
+            counts["+2y"] = third_count
+            covered_growth = third_growth
+    # Post-consensus annual steps supply the endpoints needed to blend five
+    # rolling periods when fiscal progress is non-zero: six annual targets.
+    for growth in _post_consensus_growth_path(
+            covered_growth, terminal_growth, 6 - len(annual_targets),
+            _POST_CONSENSUS_FADE_YEARS - (len(annual_targets) - 2)):
         annual_targets.append(annual_targets[-1] * (1.0 + growth))
 
     rolling_targets = [
@@ -1355,8 +1370,11 @@ def _rolling_consensus_revenue_path(
         "forecast_revenue": rolling_targets,
         "revenue_growth_rates": growth_path,
         "covered_growth": covered_growth,
-        "analyst_counts": {"0y": current_count, "+1y": next_count},
-        "method": "fiscal-progress blend of 0y/+1y absolute consensus",
+        "analyst_counts": counts,
+        "method": (
+            "fiscal-progress blend of 0y/+1y/+2y absolute consensus" if "+2y" in counts
+            else "fiscal-progress blend of 0y/+1y absolute consensus"
+        ),
     }
 
 
@@ -2030,6 +2048,11 @@ def ground_assumptions(
     # use 7/4.5/3% or 7.5/6/5% and publish different valuations.
     revenue_estimates = ((json_data or {}).get("analyst_data", {}) or {}).get(
         "revenue_estimates", {}) or {}
+    alignment = ((json_data or {}).get("analyst_data", {}) or {}).get("estimate_alignment") or {}
+    if (isinstance(alignment, dict) and alignment.get("status") in ("rolled", "torn")
+            and alignment.get("note")):
+        notes.append("Street estimates realigned to the statements' fiscal years: "
+                     + str(alignment["note"]))
     growth_path = a.get("revenue_growth_rates")
     if isinstance(growth_path, list) and len(growth_path) >= 2:
         grounded_growth = [float(value) for value in growth_path]
@@ -2045,7 +2068,7 @@ def ground_assumptions(
             )) if annual_rows else None
         )
         qualified_revenue = {}
-        for period in ("0y", "+1y"):
+        for period in ("0y", "+1y", "+2y"):
             estimate = revenue_estimates.get(period) or {}
             average = _positive_number(estimate.get("avg"))
             count = _safe_count(estimate.get("numberOfAnalysts"))
@@ -2068,7 +2091,9 @@ def ground_assumptions(
             ]
             used.append(
                 f"fiscal progress {rolling['fiscal_year_progress'] * 100:.1f}% "
-                f"at {rolling['period_end']}; 0y/+1y consensus blended without "
+                f"at {rolling['period_end']}; "
+                + ("0y/+1y/+2y" if "+2y" in (rolling.get("analyst_counts") or {}) else "0y/+1y")
+                + " consensus blended without "
                 "counting elapsed fiscal operations as future cash flow"
             )
             if float(rolling.get("covered_growth") or 0.0) > _POST_CONSENSUS_GROWTH_CAP:
@@ -2086,7 +2111,12 @@ def ground_assumptions(
             )
             notes.append("Revenue growth anchored to consensus: " + ", ".join(used))
         else:
-            for offset, period in enumerate(("0y", "+1y")):
+            covered_years = 0
+            for offset, period in enumerate(("0y", "+1y", "+2y")):
+                # +2y exists only after a realignment and only extends a
+                # covered FY2; it never stands in for a missing one.
+                if period == "+2y" and (covered_years != 2 or period not in qualified_revenue):
+                    break
                 estimate = revenue_estimates.get(period) or {}
                 count = _safe_count(estimate.get("numberOfAnalysts"))
                 growth = None
@@ -2098,10 +2128,10 @@ def ground_assumptions(
                     average, count = qualified_revenue[period]
                     growth = average / latest_annual_revenue - 1.0
                     anchor_note = f"absolute revenue {average:,.0f}"
-                elif period == "+1y" and all(
+                elif period in ("+1y", "+2y") and all(
                     key in qualified_revenue for key in ("0y", "+1y")
                 ):
-                    previous, _ = qualified_revenue["0y"]
+                    previous, _ = qualified_revenue["0y" if period == "+1y" else "+1y"]
                     average, count = qualified_revenue[period]
                     growth = average / previous - 1.0
                     anchor_note = f"absolute revenue {average:,.0f}"
@@ -2115,31 +2145,35 @@ def ground_assumptions(
                         and -0.50 <= float(growth) <= maximum_growth
                         and isinstance(count, (int, float)) and count >= minimum_analysts):
                     grounded_growth[offset] = float(growth)
+                    covered_years += 1
                     used.append(
                         f"FY{offset + 1} {float(growth) * 100:.1f}% "
-                        f"({int(count)} analysts"
+                        + ("(reported" if estimate.get("reported") else f"({int(count)} analysts")
                         + (f"; {anchor_note}" if anchor_note else "")
                         + ")"
                     )
             if used:
-                if len(used) == 2 and len(grounded_growth) >= 5:
-                    fy2 = grounded_growth[1]
-                    grounded_growth[2:5] = _post_consensus_growth_path(fy2, terminal, 3)
-                    if fy2 > _POST_CONSENSUS_GROWTH_CAP:
+                if covered_years >= 2 and len(grounded_growth) >= 5:
+                    last = grounded_growth[covered_years - 1]
+                    grounded_growth[covered_years:5] = _post_consensus_growth_path(
+                        last, terminal, 5 - covered_years,
+                        _POST_CONSENSUS_FADE_YEARS - (covered_years - 2))
+                    if last > _POST_CONSENSUS_GROWTH_CAP:
                         a["post_consensus_growth_capped"] = True
                         used.append(
                             f"uncovered tail starts at the {_POST_CONSENSUS_GROWTH_CAP*100:.0f}% "
                             "cap before the fade"
                         )
                     used.append(
-                        "FY3-FY5 linear fade toward terminal growth by FY10 "
-                        f"({grounded_growth[2]*100:.1f}%/{grounded_growth[3]*100:.1f}%/"
-                        f"{grounded_growth[4]*100:.1f}%)"
+                        f"FY{covered_years + 1}-FY5 linear fade toward terminal growth by FY10 ("
+                        + "/".join(f"{g * 100:.1f}%" for g in grounded_growth[covered_years:5])
+                        + ")"
                     )
                 a["revenue_growth_rates"] = grounded_growth
                 a["revenue_growth_source"] = (
                     "yahoo_analyst_consensus_absolute_revenue_with_deterministic_fade"
-                    if len(qualified_revenue) == 2 and len(used) >= 3 else
+                    if all(key in qualified_revenue for key in ("0y", "+1y"))
+                    and len(used) >= 3 else
                     "yahoo_analyst_consensus_with_deterministic_fade"
                     if len(used) == 3 else "yahoo_analyst_consensus_near_term"
                 )

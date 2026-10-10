@@ -1698,8 +1698,8 @@ def enforce_valuation_publication_boundary(
                 if abs(gap) > 0.15:
                     forecast_conflicts.append(
                         f"{row.get('horizon') or f'FY{index + 1}'} model revenue is "
-                        f"{gap:+.0%} versus the "
-                        f"{count}-analyst Street estimate"
+                        f"{gap:+.0%} versus "
+                        f"{_street_revenue_source(row, count)}"
                     )
         if forecast_conflicts:
             withheld = True
@@ -2254,6 +2254,17 @@ def _safe_markdown_link(label: Any, url: Any, limit: int = 100) -> str:
     # Exclude Markdown delimiters and whitespace from the safe character set.
     encoded = quote(raw_url, safe=":/?&=#%+@,.;~-_")
     return f"[{display}]({encoded})"
+
+
+def _street_revenue_source(row: Dict[str, Any], count: int, *, indefinite: bool = False) -> str:
+    """How to name the Street figure a model year is compared with: a year the
+    company already reported (src/estimate_alignment.py) is not an estimate."""
+    if row.get("reported"):
+        return "the reported revenue"
+    if row.get("reported_share"):
+        return (f"{'a ' if indefinite else 'the '}blend of the reported year and the "
+                f"{count}-analyst Street estimate")
+    return f"{'a' if indefinite else 'the'} {count}-analyst Street estimate"
 
 
 def _join_distinct_messages(*parts: Any) -> Optional[str]:
@@ -3447,8 +3458,8 @@ def generate_section_investment_thesis(data: Dict[str, Any], llm) -> Tuple[str, 
             lines.append(
                 f"- {row.get('horizon') or f'{horizon_prefix}{index + 1}'} model revenue "
                 f"is {format_number(revenues[index])} versus "
-                f"a {int(count)}-analyst Street estimate of {format_number(street)} "
-                f"({format_percent(gap)} difference)."
+                f"{_street_revenue_source(row, int(count), indefinite=True)} of "
+                f"{format_number(street)} ({format_percent(gap)} difference)."
             )
 
     lines.extend(["", "### Event-Evidence Coverage", ""])
