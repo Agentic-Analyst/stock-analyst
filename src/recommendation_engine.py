@@ -12,8 +12,6 @@ Design: Numbers = Code, Narrative = LLM, Validation = Code + Critic
 """
 
 import json
-import math
-import threading
 import traceback
 import os
 import re
@@ -30,9 +28,6 @@ from src.confidence_alert import (
     report_rating_heading, single_fair_value_line, support_shape,
 )
 from src.summary_evidence import compact_publication_reason
-
-# The evidence type of E0, VYNN's own figures: the report labels it as such.
-MODEL_EVIDENCE_TYPE = "vynn_model"
 
 
 def no_single_value_lines(fixed_numbers: Dict[str, Any], ccy: str) -> Tuple[str, list, str]:
@@ -78,106 +73,6 @@ _CCY = {
 def _symbol_for(code):
     code = (code or "USD").strip()
     return _CCY.get(code, f"{code} ")
-
-
-def _finite(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) \
-        and math.isfinite(value)
-
-
-def _one_sentence(text: str) -> str:
-    """Several sentences as one, so none is quoted without the others.
-
-    The alert's "That is a large gap between VYNN and the Street, ..." quoted
-    alone after a news sentence would point "That" at the news.
-    """
-    parts = RecommendationValidator.sentences(text)
-    joined = parts[0] if parts else ""
-    for part in parts[1:]:
-        # "That is ..." continues as "that is ..."; "VYNN's ..." keeps its case.
-        if len(part) > 1 and part[0].isupper() and part[1].islower():
-            part = part[0].lower() + part[1:]
-        joined += "; " + part
-    return joined + "."
-
-
-def model_evidence_item(fixed_numbers: Dict[str, Any], context: Dict[str, Any],
-                        ccy: str) -> Dict[str, Any]:
-    """E0: VYNN's own deterministic figures as a citable evidence item.
-
-    A sentence that restates the rating, the fair value, its range, the price
-    used, the implied return or the confidence alert cites [E0] alone and is
-    one of these sentences, word for word: the validator checks E0 by exact
-    quotation, so each sentence here must be true and complete on its own.
-    Built only from FIXED_NUMBERS and the company context the explainer is
-    shown, formatted as it is shown there. A figure that is missing, not
-    finite or (for the 52-week range) zero says nothing, so it is left out.
-    """
-    def money(value):
-        return f"{ccy}{value:,.2f}" if _finite(value) else None
-
-    sentences = []
-    # VYNN's own: what may stand outside the thesis (the base case, the
-    # buyers' and holders' lines). The price used, the Street's target and
-    # market data read there as a scenario's or an advice's own figure.
-    own = []
-    rating = fixed_numbers.get("rating")
-    if rating:
-        confidence = fixed_numbers.get("rating_confidence")
-        sentences.append(f"VYNN's rating is {rating}"
-                         + (f", at {confidence} confidence" if confidence else "") + ".")
-        own.append(sentences[-1])
-    m12 = (fixed_numbers.get("targets") or {}).get("m12") or {}
-    if money(m12.get("price")):
-        sentences.append(f"VYNN's fair value and 12-month target is {money(m12['price'])} per share.")
-        own.append(sentences[-1])
-    # The report's "method range": every supported leg, comps and bank
-    # methods included, so never "DCF". One value is no range.
-    if money(m12.get("range_low")) and money(m12.get("range_high")) \
-            and money(m12["range_low"]) != money(m12["range_high"]):
-        sentences.append(f"VYNN's valuation methods range from {money(m12['range_low'])} to "
-                         f"{money(m12['range_high'])}.")
-        own.append(sentences[-1])
-    if money(fixed_numbers.get("current_price")):
-        sentences.append(f"The share price used for this valuation is "
-                         f"{money(fixed_numbers['current_price'])}.")
-    expected = fixed_numbers.get("expected_return_pct_12m")
-    if _finite(expected):
-        sentences.append(f"The implied 12-month return is {expected:+.2f}%.")
-        own.append(sentences[-1])
-    inputs = fixed_numbers.get("inputs") or {}
-    count = inputs.get("analyst_count")
-    if money(inputs.get("analyst_target")) and _finite(count) and count >= 1:
-        count = int(count)
-        sentences.append(f"The mean target of {count} analyst{'' if count == 1 else 's'} is "
-                         f"{money(inputs['analyst_target'])}.")
-    for text in (fixed_numbers.get("target_assumption"), fixed_numbers.get("confidence_alert_text")):
-        if isinstance(text, str) and text.strip():
-            sentences.append(_one_sentence(text))
-            own.append(sentences[-1])
-    for label, key in (
-        ("The P/E ratio is", "pe_ratio"), ("EV/EBITDA is", "ev_ebitda"),
-        ("The price-to-book ratio is", "pb_ratio"), ("Revenue growth is", "revenue_growth"),
-        ("The net margin is", "net_margin"), ("Return on equity is", "roe"),
-        ("Debt-to-equity is", "debt_equity"),
-    ):
-        value = context.get(key)
-        if isinstance(value, str) and value.strip() and value.strip() != "N/A":
-            sentences.append(f"{label} {value.strip()}.")
-    low, high = context.get("week_52_low"), context.get("week_52_high")
-    if money(low) and money(high) and 0 < low <= high:
-        sentences.append(f"The 52-week range is {money(low)} to {money(high)}.")
-    return {
-        "id": "E0",
-        "type": MODEL_EVIDENCE_TYPE,
-        "date": fixed_numbers.get("as_of"),
-        "source": "VYNN",
-        "source_article_title": "VYNN's own figures (not news)",
-        "title": "VYNN's valuation figures and provider market data (not news)",
-        "snippet": " ".join(sentences),
-        "own_statements": own,
-        "source_quality": "computed",
-    }
 
 
 class RecommendationEngineV3:
@@ -403,15 +298,6 @@ class RecommendationEngineV3:
                 fixed_numbers, evidence_pack, validation
             ), 0.0, evidence_pack
 
-        # VYNN's own figures as a citable item, and whose news this is.
-        evidence_pack['evidence'] = [
-            model_evidence_item(fixed_numbers, self._company_context(company_data),
-                                getattr(self, "_ccy", "$"))
-        ] + list(evidence_pack.get('evidence') or [])
-        evidence_pack["subject"] = {
-            "ticker": ticker, "name": company_data.get('company_name') or None,
-        }
-
         # Step 4: Build prompt
         prompt = self._build_explainer_prompt(
             fixed_numbers,
@@ -446,29 +332,18 @@ class RecommendationEngineV3:
         
         # Step 6: Validate and auto-correct response
         total_cost = cost
-
-        cost_lock = threading.Lock()
-
-        def fact_check(check_prompt: str) -> str:
-            # The same model, asked whether each news-cited sentence says
-            # only what its sources state; its cost is the report's. Called
-            # from several threads at once.
-            nonlocal total_cost
-            answer, check_cost = llm([{"role": "user", "content": check_prompt}], temperature=0)
-            with cost_lock:
-                total_cost += check_cost or 0.0
-            return answer
-
         corrected_json, validation_report = self.validator.validate_and_correct(
-            response, fixed_numbers, evidence_pack, fact_check=fact_check
+            response, fixed_numbers, evidence_pack
         )
         
-        # A draft that cannot be read is not rewritten from nothing: the
-        # evidence-safe recommendation below prints the rating. It raised
-        # here, and the whole section read "Section unavailable".
+        # If JSON parsing failed completely, cannot proceed
         if corrected_json is None:
-            self._log("Recommendation draft could not be read; using the evidence-safe "
-                      "recommendation.", "warning")
+            self._log("\n❌ CRITICAL ERROR: JSON parsing failed completely", "error")
+            self._log("="*80, "error")
+            self._log("VALIDATION REPORT:", "error")
+            self._log(json.dumps(validation_report, indent=2), "error")
+            self._log("="*80, "error")
+            raise ValueError("LLM response is not valid JSON. Cannot proceed.")
         
         if verbose:
             self._log("VALIDATION REPORT\n" + json.dumps(validation_report, indent=2))
@@ -499,16 +374,9 @@ class RecommendationEngineV3:
             self._log("="*80 + "\n")
         
         # Step 7: Multi-pass rewrite loop until 95%+ coverage or max attempts
-        max_rewrite_attempts = 3 if corrected_json is not None else 0
+        max_rewrite_attempts = 3
         rewrite_attempt = 0
         evidence_safe_fallback = None
-        # Claims an attempt cited and failed on: one that comes back with its
-        # citation simply removed is still a claim to cite or delete.
-        rejected_claims = {
-            issue.get("sentence") or issue.get("claim")
-            for issue in validation_report.get("citation_support_issues") or []
-            if issue.get("sentence") or issue.get("claim")
-        }
         
         while self.validator.needs_rewrite(validation_report) and rewrite_attempt < max_rewrite_attempts:
             rewrite_attempt += 1
@@ -569,14 +437,8 @@ class RecommendationEngineV3:
             
             # Re-validate the rewrite
             final_json, validation_report = self.validator.validate_and_correct(
-                rewrite_response, fixed_numbers, evidence_pack, rejected_claims,
-                fact_check=fact_check,
+                rewrite_response, fixed_numbers, evidence_pack
             )
-            rejected_claims |= {
-                issue.get("sentence") or issue.get("claim")
-                for issue in validation_report.get("citation_support_issues") or []
-                if issue.get("sentence") or issue.get("claim")
-            }
             
             # Update corrected_json if we got valid output
             if final_json:
@@ -597,10 +459,8 @@ class RecommendationEngineV3:
                 self._log(f"  Cited: {coverage_details.get('cited_count', 0)}/{coverage_details.get('material_sentences', 0)} sentences")
                 self._log("="*80 + "\n")
             
-            # Stop only when nothing is left to rewrite: a response can be
-            # valid while its rating or prices were corrected, and its prose
-            # may still say "We rate Apple a BUY."
-            if not self.validator.needs_rewrite(validation_report):
+            # If validation passed, break early
+            if validation_report.get("valid"):
                 self._log(f"✅ VALIDATION PASSED on attempt {rewrite_attempt} - Output is production-ready\n")
                 break
         else:
@@ -640,10 +500,8 @@ class RecommendationEngineV3:
             )
 
         # Step 8: Format final output
-        # The validated object itself: re-parsing its JSON text let a "/*"
-        # in one field and "*/" in another strip what lay between.
         final_output = evidence_safe_fallback or self._format_final_output(
-            corrected_json, fixed_numbers, validation_report
+            json.dumps(corrected_json), fixed_numbers, validation_report
         )
 
         if verbose:
@@ -711,77 +569,27 @@ class RecommendationEngineV3:
             for warning in validation_report["warnings"]:
                 issues_section += f"- {warning}\n"
             issues_section += "\n"
-
-        # Each failing claim, where it is and why: given only a count, the
-        # model rewrote other sentences and left these standing through all
-        # three attempts. The text is JSON-quoted: it is generated, and a
-        # newline in it must not read as part of these instructions.
-        unsupported = validation_report.get("citation_support_issues") or []
-        if unsupported:
-            issues_section += (
-                "**Cited Sentences Their Sources Do Not Support** (for EACH: cite a source that "
-                "states it, restate only what the cited source says, or delete the sentence "
-                "or item; every field may be edited, including `watch` items):\n"
-            )
-            for i, issue in enumerate(unsupported, 1):
-                issues_section += (
-                    f"{i}. {json.dumps(issue.get('field') or '?')} cites "
-                    f"{', '.join(issue.get('citations') or [])}: "
-                    f"{json.dumps(issue.get('claim') or '')} — {issue.get('reason') or 'unsupported'}\n"
-                )
-            issues_section += "\n"
-
-        returning = validation_report.get("returning_rejected_claims") or []
-        if returning:
-            issues_section += (
-                "**Claims That Failed Before and Came Back Without a Citation** (these block "
-                "the report: delete each, or cite a source that states it):\n"
-            )
-            for i, sent in enumerate(returning[:10], 1):
-                issues_section += f"{i}. {json.dumps(sent[:200])}\n"
-            issues_section += "\n"
-
-        model_item = next((ev for ev in evidence_pack.get("evidence", [])
-                           if isinstance(ev, dict) and ev.get("type") == MODEL_EVIDENCE_TYPE), None)
-        statements = self.validator.model_statements(model_item)
-        if statements:
-            issues_section += (
-                "**E0's Sentences** (a sentence citing [E0] is exactly one of these, word for "
-                "word, followed by [E0], and cites nothing else):\n"
-            )
-            for i, sent in enumerate(statements, 1):
-                issues_section += f"{i}. {json.dumps(sent)}\n"
-            issues_section += "\n"
         
         coverage = validation_report.get("coverage_details", {})
         if coverage:
             issues_section += f"**Citation Coverage**: {coverage.get('coverage_pct', 0):.1f}% "
             issues_section += f"({coverage.get('cited_count', 0)}/{coverage.get('material_sentences', 0)} sentences cited)\n"
-            issues_section += ("**PRODUCTION REQUIREMENT**: every printed sentence and item cites "
-                               "a source that states it (YOU MUST ACHIEVE THIS)\n\n")
+            issues_section += "**PRODUCTION REQUIREMENT**: 95%+ coverage (YOU MUST ACHIEVE THIS)\n\n"
             
             # Show uncited sentences if available
             uncited = coverage.get('uncited_sentences', [])
             if uncited:
-                issues_section += (
-                    "**Sentences MISSING Citations** (these block the report; for EACH: cite a "
-                    "news item that states it, use one of E0's sentences for VYNN's own figures, "
-                    "or delete the sentence or item):\n"
-                )
-                for i, sent in enumerate(uncited[:25], 1):
-                    issues_section += f"{i}. {json.dumps(sent[:200])}\n"
+                issues_section += "**Sentences MISSING Citations** (add [E#] to these):\n"
+                for i, sent in enumerate(uncited[:10], 1):
+                    issues_section += f"{i}. {sent[:100]}...\n" if len(sent) > 100 else f"{i}. {sent}\n"
                 issues_section += "\n"
             
-            # Show examples of good citations; a cited sentence its source
-            # does not support is no example.
-            failed = {issue.get("claim") for issue in unsupported}
-            examples = coverage.get('cited_sentences')
-            cited = [sent for sent in (examples if isinstance(examples, list) else [])
-                     if sent.strip()[:300] not in failed]
+            # Show examples of good citations
+            cited = coverage.get('cited_sentences', [])
             if cited:
                 issues_section += "**Examples of GOOD Citations** (keep this pattern):\n"
                 for i, sent in enumerate(cited[:3], 1):
-                    issues_section += f"{i}. {json.dumps(sent[:200])}\n"
+                    issues_section += f"{i}. {sent[:100]}...\n" if len(sent) > 100 else f"{i}. {sent}\n"
                 issues_section += "\n"
         
         # Build iteration-specific guidance
@@ -791,8 +599,8 @@ class RecommendationEngineV3:
 - Rewrite unsupported claims so they say no more than the publisher headline
   and snippet below actually establish
 - Remove a claim when no evidence item directly supports it
-- For VYNN's own figures, use one of E0's sentences word for word, citing only
-  [E0]; cite news items only for news
+- Add [E#] only to source-backed news claims; leave deterministic valuation
+  fields uncited
 """
         elif attempt == 2:
             iteration_guidance = """
@@ -841,18 +649,7 @@ class RecommendationEngineV3:
         
         # Prepare additional context
         # company_data comes from extract_company_overview() which has proper structure
-        context = self._company_context(company_data)
-        
-        # Format prompt
-        prompt = template.format(
-            fixed_numbers_json=json.dumps(fixed_numbers, indent=2),
-            evidence_pack_json=json.dumps(evidence_pack, indent=2),
-            company_context=json.dumps(context, indent=2)
-        )
-        return self._explainer_overrides(prompt, fixed_numbers, evidence_pack, citations_enabled)
-
-    def _company_context(self, company_data: Dict[str, Any]) -> Dict[str, Any]:
-        """The company context the explainer is shown, and E0 restates."""
+        #
         # Ratios are rounded BEFORE the model sees them. The explainer is told not
         # to alter any number it is given, so a raw float arrives in the report
         # verbatim — a shipped LVMH note read "20.927107x earnings ... 3.3263094x
@@ -872,7 +669,7 @@ class RecommendationEngineV3:
                 return "N/A"
             return f"{value * 100:.1f}%"
 
-        return {
+        context = {
             "company_name": company_data.get('company_name', 'N/A'),
             "sector": company_data.get('sector', self.sector),
             "market_cap": company_data.get('market_cap', 'N/A'),
@@ -886,12 +683,14 @@ class RecommendationEngineV3:
             "week_52_low": company_data.get('week_52_low', 0),
             "week_52_high": company_data.get('week_52_high', 0)
         }
+        
+        # Format prompt
+        prompt = template.format(
+            fixed_numbers_json=json.dumps(fixed_numbers, indent=2),
+            evidence_pack_json=json.dumps(evidence_pack, indent=2),
+            company_context=json.dumps(context, indent=2)
+        )
 
-    def _explainer_overrides(
-        self, prompt: str, fixed_numbers: Dict[str, Any], evidence_pack: Dict[str, Any],
-        citations_enabled: bool,
-    ) -> str:
-        """The explainer prompt's overrides for an empty pack or no single value."""
         if not citations_enabled:
             # The template unconditionally mandates [E#] citations; when the
             # evidence pack is empty that demand would force fabrication.
@@ -995,15 +794,14 @@ class RecommendationEngineV3:
     
     def _format_final_output(
         self,
-        llm_response: Any,
+        llm_response: str,
         fixed_numbers: Dict[str, Any],
         validation_result: Dict[str, Any]
     ) -> str:
-        """Format final markdown output from the validated response (or its JSON text)."""
+        """Format final markdown output."""
         
         try:
-            response_data = llm_response if isinstance(llm_response, dict) \
-                else self.validator._extract_json(llm_response)
+            response_data = self.validator._extract_json(llm_response)
             
             # Build markdown output
             output = []
@@ -1060,14 +858,9 @@ class RecommendationEngineV3:
                     f"{range_text}"
                 )
             
-            # Every written field prints as the one line the validator read
-            # (RecommendationValidator.printable): a line break inside one
-            # printed two checked fragments as one sentence, or a heading.
-            printable = self.validator.printable
-
             # Thesis
             output.append(f"\n### Investment Thesis\n")
-            output.append(printable(response_data.get('thesis', '')))
+            output.append(response_data.get('thesis', ''))
             
             # Valuation Perspective
             output.append(f"\n### Valuation Perspective\n")
@@ -1096,64 +889,49 @@ class RecommendationEngineV3:
             
             # Catalysts
             output.append(f"\n### Catalysts to Watch\n")
-            # Printed exactly as the validator reads them: a row without a
-            # statement printed as its raw dict, unchecked.
             catalysts = response_data.get('catalysts', [])
-            for cat in catalysts if isinstance(catalysts, list) else []:
-                stmt = self.validator.printed_statement(cat)
-                if stmt:
-                    output.append(f"- {printable(stmt)}")
+            for cat in catalysts:
+                stmt = cat.get('statement', cat) if isinstance(cat, dict) else cat
+                output.append(f"- {stmt}")
             
             # Risks
             output.append(f"\n### Key Risks\n")
             risks = response_data.get('risks', [])
-            for risk in risks if isinstance(risks, list) else []:
-                stmt = self.validator.printed_statement(risk)
-                if stmt:
-                    output.append(f"- {printable(stmt)}")
+            for risk in risks:
+                stmt = risk.get('statement', risk) if isinstance(risk, dict) else risk
+                output.append(f"- {stmt}")
             
             # Scenarios (if available)
             scenarios = response_data.get('scenarios', {})
-            if isinstance(scenarios, dict) and scenarios:
+            if scenarios:
                 output.append(f"\n### Scenario Analysis\n")
                 
                 for scenario_name, scenario_label in [('bull', 'Bull Case'), ('base', 'Base Case'), ('bear', 'Bear Case')]:
                     scenario = scenarios.get(scenario_name, {})
-                    if isinstance(scenario, dict) and scenario:
-                        narrative = printable(scenario.get('narrative', ''))
-                        watch = [printable(item) for item in
-                                 self.validator.printed_items(scenario.get('watch'))]
+                    if scenario:
+                        narrative = scenario.get('narrative', '')
+                        watch = scenario.get('watch', [])
                         output.append(f"**{scenario_label}**: {narrative}")
-                        # One item a line, as each was checked: joined with
-                        # ", " two items read as one sentence (review50e).
-                        for item in watch:
-                            output.append(f"  - Watch: {item}")
                         if watch:
-                            output.append("")
+                            output.append(f"  - Watch: {', '.join(watch)}\n")
             
             # Action
-            action = response_data.get('action') if rated else {}
-            if isinstance(action, dict) and action:
+            action = response_data.get('action', {}) if rated else {}
+            if action:
                 output.append(f"\n### Recommended Action\n")
-                # Joined, then made one line: exactly the text the validator read.
-                printed = {key: printable(" ".join(self.validator.printed_items(action.get(key))))
-                           for key in ('buyers', 'holders')}
-                printed['watch'] = [printable(item) for item in
-                                    self.validator.printed_items(action.get('watch'))]
-                if printed['buyers']:
-                    output.append(f"**For Buyers**: {printed['buyers']}\n")
-                if printed['holders']:
-                    output.append(f"**For Holders**: {printed['holders']}\n")
-                if printed['watch']:
-                    output.append("**Key Metrics to Monitor**:")
-                    output.extend(f"- {item}" for item in printed['watch'])
+                if action.get('buyers'):
+                    output.append(f"**For Buyers**: {action['buyers']}\n")
+                if action.get('holders'):
+                    output.append(f"**For Holders**: {action['holders']}\n")
+                if action.get('watch'):
+                    output.append(f"**Key Metrics to Monitor**: {', '.join(action['watch'])}")
             
             # Monitoring Plan
-            monitoring = self.validator.printed_items(response_data.get('monitoring_plan'))
+            monitoring = response_data.get('monitoring_plan', [])
             if monitoring:
                 output.append(f"\n### Monitoring Plan\n")
                 for item in monitoring:
-                    output.append(f"- {printable(item)}")
+                    output.append(f"- {item}")
             
             # Add calculation transparency
             output.append(f"\n---\n### Calculation Methodology\n")
