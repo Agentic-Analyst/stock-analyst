@@ -101,7 +101,7 @@ Five research records from the current engine, each with its full report and mod
 <p align="center"><sub>From the production app: a quick answer in seconds, and page 3 of Microsoft's report.</sub></p>
 
 <a href="https://vynnai.com/#race"><img src="assets/readme/race-poster.webp" alt="The same request sent to VYNN and to Claude Opus 5.5 on 15 Oct 2026, side by side: Claude finishes a 7-tab model in 7 minutes 24 seconds, VYNN a 10-tab model with 626 formulas in 38 seconds. Real runs, time-lapse, approval waits not counted." width="100%"></a>
-<p align="center"><sub>The same two requests, sent to VYNN and to Claude (Opus 5.5) on 15 Oct 2026. The model: VYNN's 10 tabs and 626 formulas in 38 s, Claude's 7 tabs and 418 formulas in 7 min 24 s. The report: VYNN's 38 pages and its model in 2 min 44 s, Claude's 3,000 words in 5 min 16 s. Real runs in time-lapse; waits for approval not counted. <a href="https://vynnai.com/#race">Watch the film on vynnai.com</a>.</sub></p>
+<p align="center"><sub>The same two requests, sent to VYNN and to Claude (Opus 5.5) on 15 Oct 2026. The model: VYNN's 10 tabs and 626 formulas in 38 s, Claude's 7 tabs and 418 formulas in 7 min 24 s. The report: VYNN's 38 pages and its model in 2 min 44 s, Claude's 3,000 words in 5 min 16 s. Real runs in time-lapse; waits for approval not counted. <a href="https://vynnai.com/#race">Watch the film on vynnai.com</a>. Read the write-up: <a href="https://zanwenfu.com/blog/vynn_vs_claude">VYNN AI Against Claude: Two Races on NVIDIA</a>.</sub></p>
 
 Each record states its confidence and its sources. Microsoft's [report](samples/MSFT-research-report.pdf) and [model](samples/MSFT-financial-model.xlsx) are also in [`samples/`](samples). Research, not investment advice.
 
