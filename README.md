@@ -22,7 +22,7 @@
 ## Overview
 
 - **One loop, any question.** A reasoning agent reads the request and picks the tools it needs, or none. There is no fixed pipeline and no intent menu.
-- **A full analysis in about two minutes.** Financials, a ten-tab Excel model with live formulas, screened news and a cited report of 30 pages or more.
+- **A full analysis in about two minutes.** Financials, a ten-tab Excel model with live formulas, screened news and a cited report, usually twenty pages or more.
 - **Code owns every number.** A deterministic calculator sets the rating and the target. A validator checks every figure against it, and requires at least 95% of material sentences to cite the run's evidence.
 - **Flagged, not hidden.** When well-covered analysts disagree with the model, VYNN still answers, with both positions side by side. The call is yours.
 
@@ -89,14 +89,14 @@ Five research records from the current engine, each with its full report and mod
 | Company | Run | Fair value | Price | Rating |
 |---|---|---|---|---|
 | [Microsoft](https://vynnai.com/research/msft) | 30 Sep 2026 | $595.14 | $508.96 | Buy |
-| [NVIDIA](https://vynnai.com/research/nvda) | 3 Oct 2026 | $350.82 | $233.95 | Strong Buy |
-| [Alphabet](https://vynnai.com/research/googl) | 3 Oct 2026 | $399.69 | $343.50 | Buy |
-| [Visa](https://vynnai.com/research/v) | 3 Oct 2026 | $373.75 | $360.66 | Hold |
-| [Apple](https://vynnai.com/research/aapl) | 3 Oct 2026 | $224.55 | $333.69 | Strong Sell, flagged |
+| [NVIDIA](https://vynnai.com/research/nvda) | 18 Oct 2026 | $364.34 | $214.13 | Strong Buy |
+| [Alphabet](https://vynnai.com/research/googl) | 18 Oct 2026 | $433.19 | $340.59 | Buy |
+| [Visa](https://vynnai.com/research/v) | 18 Oct 2026 | $390.24 | $402.61 | Hold |
+| [Apple](https://vynnai.com/research/aapl) | 18 Oct 2026 | $232.21 | $343.46 | Strong Sell, flagged |
 
 <p align="center">
   <img src="assets/readme/chat-answer.webp" width="49%" alt="A chat answer in the VYNN app: asked why Broadcom dropped today, the agent checks the live quote, finds it is up on the day, and explains what the headlines do and do not show">
-  <img src="assets/readme/report-page.webp" width="49%" alt="Page 3 of Microsoft's research report from 30 September 2026: the contents, then an executive summary with a Buy view and a $595.14 twelve-month target">
+  <img src="assets/readme/report-page.webp" width="49%" alt="Page 3 of Microsoft's research report from 30 September 2026: the executive summary, with a Buy view and a $595.14 twelve-month target, then the company's key statistics">
 </p>
 <p align="center"><sub>From the production app: a quick answer in seconds, and page 3 of Microsoft's report.</sub></p>
 
