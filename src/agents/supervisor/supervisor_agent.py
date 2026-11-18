@@ -289,14 +289,20 @@ class SupervisorWorkflowRunner:
         # method was ruled out because ..."); China Vanke's answer stated it
         # twice in a row.
         method_note = unsuitable_method_note(metrics.get("method_suitability"))
-        detail = "" if method_note and method_note.rstrip(".") in reason else f" Detail: {reason}"
+        detail = f" Detail: {reason}"
+        if method_note and method_note.rstrip(".") in reason:
+            # Any other cause joined to the method's reason still shows.
+            rest = " ".join(reason.replace(method_note.rstrip("."), "").split()).strip(" .;,")
+            rest = re.sub(r"^(?:no point valuation is published because\s+)", "", rest, flags=re.I)
+            detail = f" Also: {rest}." if len(re.findall(r"[A-Za-z]", rest)) >= 25 else ""
         # The two newest method rules state their reason plainly in the
         # evidence line; the note after it said the same a third time, and
         # wrongly ("the cash-flow method does not fit this company").
         if (metrics.get("method_suitability") or {}).get("primary_method") in (
                 "scenario_only_pending_operating_profit", "scenario_only_pending_corroboration"):
-            note, detail = "", ""
-        answer = f"{self.ticker}: {view['headline']}\n\n{body}" + (f"\n\n{note}{detail}" if note else "")
+            note = ""
+        tail = f"{note}{detail}".strip()
+        answer = f"{self.ticker}: {view['headline']}\n\n{body}" + (f"\n\n{tail}" if tail else "")
         # A ruled-out method states no direction, so the block does not
         # compare the analysts with it either.
         rendered = render_external_benchmark_compact(

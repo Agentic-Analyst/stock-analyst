@@ -578,3 +578,31 @@ def test_the_outlier_answer_states_its_reason_once():
     answer = runner._safe_withheld_valuation_answer()
     assert answer.count("outside every analyst") == 1
     assert "20.25" not in answer and "does not fit this company" not in answer
+
+
+def test_another_cause_joined_to_the_method_reason_still_shows():
+    from types import SimpleNamespace
+    from src.agents.supervisor import supervisor_agent
+    from src.valuation_methodology import UNCONFIRMED_OUTLIER_REASON
+    runner = supervisor_agent.SupervisorWorkflowRunner.__new__(
+        supervisor_agent.SupervisorWorkflowRunner)
+    runner.ticker = "TSLA"
+    extra = "The model's machine-readable publication decision is missing or incomplete."
+    metrics = {
+        "perpetual_price": 20.25, "exit_multiple_price": None, "current_price": 380.11,
+        "point_estimate_withheld": True,
+        # The chat shows the stored reason's first sentence (the rest stays
+        # in the report); a cause that comes first must still show.
+        "publication_withheld_reason": f"{extra} {UNCONFIRMED_OUTLIER_REASON}",
+        "method_suitability": {
+            "primary_method": "scenario_only_pending_corroboration",
+            "publication_allowed": False, "reason": UNCONFIRMED_OUTLIER_REASON,
+        },
+    }
+    runner.state = SimpleNamespace(
+        financial_data=SimpleNamespace(key_metrics={"basic_info": {"currency": "USD"}}, raw_data={}),
+        news_analysis=None,
+        financial_model=SimpleNamespace(assumptions={}, valuation_metrics=metrics))
+    answer = runner._safe_withheld_valuation_answer()
+    assert "publication decision is missing or incomplete" in answer
+    assert answer.count("outside every analyst") == 1

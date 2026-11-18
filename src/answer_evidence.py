@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Pattern, Sequence
+from typing import Iterable, List, Optional, Pattern, Sequence
 
 _DASHES = dict.fromkeys(map(ord, "‐‑‒–—―−﹣－"), "-")
 _APOSTROPHES = dict.fromkeys(map(ord, "‘’ʼ＇`´"), "'")
@@ -526,7 +526,7 @@ def review_section(
 # between the analysis and the analysts' block; it goes last.
 _OFFER = re.compile(
     r"^\W*(?:if you(?:'d| would)? like|if you want|if you tell me|want me to|would you like|"
-    r"i can (?:also )?|let me know|should i|shall i|happy to|"
+    r"i can (?:also )?|let me know|should i\b|shall i\b|happy to|"
     r"如果你|如果您|需要的话|要不要|我可以|ご希望|必要であれば|원하시면|"
     r"zal ik|wil je|soll ich|möchten sie|voulez-vous|si vous|souhaitez|¿quieres|si quieres|"
     r"vuoi|se vuoi|quer que|se quiser)", re.I)
@@ -553,109 +553,3 @@ def compose(template: str, section: str) -> str:
         tail = f"\n\n{offer}" if offer else ""
         return f"{parts[0].rstrip()}\n\n{body}\n\n{parts[1].lstrip()}{tail}"
     return f"{template}\n\n{section}"
-
-
-# ---- answers about several companies ----------------------------------------
-#
-# The publication guard knows one company's boundary. A stock-picks reply or a
-# comparison also covers companies whose views WERE published, and fell back
-# whole to the withheld company's fixed statement: the picks were lost. Here
-# each sentence is judged by the company it is about. A sentence about the
-# withheld company, or about no named company, may not make a call or state a
-# withheld figure; a sentence about another analysed company keeps its own
-# published view. A list item or paragraph under a line that names one company
-# is about that company.
-
-_GENERIC_FIRST_WORDS = {"the", "first", "american", "general", "united", "china", "national",
-                        "bank", "banco", "new", "international", "global"}
-_NAME_SUFFIX = re.compile(
-    r"[,.]?\s+(?:inc|incorporated|corp|corporation|co|company|plc|ltd|limited|ag|sa|se|nv|n\.v|"
-    r"holdings?|group|platforms|communications|technologies)\b\.?.*$", re.I)
-_OPINION = re.compile(
-    r"\b(?:avoid|prefer(?:red)?|pick(?:s|ed)?|pass(?:ed)?\s+on|recommend\w*|attractive|cheap(?:er|est)?|"
-    r"expensive|overvalued|undervalued|upside|downside|worth|favou?r\w*|top\s+(?:idea|choice|pick)|"
-    r"best|worst|skip|would\s+(?:own|buy|sell|hold)|bargain|value\s+trap)\b|"
-    r"推荐|买入|卖出|避开|低估|高估|便宜|首选|おすすめ|割安|割高|買い|売り", re.I)
-
-
-def company_aliases(ticker: str, name: Optional[str]) -> List[str]:
-    """Ways an answer names a company: its ticker, its name, its name's first word."""
-    out = [str(ticker or "").strip()]
-    full = _NAME_SUFFIX.sub("", str(name or "").strip()).strip(" ,.")
-    if full:
-        out.append(full)
-        words = full.split()
-        first = words[0].strip(".,&")
-        if len(words) > 1 and (first.lower() in _GENERIC_FIRST_WORDS or len(first) < 3):
-            first = " ".join(words[:2])
-        out.append(first)
-    return [a for a in dict.fromkeys(out) if a]
-
-
-def _named(text: str, companies: Dict[str, List[str]]) -> set:
-    found = set()
-    for ticker, aliases in companies.items():
-        for alias in aliases:
-            if alias == ticker and alias.isupper():
-                hit = re.search(rf"(?<![A-Za-z0-9.]){re.escape(alias)}(?![A-Za-z0-9])", text)
-            else:
-                hit = re.search(rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])", text, re.I)
-            if hit:
-                found.add(ticker)
-                break
-    return found
-
-
-def keep_other_companies(
-    text: str,
-    withheld: str,
-    companies: Dict[str, List[str]],
-    forbidden_tokens: Sequence[str] = (),
-) -> str:
-    """The answer without any call or withheld figure for ``withheld`` or for no named company."""
-    tokens = tuple(t for t in forbidden_tokens if t)
-
-    def unsafe(sentence: str, about: set) -> bool:
-        if makes_claim(sentence, tokens) and (withheld in about or not about):
-            return True
-        if any(re.search(rf"(?<![\d.,]){re.escape(_normalize(t))}(?![\d]|[.,]\d)", _normalize(sentence))
-               for t in tokens):
-            return True
-        return withheld in about and bool(_OPINION.search(sentence))
-
-    kept: List[str] = []
-    current: set = set()
-    for raw in str(text or "").replace("\r\n", "\n").split("\n"):
-        if not raw.strip():
-            kept.append("")
-            continue
-        named = _named(raw, companies)
-        if raw.lstrip().startswith("|"):
-            if not unsafe(raw, named):
-                kept.append(raw)
-            continue
-        prefix, body = _LINE_PREFIX.match(raw).groups()
-        prefix = prefix or ""
-        nested = bool(prefix) and prefix[:1].isspace()
-        # A heading, a top-level item or a paragraph opening with one company
-        # sets what the lines under it are about.
-        if not nested:
-            current = named if len(named) == 1 else (set() if _is_structural(raw) or named else current)
-        good = []
-        for sentence in _sentences(body):
-            about = _named(sentence, companies) or (named if named else current)
-            if not unsafe(sentence, about):
-                good.append(sentence)
-        line = _balance(" ".join(good))
-        if line and (_letters(line) >= 4 or _is_structural(f"{prefix}{line}")):
-            kept.append(f"{prefix}{line}")
-    # A heading or label left with nothing under it heads nothing.
-    tidy: List[str] = []
-    for position, line in enumerate(kept):
-        if line.strip() and _is_structural(line):
-            following = next((l for l in kept[position + 1:] if l.strip()), None)
-            if following is None or (_is_structural(following)
-                                     and _heading_level(following) <= _heading_level(line)):
-                continue
-        tidy.append(line)
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(tidy)).strip()

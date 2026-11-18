@@ -758,86 +758,10 @@ def test_lines_copied_from_the_fixed_statement_do_not_sink_the_analysis():
     assert "1,085.35" not in out and "Costco closed at $1,109.80" in out and "Membership" in out
 
 
-PICKS_DRAFT = (
-    "Of the companies I screened, **Alphabet (GOOGL)** looks best and Test Corp is worth a look.\n\n"
-    "**1. Alphabet (GOOGL), $280.20**\n"
-    "- VYNN's model rates it BUY with a fair value of $414.00.\n"
-    "- It trades at 18.5x forward earnings, with revenue growth of 24.7%.\n\n"
-    "**2. Test Corp (TEST), $300.00**\n"
-    "- My model gives $167.67, well below the price.\n"
-    "- Revenue grew 8% last year."
-)
-PICKS_REWRITE = (
-    "Of the companies I screened, **Alphabet (GOOGL)** looks best.\n\n"
-    "**1. Alphabet (GOOGL), $280.20**\n"
-    "- VYNN's model rates it BUY with a fair value of $414.00.\n"
-    "- It trades at 18.5x forward earnings, with revenue growth of 24.7%, the fastest of the "
-    "large companies screened, ahead of Microsoft and Amazon on the same measure.\n\n"
-    "Alphabet is a heavy AI spender, so it can fall sharply when technology shares sell off."
-)
-
-
-def _picks_agent():
-    ag = _chat_agent("any stocks you would recommend today?", _withheld_state(), "TEST")
-    ag._analysis_names = {"GOOGL": "Alphabet Inc.", "TEST": "Test Corp"}
-    return ag
-
-
-def _several(ag, provider, draft=PICKS_DRAFT):
-    template = ag._guard_final_answer(draft)
-    messages = [{"role": "user", "content": ag.user_prompt}]
-    return template, asyncio.run(ag._several_companies(messages, provider, draft, template, [{"type": "function"}]))
-
-
-def test_picks_keep_the_other_companies_views_and_end_with_the_withheld_statement():
-    # A stock-picks reply opened with Verizon's "no rating" statement and
-    # recommended nothing: every other company's published view was lost.
-    ag = _picks_agent()
-    provider = _Provider(PICKS_REWRITE, "NO")
-    template, out = _several(ag, provider)
-    assert out.startswith("Of the companies I screened, **Alphabet (GOOGL)** looks best.")
-    assert "rates it BUY with a fair value of $414.00" in out and out.endswith(template)
-    assert "167.67" not in out.split(template)[0]
-    rewrite, check = provider.calls
-    assert "no view on Test Corp (TEST)" in rewrite["messages"][0]["content"]
-    assert "about Test Corp" in check["messages"][0]["content"] and check["tools"] == []
-
-
-def test_a_rewrite_that_still_states_the_withheld_figure_loses_that_sentence():
-    ag = _picks_agent()
-    leaky = PICKS_REWRITE + "\n\nTest Corp's model gives $167.67 against a $300.00 price."
-    _template, out = _several(ag, _Provider(leaky, "NO"))
-    body = out.split("\n\nTEST")[0]
-    assert "167.67" not in body and "rates it BUY" in body
-
-
-def test_when_the_check_finds_a_view_the_checked_analysis_path_is_used():
-    ag = _picks_agent()
-    section = ("I screened large companies on growth, margins and trading multiples. "
-               "Alphabet had the fastest revenue growth of the group at 24.7%.")
-    provider = _Provider(PICKS_REWRITE, "YES", section, "NO")
-    template, out = _several(ag, provider)
-    assert "rates it BUY" not in out and out.startswith("I screened large companies")
-    assert out.endswith(template)
-    assert any("the check found a view on TEST" in line for line in ag.logs)
-
-
-def test_the_filter_reads_a_list_item_as_about_the_company_above_it():
-    from answer_evidence import company_aliases, keep_other_companies
-    companies = {"GOOGL": company_aliases("GOOGL", "Alphabet Inc."),
-                 "META": company_aliases("META", "Meta Platforms, Inc.")}
-    assert companies["META"] == ["META", "Meta"]
-    text = ("**Meta (META)**\n- Strong buy at this level.\n- Revenue grew 26%.\n\n"
-            "**Alphabet (GOOGL)**\n- Strong buy at this level.")
-    out = keep_other_companies(text, "META", companies)
-    assert out.count("Strong buy") == 1 and "Revenue grew 26%" in out
-    assert out.index("Alphabet") < out.index("Strong buy")
-
-
 def test_with_several_companies_the_analysis_comes_first():
     # A stock-picks reply opened with the last company's "no rating" statement.
     ag = _chat_agent("any stocks you would recommend today?", _withheld_state(), "TEST")
-    ag._analysis_tickers = {"GOOGL", "META", "TEST"}
+    ag._analysis_names = {"GOOGL": "Alphabet Inc.", "META": "Meta Platforms, Inc.", "TEST": None}
     section = ("I screened ten large companies on growth, margins and trading multiples, "
                "then built models for three of them. Alphabet had the strongest growth.")
     template, out = _analysis(ag, _Provider(section, "NO"),
@@ -862,3 +786,30 @@ def test_the_closing_offer_goes_after_the_analysts_block():
     # A last paragraph that is not an offer stays where it was.
     plain = compose(template, "Revenue grew 8%.\n\nMargins fell to 12%.")
     assert plain.endswith("- Average price target: $200.00 from 20 analysts.")
+
+
+def test_one_company_whose_ticker_resolves_elsewhere_is_one_company(monkeypatch):
+    # A safeguard review: "AZN" built as AZN.L counted as two companies.
+    import json as _json
+    monkeypatch.delenv("VYNN_CACHE_DIR", raising=False)
+    ag = _chat_agent("Should I buy AstraZeneca?", None, None)
+    ag.ctx.company_name = None
+
+    class _Registry:
+        async def execute(self, name, arguments):
+            ag.ctx.ticker, ag.ctx.company_name = "AZN.L", "AstraZeneca PLC"
+            return _json.dumps({"status": "ok" if arguments["ticker"] != "BAD" else "error"})
+
+    ag.registry = _Registry()
+    ag._friendly_progress = lambda name, arguments: None
+    for ticker in ("AZN", "AZN.L", "BAD"):
+        asyncio.run(ag._execute_tool("build_model", {"ticker": ticker}))
+    assert ag._analysis_names == {"AZN.L": "AstraZeneca PLC"} and not ag._multi_company()
+
+
+def test_a_question_starting_should_is_not_a_closing_offer():
+    from answer_evidence import compose
+    template = ("TEST: no single value.\n\nWhat analysts think, for comparison (not VYNN's view):\n"
+                "- Average price target: $200.00 from 20 analysts.")
+    out = compose(template, "Revenue grew 8%.\n\nShould interest rates fall, its funding costs drop.")
+    assert out.endswith("- Average price target: $200.00 from 20 analysts.")

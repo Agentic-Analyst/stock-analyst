@@ -324,3 +324,29 @@ def test_a_correction_never_takes_a_caution_away():
     assert applied2 and "39% below" in out2
     eng = "The high may come from a price series not adjusted for a split, so check it."
     assert apply_corrections(eng, [{"wrong": eng, "right": "The high's date is unknown."}])[1] == []
+
+
+def test_a_wrong_month_named_may_can_still_be_corrected():
+    from src.agents.generalist_agent import apply_corrections
+    out, applied = apply_corrections("The results came in May 2025.", [{"wrong": "in May 2025", "right": "in June 2025"}])
+    assert applied and out == "The results came in June 2025."
+
+
+def test_the_local_position_line_goes_when_it_is_second(monkeypatch):
+    # A safeguard review: with the short answer first, the Chinese line was kept twice.
+    import types as _types
+    from src.agents.generalist_agent import GeneralistAgent
+    ag = GeneralistAgent.__new__(GeneralistAgent)
+    ag.user_prompt = "万科可以买吗?"
+    ag._local_prefix = "万科:不给出买卖判断。"
+    ag._translations = {"**Short answer: VYNN gives no buy or sell call here.**": "**简短回答:VYNN 在这里不给出买卖判断。**",
+                        "000002.SZ: the model is a scenario.": "000002.SZ:模型仅为情景。"}
+
+    async def _no_call(provider, paragraphs):
+        return None
+
+    ag._translate = _no_call
+    text = ("**Short answer: VYNN gives no buy or sell call here.**\n\n万科:不给出买卖判断。\n\n"
+            "000002.SZ: the model is a scenario.")
+    out = asyncio.run(ag._localize(None, text))
+    assert out == "**简短回答:VYNN 在这里不给出买卖判断。**\n\n000002.SZ:模型仅为情景。"
