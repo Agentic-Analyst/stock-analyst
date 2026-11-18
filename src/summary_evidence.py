@@ -1132,7 +1132,7 @@ def _times(ratio: float) -> str:
     return f"{ratio:.1f}" if abs(ratio) >= 10 else f"{ratio:.2f}"
 
 
-def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
+def render_external_benchmark_compact(value: Dict[str, Any], *, model_comparison: bool = True) -> str:
     """The analysts' view and what the price assumes, in plain words.
 
     Shown under the guard's fixed statement, to the user. It used to read
@@ -1142,6 +1142,10 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
     provenance only)"), which a reviewer of real answers called jargon a
     retail investor cannot act on. ``render_external_benchmark`` keeps the
     exhaustive form for the answer-writing model.
+
+    ``model_comparison=False`` keeps only what the analysts say: for a
+    cash-flow model ruled out for this company, the lines that set the
+    analysts or the price against it would give it a direction it lacks.
     """
     value = value if isinstance(value, dict) else {}
     currency = str(value.get("currency") or "")
@@ -1170,7 +1174,8 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
                 + (f" (middle: {_money(median, currency)})." if median is not None else ".")
             )
 
-    if value.get("rating"):
+    # Yahoo reports "none" when it has no consensus rating.
+    if str(value.get("rating") or "").strip().lower() not in ("", "none", "n/a", "null"):
         rating = str(value["rating"]).replace("_", " ").title()
         count = int(_number(value.get("rating_analyst_count")) or 0)
         source = _source_name(value.get("rating_source"))
@@ -1178,7 +1183,7 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
             f"{count} rating{'' if count == 1 else 's'}" if count else "", source) if part)
         lines.append(f"- Their consensus rating: {rating}" + (f" ({detail})." if detail else "."))
 
-    relationship = value.get("benchmark_relationship")
+    relationship = value.get("benchmark_relationship") if model_comparison else None
     if relationship == "material_conflict":
         range_note = {
             "analyst_range_entirely_above_model_range": (
@@ -1214,7 +1219,7 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
     anchored = [
         row for row in value.get("forward") or []
         if row.get("street_revenue") is not None and row.get("model_uses_street_anchor")
-    ]
+    ] if model_comparison else []
     if anchored:
         horizons = [_HORIZON_NAMES.get(str(row.get("horizon")), str(row.get("horizon"))) for row in anchored]
         years = horizons[0] if len(horizons) == 1 else ", ".join(horizons[:-1]) + " and " + horizons[-1]
@@ -1224,7 +1229,7 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
             "reinvest, the return investors require, and how long growth lasts."
         )
 
-    market_path = value.get("market_implied_fcf_path_delta")
+    market_path = value.get("market_implied_fcf_path_delta") if model_comparison else None
     target_path = value.get("analyst_target_implied_fcf_path_delta")
     if market_path is not None:
         ratio = market_path + 1
@@ -1247,7 +1252,7 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
             "- A gap that large means VYNN's model counts only the cash flow it can forecast, "
             "not everything investors are paying for. It does not make today's price right."
         )
-    elif market_path is None and value.get("market_implied_fcf_delta") is not None:
+    elif model_comparison and market_path is None and value.get("market_implied_fcf_delta") is not None:
         gap = value["market_implied_fcf_delta"]
         lines.append(
             f"- Today's price assumes long-run cash flow {abs(gap):.1%} "
@@ -1255,13 +1260,13 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
         )
 
     clauses = []
-    if value.get("market_implied_wacc") is not None:
+    if model_comparison and value.get("market_implied_wacc") is not None:
         model_wacc = value.get("model_wacc")
         clauses.append(
             f"investors accept a yearly return of {value['market_implied_wacc']:.1%}"
             + (f" (VYNN's model uses {model_wacc:.1%})" if model_wacc is not None else "")
         )
-    if value.get("market_implied_terminal_growth") is not None:
+    if model_comparison and value.get("market_implied_terminal_growth") is not None:
         model_growth = value.get("model_terminal_growth")
         clauses.append(
             f"cash flow grows {value['market_implied_terminal_growth']:.1%} a year forever"
@@ -1270,7 +1275,7 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
     if clauses:
         lines.append("- Put another way, today's price works if " + ", or if ".join(clauses) + ".")
 
-    reinvestment = value.get("reinvestment_sensitivity") or {}
+    reinvestment = (value.get("reinvestment_sensitivity") or {}) if model_comparison else {}
     if reinvestment.get("status") == "material":
         reported_ratio = reinvestment.get("reported_capex_to_revenue")
         normalized_ratio = reinvestment.get(
@@ -1298,7 +1303,7 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
     if pe is not None:
         economics.append(f"the shares would trade at {pe:.1f} times next year's expected earnings")
     if ev_sales is not None:
-        economics.append(f"the whole company at {ev_sales:.1f} times next year's expected sales")
+        economics.append(f"the whole company would be valued at {ev_sales:.1f} times next year's expected sales")
     if economics:
         lines.append("- At the average target, " + ", and ".join(economics) + ".")
 

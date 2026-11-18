@@ -274,7 +274,12 @@ class SupervisorWorkflowRunner:
             f"{self.ticker}: {view['headline']}\n\n{body}"
             f"\n\n{note} Detail: {reason}"
         )
-        rendered = render_external_benchmark_compact(benchmark)
+        # A ruled-out method states no direction, so the block does not
+        # compare the analysts with it either.
+        rendered = render_external_benchmark_compact(
+            benchmark,
+            model_comparison=not unsuitable_method_note(metrics.get("method_suitability")),
+        )
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
             has_human_benchmark = bool(
                 benchmark.get("target_mean") is not None
