@@ -43,6 +43,17 @@ from slugify import slugify
 
 from serpapi import GoogleSearch
 from newspaper import Article
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+# Articles used to be downloaded one at a time with a one-second pause after
+# each, and newspaper3k also downloaded every image on the page to pick the
+# largest: most of a typical 45-second news step in production (Aug-Nov 2026).
+# Pages now download side by side, without image downloads (the publisher's
+# og:image is read from the page itself) and with a bounded timeout.
+ARTICLE_FETCH_WORKERS = 8
+ARTICLE_TIMEOUT_SECONDS = 8
+_COUNT_LOCK = threading.Lock()
 from llms.config import get_llm
 from financial_scraper import FinancialScraper
 
@@ -486,7 +497,8 @@ class ArticleScraper:
     def _scrape_article(self, url: str) -> Optional[Dict]:
         """Download & parse an article. Returns dict or None on failure."""
         try:
-            art = Article(url, language="en")
+            art = Article(url, language="en", request_timeout=ARTICLE_TIMEOUT_SECONDS,
+                          fetch_images=False)
             art.download()
             art.parse()
             return {
@@ -502,7 +514,8 @@ class ArticleScraper:
             }
         except Exception as e:
             self._log("warning", f"Could not scrape {url}: {e}")
-            self.failed_count += 1
+            with _COUNT_LOCK:
+                self.failed_count += 1
             return None
     
     def _save_article_markdown(self, article_data: Dict) -> pathlib.Path:
@@ -684,16 +697,20 @@ og_image: "{article_data.get('top_image', '')}"
                 metadata["search_category"] = category.replace('_', ' ')
                 unique_articles[url] = metadata
 
-        # Scrape each article
-        for url, metadata in unique_articles.items():
+        # Download the articles side by side, then save and count them in the
+        # original order on this thread.
+        pending = list(unique_articles.items())
+        for url, _metadata in pending:
             progress_logger = getattr(self.logger, "scraping_progress", None)
             if callable(progress_logger):
                 progress_logger(url, "in progress")
             else:
                 self._log("info", f"🌐 Scraping in progress: {url}")
-            
-            article_data = self._scrape_article(url)
-            
+        workers = max(1, min(ARTICLE_FETCH_WORKERS, len(pending)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            downloaded = list(pool.map(lambda item: self._scrape_article(item[0]), pending))
+
+        for (url, metadata), article_data in zip(pending, downloaded):
             if not article_data:
                 continue  # Failed scraping already counted in _scrape_article
             
@@ -733,8 +750,6 @@ og_image: "{article_data.get('top_image', '')}"
                 f"   📊 Sector: {self.company_sector}, Industry: {self.company_industry}",
             )
 
-            time.sleep(1)  # Be polite to servers
-        
         results = self._get_scraping_results()
         results["scraped_files"] = scraped_files
         results["industry_info"] = self.industry_info
