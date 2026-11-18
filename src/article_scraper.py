@@ -412,7 +412,11 @@ class ArticleScraper:
                 "q": query,
                 "tbm": "nws",
                 "num": self.max_articles,
-                "tbs": "qdr:d",  # Last 24 hours
+                # The last week. Articles are accepted up to NEWS_MAX_AGE_DAYS
+                # old and at least NEWS_MIN_FRESH_ARTICLES are needed, but the
+                # search asked for the last 24 hours only: Tesla found 6 and
+                # China Vanke 7, too few for any news reading at all.
+                "tbs": "qdr:w",
                 "api_key": self.api_key
             })
             # The client's default timeout is 60000 (seconds — effectively
@@ -424,6 +428,13 @@ class ArticleScraper:
             if not isinstance(result, dict):
                 self._log("warning", f"Unexpected SerpAPI response type: {type(result)}")
                 return None
+
+            # Google found nothing: an empty result, not an outage. Treated
+            # as an outage, it tripped the circuit breaker and skipped every
+            # remaining query (30 times in one night's replay).
+            if "error" in result and "hasn't returned any results" in str(result.get("error")):
+                self._log("warning", f"No news results found for query: {query}")
+                return []
 
             # Check for API errors
             if "error" in result:

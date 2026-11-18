@@ -327,3 +327,29 @@ def test_news_agent_screens_current_articles_during_database_outage(
     assert result.news_analysis.freshness["persistence_status"] == (
         "unavailable_current_run_retained"
     )
+
+
+def test_a_query_google_finds_nothing_for_is_empty_not_an_outage(monkeypatch):
+    """30 such answers in one replay tripped the breaker and skipped every other query."""
+    captured = {}
+
+    class FakeSearch:
+        def __init__(self, params):
+            captured.update(params)
+
+        def get_dict(self):
+            return {"error": "Google hasn't returned any results for this query."}
+
+    monkeypatch.setattr(article_scraper_module, "GoogleSearch", FakeSearch)
+    value = ArticleScraper.__new__(ArticleScraper)
+    value.max_articles, value.api_key, value.logger = 10, "key", None
+    assert value._serpapi_news_links("China Vanke 000002 SZ debt") == []
+    # The last week, not the last 24 hours.
+    assert captured["tbs"] == "qdr:w"
+
+    class DownSearch(FakeSearch):
+        def get_dict(self):
+            return {"error": "Invalid API key."}
+
+    monkeypatch.setattr(article_scraper_module, "GoogleSearch", DownSearch)
+    assert value._serpapi_news_links("Apple news") is None
