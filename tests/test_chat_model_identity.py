@@ -11,6 +11,11 @@ def test_chat_override_updates_the_artifact_model_identity():
 
 def test_default_chat_model_is_a_valid_cli_model_choice():
     source = (Path(__file__).resolve().parents[1] / "main.py").read_text()
-    assert 'choices=["gpt-4o-mini", "gpt-5.4-mini", "gpt-6-luna"' in source
+    # --llm now offers every registered model (including Claude on Bedrock).
+    assert "choices=list_models()" in source
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from llms.config import LLMProvider
+    assert "gpt-6-luna" in LLMProvider.MODELS
     assert 'os.getenv("CHAT_MODEL", "gpt-6-luna")' in source
     assert 'default="gpt-6-luna"' in source

@@ -44,6 +44,7 @@ from logger import get_logger
 from .openai import calculate_cost as _openai_cost
 from .openai import openai_request_options as _openai_options
 from .claude import calculate_cost as _claude_cost
+from . import bedrock as _bedrock
 from .config import LLMProvider
 
 
@@ -134,7 +135,16 @@ _MODEL_TO_ANTHROPIC_ID = {
     "claude-3.5-sonnet": "claude-3-5-sonnet-20241022",
     "claude-3.5-haiku": "claude-3-5-haiku-20241022",
     "claude-3-opus": "claude-3-opus-20240229",
+    **{name: name for name in _bedrock.PROFILES},     # routed to Bedrock by name
 }
+
+
+def _anthropic_client_for(model_id: str):
+    return _bedrock.AsyncBedrockClaude() if _bedrock.is_bedrock_model(model_id) else _get_async_anthropic()
+
+
+def _anthropic_cost(response, model_id: str) -> float:
+    return _bedrock.cost(response, model_id) if _bedrock.is_bedrock_model(model_id) else _claude_cost(response, model_id)
 _OPENAI_MODELS = {"gpt-4o-mini", "gpt-5.4-mini", "gpt-5-mini", "gpt-6-luna"}
 
 
@@ -187,9 +197,9 @@ async def _call_anthropic_async(
     if system_message:
         kwargs["system"] = system_message
 
-    client = _get_async_anthropic()
+    client = _anthropic_client_for(model_id)
     response = await client.messages.create(**kwargs)
-    cost = _claude_cost(response, model_id)
+    cost = _anthropic_cost(response, model_id)
     return response.content[0].text, cost
 
 
@@ -275,9 +285,9 @@ async def _call_anthropic_tools(model_id, messages, tools, temperature, tool_cho
     if system_message:
         kwargs["system"] = system_message
 
-    client = _get_async_anthropic()
+    client = _anthropic_client_for(model_id)
     resp = await client.messages.create(**kwargs)
-    cost = _claude_cost(resp, model_id)
+    cost = _anthropic_cost(resp, model_id)
 
     text_parts, calls = [], []
     for block in resp.content:

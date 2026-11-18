@@ -984,7 +984,8 @@ Examples:
     parser.add_argument("--query", help="Override default search query for news articles")
         
     # LLM selection parameters
-    parser.add_argument("--llm", choices=["gpt-4o-mini", "gpt-5.4-mini", "gpt-6-luna", "claude-3.5-sonnet", "claude-3.5-haiku", "claude-3-opus"],
+    # Every registered model, including Claude on Bedrock (src/llms/bedrock.py).
+    parser.add_argument("--llm", choices=list_models(),
                        default="gpt-6-luna", help="LLM model to use for analysis")
     parser.add_argument("--list-llms", action="store_true", help="List available LLM models and exit")
     

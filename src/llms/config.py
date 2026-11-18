@@ -8,6 +8,7 @@ from typing import Callable, Tuple, List, Dict
 # Import all available models
 from .openai import gpt_4o_mini, gpt_5_4_mini, gpt_6_luna
 from .claude import claude_3_5_sonnet, claude_3_5_haiku, claude_3_opus
+from . import bedrock as _bedrock
 
 
 class LLMProvider:
@@ -21,6 +22,9 @@ class LLMProvider:
         "claude-3.5-sonnet": {"function": claude_3_5_sonnet, "api_key": "ANTHROPIC_API_KEY"},
         "claude-3.5-haiku": {"function": claude_3_5_haiku, "api_key": "ANTHROPIC_API_KEY"},
         "claude-3-opus": {"function": claude_3_opus, "api_key": "ANTHROPIC_API_KEY"},
+        # Claude on Amazon Bedrock with a Bedrock API key (src/llms/bedrock.py).
+        **{name: {"function": _bedrock.chat_function(name), "api_key": "AWS_BEARER_TOKEN_BEDROCK"}
+           for name in _bedrock.PROFILES},
     }
     
     def __init__(self, model_name: str = "gpt-4o-mini"):
