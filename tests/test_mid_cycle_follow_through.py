@@ -262,7 +262,7 @@ def test_read_report_hands_the_model_no_scenario_range(tmp_path, monkeypatch):
     workbook = _workbook({}, published=False)
     base = _saved_run(tmp_path, _short_history(_memory_financials()), workbook)
     (base / "SNDK_Professional_Analysis_Report.md").write_text("# Sandisk\n")
-    monkeypatch.setattr("path_utils.get_latest_analysis_path", lambda *_: base)
+    monkeypatch.setattr("path_utils.find_latest_report", lambda *_: (base, sorted(base.rglob("*Report*.md"))[-1]) if list(base.rglob("*Report*.md")) else None)
     ctx = SimpleNamespace(email="t@example.com", state=None, ticker=None, company_name=None)
     payload = json.loads(asyncio.run(ReadReportTool(ctx).execute("SNDK")))
     publication = payload["publication"]
@@ -276,7 +276,7 @@ def test_a_follow_up_on_a_mid_cycle_report_says_how_it_was_valued(tmp_path, monk
     base = _saved_run(tmp_path, _memory_financials(),
                       _workbook({"mid_cycle": MID_CYCLE}, published=True))
     (base / "SNDK_Professional_Analysis_Report.md").write_text("# Sandisk\n")
-    monkeypatch.setattr("path_utils.get_latest_analysis_path", lambda *_: base)
+    monkeypatch.setattr("path_utils.find_latest_report", lambda *_: (base, sorted(base.rglob("*Report*.md"))[-1]) if list(base.rglob("*Report*.md")) else None)
     ctx = SimpleNamespace(email="t@example.com", state=None, ticker=None, company_name=None)
     payload = json.loads(asyncio.run(ReadReportTool(ctx).execute("SNDK")))
     publication = payload["publication"]

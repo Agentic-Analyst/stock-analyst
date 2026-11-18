@@ -43,6 +43,33 @@ from agents.tools.fund_tools import build_fund_tools
 from agents.tools.ui_tools import build_ui_tools
 
 
+# A server path such as /data/<email>/1211.HK/<run>/reports/....md reached users
+# in 13 of 221 answers (Aug-Nov 2026), one of them carrying the user's email.
+# Any path into the data volume, or any path with an email in it, is replaced.
+_INTERNAL_PATH = re.compile(
+    r"`?(?:/data/|/app/data/)[^\s`)\]]+`?"
+    r"|`?/?(?:[\w.\-]+/)*[\w.+\-]+@[\w.\-]+\.[A-Za-z]{2,}/[^\s`)\]]+`?"
+)
+
+
+# Tools that never read or write the shared analysis state (AgentContext), so
+# several of them requested in one turn can run at the same time. The analysis
+# tools (get_financials, build_model, analyze_news, write_report, read_report,
+# compare_tickers) share FinancialState and stay sequential.
+PARALLEL_SAFE_TOOLS = frozenset({
+    "resolve_symbol", "get_prices", "get_technicals", "get_global_news", "get_macro",
+    "price_option", "compute_risk_metrics", "optimize_portfolio", "get_crypto",
+    "get_fund", "get_prediction_markets", "explain_price_move", "show_chart",
+})
+
+
+def scrub_internal_paths(text: str) -> str:
+    """Replace server file paths in an answer with a plain reference to the download."""
+    if not text:
+        return text
+    return _INTERNAL_PATH.sub("the attached file", text)
+
+
 SYSTEM_PROMPT = """You are VYNN, a sharp, friendly senior equity research analyst and financial assistant. You help users with ANY financial or market question — analyzing companies, valuation, news, macro, trading strategy, portfolios, or general market questions.
 
 You have TOOLS you can call to get real, current data and to run deep analysis. Reason about what the user actually wants, then use the right tools. You are NOT limited to one stock, and you must NEVER bounce a real question with a generic "I can analyze stocks, try asking about Apple" message.
@@ -75,7 +102,7 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 - "Why is X down / up" (present tense) or a question about today: lead with today's change and where the stock stands against the window's high or low (`from_window_high`, `from_window_low`); use `episode` when it is the move the user means — it is the window's largest swing and may be one the stock has since recovered.
 - Compare with the sector and the market (`market_today`, `sector_fund`, the `<fund>_same_dates_pct` field on `episode`): when the sector fund fell about as much, say it was a sector move and give the sector's driver from the news (an industry peer's results, a supply report); when the stock fell and the sector did not, it was company-specific.
 - "Crashed" with no date means the significant recent fall, not today's tick: when today's change is small but `episode` shows a large decline, explain the decline and mention today in one line. Do not ask "today or since the IPO?" when the tool shows one clear move; if two distinct moves matter (a recent slide inside a longer one), explain the recent one and give the longer one a sentence.
-- Then the drivers, as 2-5 short bullets, each led by a bold name and tied to the session it hit (`episode.sessions_that_made_it` lists the days that made the move; explain those, not the window's other big days): "**Lockup expiry and an OpenAI report** (Sep 30, -8.9% on 2.6x normal volume): a 19.4 million-share unlock hit the market, and reports said OpenAI's new Ultrafast tier runs on Nvidia hardware rather than Cerebras (Benzinga, Investing.com)." Take every driver from the tool's `news` and `sec_filings` — never from memory — name the outlets, and say "reported" or "according to" for anything the company has not confirmed; call speculation speculation. When several outlets carried a story (`outlets`), that is a sign it moved the stock.
+- Then the drivers, as 2-5 short bullets, each led by a bold name and tied to the session it hit (`episode.sessions_that_made_it` lists the days that made the move; explain those, not the window's other big days): "**Lockup expiry and an OpenAI report** (Sep 30, -8.9% on 2.6x normal volume): a 19.4 million-share unlock hit the market, and reports said OpenAI's new Ultrafast tier runs on Nvidia hardware rather than Cerebras (Benzinga, Investing.com)." Take every driver from the tool's `news`, `sec_filings` and, for an Australian listing, `exchange_announcements` (the company's own price-sensitive releases: results, guidance, leadership changes, filed under the session they moved) — never from memory — name the outlets, and say "reported" or "according to" for anything the company has not confirmed; call speculation speculation. When several outlets carried a story (`outlets`), that is a sign it moved the stock.
 - Insider activity, from `sec_filings`: say what the filings are and their size — a Form 144 is a notice of an INTENDED sale (shares, dollar value, who), a Form 4 with code S is a completed sale, code J is a transfer such as a fund distributing shares to its partners. Never call a Form 144 a sale.
 - If a big-move session inside `news.coverage` has no article in `news.by_session`, say no reported catalyst explains that day; if the session is earlier than `news.coverage.earliest`, the feed does not reach back that far — say the news available does not cover that date, not that nothing happened. Never fill a gap with a plausible story. Do NOT answer "no clear catalyst" when the tool returned dated articles about the company for the sessions that moved.
 - Volume: `volume_vs_average` of 2 or more is heavy trading. A day marked `session_in_progress` has only part of its volume (`volume_so_far_vs_full_day_average`) — never call it light. When the result has `latest_session_missing`, today's price is not available yet: give the last close as the last close, not as today's move.
@@ -488,7 +515,7 @@ class GeneralistAgent:
         if getattr(self, "_answer_emitted", False):
             return
         self._answer_emitted = True
-        answer_text = (answer_text or "").strip()
+        answer_text = scrub_internal_paths((answer_text or "").strip())
         if not answer_text:
             answer_text = "I wasn't able to produce an answer for that. Could you rephrase or give me a bit more detail?"
         # Guarantee a folder/logger (CHAT folder if no ticker was committed).
@@ -603,8 +630,21 @@ class GeneralistAgent:
                 # the valuation model…" instead of a silent wait), plus the technical
                 # detail line for the collapsible log.
                 tool_result_blocks = []  # anthropic
-                for call in resp.tool_calls:
-                    flagged_result = await self._execute_tool(call.name, call.arguments)
+                calls = list(resp.tool_calls)
+                if len(calls) > 1 and all(c.name in PARALLEL_SAFE_TOOLS for c in calls):
+                    # Independent lookups (quote, technicals, headlines, chart)
+                    # used to run one after another; none of them touches the
+                    # shared analysis state, so they run together and results
+                    # are appended in the order the model asked for them.
+                    import asyncio as _asyncio
+                    flagged = await _asyncio.gather(
+                        *(self._execute_tool(c.name, c.arguments) for c in calls)
+                    )
+                else:
+                    flagged = []
+                    for c in calls:
+                        flagged.append(await self._execute_tool(c.name, c.arguments))
+                for call, flagged_result in zip(calls, flagged):
                     if is_openai:
                         messages.append({
                             "role": "tool",

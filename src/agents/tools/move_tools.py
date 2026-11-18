@@ -152,7 +152,9 @@ class ExplainPriceMoveTool(Tool):
         "over 5d/1mo/3mo/ytd/1y, the 52-week high and drawdown (and the first close "
         "for a recent IPO), the dated news for the sessions that moved, each article "
         "with its source and summary, and insider/company SEC filings over the same "
-        "days (Form 144 sale notices, Form 4 trades, 8-Ks, offerings). Prefer it to "
+        "days (Form 144 sale notices, Form 4 trades, 8-Ks, offerings), and for an "
+        "Australian (.AX) listing the company's ASX announcements (results, guidance, "
+        "leadership changes) filed under the session each could have moved. Prefer it to "
         "get_prices + get_global_news for any why-did-it-move question."
     )
     parameters = {
@@ -216,13 +218,15 @@ class ExplainPriceMoveTool(Tool):
 
         from src.company_news import news_for_move
         from src.sec_activity import filing_activity
+        from src.exchange_announcements import announcements_for_move
         fund = None if crypto else sector_fund(identity.get("sector"), identity.get("industry"), currency)
         require_name = identity.get("quote_type") not in _UNNAMED_QUOTE_TYPES and not crypto
-        news, filings, fund_frame = await asyncio.gather(
+        news, filings, fund_frame, announcements = await asyncio.gather(
             asyncio.to_thread(news_for_move, ticker, name, start, end, sessions, focus, recent,
                               exchange_tz, require_name, session_moves),
             asyncio.to_thread(lambda: None if not require_name else filing_activity(ticker, start, end)),
             asyncio.to_thread(lambda: _live_frame(fund[0]) if fund else None),
+            asyncio.to_thread(announcements_for_move, ticker, start, end, sessions),
         )
         payload: Dict[str, Any] = {"ticker": ticker, **move}
         if name:
@@ -242,6 +246,8 @@ class ExplainPriceMoveTool(Tool):
         payload["news"] = news
         if filings:
             payload["sec_filings"] = filings
+        if announcements:
+            payload["exchange_announcements"] = announcements
         payload["how_to_read"] = (
             "episode = the largest move in the window; biggest_days = the sessions that made it "
             "(volume_vs_average 2+ means heavy trading); news.by_session lists articles under the "
@@ -250,7 +256,10 @@ class ExplainPriceMoveTool(Tool):
             "market_same_dates_pct and the sector fund's same-dates/today moves separate a "
             "stock-specific move from the market's or the sector's; from_window_high is the fall "
             "from the window's high to now; a session_in_progress has only part of its volume. "
-            "A Form 144 is a notice of intent to sell, not a completed sale."
+            "A Form 144 is a notice of intent to sell, not a completed sale. "
+            "exchange_announcements.price_sensitive_by_session lists the company's own "
+            "price-sensitive releases (results, guidance, leadership) under the session they "
+            "could have moved; they are primary evidence for that day's move."
         )
         return tool_ok(**payload)
 

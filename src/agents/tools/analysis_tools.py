@@ -2347,7 +2347,9 @@ class WriteReportTool(_CtxTool):
         view = _view_for(self.ctx, state)
         return tool_ok(
             ticker=getattr(state, "ticker", None) or ticker,
-            report_path=state.report.report_path,
+            # File name only: the full path holds the user's email, and the model
+            # used to print it. The report reaches the user as a download.
+            report_file=Path(str(state.report.report_path)).name if state.report.report_path else None,
             content_length=len(state.report.content) if state.report.content else 0,
             currency=_listing_currency(state),
             **_listing_price_note(state),
@@ -2418,18 +2420,12 @@ class ReadReportTool(_CtxTool):
             return tool_error("read_report needs a real ticker.", ticker=ticker)
 
         def _read(symbol):
-            from path_utils import get_latest_analysis_path
-            base = get_latest_analysis_path(self.ctx.email, symbol)
-            if not base:
+            from path_utils import find_latest_report
+            found = find_latest_report(self.ctx.email, symbol)
+            if not found:
                 return None
-            candidate = base / f"{symbol}_Professional_Analysis_Report.md"
-            if candidate.exists():
-                return base, candidate.read_text(encoding="utf-8", errors="ignore")
-            # Fallback: any *Report*.md in the folder (filename conventions may vary).
-            for p in sorted(base.glob("*Report*.md")) + sorted(base.glob("*report*.md")):
-                if p.exists():
-                    return base, p.read_text(encoding="utf-8", errors="ignore")
-            return None
+            base, path = found
+            return base, path.read_text(encoding="utf-8", errors="ignore")
 
         folder = ticker
         try:

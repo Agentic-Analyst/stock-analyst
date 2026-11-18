@@ -642,7 +642,7 @@ def test_read_report_uses_separate_guard_without_replacing_live_state(
         "freshness": {"status": "limited", "fresh_articles": 1},
         "analysis_summary": {"overall_sentiment": "bearish"},
     }))
-    monkeypatch.setattr("path_utils.get_latest_analysis_path", lambda *_: base)
+    monkeypatch.setattr("path_utils.find_latest_report", lambda *_: (base, sorted(base.rglob("*Report*.md"))[-1]) if list(base.rglob("*Report*.md")) else None)
     live_state = types.SimpleNamespace(
         financial_model=types.SimpleNamespace(
             valuation_metrics={

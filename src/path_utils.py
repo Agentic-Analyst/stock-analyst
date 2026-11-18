@@ -78,6 +78,33 @@ def get_latest_analysis_path(email: str, ticker: str) -> pathlib.Path:
     except ValueError:  # No subdirectories
         return None
 
+
+def find_latest_report(email: str, ticker: str):
+    """The newest run folder for this user and ticker that holds a report, and the report.
+
+    Returns ``(run_dir, report_path)`` or None. Two things made every read-back
+    fail in production (15 of 15 calls, Aug-Nov 2026): the newest folder is
+    usually the one the current turn has just created, which is empty, and the
+    report is written to the run's ``reports/`` subfolder, not its top level.
+    So this walks the runs newest first and looks in both places.
+    """
+    safe_email = safe_path_component(email, "email").lower()
+    safe_ticker = safe_path_component(ticker, "ticker", max_length=80).upper()
+    base_path = DATA_ROOT / safe_email / safe_ticker
+    if not base_path.exists():
+        return None
+    runs = sorted((p for p in base_path.iterdir() if p.is_dir()), reverse=True)
+    name = f"{safe_ticker}_Professional_Analysis_Report.md"
+    for run in runs:
+        for folder in (run / "reports", run):
+            exact = folder / name
+            if exact.is_file():
+                return run, exact
+            others = sorted(p for p in folder.glob("*.md") if "report" in p.name.lower() and p.is_file())
+            if others:
+                return run, others[-1]
+    return None
+
 def ensure_analysis_paths(analysis_path: pathlib.Path) -> None:
     """
     Ensure all necessary subdirectories exist in the analysis path.
