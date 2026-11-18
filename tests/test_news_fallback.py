@@ -42,3 +42,12 @@ def test_yahoo_failure_falls_back_to_google_by_company_name(monkeypatch):
     monkeypatch.setattr(yf_news, "fetch_google_news", lambda q, count=10: asked.append(q) or yf_news.parse_google_news(RSS))
     items = yf_news.fetch_ticker_news("HSN.AX")
     assert asked == ['"Hansen Technologies Limited"'] and len(items) == 2
+
+
+def test_search_name_drops_legal_forms_and_listing_codes():
+    assert yf_news.search_name("Hansen Technologies Limited") == "Hansen Technologies"
+    assert yf_news.search_name("China Vanke Co., Ltd.") == "China Vanke"
+    assert yf_news.search_name("Kioxia Holdings Corporation") == "Kioxia"
+    assert yf_news.search_name("Costco Wholesale Corporation") == "Costco Wholesale"
+    assert yf_news.search_name("Alphabet Inc.") == "Alphabet"
+    assert yf_news.search_name("") is None

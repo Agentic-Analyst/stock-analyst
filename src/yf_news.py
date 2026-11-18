@@ -8,6 +8,7 @@ Kept as a flat src-root module so both import styles used in this repo
 from the repo root) can reach it.
 """
 
+import re
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -82,19 +83,40 @@ def fetch_google_news(query: str, count: int = 10, days: int = 30, timeout: int 
     import urllib.request
     url = GOOGLE_NEWS_RSS + "?" + urllib.parse.urlencode(
         {"q": f"{query} when:{days}d", "hl": "en-US", "gl": "US", "ceid": "US:en"})
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; VYNN research)"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return parse_google_news(r.read(), count)
-    except Exception:
-        return []
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; VYNN research)"})
+    for attempt in range(2):   # one retry: a lone failed request returned nothing for Costco
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return parse_google_news(r.read(), count)
+        except Exception:
+            if attempt == 0:
+                time.sleep(1.0)
+    return []
+
+
+# Trailing legal forms people leave out when they write about a company.
+_LEGAL_FORM = re.compile(
+    r"[\s,]+(?:limited|ltd\.?|inc\.?|incorporated|corporation|corp\.?|co\.?|company|plc|"
+    r"n\.?v\.?|s\.?a\.?|ag|se|holdings?|group|\(the\))$", re.I)
+
+
+def search_name(name: Optional[str]) -> Optional[str]:
+    """'China Vanke Co., Ltd.' -> 'China Vanke'; 'Hansen Technologies Limited' -> 'Hansen Technologies'."""
+    text = " ".join(str(name or "").split())
+    previous = None
+    while text and text != previous:
+        previous = text
+        text = _LEGAL_FORM.sub("", text).strip(" ,")
+    return text or None
 
 
 def _company_name(ticker: str) -> Optional[str]:
+    # The long name: for ASX listings the short one is a code ("HANSEN TEC FPO
+    # [HSN]") that finds no articles.
     try:
         import yfinance as yf
         info = yf.Ticker(ticker).info or {}
-        return info.get("shortName") or info.get("longName")
+        return search_name(info.get("longName") or info.get("shortName"))
     except Exception:
         return None
 
