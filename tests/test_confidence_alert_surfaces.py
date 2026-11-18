@@ -373,8 +373,8 @@ def test_the_fixed_statement_states_the_rating_and_then_the_alert():
     runner = _runner()
     out = runner._guard_user_answer("The report rating is BUY.")
     assert out == (
-        "META audited report headline: investment rating SELL; model fair value "
-        "$380.00 USD; 12-month price target USD 380.00.\n\n" + SENTENCE
+        "VYNN's report rates META SELL, with a model fair value and 12-month price "
+        "target of $380.00 USD.\n\n" + SENTENCE
     )
     assert runner.guard_template == out and runner.guard_kind == "published:SELL"
 
@@ -462,7 +462,7 @@ def test_a_chinese_question_reads_the_alert_in_its_first_line():
         "META：VYNN 评级为卖出。下方英文部分列出模型公允价值、12个月目标价与分析师基准。"
         + alert_sentence_zh(ALERT)
     )
-    assert rest.startswith("META audited report headline: investment rating SELL")
+    assert rest.startswith("VYNN's report rates META SELL")
     assert SENTENCE in rest
 
 

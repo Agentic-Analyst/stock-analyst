@@ -477,7 +477,7 @@ def test_the_withheld_template_is_recorded_with_its_point_figures():
 def test_the_published_template_is_recorded_with_the_contradicted_figures():
     ag = _chat_agent("summarize the report", _published_state(), "PG")
     out = ag._guard_final_answer("The report rating is SELL and the report's fair value is $167.67.")
-    assert out.startswith("PG audited report headline: investment rating HOLD")
+    assert out.startswith("VYNN's report rates PG HOLD")
     assert ag._guard_template == out and "167.67" in ag._guard_forbidden
 
 
@@ -616,7 +616,7 @@ def test_a_contradicted_published_headline_gets_its_analysis_too():
     section = ("Organic sales rose 4% as pricing held up across beauty and grooming. "
                "Margins widened for a third straight quarter on lower commodity costs.")
     _, out = _analysis(ag, _Provider(section, "NO"), draft)
-    assert out.startswith("PG audited report headline: investment rating HOLD")
+    assert out.startswith("VYNN's report rates PG HOLD")
     assert "SELL" not in out and "Organic sales rose 4%" in out
 
 

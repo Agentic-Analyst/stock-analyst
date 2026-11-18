@@ -169,6 +169,17 @@ import yfinance as yf
 from dotenv import load_dotenv
 load_dotenv()
 
+
+def _same_amount(a: str, b: str) -> bool:
+    """'$20.25 USD' and '$20.25' state the same amount."""
+    import re as _re
+    num = lambda t: (_re.search(r"\d[\d,]*(?:\.\d+)?", t) or [None])[0]
+    x, y = num(a), num(b)
+    try:
+        return x is not None and y is not None and abs(float(x.replace(",", "")) - float(y.replace(",", ""))) < 0.005
+    except ValueError:
+        return False
+
 class SupervisorWorkflowRunner:
     """
     Orchestrates the LLM-powered agentic workflow with supervisor routing.
@@ -324,16 +335,30 @@ class SupervisorWorkflowRunner:
             symbol = currency_symbol(currency)
         except Exception:
             symbol = ""
-        parts = []
-        if headline.get("rating"):
-            parts.append(f"investment rating {headline['rating']}")
+        # One plain sentence. It used to read "TSLA audited report headline:
+        # investment rating STRONG SELL; model fair value $20.25 USD; 12-month
+        # price target $20.25." (12% of saved answers opened with this form).
+        rating = str(headline.get("rating") or "").strip()
         fair_value = metrics.get("fair_value")
+        value_text = None
         if isinstance(fair_value, (int, float)) and not isinstance(fair_value, bool):
-            parts.append(f"model fair value {symbol}{float(fair_value):,.2f} {currency}")
-        if headline.get("price_target_12m"):
-            parts.append(f"12-month price target {headline['price_target_12m']}")
-        detail = "; ".join(parts) if parts else "published without a point headline"
-        answer = f"{self.ticker} audited report headline: {detail}."
+            value_text = f"{symbol}{float(fair_value):,.2f} {currency}"
+        target = str(headline.get("price_target_12m") or "").strip()
+        same = bool(value_text and target) and _same_amount(value_text, target)
+        figures = []
+        if value_text and (not target or same):
+            figures.append(f"a model fair value{' and 12-month price target' if same else ''} of {value_text}")
+        elif value_text:
+            figures.append(f"a model fair value of {value_text}")
+        if target and not same:
+            figures.append(f"a 12-month price target of {target}")
+        if rating:
+            answer = f"VYNN's report rates {self.ticker} {rating}"
+            answer += (", with " + " and ".join(figures) + ".") if figures else "."
+        elif figures:
+            answer = f"VYNN's report on {self.ticker} gives " + " and ".join(figures) + "."
+        else:
+            answer = f"VYNN's report on {self.ticker} is published without a rating or a single fair value."
         # A memory maker's value is mid-cycle: say how it was reached, and how
         # many years of peak-cycle cash flow the price pays for.
         from src.summary_evidence import mid_cycle_method_note, required_growth_sentence
@@ -349,7 +374,10 @@ class SupervisorWorkflowRunner:
         benchmark = self._current_external_benchmark()
         rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
-            answer += f"\n\nExternal benchmark reconciliation{self._benchmark_basis()}:\n" + rendered
+            answer += (
+                f"\n\nThe Street's view{self._benchmark_basis()}, shown as a benchmark and not as "
+                "VYNN's rating:\n" + rendered
+            )
         lead = self._listing_lead("published", metrics, headline, benchmark)
         return f"{lead}\n\n{answer}" if lead else answer
 

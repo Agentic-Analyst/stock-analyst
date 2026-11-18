@@ -327,7 +327,7 @@ def test_broad_answer_requires_multiple_available_firm_attributions():
         "TEST has a model fair value of $120. Analysts were reviewed.",
         require_full_benchmark=True,
     )
-    assert incomplete.startswith("TEST audited report headline")
+    assert incomplete.startswith("VYNN's report on TEST")
     assert "headline:;" not in incomplete
     assert "Firm One" in incomplete and "Firm Two" in incomplete
 
