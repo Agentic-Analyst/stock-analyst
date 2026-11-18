@@ -364,5 +364,5 @@ def test_the_plain_block_skips_a_missing_rating_and_can_leave_the_model_out():
     assert analysts_only.splitlines() == [
         "- Average price target: ¥3.34 from 8 analysts, 13.5% above today's price (Yahoo Finance).",
         "- Their targets range from ¥1.85 to ¥8.30 (middle: ¥2.90).",
-        "- At the average target, the whole company would be valued at 3.5 times next year's expected sales.",
+        "- At the average target, the whole company, debt included, would be valued at 3.5 times next year's expected sales.",
     ]

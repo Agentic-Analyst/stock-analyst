@@ -1361,7 +1361,7 @@ def render_external_benchmark_compact(value: Dict[str, Any], *, model_comparison
     if pe is not None:
         economics.append(f"the shares would trade at {pe:.1f} times next year's expected earnings")
     if ev_sales is not None:
-        economics.append(f"the whole company would be valued at {ev_sales:.1f} times next year's expected sales")
+        economics.append(f"the whole company, debt included, would be valued at {ev_sales:.1f} times next year's expected sales")
     if economics:
         lines.append("- At the average target, " + ", and ".join(economics) + ".")
 

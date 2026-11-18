@@ -306,3 +306,21 @@ def test_a_dutch_closing_question_is_not_taken_for_english():
              "AppLovin's concurrenten in ad-tech zetten?")
     assert not english_paragraph(dutch, "Dutch")
     assert english_paragraph("**Short answer: no, on VYNN's numbers, but with low confidence.**", "Dutch")
+
+
+def test_a_correction_never_takes_a_caution_away():
+    # Kioxia, 18 Nov: the split warning was "corrected" into a weaker sentence.
+    from src.agents.generalist_agent import apply_corrections
+    text = ("期間高値は37,503円で、そこから-78.6%です。ただし時価総額と株価から逆算した株数が想定とずれています。"
+            "株式分割などで価格系列が調整されていない可能性があるため、この下落率は参考程度にしてください。")
+    fix = {"wrong": "ただし時価総額と株価から逆算した株数が想定とずれています。株式分割などで価格系列が調整されていない"
+                    "可能性があるため、この下落率は参考程度にしてください。",
+           "right": "ただし、この高値がいつ付いたかは取得データから確認できていません。"}
+    out, applied = apply_corrections(text, [fix])
+    assert applied == [] and out == text
+    # A correction of a figure inside a cautious sentence still applies.
+    text2 = "The price may be 12% below the high of $5.90."
+    out2, applied2 = apply_corrections(text2, [{"wrong": "12% below", "right": "39% below"}])
+    assert applied2 and "39% below" in out2
+    eng = "The high may come from a price series not adjusted for a split, so check it."
+    assert apply_corrections(eng, [{"wrong": eng, "right": "The high's date is unknown."}])[1] == []

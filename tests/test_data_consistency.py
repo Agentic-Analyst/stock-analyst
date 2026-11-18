@@ -214,3 +214,11 @@ def test_no_first_year_eps_growth_from_a_loss_a_year_ago():
         pytest.skip("this artifact shape does not produce two forward rows")
     assert rows[0]["eps_growth"] is None
     assert rows[1]["eps_growth"] == pytest.approx(0.2)
+
+
+def test_a_window_move_is_read_against_the_market_in_words():
+    # Robinhood, 18 Nov: +7.9% against the S&P 500's +3.6% was called "lagged the market".
+    from src.agents.tools.move_tools import versus_market
+    out = versus_market(7.9, 3.6, "the S&P 500", period="from 2026-11-10 to 2026-11-13")
+    assert out == ("The stock was up 7.9% from 2026-11-10 to 2026-11-13 against the S&P 500 up 3.6%: "
+                   "4.3 points better than the market.")

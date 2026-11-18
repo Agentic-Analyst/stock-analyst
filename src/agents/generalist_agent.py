@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from llms.async_client import get_async_llm
-from answer_evidence import compose as compose_with_analysis, review_section
+from answer_evidence import compose as compose_with_analysis, company_aliases, keep_other_companies, review_section
 from agents.tools.base import ToolRegistry
 from agents.tools.analysis_tools import AgentContext, build_analysis_tools
 from agents.tools.data_tools import build_data_tools
@@ -115,6 +115,7 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 - Whenever your answer is about a price, trend, performance, momentum, or a "how has X done" question — for a stock OR a coin — call `show_chart` (symbol like "NVDA" or "BTC-USD", pick the timeframe that matches the question: 1D for today, 1M for recent, 1Y for the year). Do it BEFORE writing the final answer, then reference it naturally ("as the chart shows…"). It renders an interactive live chart for the user right in the chat.
 - One chart per subject; for a comparison of two names, two charts is fine. Skip charts for pure fundamentals/valuation questions where a price line adds nothing.
 - Each chart once per chat. The conversation context lists the charts already shown ("Charts shown"); they are live and stay above, so in a follow-up about the same company refer to "the chart above" instead of calling show_chart again. Only a different timeframe that the question needs (today's session after a one-year view) is a new chart.
+- Each point once per chat, too. In a follow-up, don't retell what your earlier answers in this chat already covered (the price story, the technicals, the analysts' view; the conversation context shows how each began). Refer back in a few words ("as covered above") and spend the answer on what the new question asks and what is new.
 
 ## CRITICAL: reuse prior work — do NOT regenerate what already exists
 - If the conversation context shows a report was ALREADY generated for a company this session (look for "Report Generated" or a prior valuation/news block), and the user asks a follow-up about it ("summarize the report", "break out the bull/base/bear cases", "what were the risks", "explain the valuation") — call `read_report` for that ticker and answer from its content. Do NOT call write_report again; regenerating produces the identical file and wastes a minute of the user's time.
@@ -515,6 +516,39 @@ _SECTION_CHECK = (
 )
 
 
+# ---- answers about several companies ---------------------------------------------
+#
+# A stock-picks reply opened with Verizon's "no rating" statement and
+# recommended nothing (18 Nov Sonnet check): the guard knows one company's
+# boundary, so every other company's published view was lost with it.
+_ONE_COMPANY_OUT = (
+    "Below is a draft answer about several companies. VYNN publishes no view on {company} "
+    "({ticker}) this time, and a separate statement about it follows the answer. Rewrite the draft "
+    "so that it gives no view on {company}: no rating, no ranking and no place in a list of picks; "
+    "no suggestion to buy, add, hold, keep, trim, sell or avoid it, including soft forms such as "
+    "\"build positions\" or \"worth a look\"; no judgement that it is cheap, expensive or fairly "
+    "valued; and no price target, value per share, scenario value, expected return or upside for it, "
+    "whoever it is attributed to (analysts' targets included). Take {company} out of any list of "
+    "picks and renumber the list. Facts about {company} that carry no view may stay only where "
+    "another company's point needs them. Keep everything about the other companies word for word, "
+    "including their ratings and values. Add nothing. Reply with the rewritten answer only.\n\n"
+    "Draft:\n<<<\n"
+)
+
+
+def _company_check(ticker: str, company: str) -> str:
+    """The yes/no section check, about one company in an answer that covers several."""
+    rules = _SECTION_CHECK.split(":\n", 1)[1].replace("the stock", company).replace("Section:", "Answer:")
+    return (
+        "You check a stock-research answer about several companies before it is published. Views on "
+        f"the other companies are fine. VYNN states no view on {company} ({ticker}), so the answer may "
+        f"only describe evidence about it. Answer YES if the answer contains ANY of the following about "
+        f"{company}, in any language and whoever it is attributed to (an analyst's rating, upgrade or "
+        "price target counts too), including a place in a ranking or a list of picks, and NO otherwise:\n"
+        + rules
+    )
+
+
 # ---- a direct answer to "should I buy X?" ---------------------------------------
 #
 # A blind review of twelve real questions found almost no answer opened with
@@ -560,9 +594,19 @@ _NUMBER_CHECK_NOTE = (
     "sale). Reply with only a JSON array of corrections, each {\"wrong\": \"<exact words from "
     "the text>\", \"right\": \"<the corrected words>\"}. Copy each wrong part exactly and keep it "
     "short (a phrase or one sentence), including any linking word before it, so the corrected "
-    "sentence reads naturally in place; change only what is wrong and add nothing new. Reply [] "
-    "when everything is right. Do not call any tool.]"
+    "sentence reads naturally in place; change only what is wrong and add nothing new. A caution "
+    "to the reader (that a figure may be unadjusted, stale or unreliable, or should be checked) "
+    "is not an error: never remove or weaken one. Reply [] when everything is right. Do not call "
+    "any tool.]"
 )
+# A caution the reader needs. Kioxia (18 Nov): a warning that the 1-year high
+# might be from a price series not adjusted for a split was "corrected" into
+# a sentence that only said the high's date was unknown, and the answer then
+# stated a 78.6% fall from that high as fact.
+_CAUTION = re.compile(
+    r"\b(?:may|might|could|possibly|perhaps|unadjusted|not\s+adjusted|unreliable|unverified|"
+    r"check|verify|caution|treat\s+.{0,30}\s+with|reference\s+only|as\s+a\s+guide)\b|"
+    r"可能|参考|注意|确认|核实|谨慎|調整されていない|確認", re.I)
 _FIGURE_TOKEN = re.compile(r"\d+(?:[.,]\d+)*")
 # Fewer figures than this, and there is nothing worth a check.
 _MIN_FIGURES_TO_CHECK = 3
@@ -607,6 +651,8 @@ def apply_corrections(text: str, corrections: List[Dict[str, str]]):
         if (not wrong.strip() or wrong == right or len(wrong) > 400 or len(right) > 600
                 or text.count(wrong) != 1):
             continue
+        if len(_CAUTION.findall(right)) < len(_CAUTION.findall(wrong)):
+            continue  # a correction never takes a caution away
         text = text.replace(wrong, right)
         applied.append(fix)
     return text, applied
@@ -1020,7 +1066,9 @@ class GeneralistAgent:
                 # Committed before the next step, so nothing after this point
                 # can publish the unguarded draft.
                 final_text = guarded
-                if self._guard_template is not None and guarded == self._guard_template:
+                if self._guard_template is not None and guarded == self._guard_template and self._multi_company():
+                    final_text = await self._several_companies(messages[:tool_work], provider, draft, guarded, tool_defs)
+                elif self._guard_template is not None and guarded == self._guard_template:
                     template = guarded
                     # Added after the analysis is written: shown to the writer,
                     # it was copied into the analysis and sank it (Costco).
@@ -1292,6 +1340,9 @@ class GeneralistAgent:
             _cache_tool_result(name, arguments, result_json)
         else:
             self._log(f"[SUPERVISOR]    ↳ {name}: reused a result from the last few minutes")
+        if name in ("build_model", "write_report", "get_financials") and getattr(self.ctx, "ticker", None):
+            self.__dict__.setdefault("_analysis_names", {})[str(self.ctx.ticker).strip().upper()] = (
+                getattr(self.ctx, "company_name", None))
         # Log a one-line result status so the log shows what each tool returned.
         try:
             _rd = json.loads(result_json)
@@ -1509,7 +1560,53 @@ class GeneralistAgent:
 
     def _multi_company(self) -> bool:
         """Whether this turn analysed two or more companies (picks, a comparison)."""
-        return len(getattr(self, "_analysis_tickers", set()) or set()) >= 2
+        seen = set(getattr(self, "_analysis_tickers", set()) or set())
+        seen |= set((getattr(self, "_analysis_names", {}) or {}).keys())
+        return len(seen) >= 2
+
+    async def _several_companies(self, messages: list, provider, draft: str, template: str, tool_defs=None) -> str:
+        """Picks or a comparison where one company's view is withheld.
+
+        The other companies' published views are the answer. The draft is
+        rewritten without any view on the withheld company, held to that
+        company's boundary by the same two layers as a single company's
+        analysis (the claim filter, then a yes/no check), and its fixed
+        statement follows. On any doubt, the checked analysis path.
+        """
+        _state, ticker, company = self._answer_subject()
+        withheld = str(ticker or "").strip().upper()
+        names = dict(getattr(self, "_analysis_names", {}) or {})
+        company = company or names.get(withheld)
+        name = company or withheld
+        for t in getattr(self, "_analysis_tickers", set()) or set():
+            names.setdefault(str(t).upper(), None)
+        names.setdefault(withheld, company)
+        companies = {t: company_aliases(t, n or (company if t == withheld else None)) for t, n in names.items()}
+
+        async def fallback(why: str) -> str:
+            self._log(f"[SUPERVISOR] ⚠️ Several companies: {why} — answering with the checked analysis.")
+            return await self._add_analysis(messages, provider, template, tool_defs)
+
+        rewrite = await provider.call_with_tools(
+            [{"role": "user", "content": _ONE_COMPANY_OUT.format(company=name, ticker=withheld) + draft + "\n>>>"}],
+            [], temperature=0.0)
+        self.total_cost += rewrite.cost
+        text = (rewrite.text or "").strip()
+        if len(text) < 200:
+            return await fallback("the rewrite came back empty")
+        text = await self._check_numbers(messages, provider, text, tool_defs)
+        kept = keep_other_companies(text, withheld, companies, getattr(self, "_guard_forbidden", ()))
+        if len(kept) < 200:
+            return await fallback("too little was left")
+        check = await provider.call_with_tools(
+            [{"role": "user", "content": _company_check(withheld, name) + kept + "\n>>>"}], [], temperature=0.0)
+        self.total_cost += check.cost
+        verdict = (check.text or "").strip()
+        if not re.fullmatch(r"[\W_]*NO[\W_]*", verdict):
+            return await fallback(f"the check found a view on {withheld} ({verdict[:20]!r})")
+        self._log(f"[SUPERVISOR] ✂️ Several companies in one answer: kept the others' views, "
+                  f"held {withheld} to its own boundary.")
+        return f"{kept}\n\n{template}"
 
     async def _check_numbers(self, transcript: list, provider, text: str, tool_defs=None) -> str:
         """The text with the checker's exact-match corrections applied; the text itself on any doubt."""

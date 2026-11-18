@@ -110,8 +110,8 @@ def session_open(last_session: str, exchange_tz: Optional[str], now=None) -> boo
 
 
 def versus_market(stock_pct: Any, index_pct: Any, index_name: Optional[str],
-                  session: Optional[str] = None) -> Optional[str]:
-    """Today's move against the market's, in words.
+                  session: Optional[str] = None, period: Optional[str] = None) -> Optional[str]:
+    """A move against the market's over the same time, in words.
 
     Worked out here: an answer called a 1% fall "a bit better than the ASX
     200's 0.6% fall".
@@ -120,7 +120,7 @@ def versus_market(stock_pct: Any, index_pct: Any, index_name: Optional[str],
         return None
     index = index_name or "the market"
     gap = float(stock_pct) - float(index_pct)
-    when = f"on {session}" if session else "in the latest session"
+    when = period or (f"on {session}" if session else "in the latest session")
     stock = f"{'up' if stock_pct >= 0 else 'down'} {abs(stock_pct):.1f}%"
     market = f"{'up' if index_pct >= 0 else 'down'} {abs(index_pct):.1f}%"
     if abs(gap) < 0.05:
@@ -268,6 +268,14 @@ class ExplainPriceMoveTool(Tool):
             session=payload.get("as_of_session"))
         if comparison:
             market_today["stock_vs_index_today"] = comparison
+        episode = payload.get("episode")
+        if episode and not crypto:
+            # The same reading for the window's main move: Robinhood's +7.9%
+            # against the S&P 500's +3.6% was called "lagged the market".
+            over = versus_market(episode.get("change_pct"), episode.get("market_same_dates_pct"), index_name,
+                                 period=f"from {episode.get('start_date')} to {episode.get('end_date')}")
+            if over:
+                episode["stock_vs_market"] = over
         payload["market_today"] = market_today
         payload["news"] = news
         if filings:
@@ -280,7 +288,8 @@ class ExplainPriceMoveTool(Tool):
             "first session they could have moved (after-close news moves the next session unless it "
             "looks back at the day); news.coverage is the span of days the news feed reaches; "
             "market_same_dates_pct and the sector fund's same-dates/today moves separate a "
-            "stock-specific move from the market's or the sector's; from_window_high is the fall "
+            "stock-specific move from the market's or the sector's (episode.stock_vs_market and "
+            "market_today.stock_vs_index_today say it in words; use them); from_window_high is the fall "
             "from the window's high to now; a session_in_progress has only part of its volume. "
             "A Form 144 is a notice of intent to sell, not a completed sale. "
             "exchange_announcements.price_sensitive_by_session lists the company's own "
