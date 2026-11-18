@@ -813,3 +813,135 @@ def test_a_question_starting_should_is_not_a_closing_offer():
                 "- Average price target: $200.00 from 20 analysts.")
     out = compose(template, "Revenue grew 8%.\n\nShould interest rates fall, its funding costs drop.")
     assert out.endswith("- Average price target: $200.00 from 20 analysts.")
+
+
+# --------------------------------------------------------------------------
+# A YES that names its sentences (18 Nov 2026 Sonnet check, Costco)
+# --------------------------------------------------------------------------
+#
+# Costco's whole analysis was dropped because the check read one sentence as
+# a call. The check now quotes the sentences it objects to; they are removed
+# and the rest must pass both checks again, once.
+
+SOFT = "After the pullback, the risk/reward looks favorable."
+
+
+def test_the_quoted_sentence_is_left_out_and_the_rest_is_published():
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    audits = []
+    ag._audit = audits.append
+    provider = _Provider(XOM_SECTION + "\n\n" + SOFT, f'YES\n"{SOFT}"', "NO")
+    template, out = _analysis(ag, provider, XOM_DRAFT_2)
+    assert "Guyana and the Permian" in out and "risk/reward" not in out
+    assert len(provider.calls) == 3
+    # The second check sees the section without the sentence.
+    second = provider.calls[2]["messages"][0]["content"].split("Section:\n<<<\n", 1)[1]
+    assert "risk/reward" not in second and "Guyana and the Permian" in second
+    assert any("Left out 1 sentence" in line for line in ag.logs)
+    # What the check objected to is never in the log the user can open.
+    assert not any("risk/reward" in line for line in ag.logs)
+    assert any("risk/reward" in line for line in audits)
+
+
+@pytest.mark.parametrize("replies", [
+    # A quote that matches no sentence: the reply does not name what it saw.
+    (f'YES\n"XOM is a compelling buy for patient investors."', ),
+    # An explanation, not a quote (Costco's reply began "YES. The section rep").
+    ("YES. The section reports a judgement on the valuation.", ),
+    # Still a call after the removal.
+    (f'YES\n"{SOFT}"', "YES"),
+    (f'YES\n"{SOFT}"', f'YES\n"{SOFT}"'),
+    (f'YES\n"{SOFT}"', RuntimeError("check failed")),
+])
+def test_a_yes_that_cannot_be_narrowed_leaves_the_fixed_statement(replies):
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    ag._audit = lambda msg: None
+    template, out = _analysis(ag, _Provider(XOM_SECTION + "\n\n" + SOFT, *replies), XOM_DRAFT_2)
+    assert out == template
+
+
+def test_a_yes_quoting_most_of_the_section_leaves_the_fixed_statement():
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    ag._audit = lambda msg: None
+    section = "XOM rose 41% over the past year.\n\n" + SOFT
+    quotes = "YES\n- XOM rose 41% over the past year.\n- " + SOFT
+    template, out = _analysis(ag, _Provider(section, quotes, "NO"), XOM_DRAFT_2)
+    assert out == template
+
+
+def test_a_rejected_explicit_claim_stays_out_of_the_visible_log():
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    audits = []
+    ag._audit = audits.append
+    _analysis(ag, _Provider(XOM_SECTION + "\n\nFair value is about $180 per share."), XOM_DRAFT_2)
+    assert any("explicit claim" in line for line in ag.logs)
+    assert not any("$180" in line for line in ag.logs)
+    assert any("$180" in line for line in audits)
+
+
+@pytest.mark.parametrize("verdict, quotes", [
+    ("NO", []),
+    ("YES", []),
+    (f'YES: "{SOFT}"', [f'"{SOFT}"']),
+    (f"YES\n- {SOFT}\n- XOM looks cheap at 12 times earnings.",
+     [SOFT, "XOM looks cheap at 12 times earnings."]),
+    ("NO\nYES\nsomething long enough to count", []),
+])
+def test_the_quoted_sentences_are_read_from_a_yes(verdict, quotes):
+    from src.answer_evidence import _quote_key, flagged_sentences
+    assert [_quote_key(q) for q in flagged_sentences(verdict)] == [_quote_key(q) for q in quotes]
+
+
+def test_a_quoted_sentence_matches_despite_emphasis_and_quotes():
+    section = ("Revenue rose 8% on membership fees.\n\n"
+               "- **The shares trade at a rich premium** to the retail group.\n\n"
+               "Comparable sales grew 6% excluding fuel.")
+    review = review_section(section, drop=['"The shares trade at a rich premium to the retail group."'])
+    assert review.quotes_unmatched == 0 and len(review.dropped) == 1
+    assert "premium" not in review.text and "membership fees" in review.text
+
+
+# The independent review's cases: in each, the flagged call would have stayed
+# in the text while the log said it was removed.
+STRETCHED = "At 50 times earnings the shares look stretched versus peers."
+
+
+@pytest.mark.parametrize("verdict", [
+    # A long quote "found" through the innocent sentence inside it.
+    "YES\nComparable sales grew 6% excluding fuel, and at 50x earnings the shares look "
+    "stretched relative to peers.",
+    # A flagged sentence too short to match.
+    f"YES\nLooks cheap.\n{STRETCHED}",
+    # A preface is not a sentence of the section.
+    f"YES, these sentences:\n{STRETCHED}",
+])
+def test_a_quote_the_removal_does_not_account_for_leaves_the_fixed_statement(verdict):
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    ag._audit = lambda msg: None
+    section = (XOM_SECTION + "\n\nComparable sales grew 6% excluding fuel. Looks cheap.\n\n"
+               + STRETCHED)
+    template, out = _analysis(ag, _Provider(section, verdict, "NO"), XOM_DRAFT_2)
+    assert out == template
+
+
+def test_a_quote_joining_two_flagged_sentences_removes_both():
+    section = ("Revenue rose 8% on membership fees. The shares look stretched at 50 times "
+               "earnings. Few retailers look as pricey on that measure.")
+    quote = ("The shares look stretched at 50 times earnings, and few retailers look as "
+             "pricey on that measure.")
+    review = review_section(section, drop=[quote])
+    assert review.quotes_unmatched == 0 and len(review.dropped) == 2
+    assert review.text == "" or "stretched" not in review.text
+
+
+def test_the_number_check_keeps_corrected_text_out_of_the_visible_log():
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    ag._tools_used = {"get_prices"}
+    audits = []
+    ag._audit = audits.append
+    text = "XOM rose 41% in 2025 to $160.59, a fair value of $180 by our count."
+    provider = _Provider('[{"wrong": "a fair value of $180", "right": "a fair value of $181"}]')
+    out = asyncio.run(ag._check_numbers([], provider, text, None))
+    assert "$181" in out
+    assert not any("fair value" in line for line in ag.logs)
+    assert any("fair value" in line for line in audits)

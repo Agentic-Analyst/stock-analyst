@@ -444,10 +444,56 @@ class SectionReview:
     repeated: List[str] = field(default_factory=list)
     # Explicit claims; any one of them means the section is not published.
     claims: List[str] = field(default_factory=list)
+    # Sentences removed because the model check quoted them as a call, and
+    # how many quotes were not accounted for (any means the check's reply
+    # cannot be trusted to name what it objected to).
+    dropped: List[str] = field(default_factory=list)
+    quotes_unmatched: int = 0
 
     @property
     def publishable(self) -> bool:
         return bool(self.text) and not self.claims
+
+
+_QUOTE_MIN = 12
+
+
+def _quote_key(text: str) -> str:
+    """A sentence as the check might quote it: no emphasis, quotes or end punctuation."""
+    plain = re.sub(r"[*_`\"“”‘’']", "", str(text or "")).lower()
+    return " ".join(plain.split()).strip(" .;:,!?。；：，！？")
+
+
+def flagged_sentences(verdict: str) -> List[str]:
+    """Every line a YES verdict gives after the YES; [] for anything else.
+
+    Nothing is filtered out here: a line too short to match ("Looks
+    cheap.") or a preface ("these sentences:") matches no sentence, and an
+    unmatched quote sends the caller back to the fixed statement.
+    """
+    lines = [line.strip() for line in str(verdict or "").strip().splitlines()]
+    if not lines:
+        return []
+    head = re.match(r"^[\W_]*YES\b[\W_]*(.*)$", lines[0], re.I)
+    if not head:
+        return []
+    quotes = []
+    for line in [head.group(1), *lines[1:]]:
+        line = re.sub(r"^(?:[-*•]\s+|\d+[.)]\s+)", "", line.strip())
+        if _quote_key(line):
+            quotes.append(line)
+    return quotes
+
+
+def _covered(quote_key: str, sentence_keys: Sequence[str]) -> bool:
+    """Whether the removed sentences account for the whole quote, not just part of it."""
+    if any(quote_key in key for key in sentence_keys):
+        return True
+    rest = quote_key
+    for key in sorted(sentence_keys, key=len, reverse=True):
+        rest = rest.replace(key, " ")
+    # A quote joining two sentences leaves only joining words ("and", a comma).
+    return _letters(rest) <= max(3, _letters(quote_key) // 10)
 
 
 def review_section(
@@ -456,12 +502,36 @@ def review_section(
     forbidden_tokens: Iterable[str] = (),
     extra_patterns: Sequence[Pattern[str]] = (),
     published: Optional[dict] = None,
+    drop: Sequence[str] = (),
 ) -> SectionReview:
-    """Strip what repeats the fixed statement, then list every explicit claim left."""
+    """Strip what repeats the fixed statement, then list every explicit claim left.
+
+    `drop` holds sentences the model check quoted as a call: each sentence
+    that matches one is removed like a repeat, and the rest is reviewed (and
+    checked again by the caller) as if the model had written only that.
+    """
     tokens = tuple(token for token in forbidden_tokens if token)
     view = published
     review = SectionReview()
     lines = str(section or "").replace("\r\n", "\n").split("\n")
+    keys = [key for key in (_quote_key(q) for q in drop) if len(key) >= _QUOTE_MIN]
+    hit_by: dict = {}
+
+    def quoted(part: str) -> bool:
+        key = _quote_key(part)
+        hits = [i for i, q in enumerate(keys) if q in key or (len(key) >= _QUOTE_MIN and key in q)]
+        for i in hits:
+            hit_by.setdefault(i, []).append(key)
+        return bool(hits)
+
+    def removed(part: str) -> bool:
+        if restates(part, extra_patterns):
+            review.repeated.append(part.strip())
+            return True
+        if keys and quoted(part):
+            review.dropped.append(part.strip())
+            return True
+        return False
 
     # Repeats go first: whatever they contain is never published, so a claim
     # inside one ("analysts rate it a Buy") cannot sink an otherwise good section.
@@ -471,16 +541,13 @@ def review_section(
             kept.append("")
             continue
         if raw.lstrip().startswith("|"):
-            if restates(raw, extra_patterns):
-                review.repeated.append(raw.strip())
-            else:
+            if not removed(raw):
                 kept.append(raw)
             continue
         prefix, body = _LINE_PREFIX.match(raw).groups()
         prefix = prefix or ""
         parts = _sentences(body)
-        good = [part for part in parts if not restates(part, extra_patterns)]
-        review.repeated.extend(part for part in parts if restates(part, extra_patterns))
+        good = [part for part in parts if not removed(part)]
         text = _balance(" ".join(good))
         if not text:
             continue
@@ -519,6 +586,14 @@ def review_section(
         review.claims.append(table[:200])
 
     review.text = text if _letters(text) >= _MIN_SECTION_LETTERS else ""
+    # A quote counts as found only if the sentences removed for it make up
+    # the whole of it, and none of it is left in the text: a long quote
+    # that took in an innocent sentence must not leave its call behind.
+    # A quote too short to match is never found.
+    left = _quote_key(text)
+    review.quotes_unmatched = (len(list(drop)) - len(keys)) + sum(
+        1 for i, q in enumerate(keys) if not (_covered(q, hit_by.get(i, [])) and q not in left)
+    )
     return review
 
 

@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from llms.async_client import get_async_llm
-from answer_evidence import compose as compose_with_analysis, review_section
+from answer_evidence import compose as compose_with_analysis, flagged_sentences, review_section
 from agents.tools.base import ToolRegistry
 from agents.tools.analysis_tools import AgentContext, build_analysis_tools
 from agents.tools.data_tools import build_data_tools
@@ -511,9 +511,12 @@ _SECTION_CHECK = (
     "These are fine and are NOT a reason to answer YES: facts about the business, results and "
     "guidance, management's own targets, the price history, technical indicators, valuation "
     "multiples stated as numbers, commodity-price sensitivities, bull and bear case labels over "
-    "evidence, news events, what investors or insiders did, and risks. Reply with exactly one "
-    "word: YES or NO.\n\nSection:\n<<<\n"
+    "evidence, news events, what investors or insiders did, and risks. Reply with exactly NO "
+    "if the section contains none of these. Otherwise reply YES on its own line, followed only "
+    "by each sentence that contains one, each on its own line, copied exactly from the section: "
+    "no other words.\n\nSection:\n<<<\n"
 )
+_SECTION_CHECK_ANCHOR = "Reply with exactly NO"
 
 
 # ---- a direct answer to "should I buy X?" ---------------------------------------
@@ -1552,8 +1555,10 @@ class GeneralistAgent:
         fixed, applied = apply_corrections(text, corrections)
         self._log(f"[SUPERVISOR] 🔢 Number check: {len(applied)} correction(s) applied"
                   f" of {len(corrections)} proposed.")
+        # The corrected text goes to the private log: info.log is shown to the
+        # user, and this runs on an analysis before its checks.
         for fix in applied[:5]:
-            self._log(f"[SUPERVISOR]    ↳ {fix['wrong'][:120]!r} -> {fix['right'][:120]!r}")
+            self._audit(f"[SUPERVISOR]    ↳ {fix['wrong'][:200]!r} -> {fix['right'][:200]!r}")
         return fixed
 
     async def _checked_draft(self, messages: list, provider, draft: str, guarded: str, tool_defs=None) -> str:
@@ -1641,7 +1646,7 @@ class GeneralistAgent:
             + ". Restating exactly this rating and these figures, attributed to VYNN's model or report, "
             "is fine and is NOT a reason to answer YES; any other call, figure or valuation judgement is. "
         )
-        return _SECTION_CHECK.replace("Reply with exactly one word", line + "Reply with exactly one word")
+        return _SECTION_CHECK.replace(_SECTION_CHECK_ANCHOR, line + _SECTION_CHECK_ANCHOR)
 
     def _local_statement(self) -> str:
         """The fixed statement's position in Chinese, for a question asked in Chinese.
@@ -1716,27 +1721,46 @@ class GeneralistAgent:
         # Before both checks, so they judge the text that is published.
         section = await self._check_numbers(retry, provider, section, tool_defs)
 
-        review = review_section(
-            section,
-            forbidden_tokens=getattr(self, "_guard_forbidden", ()),
-            extra_patterns=getattr(self, "_guard_patterns", ()),
-            published=getattr(self, "_guard_published", None),
-        )
+        def reviewed(text, drop=()):
+            return review_section(
+                text,
+                forbidden_tokens=getattr(self, "_guard_forbidden", ()),
+                extra_patterns=getattr(self, "_guard_patterns", ()),
+                published=getattr(self, "_guard_published", None),
+                drop=drop,
+            )
+
+        review = reviewed(section)
         if not review.publishable:
             what = f"{len(review.claims)} explicit claim(s)" if review.claims else "too little analysis"
             self._log(f"[SUPERVISOR] ⚠️ The analysis made {what} — answering with the fixed statement.")
+            # The claims themselves go to the private log: info.log is shown
+            # to the user, and a withheld call must not reach them that way.
             for claim in review.claims[:3]:
-                self._log(f"[SUPERVISOR]    ↳ {claim[:160]}")
+                self._audit(f"[SUPERVISOR] rejected claim: {claim[:300]}")
             return template
 
-        check = await provider.call_with_tools(
-            [{"role": "user", "content": self._section_check() + review.text + "\n>>>"}], [], temperature=0.0
-        )
-        self.total_cost += check.cost
-        verdict = (check.text or "").strip()
+        verdict = await self._ask_section_check(provider, review.text)
         if not re.fullmatch(r"[\W_]*NO[\W_]*", verdict, re.I):
-            self._log(f"[SUPERVISOR] ⚠️ The check found a call in the analysis ({verdict[:20]!r}) — answering with the fixed statement.")
-            return template
+            self._audit(f"[SUPERVISOR] section check verdict: {verdict[:800]!r}")
+            # The check names the sentences it read as a call. Without them,
+            # Costco's whole analysis was dropped for one. They are removed and
+            # what is left must pass both checks again, once; a quote that
+            # matches nothing, or a second YES, leaves the fixed statement.
+            quotes = flagged_sentences(verdict)
+            trimmed = reviewed(section, drop=quotes) if quotes else None
+            if (trimmed is None or trimmed.quotes_unmatched
+                    or not trimmed.dropped or not trimmed.publishable):
+                self._log("[SUPERVISOR] ⚠️ The check found a call in the analysis — answering with the fixed statement.")
+                return template
+            second = await self._ask_section_check(provider, trimmed.text)
+            if not re.fullmatch(r"[\W_]*NO[\W_]*", second, re.I):
+                self._audit(f"[SUPERVISOR] second section check verdict: {second[:800]!r}")
+                self._log("[SUPERVISOR] ⚠️ The check still found a call in the analysis — answering with the fixed statement.")
+                return template
+            self._log(f"[SUPERVISOR] ✂️ Left out {len(trimmed.dropped)} sentence(s) the check read as a call; "
+                      "the rest passed it.")
+            review = trimmed
         if review.repeated:
             self._log(f"[SUPERVISOR] ✂️ Left out {len(review.repeated)} sentence(s) that repeated the fixed statement.")
         if self._multi_company():
@@ -1745,6 +1769,23 @@ class GeneralistAgent:
             # rating" statement; it now follows the (checked) analysis.
             return f"{review.text.strip()}\n\n{template}" if review.text.strip() else template
         return compose_with_analysis(template, review.text)
+
+    async def _ask_section_check(self, provider, text: str) -> str:
+        """The model check's reply on one section, seen alone and deterministically."""
+        check = await provider.call_with_tools(
+            [{"role": "user", "content": self._section_check() + text + "\n>>>"}], [], temperature=0.0
+        )
+        self.total_cost += check.cost
+        return (check.text or "").strip()
+
+    def _audit(self, msg: str) -> None:
+        """A line for the run's agents.log only; info.log is streamed to the chat page."""
+        try:
+            from src.logger import StockAnalystLogger, TaskAgentLog
+            if isinstance(self.ctx.logger, StockAnalystLogger):
+                TaskAgentLog(self.ctx.logger).logger.info(msg)
+        except Exception:
+            pass
 
     async def _text_only_turn(self, messages: list, provider, tool_defs=None):
         """

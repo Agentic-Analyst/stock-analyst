@@ -291,10 +291,13 @@ class SupervisorWorkflowRunner:
         method_note = unsuitable_method_note(metrics.get("method_suitability"))
         detail = f" Detail: {reason}"
         if method_note and method_note.rstrip(".") in reason:
-            # Any other cause joined to the method's reason still shows.
-            rest = " ".join(reason.replace(method_note.rstrip("."), "").split()).strip(" .;,")
-            rest = re.sub(r"^(?:no point valuation is published because\s+)", "", rest, flags=re.I)
-            detail = f" Also: {rest}." if len(re.findall(r"[A-Za-z]", rest)) >= 25 else ""
+            # The chat shows the reason's first sentence (the rest stays in
+            # the report), and here that sentence is the method's own reason:
+            # nothing is left to add. A cause that comes first shows under
+            # "Detail:" below. Cutting the method's words out of its sentence
+            # printed "Also: No point valuation is published because."
+            # under Costco (18 Nov check).
+            detail = ""
         # The two newest method rules state their reason plainly in the
         # evidence line; the note after it said the same a third time, and
         # wrongly ("the cash-flow method does not fit this company").

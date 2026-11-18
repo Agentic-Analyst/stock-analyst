@@ -606,3 +606,28 @@ def test_another_cause_joined_to_the_method_reason_still_shows():
     answer = runner._safe_withheld_valuation_answer()
     assert "publication decision is missing or incomplete" in answer
     assert answer.count("outside every analyst") == 1
+
+
+def test_no_cut_sentence_is_left_when_the_reason_is_the_method_alone():
+    # Costco, 18 Nov check: "Also: No point valuation is published because."
+    from types import SimpleNamespace
+    from src.agents.supervisor import supervisor_agent
+    from src.valuation_methodology import OPERATING_LOSS_SCENARIO_REASON, UNCONFIRMED_OUTLIER_REASON
+    for primary, reason in (("scenario_only_pending_corroboration", UNCONFIRMED_OUTLIER_REASON),
+                            ("scenario_only_pending_operating_profit", OPERATING_LOSS_SCENARIO_REASON)):
+        runner = supervisor_agent.SupervisorWorkflowRunner.__new__(
+            supervisor_agent.SupervisorWorkflowRunner)
+        runner.ticker = "COST"
+        metrics = {
+            "perpetual_price": 499.44, "exit_multiple_price": 626.49, "current_price": 1111.69,
+            "point_estimate_withheld": True, "publication_withheld_reason": reason,
+            "method_suitability": {"primary_method": primary, "publication_allowed": False,
+                                   "reason": reason},
+        }
+        runner.state = SimpleNamespace(
+            financial_data=SimpleNamespace(key_metrics={"basic_info": {"currency": "USD"}}, raw_data={}),
+            news_analysis=None,
+            financial_model=SimpleNamespace(assumptions={}, valuation_metrics=metrics))
+        answer = runner._safe_withheld_valuation_answer()
+        assert "Also:" not in answer and "because." not in answer
+        assert "Detail:" not in answer
