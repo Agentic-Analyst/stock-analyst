@@ -494,3 +494,33 @@ def test_bank_metadata_publishes_only_the_appropriate_method_and_inputs():
     assert metadata["valuation_method_inputs"]["justified_price_to_book"] == pytest.approx(
         2.0769230769)
     assert metadata["comps_included_in_blended_value"] is False
+
+
+def _with_nopat(computed, nopat):
+    computed["Projections"] = {
+        "cells": {f"(11, {column})": value for column, value in zip(range(2, 7), nopat)},
+        "metadata": {"total_cells": len(nopat)},
+    }
+    return computed
+
+
+def test_a_model_still_losing_money_in_its_last_year_publishes_no_value():
+    # China Vanke, 17 Nov 2026: operating losses every forecast year, positive
+    # free cash flow only from running down housing inventory, and a terminal
+    # value that capitalised that release forever: STRONG BUY at +588%.
+    metadata = build_publication_metadata(
+        _with_nopat(_computed(perpetual=650.0, exit_value=700.0), [-5.0, -3.9, -3.2, -2.7, -2.3]),
+        _financials(),
+    )
+    assert metadata["point_estimate_withheld"] is True
+    assert metadata["canonical_fair_value"] is None
+    assert metadata["confidence_alert"] is None
+    assert "operating profit is still negative in its final forecast year" in metadata["withheld_reason"]
+
+
+def test_early_losses_that_turn_to_profit_are_not_blocked_by_that_rule():
+    metadata = build_publication_metadata(
+        _with_nopat(_computed(), [-5.0, -1.0, 2.0, 4.0, 6.0]), _financials(),
+    )
+    assert "operating profit is still negative" not in (metadata["withheld_reason"] or "")
+    assert metadata["point_estimate_withheld"] is False
