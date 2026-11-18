@@ -641,17 +641,17 @@ def test_the_writer_sees_the_transcript_only_up_to_the_tool_work():
     source = (Path(__file__).resolve().parents[1] / "src" / "agents" / "generalist_agent.py").read_text()
     mark = source.index("tool_work = len(messages)")
     report = source.index("final_text = await self._ensure_report_if_requested(", mark)
-    step = source.index("self._add_analysis(messages[:tool_work], provider, guarded, tool_defs)", report)
+    step = source.index("self._add_analysis(messages[:tool_work], provider, template, tool_defs)", report)
     assert mark < report < step
 
 
 def test_the_guarded_text_is_committed_before_the_analysis_step():
     from pathlib import Path
     source = (Path(__file__).resolve().parents[1] / "src" / "agents" / "generalist_agent.py").read_text()
-    guard = source.index("guarded = self._guard_final_answer(final_text)")
+    guard = source.index("guarded = self._guard_final_answer(draft)")
     commit = source.index("final_text = guarded", guard)
     condition = source.index("if self._guard_template is not None and guarded == self._guard_template:", guard)
-    step = source.index("final_text = await self._add_analysis(messages[:tool_work], provider, guarded, tool_defs)", guard)
+    step = source.index("self._add_analysis(messages[:tool_work], provider, template, tool_defs)", guard)
     assert guard < commit < condition < step
 
 

@@ -157,6 +157,8 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 
 ## Style
 - Answer the user's ACTUAL question directly and first. Lead with the point.
+- A yes/no or should-I question ("should I buy X?", "is X a good investment at this price?", "is now a good time to get in?") gets a direct first sentence: yes, no, not at this price, or "it depends on <the one thing that decides it>". The evidence comes after. Never open with a disclaimer, a definition, or a list of what you looked up.
+- Work out every derived figure (a percent change, how far a price is above or below a level, a margin, a ratio or multiple) from the numbers the tools returned, and say which year or period each multiple uses. Do not round a figure into a different claim.
 - Ground claims in the data your tools return — cite real numbers (price, fair value, upside %, RSI, sentiment, macro values).
 - Warm, precise, second person.
 - Never fabricate numbers. But "honest about gaps" means one short clause, not a disclaimer-led answer — see the recovery section above.
@@ -442,6 +444,132 @@ _SECTION_CHECK = (
 )
 
 
+# ---- a direct answer to "should I buy X?" ---------------------------------------
+#
+# A blind review of twelve real questions found almost no answer opened with
+# yes or no. Where the guard answers with its fixed statement, the first line
+# is now the rating said as an answer to the question asked; for a model
+# draft the prompt asks for the same. Questions about selling are left alone:
+# "no" to "should I sell?" is not what a SELL rating says.
+_BUY_QUESTION = re.compile(
+    r"\bshould\s+(?:i|we)\s+(?:buy|invest|purchase|get\s+in|add|pick\s+up|own)\b"
+    r"|\b(?:is|are)\b[^?.!\n]{0,60}\ba\s+(?:good|smart|wise)\s+(?:investment|buy|stock|pick)\b"
+    r"|\bgood\s+time\s+to\s+(?:buy|invest|get\s+in)\b|\bworth\s+(?:buying|investing|owning)\b"
+    r"|\bbuy\s+or\s+(?:not|wait)\b"
+    r"|值得买|值不值得买|能买吗|能不能买|可以买吗|可以买入吗|该不该买|要不要买|买吗|值得投资|值得入手"
+    r"|買うべき|買い時|買いですか|買っても|사야\s*(?:할까|하나|돼|하나요|할까요)|매수해도|사도\s*될까",
+    re.I,
+)
+_SELL_QUESTION = re.compile(
+    r"\b(?:sell|trim|exit|dump|take\s+profits?)\b|卖|売る|売り|팔", re.I,
+)
+_SHORT_ANSWER = {
+    "STRONG BUY": "yes", "BUY": "yes", "HOLD": "not at today's price",
+    "SELL": "no", "STRONG SELL": "no",
+}
+
+
+# ---- the numbers check ----------------------------------------------------------
+#
+# The same blind review found the longer, better answers carried more number
+# slips: a wrong "% above the low", an EBITDA margin that did not match its
+# own figures, a forward P/E on the wrong year, a misread insider filing,
+# "forward P/E below trailing means growth falls" (backwards). One more turn
+# on the same transcript (its prefix is cached) checks the answer against the
+# tool results and returns only corrections, applied where they match exactly.
+_NUMBER_CHECK_NOTE = (
+    "[HARNESS NOTE — not from the user. Before the text in your last turn is published, check "
+    "its numbers against the tool results in this conversation. Recompute every figure that is a "
+    "calculation or a comparison: percent changes, how far a price is above or below a level, "
+    "margins, growth rates, ratios and multiples, sums and differences. Check that every figure "
+    "taken from a tool result matches it, that each multiple uses the year or period the text "
+    "says, and that each reading of a number follows from it (a forward P/E below the trailing "
+    "P/E means earnings are expected to grow; a Form 144 is a notice of an intended sale, not a "
+    "sale). Reply with only a JSON array of corrections, each {\"wrong\": \"<exact words from "
+    "the text>\", \"right\": \"<the corrected words>\"}. Copy each wrong part exactly and keep it "
+    "short (a phrase or one sentence); change only what is wrong and add nothing new. Reply [] "
+    "when everything is right. Do not call any tool.]"
+)
+_FIGURE_TOKEN = re.compile(r"\d+(?:[.,]\d+)*")
+# Fewer figures than this, and there is nothing worth a check.
+_MIN_FIGURES_TO_CHECK = 3
+
+
+def parse_corrections(reply: Optional[str]) -> List[Dict[str, str]]:
+    """The checker's JSON array of {"wrong", "right"}; [] for anything else."""
+    text = str(reply or "")
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end <= start:
+        return []
+    try:
+        items = json.loads(text[start:end + 1])
+    except (ValueError, TypeError):
+        return []
+    out = []
+    for item in items if isinstance(items, list) else []:
+        if (isinstance(item, dict) and isinstance(item.get("wrong"), str)
+                and isinstance(item.get("right"), str)):
+            out.append({"wrong": item["wrong"], "right": item["right"]})
+    return out
+
+
+def apply_corrections(text: str, corrections: List[Dict[str, str]]):
+    """Apply each correction whose wrong part occurs exactly once; return (text, applied)."""
+    applied = []
+    for fix in corrections:
+        wrong, right = fix["wrong"], fix["right"]
+        if (not wrong.strip() or wrong == right or len(wrong) > 400 or len(right) > 600
+                or text.count(wrong) != 1):
+            continue
+        text = text.replace(wrong, right)
+        applied.append(fix)
+    return text, applied
+
+
+# ---- one language per answer -----------------------------------------------------
+#
+# A question asked in Chinese, Japanese or Korean got its fixed statement and
+# the analysts' block in English (China Vanke: a Chinese line, then the same
+# line again in English, then the English block). The English paragraphs are
+# translated with one plain call, and a translation is used only when it
+# keeps every figure of the original.
+_TRANSLATE_NOTE = (
+    "Translate each numbered part below into {language}, for an individual investor. Keep every "
+    "number exactly as written, in Arabic digits, and keep tickers, currency signs, dates written "
+    "as digits, the name VYNN and Markdown such as ** and leading - unchanged. {ratings}Keep each "
+    "<<n>> marker on its own line before its part. Output only the translated parts.\n\n"
+)
+_RATING_TOKEN = re.compile(r"\b(?:STRONG BUY|STRONG SELL|BUY|HOLD|SELL)\b")
+
+
+def _figures(text: str) -> "collections.Counter":
+    import collections
+    return collections.Counter(token.replace(",", "") for token in _FIGURE_TOKEN.findall(text or ""))
+
+
+def english_paragraph(paragraph: str) -> bool:
+    """A paragraph written in English (or another Latin-script language), not CJK."""
+    return len(_LETTER.findall(paragraph or "")) >= 20 and _cjk_share(paragraph) < 0.05
+
+
+def translation_keeps_facts(source: str, translated: str, language: str) -> bool:
+    """Every figure of the source is in the translation, and its rating is too."""
+    if not translated.strip() or _cjk_share(translated) < 0.2:
+        return False
+    missing = _figures(source) - _figures(translated)
+    if missing:
+        return False
+    # A translated date may add a month number ("Nov 17" -> "11月17日"), nothing else.
+    extra = _figures(translated) - _figures(source)
+    if any(not (token.isdigit() and 1 <= int(token) <= 12) for token in extra):
+        return False
+    for rating in _RATING_TOKEN.findall(source):
+        local = _ZH_RATINGS.get(rating) if language == "Chinese" else None
+        if rating not in translated and not (local and local in translated):
+            return False
+    return True
+
+
 class GeneralistAgent:
     """Drives the ReAct tool-use loop for one chat turn."""
 
@@ -697,12 +825,26 @@ class GeneralistAgent:
                 # yet still told the user "overall sentiment: bearish" and
                 # omitted the numeric human-analyst benchmark.  Reuse the same
                 # state-based guard after every possible report restatement.
-                guarded = self._guard_final_answer(final_text)
+                draft = final_text
+                guarded = self._guard_final_answer(draft)
                 # Committed before the next step, so nothing after this point
                 # can publish the unguarded draft.
                 final_text = guarded
                 if self._guard_template is not None and guarded == self._guard_template:
-                    final_text = await self._add_analysis(messages[:tool_work], provider, guarded, tool_defs)
+                    template = self._with_short_answer(guarded)
+                    if prompt_language(self.user_prompt):
+                        # The fixed statement is English; translate it while
+                        # the analysis is written, not after.
+                        import asyncio as _asyncio
+                        final_text, _ = await _asyncio.gather(
+                            self._add_analysis(messages[:tool_work], provider, template, tool_defs),
+                            self._translate(provider, [p for p in template.split("\n\n") if english_paragraph(p)]),
+                        )
+                    else:
+                        final_text = await self._add_analysis(messages[:tool_work], provider, template, tool_defs)
+                else:
+                    final_text = await self._checked_draft(messages, provider, draft, guarded, tool_defs)
+                final_text = await self._localize(provider, final_text)
 
         except Exception as e:
             # CRASH GUARD: no exception may skip finalization. The Jul 24 -
@@ -1101,7 +1243,118 @@ class GeneralistAgent:
             self._log(f"[SUPERVISOR] ⚠️ Could not add the analysis: {type(e).__name__} — answering with the fixed statement.")
             answer = template
         local = self._local_statement()
+        # _localize drops it again when the whole fixed statement was translated.
+        self._local_prefix = local
         return f"{local}\n\n{answer}" if local else answer
+
+    def _with_short_answer(self, template: str) -> str:
+        """The fixed statement, opened by its answer to "should I buy X?" when that was asked."""
+        prompt = self.user_prompt or ""
+        if not _BUY_QUESTION.search(prompt) or _SELL_QUESTION.search(prompt):
+            return template
+        kind = str(getattr(self, "_guard_kind", None) or "")
+        if kind.startswith("published:"):
+            answer = _SHORT_ANSWER.get(kind.split(":", 1)[1].strip().upper())
+            if not answer:
+                return template
+            state = self._answer_subject()[0]
+            metrics = getattr(getattr(state, "financial_model", None), "valuation_metrics", {}) or {}
+            from src.confidence_alert import alert_sentence
+            low = bool(alert_sentence(metrics.get("confidence_alert")))
+            line = f"Short answer: {answer}, on VYNN's numbers" + (", but with low confidence." if low else ".")
+        elif kind == "withheld":
+            line = ("Short answer: VYNN gives no buy or sell call here, because its valuation "
+                    "is a range rather than one value.")
+        elif kind.startswith("refused"):
+            line = ("Short answer: VYNN gives no buy or sell call here, because it has no "
+                    "valuation of this company this time.")
+        else:
+            return template
+        return f"**{line}**\n\n{template}"
+
+    async def _check_numbers(self, transcript: list, provider, text: str, tool_defs=None) -> str:
+        """The text with the checker's exact-match corrections applied; the text itself on any doubt."""
+        if not getattr(self, "_tools_used", None) or len(_FIGURE_TOKEN.findall(text or "")) < _MIN_FIGURES_TO_CHECK:
+            return text
+        check = list(transcript)
+        check.append({"role": "assistant", "content": text})
+        check.append({"role": "user", "content": _NUMBER_CHECK_NOTE})
+        try:
+            resp = await self._text_only_turn(check, provider, tool_defs)
+            self.total_cost += resp.cost
+        except Exception as e:
+            self._log(f"[SUPERVISOR] ⚠️ Number check failed: {type(e).__name__} — keeping the text as written.")
+            return text
+        corrections = parse_corrections(resp.text)
+        fixed, applied = apply_corrections(text, corrections)
+        self._log(f"[SUPERVISOR] 🔢 Number check: {len(applied)} correction(s) applied"
+                  f" of {len(corrections)} proposed.")
+        for fix in applied[:5]:
+            self._log(f"[SUPERVISOR]    ↳ {fix['wrong'][:120]!r} -> {fix['right'][:120]!r}")
+        return fixed
+
+    async def _checked_draft(self, messages: list, provider, draft: str, guarded: str, tool_defs=None) -> str:
+        """The guarded answer, built from the draft after its number check.
+
+        The corrected draft goes through the guard again. If the correction
+        made it unpublishable, the original guarded answer stands.
+        """
+        checked = await self._check_numbers(messages, provider, draft, tool_defs)
+        if checked == draft:
+            return guarded
+        reguarded = self._guard_final_answer(checked)
+        if self._guard_template is not None and reguarded == self._guard_template:
+            self._log("[SUPERVISOR] ⚠️ The corrected draft did not pass the guard — keeping the original.")
+            return self._guard_final_answer(draft)
+        return reguarded
+
+    async def _translate(self, provider, paragraphs: List[str]) -> None:
+        """Translate English paragraphs into the question's language; keep only faithful ones."""
+        language = prompt_language(self.user_prompt)
+        cache = self.__dict__.setdefault("_translations", {})
+        todo = [p for p in dict.fromkeys(paragraphs) if p not in cache]
+        if not language or not todo:
+            return
+        if language == "Chinese":
+            ratings = ("Write the ratings STRONG BUY, BUY, HOLD, SELL and STRONG SELL as "
+                       + ", ".join(_ZH_RATINGS.values()) + ". ")
+        else:
+            ratings = "Keep the ratings STRONG BUY, BUY, HOLD, SELL and STRONG SELL in English. "
+        prompt = _TRANSLATE_NOTE.format(language=language, ratings=ratings) + "\n\n".join(
+            f"<<{n}>>\n{p}" for n, p in enumerate(todo, start=1))
+        try:
+            resp = await provider.call_with_tools([{"role": "user", "content": prompt}], [], temperature=0.0)
+            self.total_cost += resp.cost
+        except Exception as e:
+            self._log(f"[SUPERVISOR] ⚠️ Translation failed: {type(e).__name__} — keeping English.")
+            return
+        parts = re.split(r"^\s*<<(\d+)>>\s*$", resp.text or "", flags=re.M)
+        kept = 0
+        for index in range(1, len(parts) - 1, 2):
+            n = int(parts[index])
+            if 1 <= n <= len(todo):
+                source, translated = todo[n - 1], parts[index + 1].strip()
+                if translation_keeps_facts(source, translated, language):
+                    cache[source] = translated
+                    kept += 1
+        self._log(f"[SUPERVISOR] 🌐 Translated {kept} of {len(todo)} English paragraph(s) into {language}.")
+
+    async def _localize(self, provider, text: str) -> str:
+        """For a question asked in Chinese, Japanese or Korean: no English paragraph left."""
+        if not prompt_language(self.user_prompt) or not text:
+            return text
+        paragraphs = text.split("\n\n")
+        english = [p for p in paragraphs if english_paragraph(p)]
+        if not english:
+            return text
+        await self._translate(provider, english)
+        cache = getattr(self, "_translations", {})
+        out = [cache.get(p, p) for p in paragraphs]
+        local = getattr(self, "_local_prefix", "")
+        if local and out and out[0] == local and not any(english_paragraph(p) for p in out):
+            # The Chinese line said what the translated statement now says.
+            out = out[1:]
+        return "\n\n".join(out)
 
     def _section_check(self) -> str:
         """The yes/no check, told what VYNN published when it published a view.
@@ -1192,6 +1445,8 @@ class GeneralistAgent:
         if not section or answer_language_mismatch(self.user_prompt, section):
             self._log("[SUPERVISOR] ⚠️ The analysis was empty or not in the user's language — answering with the fixed statement.")
             return template
+        # Before both checks, so they judge the text that is published.
+        section = await self._check_numbers(retry, provider, section, tool_defs)
 
         review = review_section(
             section,
