@@ -57,6 +57,37 @@ _COUNT_LOCK = threading.Lock()
 from llms.config import get_llm
 from financial_scraper import FinancialScraper
 
+def _is_google_news_link(url: str) -> bool:
+    """A Google News page that stands in for an article (the free news fallback's links).
+
+    Downloading one returns Google's own page (600 KB) rather than the article,
+    so its text was never the article's.
+    """
+    from urllib.parse import urlparse
+    try:
+        return urlparse(str(url or "")).netloc.lower() == "news.google.com"
+    except Exception:
+        return False
+
+
+def _headline_only(url: str, metadata: Dict) -> Optional[Dict]:
+    """The headline and outlet as the article's text, without a download."""
+    title = str((metadata or {}).get("title") or "").strip()
+    if not title:
+        return None
+    outlet = str((metadata or {}).get("source_name") or "").strip()
+    text = f"{title}." + (f" (Reported by {outlet}.)" if outlet else "")
+    return {
+        "url": url,
+        "title": title,
+        "publish_date": str((metadata or {}).get("published_date") or ""),
+        "text": text,
+        "word_count": len(text.split()),
+        "top_image": "",
+        "headline_only": True,
+    }
+
+
 class ArticleScraper:
     """News article scraper for collecting stock-related news articles."""
     
@@ -719,7 +750,11 @@ og_image: "{article_data.get('top_image', '')}"
                 self._log("info", f"🌐 Scraping in progress: {url}")
         workers = max(1, min(ARTICLE_FETCH_WORKERS, len(pending)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            downloaded = list(pool.map(lambda item: self._scrape_article(item[0]), pending))
+            downloaded = list(pool.map(
+                lambda item: (_headline_only(item[0], item[1]) if _is_google_news_link(item[0])
+                              else self._scrape_article(item[0])),
+                pending,
+            ))
 
         for (url, metadata), article_data in zip(pending, downloaded):
             if not article_data:

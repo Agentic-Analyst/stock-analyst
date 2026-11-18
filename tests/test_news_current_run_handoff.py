@@ -353,3 +353,16 @@ def test_a_query_google_finds_nothing_for_is_empty_not_an_outage(monkeypatch):
 
     monkeypatch.setattr(article_scraper_module, "GoogleSearch", DownSearch)
     assert value._serpapi_news_links("Apple news") is None
+
+
+def test_a_google_news_link_is_kept_as_its_headline_not_downloaded(monkeypatch, tmp_path: Path):
+    """Its page is Google's, not the article's: it was downloaded and parsed as the article."""
+    from src.article_scraper import _headline_only, _is_google_news_link
+    assert _is_google_news_link("https://news.google.com/rss/articles/CBMi123?oc=5")
+    assert not _is_google_news_link("https://www.google.com/goto?url=CAES")
+    item = _headline_only("https://news.google.com/rss/articles/x",
+                          {"title": "Vanke posts third-quarter loss", "source_name": "Bloomberg",
+                           "published_date": "2026-11-08"})
+    assert item["text"] == "Vanke posts third-quarter loss. (Reported by Bloomberg.)"
+    assert item["headline_only"] is True and item["publish_date"] == "2026-11-08"
+    assert _headline_only("https://news.google.com/x", {"title": ""}) is None
