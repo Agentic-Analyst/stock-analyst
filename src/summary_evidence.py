@@ -726,7 +726,9 @@ def external_benchmark(financial_data: Dict[str, Any],
         ),
         "target_source_means": source_means,
         "model_return_vs_market": model_gap,
-        "model_fair_value": model_value,
+        # fair_value, read again: ``model_value`` is reused for each forward
+        # year's revenue in the loop above.
+        "model_fair_value": _number(metrics.get("fair_value"), positive=True),
         # The price comparisons below are against the cash-flow method alone.
         "model_cash_flow_value": _number(metrics.get("perpetual_price"), positive=True),
         "benchmark_relationship": benchmark_relationship,

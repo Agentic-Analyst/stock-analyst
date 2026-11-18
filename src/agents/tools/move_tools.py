@@ -109,7 +109,8 @@ def session_open(last_session: str, exchange_tz: Optional[str], now=None) -> boo
     return local.date().isoformat() == last_session and (local.hour, local.minute) < close
 
 
-def versus_market(stock_pct: Any, index_pct: Any, index_name: Optional[str]) -> Optional[str]:
+def versus_market(stock_pct: Any, index_pct: Any, index_name: Optional[str],
+                  session: Optional[str] = None) -> Optional[str]:
     """Today's move against the market's, in words.
 
     Worked out here: an answer called a 1% fall "a bit better than the ASX
@@ -119,11 +120,12 @@ def versus_market(stock_pct: Any, index_pct: Any, index_name: Optional[str]) -> 
         return None
     index = index_name or "the market"
     gap = float(stock_pct) - float(index_pct)
+    when = f"on {session}" if session else "in the latest session"
     stock = f"{'up' if stock_pct >= 0 else 'down'} {abs(stock_pct):.1f}%"
     market = f"{'up' if index_pct >= 0 else 'down'} {abs(index_pct):.1f}%"
     if abs(gap) < 0.05:
-        return f"The stock is {stock} today, in line with {index} ({market})."
-    return (f"The stock is {stock} today against {index} {market}: "
+        return f"The stock was {stock} {when}, in line with {index} ({market})."
+    return (f"The stock was {stock} {when} against {index} {market}: "
             f"{abs(gap):.1f} points {'better' if gap > 0 else 'worse'} than the market.")
 
 
@@ -260,8 +262,10 @@ class ExplainPriceMoveTool(Tool):
             if episode:
                 episode[f"{fund[0]}_same_dates_pct"] = index_change(
                     fund_frame["Close"], episode["start_date"], episode["end_date"])
-        comparison = versus_market(payload.get("day_change_pct"), market_today.get("index_today_pct"),
-                                   index_name)
+        # Not for a coin: it trades every day and its "market" index does not.
+        comparison = None if crypto else versus_market(
+            payload.get("day_change_pct"), market_today.get("index_today_pct"), index_name,
+            session=payload.get("as_of_session"))
         if comparison:
             market_today["stock_vs_index_today"] = comparison
         payload["market_today"] = market_today

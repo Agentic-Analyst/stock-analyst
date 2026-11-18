@@ -99,7 +99,7 @@ def test_the_charts_of_earlier_messages_are_loaded_from_the_chat(tmp_path, monke
 def test_a_lookup_is_reused_for_a_few_minutes_and_an_error_never(tmp_path, monkeypatch):
     monkeypatch.setenv("VYNN_CACHE_DIR", str(tmp_path))
     args = {"ticker": "HSN.AX", "period": "1y"}
-    ok = json.dumps({"status": "ok", "latest": 3.57})
+    ok = json.dumps({"status": "ok", "latest_price": 3.57, "period_stats": {"period_high": 5.9}})
     assert _cached_tool_result("get_prices", args) is None
     _cache_tool_result("get_prices", args, ok)
     assert _cached_tool_result("get_prices", args) == ok
@@ -109,9 +109,10 @@ def test_a_lookup_is_reused_for_a_few_minutes_and_an_error_never(tmp_path, monke
 
 
 def test_only_lookups_that_touch_no_analysis_state_are_reused():
-    # A live quote ages fast; the analysis tools set the run's state and are never reused.
-    assert _tool_cache_seconds("get_prices", {"period": "1d"}) == 60
-    assert _tool_cache_seconds("get_prices", {"period": "1y"}) == 600
+    # Anything with a live price is kept for 90 s at most, whatever its period.
+    assert _tool_cache_seconds("get_prices", {"period": "1d"}) == 90
+    assert _tool_cache_seconds("get_prices", {"period": "1y"}) == 90
+    assert _tool_cache_seconds("explain_price_move", {}) == 90
     for name in ("get_financials", "build_model", "write_report", "read_report", "analyze_news",
                  "show_chart", "compare_tickers"):
         assert _tool_cache_seconds(name, {}) == 0
@@ -171,3 +172,23 @@ def test_a_companys_statements_are_reused_within_fifteen_minutes(tmp_path, monke
     assert second.financial_data.raw_data == first.financial_data.raw_data
     # The second run still saves its own copy for the model builder.
     assert (tmp_path / "run2" / "financials" / "financials_annual_modeling_latest.json").exists()
+
+
+@pytest.mark.parametrize("name,result", [
+    ("resolve_symbol", {"status": "ok", "candidates": [], "note": "No ticker found via search."}),
+    ("get_global_news", {"status": "ok", "headlines": [], "note": "No fresh headlines retrieved; ..."}),
+    ("get_fund", {"status": "ok", "data_status": "partial"}),
+    ("get_prices", {"status": "ok", "latest_price": 3.57,
+                    "note": "Period history temporarily unavailable; quote fields are live."}),
+    ("get_prices", {"status": "ok", "latest_price": None, "period_stats": {"x": 1}}),
+    ("explain_price_move", {"status": "ok", "latest_session_missing": "2026-11-18"}),
+])
+def test_a_failed_lookup_that_says_ok_is_not_kept(tmp_path, monkeypatch, name, result):
+    monkeypatch.setenv("VYNN_CACHE_DIR", str(tmp_path))
+    _cache_tool_result(name, {"q": "x"}, json.dumps(result))
+    assert _cached_tool_result(name, {"q": "x"}) is None
+
+
+def test_band_position_is_none_without_bands():
+    from src.agents.tools.data_tools import band_position
+    assert band_position(3.5, float("nan"), float("nan")) is None

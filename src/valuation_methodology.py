@@ -593,6 +593,14 @@ def withhold_unconfirmed_outlier(suitability: Any, financial_data: Any, model_va
         except Exception:
             expectations = None
     target = (expectations or {}).get("price_target") or {}
+    # Only targets the publication rules already accept as a challenge: in the
+    # model's currency and current. Unconvertible targets are left in their own
+    # currency on purpose, and a stale range says nothing about today.
+    active = ((target.get("source_evidence") or {}).get(str(target.get("source") or "")) or {})
+    if not (target.get("qualified_for_contradiction") or active.get("qualified_for_contradiction")):
+        return suitability
+    if active and active.get("currency_comparable") is False:
+        return suitability
     low, high = positive(target.get("low")), positive(target.get("high"))
     try:
         count = int(target.get("analyst_count") or 0)

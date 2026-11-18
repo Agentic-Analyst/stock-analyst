@@ -170,6 +170,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _states_cash_flow_multiple(answer: str, ratio: float) -> bool:
+    """The plain form of the whole-path reverse DCF, with its own number.
+
+    "Trades at 40 times the cash flow" is not it: the multiple the answer
+    states must be the one the market price implies.
+    """
+    lower = str(answer or "").lower()
+    if "times the cash flow" not in lower:
+        return False
+    tokens = {f"{ratio:.2f}", f"{ratio:.1f}", f"{ratio:.0f}"} if abs(ratio) >= 1 else {f"{ratio:.2f}"}
+    return any(re.search(rf"(?<![\d.]){re.escape(token)}(?![\d])\s*(?:times|×|x)\b", lower)
+               for token in tokens)
+
+
 def _has_human_benchmark(benchmark: Dict[str, object]) -> bool:
     """Analysts' targets, ratings or forecasts, as opposed to market-implied figures only."""
     return bool(
@@ -620,7 +634,7 @@ class SupervisorWorkflowRunner:
                     "material conflict", "materially conflicts",
                     "unresolved calibration", "does not corroborate",
                     # The plain words the answer is asked for.
-                    "disagree sharply", "sharply disagree", "far apart",
+                    "disagree sharply", "sharply disagree",
                 ))):
             return False
         if (isinstance(whole_path, (int, float))
@@ -628,7 +642,7 @@ class SupervisorWorkflowRunner:
                 and math.isfinite(float(whole_path))
                 and "whole-path" not in lower
                 and "whole path" not in lower
-                and "times the cash flow" not in lower):
+                and not _states_cash_flow_multiple(answer, float(whole_path) + 1)):
             return False
         if (isinstance(whole_path, (int, float))
                 and not isinstance(whole_path, bool)

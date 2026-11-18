@@ -501,7 +501,9 @@ def rsi_reading(rsi: Optional[float]) -> Optional[str]:
 
 
 def band_position(last: float, lower: float, upper: float) -> Optional[str]:
-    if upper is None or lower is None or upper <= lower:
+    import math
+    if (upper is None or lower is None or last is None
+            or not all(math.isfinite(float(v)) for v in (last, lower, upper)) or upper <= lower):
         return None
     if last > upper:
         return "above the upper band"
@@ -606,7 +608,8 @@ class GetTechnicalsTool(Tool):
                 "rsi_reading": rsi_reading(rsi),
                 "pct_vs_sma_50": pct_from(last, sma50),
                 "pct_vs_sma_200": pct_from(last, sma200),
-                "bollinger_middle": round((bb_upper + bb_lower) / 2, 2),
+                "bollinger_middle": (round((bb_upper + bb_lower) / 2, 2)
+                                     if band_position(last, bb_lower, bb_upper) else None),
                 "bollinger_position": band_position(last, bb_lower, bb_upper),
                 "sma_50": round(sma50, 2) if sma50 else None,
                 "sma_200": round(sma200, 2) if sma200 else None,

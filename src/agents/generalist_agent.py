@@ -520,6 +520,7 @@ _SECTION_CHECK = (
 _BUY_QUESTION = re.compile(
     r"\bshould\s+(?:i|we)\s+(?:buy|invest|purchase|get\s+in|add|pick\s+up|own)\b"
     r"|\b(?:is|are)\b[^?.!\n]{0,60}\ba\s+(?:good|smart|wise)\s+(?:investment|buy|stock|pick)\b"
+    r"|\b(?:is|are)\b[^?.!\n]{0,60}\ba\s+(?:strong\s+)?buy\b"
     r"|\bgood\s+time\s+to\s+(?:buy|invest|get\s+in)\b|\bworth\s+(?:buying|investing|owning)\b"
     r"|\bbuy\s+or\s+(?:not|wait)\b"
     r"|值得买|值不值得买|能买吗|能不能买|可以买吗|可以买入吗|该不该买|要不要买|买吗|值得投资|值得入手"
@@ -660,24 +661,52 @@ def translation_keeps_facts(source: str, translated: str, language: str) -> bool
 # no reuse. Seconds, by tool (by period for prices: a live quote ages fast).
 _TOOL_CACHE_SECONDS = {
     "resolve_symbol": 24 * 3600,
-    "get_technicals": 600,
     "get_global_news": 600,
     "get_macro": 3600,
-    "explain_price_move": 600,
     "get_fund": 6 * 3600,
-    "get_crypto": 120,
     "get_prediction_markets": 300,
-    "price_option": 300,
+    # Anything carrying a live price or today's change: a follow-up within a
+    # minute or so, never long enough to quote two different current prices.
+    "get_prices": 90,
+    "get_technicals": 90,
+    "explain_price_move": 90,
+    "get_crypto": 90,
+    "price_option": 90,
     "compute_risk_metrics": 1800,
     "optimize_portfolio": 1800,
 }
 
 
 def _tool_cache_seconds(name: str, arguments: Dict[str, Any]) -> int:
-    if name == "get_prices":
-        period = str((arguments or {}).get("period") or "").lower()
-        return 60 if period in ("", "1d", "5d") else 600
     return _TOOL_CACHE_SECONDS.get(name, 0)
+
+
+# A result can say "ok" and still be a failed lookup: no ticker found after a
+# throttled search, no headlines during an outage, partial fund data, no price
+# yet. Kept, it would answer the same failure for hours.
+_INCOMPLETE_NOTE = re.compile(
+    r"no ticker found|no fresh headlines|temporarily unavailable|not available yet|"
+    r"unavailable|could not|failed|partial",
+    re.I,
+)
+
+
+def _complete_result(name: str, result: Dict[str, Any]) -> bool:
+    if str(result.get("status", "ok")) != "ok":
+        return False
+    if _INCOMPLETE_NOTE.search(str(result.get("note") or "")):
+        return False
+    if result.get("data_status") not in (None, "complete"):
+        return False
+    if result.get("latest_session_missing"):
+        return False
+    if name == "resolve_symbol" and not result.get("candidates"):
+        return False
+    if name == "get_global_news" and not result.get("headlines"):
+        return False
+    if name == "get_prices" and (result.get("latest_price") is None or not result.get("period_stats")):
+        return False
+    return True
 
 
 def _tool_cache_name(name: str, arguments: Dict[str, Any]) -> str:
@@ -699,11 +728,12 @@ def _cached_tool_result(name: str, arguments: Dict[str, Any]) -> Optional[str]:
 
 
 def _cache_tool_result(name: str, arguments: Dict[str, Any], result_json: str) -> None:
-    """Keep a successful result only; an error is retried next time."""
+    """Keep a complete result only; an error or a partial lookup is retried next time."""
     if not _tool_cache_seconds(name, arguments) or not isinstance(result_json, str):
         return
     try:
-        if str(json.loads(result_json).get("status", "ok")) != "ok":
+        result = json.loads(result_json)
+        if not isinstance(result, dict) or not _complete_result(name, result):
             return
         from agents.fm.netcache import cache_put
         cache_put(_tool_cache_name(name, arguments), result_json)

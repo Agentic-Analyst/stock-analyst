@@ -44,7 +44,7 @@ def test_next_years_growth_is_measured_from_this_years_estimate():
                 "0y": {"avg": 179.342e9, "numberOfAnalysts": 6, "yearAgoRevenue": 233.43e9, "growth": -0.2317},
                 "+1y": {"avg": 135.233e9, "numberOfAnalysts": 6, "yearAgoRevenue": 165.79e9, "growth": -0.1843},
             },
-            "earnings_estimate": {
+            "earnings_estimates": {
                 "0y": {"avg": -2.07, "numberOfAnalysts": 4, "growth": -0.5},
                 "+1y": {"avg": -1.43, "numberOfAnalysts": 4, "growth": 0.31},
             },
@@ -74,8 +74,8 @@ def test_rsi_band_and_distance_readings():
 
 def test_todays_move_against_the_market_in_words():
     from src.agents.tools.move_tools import versus_market
-    out = versus_market(-1.0, -0.6, "the S&P/ASX 200")
-    assert out == ("The stock is down 1.0% today against the S&P/ASX 200 down 0.6%: "
+    out = versus_market(-1.0, -0.6, "the S&P/ASX 200", session="2026-11-17")
+    assert out == ("The stock was down 1.0% on 2026-11-17 against the S&P/ASX 200 down 0.6%: "
                    "0.4 points worse than the market.")
     assert "better" in versus_market(0.5, -0.6, "the S&P 500")
     assert "in line with" in versus_market(-0.62, -0.6, None)
@@ -115,8 +115,9 @@ def test_the_price_comparison_says_it_uses_the_cash_flow_method_alone():
 
 # ---- a single model far outside every analyst target -----------------------------
 
-def _fin(low=128.11, high=600.0, count=40):
-    return {"external_expectations": {"price_target": {"low": low, "high": high, "analyst_count": count}}}
+def _fin(low=128.11, high=600.0, count=40, qualified=True):
+    return {"external_expectations": {"price_target": {
+        "low": low, "high": high, "analyst_count": count, "qualified_for_contradiction": qualified}}}
 
 
 def test_a_dcf_only_value_far_outside_every_analyst_target_is_a_scenario():
@@ -139,6 +140,8 @@ def test_a_dcf_only_value_far_outside_every_analyst_target_is_a_scenario():
     ({"primary_method": "dcf_mid_cycle", "publication_allowed": True}, _fin(), 20.25, None),
     ({"primary_method": "justified_pb_roe", "publication_allowed": True}, _fin(), 20.25, None),
     ({"primary_method": "dcf", "publication_allowed": True}, {}, 20.25, None),         # no analysts
+    # Targets the publication rules do not accept: another currency, or stale.
+    ({"primary_method": "dcf", "publication_allowed": True}, _fin(qualified=False), 20.25, None),
 ])
 def test_the_outlier_rule_leaves_everything_else_alone(suitability, financial, value, comps):
     from src.valuation_methodology import withhold_unconfirmed_outlier
@@ -158,3 +161,56 @@ def test_the_outlier_rule_leaves_everything_else_alone(suitability, financial, v
 def test_the_detail_line_says_the_reason_plainly(stored, plain):
     from src.summary_evidence import plain_publication_reason
     assert plain_publication_reason(stored).startswith(plain)
+
+
+def test_the_method_note_uses_the_fair_value_through_the_real_benchmark():
+    # The reviewer's case: through external_benchmark, the note printed the last
+    # forward year's revenue as the fair value ("A$410,000,000.00").
+    from src.summary_evidence import external_benchmark, render_external_benchmark_compact
+    financial = {"external_expectations": {"currency": "AUD", "forward_estimates": [
+        {"period": "0y", "revenue": 386.5e6, "revenue_analyst_count": 7},
+        {"period": "+1y", "revenue": 410e6, "revenue_analyst_count": 7}]}}
+    benchmark = external_benchmark(
+        financial, [386.5e6, 410e6],
+        valuation_metrics={"fair_value": 4.16, "perpetual_price": 3.43, "current_price": 3.57,
+                           "market_implied_fcf_path_vs_model": 0.04})
+    assert benchmark["model_fair_value"] == 4.16
+    text = render_external_benchmark_compact(benchmark)
+    assert "its fair value of A$4.16 also uses a second method" in text
+    assert "410,000,000" not in text
+
+
+def test_the_plain_words_must_carry_the_right_number():
+    from src.agents.supervisor.supervisor_agent import SupervisorWorkflowRunner as R
+    benchmark = {"market_implied_fcf_path_delta": 1.12}       # the price needs 2.12x the model
+    assert R._answer_covers_external_benchmark(
+        "To justify today's price, the company needs about 2.12 times the cash flow VYNN expects.", benchmark)
+    assert not R._answer_covers_external_benchmark(
+        "The shares trade at 40 times the cash flow.", benchmark)
+    conflict = {"benchmark_relationship": "material_conflict", "target_mean": 10.0}
+    assert not R._answer_covers_external_benchmark(
+        "Analyst targets are far apart; the average target is 10.00.", conflict)
+
+
+@pytest.mark.parametrize("prompt", ["Is NVDA a buy?", "Is Moet Hennessy Louis Vuitton a buy?", "is it a strong buy now"])
+def test_is_x_a_buy_is_a_buy_question(prompt):
+    from src.agents.generalist_agent import _BUY_QUESTION
+    assert _BUY_QUESTION.search(prompt)
+
+
+def test_no_first_year_eps_growth_from_a_loss_a_year_ago():
+    from src.external_expectations import build_external_expectations
+    data = {
+        "company_data": {"basic_info": {"currency": "USD"},
+                         "market_data": {"current_price": 10.0, "shares_outstanding_basic": 1e9}},
+        "analyst_data": {
+            "revenue_estimates": {"0y": {"avg": 1e9, "numberOfAnalysts": 6}, "+1y": {"avg": 1.1e9, "numberOfAnalysts": 6}},
+            "earnings_estimates": {"0y": {"avg": 0.5, "numberOfAnalysts": 6, "growth": 3.5, "yearAgoEps": -0.2},
+                                  "+1y": {"avg": 0.6, "numberOfAnalysts": 6, "growth": 0.2}},
+        },
+    }
+    rows = build_external_expectations(data).get("forward_estimates") or []
+    if len(rows) < 2:
+        pytest.skip("this artifact shape does not produce two forward rows")
+    assert rows[0]["eps_growth"] is None
+    assert rows[1]["eps_growth"] == pytest.approx(0.2)

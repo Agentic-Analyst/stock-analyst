@@ -116,12 +116,21 @@ def _recent_financials(ticker: str):
 
 
 def _remember_financials(ticker: str, json_path) -> None:
-    """Keep the saved file's contents, exactly as the model builder reads them."""
+    """Keep the saved file's contents, exactly as the model builder reads them.
+
+    Only a complete download: statements for three or more years and a price.
+    A partial one is downloaded again next time.
+    """
     try:
         import json
         from src.agents.fm.netcache import cache_put
         with open(json_path, "r", encoding="utf-8") as fh:
-            cache_put(_financials_cache_name(ticker), json.load(fh))
+            data = json.load(fh)
+        completeness = (data.get("data_summary") or {}).get("data_completeness") or {}
+        market = (data.get("company_data") or {}).get("market_data") or {}
+        if int(completeness.get("income_statement_periods") or 0) < 3 or not market.get("current_price"):
+            return
+        cache_put(_financials_cache_name(ticker), data)
     except Exception:
         return
 

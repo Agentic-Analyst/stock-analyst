@@ -588,6 +588,8 @@ def _estimate(rows: Any, period: str, *, positive_values: bool) -> Dict[str, Any
         "low": _number(row.get("low"), positive=positive_values),
         "high": _number(row.get("high"), positive=positive_values),
         "growth": _number(row.get("growth")),
+        # The provider's base for that growth rate.
+        "year_ago": _number(row.get("yearAgoEps") if "yearAgoEps" in row else row.get("yearAgoRevenue")),
         "analyst_count": _count(row.get("numberOfAnalysts")),
         # A year the company has reported, realigned into the table
         # (src/estimate_alignment.py): not a forecast.
@@ -885,6 +887,8 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
         eps_growth = eps_row["growth"]
         if isinstance(eps_row["average"], (int, float)) and eps_row["average"] <= 0:
             eps_growth = None
+        if isinstance(raw_eps[index].get("year_ago"), (int, float)) and raw_eps[index]["year_ago"] <= 0:
+            eps_growth = None    # from a loss a year ago
         previous_eps = years[-1]["eps"] if years else None
         if index > 0 and isinstance(previous_eps, (int, float)) and isinstance(eps_row["average"], (int, float)):
             eps_growth = (eps_row["average"] / previous_eps - 1.0
