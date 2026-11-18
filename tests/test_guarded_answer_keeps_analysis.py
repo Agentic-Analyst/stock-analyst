@@ -273,7 +273,7 @@ NEAR_MISS_CLAIMS = [
     "PT $200.", "Our PT of $200.", "Price target $200.", "target price 200",
     "My DCF puts the shares at $180.", "The model's midpoint implies $167.67.", "Our model gives a value of $180.",
     "The valuation implies $180 per share.",
-    "目标价200美元", "合理估值约为180美元", "公允价值约为180美元", "维持买入评级", "评级：买入", "目前被低估",
+    "目标价200美元", "合理估值约为180美元", "公允价值约为180美元", "维持买入评级", "评级：买入", "目前被低估", "给予增持评级", "评级为中性",
 ]
 IDIOMS = [
     "The main downside is China exposure, which is about 17% of revenue.",
@@ -306,6 +306,10 @@ IDIOMS = [
     "Tesla's direct-sales model gives it about $2,000 per car of margin advantage.",
     "净利润同比增长16%，主要受所持股权投资公允价值变动收益影响。",
     "穆迪维持阿里巴巴A1信用评级，展望稳定。",
+    # A credit-rating story is not a stock rating (China Vanke, 17 Nov 2026).
+    "**行业**:彭博 11 月 8 日有一篇关于\"高评级企业突发信用困境、考验中国评级整治\"的报道。",
+    "惠誉将万科主体评级下调至CCC。",
+    "彭博社另有报道，一家信用评级较高的企业出现突发财务困境，引发市场对中国评级监管力度的关注，但该报道并未直接点名万科。",
 ]
 
 

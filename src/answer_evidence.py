@@ -165,6 +165,14 @@ _SHARE_WORD = re.compile(r"\b(?:stock|shares?|share\s+price|valued?|worth|target
 _UNIT_AFTER = re.compile(
     r"^\s*(?:/\s*|a\s+|an\s+|per\s+)(?:bbl|barrel|boe|mmbtu|mcf|ton|tonne|oz|ounce|mwh|kwh|gallon)", re.I
 )
+# A Chinese stock rating: 评级 next to a rating word. 评级 alone is usually a
+# credit rating -- "高评级企业突发信用困境" (highly rated firms in sudden credit
+# trouble, a Bloomberg story) sank China Vanke's whole analysis section.
+_ZH_RATING_TERM = r"(?:强烈买入|买入|卖出|持有|增持|减持|强烈卖出|中性|推荐|跑赢大市|跑输大市|优于大市|弱于大市|買入|賣出)"
+_ZH_RATING_CLAIM = (
+    rf"(?<!信用)(?:评级|評級)[^。！？\n]{{0,6}}?{_ZH_RATING_TERM}"
+    rf"|{_ZH_RATING_TERM}[^。！？\n]{{0,4}}?(?:评级|評級)|"
+)
 # Explicit rating and valuation terms in the other languages answers come back
 # in; not 信用评级 (a credit rating) or 公允价值变动 (fair-value accounting).
 _OTHER_LANGUAGE_CLAIM = re.compile(
@@ -175,7 +183,8 @@ _OTHER_LANGUAGE_CLAIM = re.compile(
     r"上涨空间|上行空间|下跌空间|下行空间)[^。！？，,；;\n]{0,20}?\d"
     r"|\d[^。！？，,；;\n]{0,12}?(?:目标价|目標價|目标股价|目標株価|公允价值(?!变动|计量|变化)|合理价值|"
     r"合理估值|内在价值|適正価格)|"
-    r"(?<!信用)评级|評級|低估|高估|割安|割高|"
+    + _ZH_RATING_CLAIM +
+    r"低估|高估|割安|割高|"
     r"\b(?:precio\s+objetivo|objetivo\s+de\s+precio|pre[cç]o[-\s]alvo|prix\s+cible|kursziel|"
     r"valor\s+(?:justo|razonable|intr[ií]nseco)|juste\s+valeur|fairer\s+wert|"
     r"infravalorad\w*|sobrevalorad\w*|subvalorizad\w*|sous-[ée]valu\w*|sur[ée]valu\w*|"
@@ -184,15 +193,9 @@ _OTHER_LANGUAGE_CLAIM = re.compile(
     re.I,
 )
 _ZH_RATING_WORDS = {"STRONG BUY": "强烈买入", "BUY": "买入", "HOLD": "持有", "SELL": "卖出", "STRONG SELL": "强烈卖出"}
-_PUBLISHED_OTHER_LANGUAGE_CLAIM = re.compile(
-    _OTHER_LANGUAGE_CLAIM.pattern.replace(
-        r"(?<!信用)评级|評級|",
-        r"(?<!信用)(?:评级|評級)[^。！？\n]{0,6}?(?:强烈买入|买入|卖出|持有|增持|减持|强烈卖出)"
-        r"|(?:强烈买入|买入|卖出|持有|增持|减持|强烈卖出)[^。！？\n]{0,4}?(?:评级|評級)|",
-    ),
-    re.I,
-)
-assert _PUBLISHED_OTHER_LANGUAGE_CLAIM.pattern != _OTHER_LANGUAGE_CLAIM.pattern
+# With a published view the same terms apply: its own rating word is masked
+# before the check, so only a different rating still reads as a claim.
+_PUBLISHED_OTHER_LANGUAGE_CLAIM = _OTHER_LANGUAGE_CLAIM
 
 _ANY_RATING_PHRASE = re.compile(
     r"(?<![-\w])(?:strong[-\s]+(?:buy|sell)|buy|hold|sell|accumulate|outperform|underperform|"
