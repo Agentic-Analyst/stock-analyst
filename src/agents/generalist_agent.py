@@ -1170,27 +1170,27 @@ class GeneralistAgent:
                     continue
             cleaned.append(line)
         body = "\n".join(cleaned).strip()
+        # Plain words, after the answer: Solana's answer opened with "Point-in-
+        # time network, protocol, volume, and fee observations are descriptive;
+        # without a supplied comparison or execution study, ...".
         scopes = []
         if removed_valuation:
             scopes.append(
-                "This crypto snapshot has no defensible generic intrinsic-value "
-                "estimate, so it does not assign a cheap/expensive or "
-                "undervalued/overvalued label."
+                "A coin has no earnings or cash flows to value, so VYNN does not "
+                "call it cheap or expensive."
             )
         if removed_snapshot_label:
             scopes.append(
-                "Point-in-time network, protocol, volume, and fee observations are "
-                "descriptive; without a supplied comparison or execution study, "
-                "they do not establish network health, direction, or liquidity quality."
+                "The network, fee and volume figures are a snapshot: without a "
+                "comparison they do not show whether activity is healthy or rising."
             )
         if _CRYPTO_RATING_LANGUAGE.search(body):
             scopes.append(
-                "Any buy/hold/sell language below is a risk-and-momentum stance "
-                "conditioned on the investor's horizon and tolerance, not an "
-                "intrinsic-value rating."
+                "Any buy, hold or sell view here rests on the price trend, risk and "
+                "your time horizon, not on a valuation."
             )
         scope = " ".join(scopes)
-        return f"{scope}\n\n{body}" if body else scope
+        return f"{body}\n\n_{scope}_" if body else scope
 
     async def _execute_tool(self, name: str, arguments: Dict[str, Any]) -> str:
         """

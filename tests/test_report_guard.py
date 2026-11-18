@@ -308,7 +308,7 @@ def test_crypto_answer_guard_removes_unsupported_valuation_labels_only():
 
     guarded = ag._guard_specialized_answer(answer)
 
-    assert guarded.startswith("This crypto snapshot has no defensible")
+    assert guarded.rstrip().endswith("_") and "does not call it cheap or expensive" in guarded
     assert "Bitcoin looks constructive" not in guarded
     assert "call it a bargain" not in guarded
     assert "Price: $77,250" in guarded
@@ -338,8 +338,8 @@ def test_crypto_answer_guard_blocks_valuation_synonyms_and_snapshot_health_label
 
     guarded = ag._guard_specialized_answer(answer)
 
-    assert guarded.startswith("This crypto snapshot has no defensible")
-    assert "Point-in-time network" in guarded
+    assert guarded.rstrip().endswith("_") and "does not call it cheap or expensive" in guarded
+    assert "are a snapshot" in guarded
     assert "### Network health" in guarded
     assert "Block height: 966,761" in guarded
     assert "One-year volatility: 44.4%" in guarded
@@ -365,7 +365,7 @@ def test_crypto_snapshot_guard_uses_heading_context_and_removes_empty_subheading
         "- One-year max drawdown: -53%."
     )
     guarded = ag._guard_specialized_answer(answer)
-    assert "Point-in-time network" in guarded
+    assert "are a snapshot" in guarded
     assert "Network interpretation" not in guarded
     assert "Healthy" not in guarded
     assert "overheated" not in guarded
@@ -391,7 +391,7 @@ def test_crypto_snapshot_guard_removes_quality_labels_repeated_in_conclusion():
     assert "network is functioning well" not in guarded
     assert "Liquidity is excellent" not in guarded
     assert "**Hold** is my base-case conclusion" in guarded
-    assert "risk-and-momentum stance" in guarded
+    assert "not on a valuation" in guarded
     assert "One-year volatility is 44%" in guarded
 
 
