@@ -256,3 +256,45 @@ def test_a_failed_translation_keeps_the_answer():
     answer = ENGLISH_ZH + "\n\n" + BLOCK
     out = asyncio.run(ag._localize(_Provider(RuntimeError("down")), answer))
     assert out == answer
+
+
+# ---- European languages ----------------------------------------------------------
+
+@pytest.mark.parametrize("prompt,language", [
+    ("Is het slim om nu in te stappen in Applovin?", "Dutch"),
+    ("Target ASTS, wat wordt het wellicht waard?", "Dutch"),
+    ("Wat zijn de verwachtingen voor komend jaar?", "Dutch"),
+    ("Nederlands graag, ik wil alles over ASTS weten.", "Dutch"),
+    ("Soll ich die Aktie von Tesla jetzt kaufen?", "German"),
+    ("Est-ce que je dois acheter l'action LVMH?", "French"),
+    ("¿Debo comprar acciones de Tesla hoy?", "Spanish"),
+    ("Conviene comprare azioni Ferrari oggi?", "Italian"),
+])
+def test_a_european_question_is_recognised(prompt, language):
+    from src.agents.generalist_agent import answer_language, latin_language
+    assert latin_language(prompt) == language
+    assert answer_language(prompt) == language
+
+
+@pytest.mark.parametrize("prompt", [
+    "should i buy tesla today?", "what is the price of ASML today", "analyze this company",
+    "any stocks you would recommend today?", "SNDK", "netease", "how would falling rates affect banks",
+    "is the die-hard bull case for NVDA still valid?", "分析万科股票",
+])
+def test_english_and_cjk_questions_are_not_taken_for_european(prompt):
+    from src.agents.generalist_agent import latin_language
+    assert latin_language(prompt) == ""
+
+
+def test_the_fixed_text_of_a_dutch_answer_is_translated():
+    ag = _chat_agent("Is het slim om nu in te stappen in Applovin?", None, "APP")
+    english = "**Short answer: no, on VYNN's numbers, but with low confidence.**"
+    dutch_block = "Analisten: gemiddeld koersdoel $412,48 van 40 analisten."
+    answer = "\n\n".join([english, "De koers van AppLovin is dit jaar sterk gestegen en het aandeel is volatiel.",
+                          dutch_block])
+    provider = _Provider("<<1>>\n**Kort antwoord: nee, volgens de cijfers van VYNN, maar met weinig vertrouwen.**")
+    out = asyncio.run(ag._localize(provider, answer))
+    assert out.startswith("**Kort antwoord: nee")
+    # Only the English paragraph was sent; the Dutch ones were left alone.
+    sent = provider.calls[0]["messages"][0]["content"]
+    assert "Short answer" in sent and "De koers" not in sent and "Dutch" in sent

@@ -349,6 +349,68 @@ def prompt_language(prompt: Optional[str]) -> str:
     return _cjk_language(text)
 
 
+# European languages, for the fixed text only: real users asked in Dutch ("Is
+# het slim om nu in te stappen in Applovin?"), German, Italian and Spanish and
+# got the fixed statement in English. Told apart by common words; a language
+# counts only with two of its words, at least one its own, and more of them
+# than English words. Anything less certain stays English.
+_LATIN_WORDS = {
+    "Dutch": {"het", "een", "wat", "zijn", "niet", "ik", "wil", "weten", "om", "nu", "te", "voor",
+              "komend", "jaar", "aandeel", "aandelen", "kopen", "graag", "wordt", "waard", "hoe",
+              "waarom", "moet", "mijn", "dit", "dat", "er", "ook", "maar", "nog", "heb", "koers",
+              "slim", "verwachtingen", "beleggen", "verkopen", "goed", "is", "de", "en", "van", "op"},
+    "German": {"ist", "und", "der", "die", "das", "ich", "nicht", "wie", "was", "soll", "sollte",
+               "kaufen", "aktie", "aktien", "ein", "eine", "mit", "für", "auf", "zu", "von", "den",
+               "dem", "bitte", "warum", "jetzt", "noch", "auch", "kurs", "lohnt", "sich", "wird",
+               "sind", "mein", "meine", "gut", "heute", "verkaufen", "es"},
+    "French": {"est", "le", "la", "les", "des", "une", "un", "et", "pour", "que", "qui", "acheter",
+               "action", "actions", "je", "ce", "cette", "pas", "sur", "dans", "avec", "pourquoi",
+               "combien", "vaut", "faut", "il", "bonne", "vendre", "aujourd'hui"},
+    "Spanish": {"el", "la", "los", "las", "es", "una", "un", "y", "para", "que", "comprar", "acción",
+                "acciones", "por", "qué", "cómo", "vale", "debo", "con", "del", "se", "mi", "hoy",
+                "esta", "este", "vender", "conviene"},
+    "Italian": {"il", "lo", "la", "gli", "le", "è", "una", "un", "e", "per", "che", "comprare",
+                "azione", "azioni", "perché", "come", "vale", "devo", "con", "del", "di", "oggi",
+                "questa", "questo", "conviene", "vendere", "capire", "diventa"},
+    "Portuguese": {"o", "a", "os", "as", "é", "uma", "um", "e", "para", "que", "comprar", "ação",
+                   "ações", "por", "como", "vale", "devo", "com", "do", "da", "hoje", "esta", "este",
+                   "vender", "não"},
+}
+_ENGLISH_WORDS = {"the", "is", "a", "an", "and", "of", "to", "in", "for", "what", "how", "why",
+                  "should", "i", "it", "this", "that", "stock", "buy", "are", "on", "with", "me",
+                  "my", "today", "about", "its", "be", "do", "does", "will", "from", "than", "at",
+                  "by", "price", "target", "analysts", "average", "not", "has", "was", "which"}
+_WORD = re.compile(r"[a-zà-öø-ÿ']+")
+
+
+def _word_hits(text: str) -> Dict[str, Any]:
+    words = _WORD.findall((text or "").lower())
+    english = sum(1 for w in words if w in _ENGLISH_WORDS)
+    scores = {}
+    for language, vocabulary in _LATIN_WORDS.items():
+        others = set().union(*(v for k, v in _LATIN_WORDS.items() if k != language)) | _ENGLISH_WORDS
+        hits = sum(1 for w in words if w in vocabulary)
+        own = sum(1 for w in words if w in vocabulary and w not in others)
+        scores[language] = (own, hits)
+    return {"english": english, "scores": scores}
+
+
+def latin_language(text: Optional[str]) -> str:
+    """"Dutch", "German", "French", "Spanish", "Italian" or "Portuguese", or "" when unsure."""
+    if _cjk_share(text) >= _CJK_LANGUAGE_SHARE:
+        return ""
+    found = _word_hits(text or "")
+    language, (own, hits) = max(found["scores"].items(), key=lambda item: item[1])
+    if own >= 1 and hits >= 2 and hits > found["english"]:
+        return language
+    return ""
+
+
+def answer_language(prompt: Optional[str]) -> str:
+    """The language a fixed statement is put into: CJK by script, else European by words."""
+    return prompt_language(prompt) or latin_language(prompt)
+
+
 def report_language(prompt: Optional[str]) -> str:
     """The language write_report should write in, or "" for the default.
 
@@ -550,14 +612,28 @@ def _figures(text: str) -> "collections.Counter":
     return collections.Counter(token.replace(",", "") for token in _FIGURE_TOKEN.findall(text or ""))
 
 
-def english_paragraph(paragraph: str) -> bool:
-    """A paragraph written in English (or another Latin-script language), not CJK."""
-    return len(_LETTER.findall(paragraph or "")) >= 20 and _cjk_share(paragraph) < 0.05
+def english_paragraph(paragraph: str, language: str = "") -> bool:
+    """A paragraph written in English, for an answer that should be in ``language``.
+
+    For Chinese, Japanese or Korean the script decides; for a European
+    language, English words must outnumber that language's.
+    """
+    if len(_LETTER.findall(paragraph or "")) < 20:
+        return False
+    if language in _LATIN_WORDS:
+        found = _word_hits(paragraph)
+        return found["english"] >= 2 and found["english"] > found["scores"][language][1]
+    return _cjk_share(paragraph) < 0.05
 
 
 def translation_keeps_facts(source: str, translated: str, language: str) -> bool:
     """Every figure of the source is in the translation, and its rating is too."""
-    if not translated.strip() or _cjk_share(translated) < 0.2:
+    if not translated.strip():
+        return False
+    if language in _LATIN_WORDS:
+        if translated.strip() == source.strip() or english_paragraph(translated, language):
+            return False
+    elif _cjk_share(translated) < 0.2:
         return False
     missing = _figures(source) - _figures(translated)
     if missing:
@@ -896,13 +972,15 @@ class GeneralistAgent:
                 final_text = guarded
                 if self._guard_template is not None and guarded == self._guard_template:
                     template = self._with_short_answer(guarded)
-                    if prompt_language(self.user_prompt):
+                    language = answer_language(self.user_prompt)
+                    if language:
                         # The fixed statement is English; translate it while
                         # the analysis is written, not after.
                         import asyncio as _asyncio
                         final_text, _ = await _asyncio.gather(
                             self._add_analysis(messages[:tool_work], provider, template, tool_defs),
-                            self._translate(provider, [p for p in template.split("\n\n") if english_paragraph(p)]),
+                            self._translate(provider, [p for p in template.split("\n\n")
+                                                       if english_paragraph(p, language)]),
                         )
                     else:
                         final_text = await self._add_analysis(messages[:tool_work], provider, template, tool_defs)
@@ -1399,7 +1477,7 @@ class GeneralistAgent:
 
     async def _translate(self, provider, paragraphs: List[str]) -> None:
         """Translate English paragraphs into the question's language; keep only faithful ones."""
-        language = prompt_language(self.user_prompt)
+        language = answer_language(self.user_prompt)
         cache = self.__dict__.setdefault("_translations", {})
         todo = [p for p in dict.fromkeys(paragraphs) if p not in cache]
         if not language or not todo:
@@ -1430,17 +1508,18 @@ class GeneralistAgent:
 
     async def _localize(self, provider, text: str) -> str:
         """For a question asked in Chinese, Japanese or Korean: no English paragraph left."""
-        if not prompt_language(self.user_prompt) or not text:
+        language = answer_language(self.user_prompt)
+        if not language or not text:
             return text
         paragraphs = text.split("\n\n")
-        english = [p for p in paragraphs if english_paragraph(p)]
+        english = [p for p in paragraphs if english_paragraph(p, language)]
         if not english:
             return text
         await self._translate(provider, english)
         cache = getattr(self, "_translations", {})
         out = [cache.get(p, p) for p in paragraphs]
         local = getattr(self, "_local_prefix", "")
-        if local and out and out[0] == local and not any(english_paragraph(p) for p in out):
+        if local and out and out[0] == local and not any(english_paragraph(p, language) for p in out):
             # The Chinese line said what the translated statement now says.
             out = out[1:]
         return "\n\n".join(out)
@@ -1524,7 +1603,7 @@ class GeneralistAgent:
         retry.append({"role": "assistant", "content": "I have the tool results above."})
         # Named, not "the user's language": asked in Chinese, the section came
         # back in the language of this English note, and was refused.
-        language = prompt_language(self.user_prompt) or (
+        language = answer_language(self.user_prompt) or (
             "the language the user's message is written in (English for an English message)"
         )
         retry.append({"role": "user", "content": _ANALYSIS_ONLY_NOTE.format(language=language) + template})
