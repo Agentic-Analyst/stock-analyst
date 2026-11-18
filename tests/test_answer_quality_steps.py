@@ -298,3 +298,11 @@ def test_the_fixed_text_of_a_dutch_answer_is_translated():
     # Only the English paragraph was sent; the Dutch ones were left alone.
     sent = provider.calls[0]["messages"][0]["content"]
     assert "Short answer" in sent and "De koers" not in sent and "Dutch" in sent
+
+
+def test_a_dutch_closing_question_is_not_taken_for_english():
+    from src.agents.generalist_agent import english_paragraph
+    dutch = ("Zal ik de bull/base/bear-scenario's uitwerken of AppLovin naast peers zoals Unity of "
+             "AppLovin's concurrenten in ad-tech zetten?")
+    assert not english_paragraph(dutch, "Dutch")
+    assert english_paragraph("**Short answer: no, on VYNN's numbers, but with low confidence.**", "Dutch")
