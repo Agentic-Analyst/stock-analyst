@@ -690,6 +690,39 @@ class FinancialScraper:
             self.failed_statements += 1
             return {}
     
+    @staticmethod
+    def normalize_operating_cash_flow(statement: Dict[str, Any]) -> Dict[str, Any]:
+        """Fill ``Operating Cash Flow`` from the provider's other names for it.
+
+        Yahoo files the same total under different names by presentation.
+        Australian and New Zealand issuers report operating cash flow by the
+        direct method (receipts from customers less payments to suppliers),
+        which arrives only as "Cash Flowsfromusedin Operating Activities
+        Direct". Every consumer reads "Operating Cash Flow", and the Historical
+        tab requires it in a year before that year counts as complete, so for
+        Hansen Technologies (HSN.AX) no year qualified, the tab came out empty,
+        every projection divided by zero revenue and the model failed closed.
+        The direct total is the same quantity: Hansen's FY2026 A$110.4M less
+        A$15.1M of capital expenditure equals the A$95.3M free cash flow Yahoo
+        reports. An existing value is never overwritten.
+        """
+        aliases = (
+            "Cash Flow From Continuing Operating Activities",
+            "Cash Flowsfromusedin Operating Activities Direct",
+        )
+        for row in (statement or {}).values():
+            if not isinstance(row, dict):
+                continue
+            current = row.get("Operating Cash Flow")
+            if isinstance(current, (int, float)) and not isinstance(current, bool) and math.isfinite(current):
+                continue
+            for alias in aliases:
+                value = row.get(alias)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                    row["Operating Cash Flow"] = float(value)
+                    break
+        return statement
+
     def scrape_cash_flow(self, annual: bool = True) -> Dict[str, Any]:
         """
         Scrape cash flow statement data.
@@ -708,7 +741,7 @@ class FinancialScraper:
             else:
                 cash_flow = self.yf_ticker.quarterly_cashflow
             
-            cleaned_data = self._clean_financial_data(cash_flow)
+            cleaned_data = self.normalize_operating_cash_flow(self._clean_financial_data(cash_flow))
             
             if cleaned_data:
                 self.scraped_statements += 1
@@ -743,6 +776,8 @@ class FinancialScraper:
                 result[name] = self._clean_financial_data(
                     getattr(self.yf_ticker, attribute)
                 )
+                if name == "cash_flow":
+                    self.normalize_operating_cash_flow(result[name])
             except Exception as error:
                 self._log(
                     "warning",
