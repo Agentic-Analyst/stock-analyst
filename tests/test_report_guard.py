@@ -541,7 +541,7 @@ def test_published_report_guard_corrects_conflicting_headline_claims():
 
     assert "VYNN's report rates PG HOLD" in guarded
     assert "model fair value of $134.75 USD" in guarded
-    assert "12-month price target USD 142.00" in guarded
+    assert "12-month price target of USD 142.00" in guarded
     assert "167.67" not in guarded
     assert "190" not in guarded
 
