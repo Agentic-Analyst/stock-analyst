@@ -200,7 +200,9 @@ async def _call_anthropic_async(
     client = _anthropic_client_for(model_id)
     response = await client.messages.create(**kwargs)
     cost = _anthropic_cost(response, model_id)
-    return response.content[0].text, cost
+    # Claude 5.5 may open with a thinking block; the answer is the text blocks.
+    text = "".join(getattr(b, "text", "") for b in response.content if getattr(b, "type", "") == "text")
+    return text, cost
 
 
 async def _call_openai_async(

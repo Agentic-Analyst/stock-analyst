@@ -54,3 +54,22 @@ def test_models_are_registered_and_take_the_anthropic_tool_path():
     for name in bedrock.PROFILES:
         assert LLMProvider.MODELS[name]["api_key"] == "AWS_BEARER_TOKEN_BEDROCK"
         assert AsyncLLMProvider(name).is_openai is False
+
+
+def test_plain_call_skips_a_leading_thinking_block(monkeypatch):
+    """Vanke, 17 Nov 2026: 'ThinkingBlock' object has no attribute 'text' failed the report."""
+    import asyncio
+    from llms import async_client
+    payload = {**PAYLOAD, "content": [{"type": "thinking", "thinking": "Let me check.", "signature": "sig"},
+                                      {"type": "text", "text": "Vanke is loss-making."}], "stop_reason": "end_turn"}
+
+    class Fake:
+        class messages:
+            @staticmethod
+            async def create(**kwargs):
+                return bedrock._message(200, payload, "")
+
+    monkeypatch.setattr(async_client, "_anthropic_client_for", lambda model_id: Fake)
+    text, spent = asyncio.run(async_client._call_anthropic_async(
+        "claude-haiku-5-5-bedrock", [{"role": "user", "content": "分析万科股票"}], 0.3))
+    assert text == "Vanke is loss-making." and spent > 0
