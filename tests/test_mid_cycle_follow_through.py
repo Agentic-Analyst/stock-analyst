@@ -302,16 +302,20 @@ def _benchmark(method_suitability):
 def test_a_mid_cycle_answer_explains_its_gap_as_the_peak_lasting():
     from src.summary_evidence import render_external_benchmark, render_external_benchmark_compact
     benchmark = _benchmark({"primary_method": "dcf_mid_cycle", "mid_cycle": MID_CYCLE})
-    for text in (render_external_benchmark_compact(benchmark),
-                 render_external_benchmark(benchmark)):
-        assert "not a comprehensive company value" not in text
-        assert "3.35" in text and "peak to last longer" in text
+    full = render_external_benchmark(benchmark)
+    assert "not a comprehensive company value" not in full
+    assert "3.35" in full and "peak to last longer" in full
+    # What the user reads: the same point in plain words.
+    compact = render_external_benchmark_compact(benchmark)
+    assert "not everything investors are paying for" not in compact
+    assert "3.35 times" in compact and "peak profits last longer" in compact
 
 
 def test_other_answers_keep_the_model_scope_warning():
     from src.summary_evidence import render_external_benchmark_compact
     text = render_external_benchmark_compact(_benchmark({"primary_method": "dcf_only"}))
-    assert "Model-scope warning" in text and "not a comprehensive company value" in text
+    assert "3.35 times" in text and "not everything investors are paying for" in text
+    assert "does not make today's price right" in text
 
 
 def test_the_guard_takes_the_peak_explanation_for_a_mid_cycle_value():

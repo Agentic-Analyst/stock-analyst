@@ -170,6 +170,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _has_human_benchmark(benchmark: Dict[str, object]) -> bool:
+    """Analysts' targets, ratings or forecasts, as opposed to market-implied figures only."""
+    return bool(
+        benchmark.get("target_mean") is not None
+        or benchmark.get("rating")
+        or benchmark.get("analyst_observation_count")
+        or any(row.get("street_revenue") is not None for row in benchmark.get("forward") or [])
+    )
+
+
 def _same_amount(a: str, b: str) -> bool:
     """'$20.25 USD' and '$20.25' state the same amount."""
     import re as _re
@@ -275,11 +285,7 @@ class SupervisorWorkflowRunner:
                     for row in benchmark.get("forward") or []
                 )
             )
-            label = (
-                "Human-analyst and market benchmark reconciliation"
-                if has_human_benchmark else "Market benchmark reconciliation"
-            )
-            answer += f"\n\n{label}{self._benchmark_basis()}:\n{rendered}"
+            answer += f"\n\n{self._benchmark_label(has_human_benchmark)}\n{rendered}"
         lead = self._listing_lead("withheld", metrics, benchmark=benchmark)
         return f"{lead}\n\n{answer}" if lead else answer
 
@@ -303,6 +309,12 @@ class SupervisorWorkflowRunner:
             return lead_paragraph(view, company=company, kind=kind, figures=figures)
         except Exception:
             return ""
+
+    def _benchmark_label(self, has_human_benchmark: bool) -> str:
+        """The heading over the Street block, in words a retail reader uses."""
+        if has_human_benchmark:
+            return f"What analysts think{self._benchmark_basis()}, for comparison (not VYNN's view):"
+        return f"What today's price assumes{self._benchmark_basis()}:"
 
     def _benchmark_basis(self) -> str:
         """
@@ -374,10 +386,7 @@ class SupervisorWorkflowRunner:
         benchmark = self._current_external_benchmark()
         rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
-            answer += (
-                f"\n\nThe Street's view{self._benchmark_basis()}, shown as a benchmark and not as "
-                "VYNN's rating:\n" + rendered
-            )
+            answer += f"\n\n{self._benchmark_label(_has_human_benchmark(benchmark))}\n{rendered}"
         lead = self._listing_lead("published", metrics, headline, benchmark)
         return f"{lead}\n\n{answer}" if lead else answer
 
@@ -520,10 +529,7 @@ class SupervisorWorkflowRunner:
         benchmark = self._current_external_benchmark()
         rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
-            answer += (
-                f"\n\nThe Street's view{self._benchmark_basis()}, shown as a benchmark and not as "
-                "VYNN's rating:\n" + rendered
-            )
+            answer += f"\n\n{self._benchmark_label(_has_human_benchmark(benchmark))}\n{rendered}"
         lead = self._listing_lead("refused", benchmark=benchmark)
         return f"{lead}\n\n{answer}" if lead else answer
 

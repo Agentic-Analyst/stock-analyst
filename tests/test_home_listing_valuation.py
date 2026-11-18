@@ -677,11 +677,11 @@ def test_the_street_block_names_the_share_its_targets_are_for():
     state.listing_view = SHEL_VIEW
     runner.state, runner.ticker = state, "SHEL.L"
     answer = runner._safe_withheld_valuation_answer()
-    assert "benchmark reconciliation (per SHEL.L share, in USD):" in answer
+    assert "What analysts think (per SHEL.L share, in USD), for comparison" in answer
     assert "The Street's mean target is $400.00 per SHEL share." in answer      # 200.00 x 2
     # The analysis still goes in before the Street block.
     composed = compose(answer, "ANALYSIS")
-    assert composed.index("ANALYSIS") < composed.index("benchmark reconciliation (per SHEL.L share")
+    assert composed.index("ANALYSIS") < composed.index("What analysts think (per SHEL.L share")
 
 
 def test_where_the_figures_are_the_same_the_street_block_is_unlabelled():
@@ -690,4 +690,4 @@ def test_where_the_figures_are_the_same_the_street_block_is_unlabelled():
     state.listing_view = AZN_VIEW
     runner.state, runner.ticker = state, "AZN.L"
     answer = runner._safe_withheld_valuation_answer()
-    assert "benchmark reconciliation:" in answer and "(per AZN.L share" not in answer
+    assert "What analysts think, for comparison" in answer and "(per AZN.L share" not in answer

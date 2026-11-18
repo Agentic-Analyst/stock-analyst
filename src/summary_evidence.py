@@ -1095,100 +1095,120 @@ def render_external_benchmark(value: Dict[str, Any]) -> str:
     )
 
 
-def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
-    """Readable launch-surface summary for the deterministic answer guard.
+_SOURCE_NAMES = {
+    "yahoo_finance": "Yahoo Finance", "yahoo": "Yahoo Finance", "finnhub": "Finnhub",
+    "benzinga": "Benzinga", "fmp": "Financial Modeling Prep",
+}
+_HORIZON_NAMES = {
+    "FY1": "this fiscal year", "FY2": "next fiscal year", "FY3": "the year after",
+    "NTM1": "the next 12 months", "NTM2": "the 12 months after that",
+}
 
-    ``render_external_benchmark`` is intentionally exhaustive because it feeds
-    the answer-writing model.  If that model fails the publication guard, the
-    user should receive the same evidence in a short structured form rather
-    than one duplicated wall of prose.
+
+def _money(amount: float, currency: str) -> str:
+    """A per-share amount the way a reader writes it: $412.48, A$5.40, 1,234.00p."""
+    if currency == "GBp":
+        return f"{amount:,.2f}p"
+    try:
+        from src.currency import currency_symbol
+        symbol = currency_symbol(currency) if currency else ""
+    except Exception:
+        symbol = f"{currency} " if currency else ""
+    return f"{symbol}{amount:,.2f}"
+
+
+def _source_name(source: Any) -> str:
+    text = str(source or "").strip()
+    return _SOURCE_NAMES.get(text.lower(), text.replace("_", " ").title()) if text else ""
+
+
+def _plain_count(count: Any, unit: Any) -> str:
+    number = int(_number(count) or 0)
+    noun = "analyst firm" if "firm" in str(unit or "") else "analyst"
+    return f"{number} {noun}{'' if number == 1 else 's'}"
+
+
+def _times(ratio: float) -> str:
+    return f"{ratio:.1f}" if abs(ratio) >= 10 else f"{ratio:.2f}"
+
+
+def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
+    """The analysts' view and what the price assumes, in plain words.
+
+    Shown under the guard's fixed statement, to the user. It used to read
+    like the model's own diagnostics ("whole-path reverse DCF: market
+    29.27×; ... (diagnostic only)", "External analyst view: BUY from
+    yahoo_finance (0 rating observations; provider date unavailable;
+    provenance only)"), which a reviewer of real answers called jargon a
+    retail investor cannot act on. ``render_external_benchmark`` keeps the
+    exhaustive form for the answer-writing model.
     """
     value = value if isinstance(value, dict) else {}
-    currency = str(value.get("currency") or "listing currency")
+    currency = str(value.get("currency") or "")
     lines = []
     target = value.get("target_mean")
     if target is not None:
         move = value.get("target_return_vs_market")
-        move_text = f", {move:+.1%} vs market" if move is not None else ""
-        latest = value.get("target_provider_as_of") or "provider date unavailable"
-        oldest = value.get("target_oldest_observation_as_of")
-        date = f"observations {oldest}–{latest}" if oldest else latest
-        lines.append(
-            f"- Human benchmark: human-analyst mean target {currency} {target:,.2f}"
-            f"{move_text} from {value.get('target_source') or 'source unavailable'} "
-            f"({_coverage_text(value.get('target_analyst_count'), value.get('target_coverage_unit'))}; {date})."
+        move_text = (
+            f", {abs(move):.1%} {'above' if move >= 0 else 'below'} today's price"
+            if move is not None else ""
         )
-        distribution = []
-        for label, key in (("low", "target_low"), ("median", "target_median"),
-                           ("high", "target_high")):
-            number = value.get(key)
-            if number is not None:
-                distribution.append(f"{label} {currency} {number:,.2f}")
-        if distribution:
+        latest = value.get("target_provider_as_of")
+        oldest = value.get("target_oldest_observation_as_of")
+        when = (f", set between {oldest} and {latest}" if oldest and latest
+                else f", as of {latest}" if latest else "")
+        source = _source_name(value.get("target_source"))
+        lines.append(
+            f"- Average price target: {_money(target, currency)} from "
+            f"{_plain_count(value.get('target_analyst_count'), value.get('target_coverage_unit'))}"
+            f"{move_text}{when}" + (f" ({source})." if source else ".")
+        )
+        low, median, high = (value.get(key) for key in ("target_low", "target_median", "target_high"))
+        if low is not None and high is not None:
             lines.append(
-                "- Target distribution: " + ", ".join(distribution)
-                + " (dispersion, not a confidence interval)."
+                f"- Their targets range from {_money(low, currency)} to {_money(high, currency)}"
+                + (f" (middle: {_money(median, currency)})." if median is not None else ".")
             )
+
+    if value.get("rating"):
+        rating = str(value["rating"]).replace("_", " ").title()
+        count = int(_number(value.get("rating_analyst_count")) or 0)
+        source = _source_name(value.get("rating_source"))
+        detail = ", ".join(part for part in (
+            f"{count} rating{'' if count == 1 else 's'}" if count else "", source) if part)
+        lines.append(f"- Their consensus rating: {rating}" + (f" ({detail})." if detail else "."))
 
     relationship = value.get("benchmark_relationship")
     if relationship == "material_conflict":
         range_note = {
             "analyst_range_entirely_above_model_range": (
-                " Even the analyst low is above the supported model-method range."
+                " Even the lowest analyst target is above every value VYNN's model supports."
             ),
             "analyst_range_entirely_below_model_range": (
-                " Even the analyst high is below the supported model-method range."
+                " Even the highest analyst target is below every value VYNN's model supports."
             ),
-            "ranges_overlap": " The analyst and model ranges overlap.",
+            "ranges_overlap": " Their ranges overlap.",
         }.get(value.get("target_range_relationship"), "")
-        lines.append(
-            "- Calibration result: the covered external target materially conflicts "
-            "with the model's directional magnitude; this is not a minor caveat."
-            + range_note
-        )
+        lines.append("- VYNN's model and the analysts disagree sharply." + range_note)
     elif relationship == "corroborates":
-        lines.append(
-            "- Calibration result: current, covered target evidence corroborates "
-            "the model direction and a material part of its magnitude."
-        )
+        lines.append("- The analysts' targets back the direction of VYNN's model and much of its size.")
 
     sources = value.get("target_source_means") or {}
     if len(sources) >= 2:
-        rows = []
-        for source, row in sorted(sources.items()):
-            rows.append(
-                f"{source} {currency} {row['mean']:,.2f} "
-                f"({_coverage_text(row['analyst_count'], row.get('coverage_unit'))}; "
-                f"{row.get('provider_as_of') or 'date unavailable'})"
-            )
-        lines.append("- Provider cross-checks (kept separate): " + "; ".join(rows) + ".")
-
-    if value.get("rating"):
-        latest = value.get("rating_provider_as_of") or "provider date unavailable"
-        oldest = value.get("rating_oldest_observation_as_of")
-        date = f"observations {oldest}–{latest}" if oldest else str(latest)
-        status = (
-            "qualified external directional benchmark"
-            if value.get("rating_qualified") else "provenance only"
-        )
-        lines.append(
-            "- External analyst view: "
-            f"{str(value['rating']).replace('_', ' ').upper()} from "
-            f"{value.get('rating_source') or 'source unavailable'} "
-            f"({_coverage_text(value.get('rating_analyst_count'), value.get('rating_coverage_unit'), kind='rating')}; "
-            f"{date}; {status}). This is the Street benchmark, not Vynn's rating."
-        )
+        rows = [
+            f"{_source_name(source)} {_money(row['mean'], currency)} "
+            f"({_plain_count(row['analyst_count'], row.get('coverage_unit'))})"
+            for source, row in sorted(sources.items())
+        ]
+        lines.append("- Average target by source: " + "; ".join(rows) + ".")
 
     if value.get("analyst_observation_count"):
         firms = value.get("analyst_observation_firms") or []
-        firm_text = f" across {', '.join(firms)}" if firms else ""
+        firm_text = f" ({', '.join(firms)})" if firms else ""
+        latest = value.get("analyst_observation_as_of")
         lines.append(
-            f"- Dated analyst records: {value['analyst_observation_count']} "
-            f"current structured observation(s){firm_text} from "
-            f"{value.get('analyst_observation_source') or 'source unavailable'} "
-            f"through {value.get('analyst_observation_as_of') or 'date unavailable'}. "
-            "Only firm/date/action/rating/target metadata was collected; licensed "
-            "rationale prose was not read or retained, so no rationale themes are claimed."
+            f"- Recent analyst actions on record: {value['analyst_observation_count']}{firm_text}"
+            + (f", the latest on {latest}." if latest else ".")
         )
 
     anchored = [
@@ -1196,78 +1216,59 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
         if row.get("street_revenue") is not None and row.get("model_uses_street_anchor")
     ]
     if anchored:
-        years = ", ".join(
-            f"{row.get('horizon')} ({row.get('revenue_analyst_count') or 0} analysts)"
-            for row in anchored
-        )
+        horizons = [_HORIZON_NAMES.get(str(row.get("horizon")), str(row.get("horizon"))) for row in anchored]
+        years = horizons[0] if len(horizons) == 1 else ", ".join(horizons[:-1]) + " and " + horizons[-1]
         lines.append(
-            f"- Forecast reconciliation: model revenue is already Street-anchored for "
-            f"{years}. The remaining conflict is in cash conversion, reinvestment, "
-            "discount rate, and terminal duration/multiple—not a simple revenue miss."
+            f"- VYNN's model already uses the analysts' sales forecasts for {years}. Where the two "
+            "differ, it is over how much of those sales becomes cash, how much the company must "
+            "reinvest, the return investors require, and how long growth lasts."
         )
 
     market_path = value.get("market_implied_fcf_path_delta")
     target_path = value.get("analyst_target_implied_fcf_path_delta")
-    implied = []
     if market_path is not None:
-        implied.append(f"market {market_path + 1:.2f}×")
-    if target_path is not None:
-        implied.append(f"analyst mean target {target_path + 1:.2f}×")
-    if implied:
-        lines.append(
-            "- whole-path reverse DCF: " + "; ".join(implied)
-            + " the model FCF path at unchanged WACC and terminal growth "
-              "(diagnostic only)."
-        )
+        ratio = market_path + 1
+        if ratio >= 1.05:
+            need = f"about {_times(ratio)} times the cash flow VYNN's model expects"
+        elif ratio > 0.95:
+            need = f"about the cash flow VYNN's model expects ({_times(ratio)} times)"
+        else:
+            need = f"only {_times(ratio)} times the cash flow VYNN's model expects"
+        analyst = (f"; the average analyst target needs {_times(target_path + 1)} times"
+                   if target_path is not None else "")
+        lines.append(f"- To justify today's price, the company needs {need}{analyst}.")
     if market_path is not None and market_path + 1 >= 3.0 and value.get("mid_cycle_value"):
         lines.append(
-            f"- Mid-cycle scope: current market EV requires {market_path + 1:.2f}× "
-            "the modeled FCF path. The model holds the Street's peak-cycle cash flow "
-            "for the covered years, then mid-cycle revenue and margins, so the gap is "
-            "the price paying for the peak to last longer, not cash flow left out of "
-            "the model. This gap does not validate the market price."
+            "- That gap is the price betting that today's peak profits last longer than the "
+            "model assumes, not cash flow the model left out. It does not make today's price right."
         )
     elif market_path is not None and market_path + 1 >= 3.0:
         lines.append(
-            f"- Model-scope warning: current market EV requires {market_path + 1:.2f}× "
-            "the modeled FCF path. The method outputs therefore value only the "
-            "modeled operating cash-flow path—not a comprehensive company value—"
-            "until the missing expectations are explicitly reconciled. This gap "
-            "does not validate the market price."
+            "- A gap that large means VYNN's model counts only the cash flow it can forecast, "
+            "not everything investors are paying for. It does not make today's price right."
         )
-    elif value.get("market_implied_fcf_delta") is not None:
+    elif market_path is None and value.get("market_implied_fcf_delta") is not None:
         gap = value["market_implied_fcf_delta"]
-        relation = (
-            f"{abs(gap):.1%} above" if gap >= 0 else f"{abs(gap):.1%} below"
-        )
         lines.append(
-            "- reverse DCF: the market-implied terminal FCF is "
-            f"{relation} the model "
-            "at unchanged explicit cash flows, WACC, and terminal growth."
+            f"- Today's price assumes long-run cash flow {abs(gap):.1%} "
+            f"{'above' if gap >= 0 else 'below'} VYNN's model."
         )
 
-    assumptions = []
-    for label, key in (
-        ("market WACC", "market_implied_wacc"),
-        ("analyst-target WACC", "analyst_target_implied_wacc"),
-        ("market terminal growth", "market_implied_terminal_growth"),
-        ("analyst-target terminal growth", "analyst_target_implied_terminal_growth"),
-    ):
-        if value.get(key) is not None:
-            assumptions.append(f"{label} {value[key]:.2%}")
-    if assumptions:
-        baselines = []
-        if value.get("model_wacc") is not None:
-            baselines.append(f"model WACC {value['model_wacc']:.2%}")
-        if value.get("model_terminal_growth") is not None:
-            baselines.append(
-                f"model terminal growth {value['model_terminal_growth']:.2%}"
-            )
-        lines.append(
-            "- One-assumption reverse DCF: " + "; ".join(assumptions)
-            + (f" versus {', '.join(baselines)}" if baselines else "")
-            + " (solve one input at a time; diagnostic only)."
+    clauses = []
+    if value.get("market_implied_wacc") is not None:
+        model_wacc = value.get("model_wacc")
+        clauses.append(
+            f"investors accept a yearly return of {value['market_implied_wacc']:.1%}"
+            + (f" (VYNN's model uses {model_wacc:.1%})" if model_wacc is not None else "")
         )
+    if value.get("market_implied_terminal_growth") is not None:
+        model_growth = value.get("model_terminal_growth")
+        clauses.append(
+            f"cash flow grows {value['market_implied_terminal_growth']:.1%} a year forever"
+            + (f" (VYNN's model uses {model_growth:.1%})" if model_growth is not None else "")
+        )
+    if clauses:
+        lines.append("- Put another way, today's price works if " + ", or if ".join(clauses) + ".")
 
     reinvestment = value.get("reinvestment_sensitivity") or {}
     if reinvestment.get("status") == "material":
@@ -1283,25 +1284,24 @@ def render_external_benchmark_compact(value: Dict[str, Any]) -> str:
         if all(item is not None for item in (
             reported_ratio, normalized_ratio, reported_value, normalized_value, change,
         )):
+            level = "high" if abs(reported_ratio) > abs(normalized_ratio) else "low"
             lines.append(
-                "- Reinvestment sensitivity: reported capex is "
-                f"{abs(reported_ratio):.1%} of revenue versus a three-year median "
-                f"of {abs(normalized_ratio):.1%}. Normalizing only that starting "
-                f"intensity moves perpetual DCF from {currency} {reported_value:,.2f} "
-                f"to {currency} {normalized_value:,.2f} ({change:+.1%}); this is "
-                "not guidance and receives no valuation vote."
+                f"- Investment spending is unusually {level}: {abs(reported_ratio):.1%} of sales, "
+                f"against {abs(normalized_ratio):.1%} over the last three years. At the usual level, "
+                f"the model's cash-flow value would be {_money(normalized_value, currency)} instead of "
+                f"{_money(reported_value, currency)} (a what-if, not VYNN's estimate)."
             )
 
+    pe = value.get("target_implied_forward_pe")
+    ev_sales = value.get("target_implied_ev_to_forward_revenue")
     economics = []
-    if value.get("target_implied_forward_pe") is not None:
-        economics.append(f"{value['target_implied_forward_pe']:.1f}× forward P/E")
-    if value.get("target_implied_ev_to_forward_revenue") is not None:
-        economics.append(
-            f"{value['target_implied_ev_to_forward_revenue']:.1f}× EV/forward revenue"
-        )
+    if pe is not None:
+        economics.append(f"the shares would trade at {pe:.1f} times next year's expected earnings")
+    if ev_sales is not None:
+        economics.append(f"the whole company at {ev_sales:.1f} times next year's expected sales")
     if economics:
-        lines.append("- Economics at the external mean target: " + ", ".join(economics) + ".")
+        lines.append("- At the average target, " + ", and ".join(economics) + ".")
 
     if not lines:
         return "Human-analyst benchmark unavailable or below usable coverage."
-    return "\n".join(lines) + "\nExternal targets are benchmarks, not intrinsic value."
+    return "\n".join(lines)

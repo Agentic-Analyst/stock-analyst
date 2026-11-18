@@ -309,7 +309,8 @@ _LETTER = re.compile(r"[^\W\d_]", re.U)
 
 # The benchmark block every guard template ends with.
 _BENCHMARK_BLOCK = re.compile(
-    r"\n\n(?=(?:The Street's view|Human-analyst and market benchmark reconciliation|"
+    r"\n\n(?=(?:What analysts think|What today's price assumes|The Street's view|"
+    r"Human-analyst and market benchmark reconciliation|"
     r"Market benchmark reconciliation|External benchmark reconciliation)\b)"
 )
 

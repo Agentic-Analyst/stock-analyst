@@ -106,5 +106,5 @@ def test_reinvestment_sensitivity_is_visible_but_never_an_intrinsic_vote():
     compact = render_external_benchmark_compact(evidence)
     assert "reinvestment-cycle sensitivity" in full
     assert "not forward guidance or an independent valuation vote" in full
-    assert "Reinvestment sensitivity" in compact
-    assert "receives no valuation vote" in compact
+    assert "Investment spending is unusually high: 30.0% of sales" in compact
+    assert "a what-if, not VYNN's estimate" in compact

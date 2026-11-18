@@ -129,8 +129,7 @@ def test_external_benchmark_carries_target_rating_and_model_reconciliation():
     assert "39 target observations" in rendered
     assert "53 rating observations" in rendered
     compact = render_external_benchmark_compact(evidence)
-    assert "External analyst view: STRONG BUY from finnhub" in compact
-    assert "not Vynn's rating" in compact
+    assert "Their consensus rating: Strong Buy (53 ratings, Finnhub)." in compact
     assert "2 current structured observation(s)" in rendered
     assert "Firm One / 2026-09-11 / action Maintains" in rendered
     assert "Licensed rationale prose was not read or collected" in rendered
@@ -331,8 +330,11 @@ def test_extreme_reverse_dcf_gap_is_labeled_as_model_scope_not_company_value():
     full = render_external_benchmark(evidence)
     compact = render_external_benchmark_compact(evidence)
 
-    for rendered in (full, compact):
-        assert "43.07" in rendered
-        assert "modeled operating cash-flow path" in rendered
-        assert "not a comprehensive company value" in rendered
-        assert "does not validate the market price" in rendered
+    assert "43.07" in full
+    assert "modeled operating cash-flow path" in full
+    assert "not a comprehensive company value" in full
+    assert "does not validate the market price" in full
+    # The user's version says the same in plain words.
+    assert "about 43.1 times the cash flow VYNN's model expects" in compact
+    assert "not everything investors are paying for" in compact
+    assert "does not make today's price right" in compact

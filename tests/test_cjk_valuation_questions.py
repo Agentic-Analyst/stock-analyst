@@ -74,7 +74,7 @@ def test_a_chinese_question_reads_its_position_in_chinese_first():
     template, out = _analysis(ag, _Provider(ZH_SECTION, "NO"), ZH_DRAFT)
     assert out.startswith("XOM：VYNN 在此给出的是证据，而不是公允价值，因为其现金流随大宗商品价格波动")
     assert (out.index("而不是公允价值") < out.index("XOM: VYNN's answer here is the evidence")
-            < out.index("自由现金流约") < out.index("The Street's view"))
+            < out.index("自由现金流约") < out.index("What analysts think"))
     assert "继续持有" not in out
     # Neither language reads as a missing rating.
     assert "未评级" not in out and "NOT RATED" not in out

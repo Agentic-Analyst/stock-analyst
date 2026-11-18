@@ -288,9 +288,8 @@ def test_generalist_final_answer_uses_shared_withheld_and_analyst_guard():
     assert "VYNN's answer here is a range, not a single fair value" in guarded
     assert "NOT RATED" not in guarded
     assert "154.04–$180.33" in guarded
-    assert "human-analyst mean target USD 335.72" in guarded
-    assert "reverse DCF" in guarded
-    assert "209.0% above the model" in guarded
+    assert "Average price target: $335.72" in guarded
+    assert "Today's price assumes long-run cash flow 209.0% above VYNN's model" in guarded
     assert "overall sentiment" not in guarded.lower()
 
 
@@ -697,9 +696,8 @@ def test_read_report_uses_separate_guard_without_replacing_live_state(
     assert guarded.startswith("AAPL: the modeled cash flows support a value below the market")
     assert "VYNN's answer here is a range, not a single fair value" in guarded
     assert "154.04–$180.33" in guarded
-    assert "human-analyst mean target USD 335.72" in guarded
-    assert "reverse DCF" in guarded
-    assert "209.0% above the model" in guarded
+    assert "Average price target: $335.72" in guarded
+    assert "Today's price assumes long-run cash flow 209.0% above VYNN's model" in guarded
 
     fresh_ctx = types.SimpleNamespace(
         email="launch@example.com", state=None, ticker=None, company_name=None,

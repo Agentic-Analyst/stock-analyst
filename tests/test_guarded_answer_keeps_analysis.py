@@ -360,10 +360,10 @@ def test_a_withheld_figure_matches_only_as_a_whole_number():
 def test_compose_puts_the_answer_first_and_the_benchmark_last():
     template = (
         "XOM: VYNN's answer here is the evidence, not a fair value, because reason.\n\n"
-        "The Street's view, shown as a benchmark and not as VYNN's rating:\n- mean target 172.55"
+        "What analysts think, for comparison (not VYNN's view):\n- Average price target: $172.55"
     )
     out = compose(template, "Price and trend: up 41% over the year.")
-    assert out.index("the evidence, not a fair value") < out.index("Price and trend") < out.index("The Street's view")
+    assert out.index("the evidence, not a fair value") < out.index("Price and trend") < out.index("What analysts think")
     assert compose(template, "") == template
 
 
@@ -526,7 +526,7 @@ def test_a_clean_section_that_passes_both_checks_is_published():
     template, out = _analysis(ag, provider, XOM_DRAFT_2)
 
     assert (out.index("XOM: VYNN's answer here is the evidence")
-            < out.index("Guyana and the Permian") < out.index("The Street's view"))
+            < out.index("Guyana and the Permian") < out.index("What analysts think"))
     assert out.count("the evidence, not a fair value") == 1 and "172.55" in out
     assert "NOT RATED" not in out
     write, check = provider.calls
@@ -602,7 +602,7 @@ def test_a_withheld_section_with_the_bull_and_bear_case_is_published():
     _, out = _analysis(ag, _Provider(section, "NO"), "Verdict: Buy. The midpoint of $167.67 is below.")
     assert "ad revenue grew 22% last quarter" in out and "EU regulators are circling" in out
     assert (out.index("VYNN's answer here is a range, not a single fair value")
-            < out.index("Bull case") < out.index("benchmark reconciliation"))
+            < out.index("Bull case") < out.index("What analysts think"))
     assert "NOT RATED" not in out
 
 

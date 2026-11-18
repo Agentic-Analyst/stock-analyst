@@ -81,8 +81,8 @@ def test_immediate_answer_cannot_leak_withheld_value_or_unverified_sentiment(
     assert "NOT RATED" not in answer and "withheld" not in answer.lower()
     assert "€153.91–€183.79 EUR" in answer
     assert "independent evidence conflicts" in answer
-    assert "Human-analyst and market benchmark reconciliation" in answer
-    assert "EUR 200.00" in answer
+    assert "What analysts think, for comparison (not VYNN's view):" in answer
+    assert "€200.00" in answer
     prompt = captured["prompt"]
     assert "Supported method range: €153.91-€183.79 EUR" in prompt
     assert "Rating / single fair value: none for this run; the answer is the range above" in prompt
@@ -232,9 +232,8 @@ def test_withheld_answer_must_explain_reverse_dcf_and_human_benchmark():
 
     assert guarded.startswith("TEST: the modeled cash flows support")
     assert "VYNN's answer here is a range, not a single fair value" in guarded
-    assert "human-analyst mean target USD 210.00" in guarded
-    assert "reverse DCF" in guarded
-    assert "57.3% above the model" in guarded
+    assert "Average price target: $210.00" in guarded
+    assert "Today's price assumes long-run cash flow 57.3% above VYNN's model" in guarded
 
 
 def test_generic_analyst_mention_cannot_replace_numeric_benchmark():
@@ -273,7 +272,7 @@ def test_generic_analyst_mention_cannot_replace_numeric_benchmark():
         "TEST: a range, not a single fair value. Analysts were considered as a cross-check."
     )
 
-    assert "human-analyst mean target USD 210.00" in guarded
+    assert "Average price target: $210.00" in guarded
 
 
 def test_broad_answer_requires_multiple_available_firm_attributions():
@@ -398,12 +397,11 @@ def test_withheld_answer_requires_dated_material_conflict_and_whole_path():
 
     assert guarded.startswith("AAPL: the modeled cash flows support a value below the market")
     assert "VYNN's answer here is a range, not a single fair value" in guarded
-    assert "benzinga" in guarded
+    assert "Benzinga" in guarded
     assert "2026-09-10" in guarded
-    assert "materially conflicts" in guarded
-    assert "whole-path reverse DCF" in guarded
-    assert "market 2.12×" in guarded
-    assert "analyst mean target 2.17×" in guarded
+    assert "disagree sharply" in guarded
+    assert "To justify today's price, the company needs about 2.12 times" in guarded
+    assert "the average analyst target needs 2.17 times" in guarded
 
 
 def test_extreme_expectation_gap_requires_an_explicit_model_scope_warning():
@@ -434,5 +432,5 @@ def test_extreme_expectation_gap_requires_an_explicit_model_scope_warning():
     guarded = runner._guard_user_answer(incomplete)
 
     assert guarded != incomplete
-    assert "modeled operating cash-flow path" in guarded
-    assert "not a comprehensive company value" in guarded
+    assert "about 43.1 times the cash flow VYNN's model expects" in guarded
+    assert "not everything investors are paying for" in guarded
