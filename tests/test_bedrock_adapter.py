@@ -73,3 +73,24 @@ def test_plain_call_skips_a_leading_thinking_block(monkeypatch):
     text, spent = asyncio.run(async_client._call_anthropic_async(
         "claude-haiku-5-5-bedrock", [{"role": "user", "content": "分析万科股票"}], 0.3))
     assert text == "Vanke is loss-making." and spent > 0
+
+
+def test_cache_points_mark_tools_system_and_the_newest_message(monkeypatch):
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test-token")
+    tools = [{"name": "get_prices", "input_schema": {}}, {"name": "show_chart", "input_schema": {}}]
+    msgs = [{"role": "user", "content": "SNDK"},
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"},
+                                              {"type": "tool_use", "id": "tu_1", "name": "get_prices", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": "{}"}]}]
+    _, body, _ = bedrock._request({"model": "claude-haiku-5-5-bedrock", "max_tokens": 64, "system": "You are VYNN.",
+                                   "tools": tools, "messages": msgs})
+    assert "cache_control" not in body["tools"][0] and body["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert body["system"] == [{"type": "text", "text": "You are VYNN.", "cache_control": {"type": "ephemeral"}}]
+    assert body["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in body["messages"][0] if isinstance(body["messages"][0]["content"], str) else True
+    # the caller's own objects are not modified (they are re-sent on the next turn)
+    assert "cache_control" not in tools[-1] and "cache_control" not in msgs[-1]["content"][-1]
+    # a thinking block never gets a cache point
+    _, body2, _ = bedrock._request({"model": "claude-haiku-5-5-bedrock", "max_tokens": 64,
+                                    "messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"}]}]})
+    assert "cache_control" not in body2["messages"][-1]["content"][-1]

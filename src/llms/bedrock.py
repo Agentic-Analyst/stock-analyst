@@ -67,6 +67,53 @@ def _plain(value: Any) -> Any:
     return value
 
 
+_CACHE = {"type": "ephemeral"}
+_NO_CACHE_BLOCKS = ("thinking", "redacted_thinking")
+
+
+def _with_cache_points(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Mark the shared prefix for prompt caching (tools, system, transcript so far).
+
+    The chat sends the same ~20 tool definitions and long instructions on every
+    turn of its loop (up to 8 per question) and the transcript only grows, so a
+    cache point after the tools, after the system text and on the newest message
+    lets each turn re-read the earlier ones at a tenth of the input price.
+    Content under the model's minimum is silently not cached (no error).
+    """
+    tools = body.get("tools")
+    if isinstance(tools, list) and tools and isinstance(tools[-1], dict):
+        tools[-1] = {**tools[-1], "cache_control": _CACHE}
+    system = body.get("system")
+    if isinstance(system, str) and system.strip():
+        body["system"] = [{"type": "text", "text": system, "cache_control": _CACHE}]
+    messages = body.get("messages")
+    if isinstance(messages, list) and messages and isinstance(messages[-1], dict):
+        last = dict(messages[-1])
+        content = last.get("content")
+        if isinstance(content, str) and content.strip():
+            last["content"] = [{"type": "text", "text": content, "cache_control": _CACHE}]
+        elif isinstance(content, list) and content and isinstance(content[-1], dict) \
+                and content[-1].get("type") not in _NO_CACHE_BLOCKS:
+            last["content"] = content[:-1] + [{**content[-1], "cache_control": _CACHE}]
+        messages[-1] = last
+    return body
+
+
+def _log_usage(response: Any, model: str) -> None:
+    """One line per call, so a run can show whether the cache is hit."""
+    try:
+        from logger import get_logger
+        logger = get_logger()
+        u = response.usage
+        line = (f"[bedrock] {model} usage: input {u.input_tokens}, cache read "
+                f"{getattr(u, 'cache_read_input_tokens', 0) or 0}, cache write "
+                f"{getattr(u, 'cache_creation_input_tokens', 0) or 0}, output {u.output_tokens}")
+        if logger:
+            logger.info(line)
+    except Exception:
+        pass
+
+
 def _request(kwargs: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, str]]:
     model = kwargs.get("model", "")
     if model not in PROFILES:
@@ -81,6 +128,7 @@ def _request(kwargs: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, str
     body = {k: _plain(v) for k, v in kwargs.items()
             if k not in ("model", "timeout", "stream", "temperature", "top_p", "top_k")}
     body["anthropic_version"] = ANTHROPIC_VERSION
+    _with_cache_points(body)
     headers = {"authorization": f"Bearer {token}", "content-type": "application/json",
                "accept": "application/json"}
     return url, body, headers
@@ -101,7 +149,9 @@ class _AsyncMessages:
         url, body, headers = _request(kwargs)
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, trust_env=False) as client:
             r = await client.post(url, json=body, headers=headers)
-        return _message(r.status_code, r.json() if r.status_code == 200 else None, r.text)
+        message = _message(r.status_code, r.json() if r.status_code == 200 else None, r.text)
+        _log_usage(message, kwargs.get("model", ""))
+        return message
 
 
 class _Messages:
@@ -110,7 +160,9 @@ class _Messages:
         url, body, headers = _request(kwargs)
         with httpx.Client(timeout=TIMEOUT_SECONDS, trust_env=False) as client:
             r = client.post(url, json=body, headers=headers)
-        return _message(r.status_code, r.json() if r.status_code == 200 else None, r.text)
+        message = _message(r.status_code, r.json() if r.status_code == 200 else None, r.text)
+        _log_usage(message, kwargs.get("model", ""))
+        return message
 
 
 class AsyncBedrockClaude:
