@@ -44,12 +44,13 @@ def build_market_expectations(
             mid_cycle_method_note, model_view_summary, plain_rating_note,
             required_growth_sentence, supported_valuation_span, unsuitable_method_note,
         )
-        from src.valuation_methodology import built_method_suitability
+        from src.valuation_methodology import built_method_suitability, workbook_nopat
 
         # The boundary withholds a mid-cycle method whose workbook was not
         # built on it (report_agent): say what the workbook is, a scenario.
         suitability = built_method_suitability(
-            financial_data or {}, ((computed or {}).get("_vynn") or {}).get("model_inputs"))
+            financial_data or {}, ((computed or {}).get("_vynn") or {}).get("model_inputs"),
+            nopat=workbook_nopat(computed))
         method_note = unsuitable_method_note(suitability)
         required: Dict[str, Any] = (
             {} if method_note else required_revenue_growth_from_workbook(computed)

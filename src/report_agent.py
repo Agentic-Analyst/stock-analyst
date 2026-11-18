@@ -1414,7 +1414,10 @@ def enforce_valuation_publication_boundary(
 
     # A memory maker's workbook built without the mid-cycle rewrite holds the
     # covered years' peak margins through the terminal value: a scenario.
-    suitability = built_method_suitability(financial_data or {}, data.get("model_inputs"))
+    suitability = built_method_suitability(
+        financial_data or {}, data.get("model_inputs"),
+        nopat=(data.get("projections") or {}).get("nopat"),
+    )
     reconstructed_bank_override = None
     if (
         suitability.get("primary_method") == "justified_pb_roe"
@@ -1729,29 +1732,6 @@ def enforce_valuation_publication_boundary(
                 + ". NOPAT and net income are not accounting equivalents, but an "
                 "eight-point or larger disagreement requires an explicit earnings, "
                 "financing, and share-count bridge before a point valuation can be published.",
-            )
-
-    # A perpetuity on a business the model itself says loses money is not an
-    # operating value. China Vanke's model (17 Nov 2026) had operating profit
-    # of -5.0B falling to -2.3B CNY a year, yet positive free cash flow from
-    # running down 239B of housing inventory; the terminal value capitalised
-    # that one-off release forever and published STRONG BUY at +588%.
-    if not is_bank:
-        final_nopat = next(
-            (float(value) for value in reversed((data.get("projections") or {}).get("nopat") or [])
-             # A missing row reads as 0 (extract_projections' default): no evidence.
-             if isinstance(value, (int, float)) and not isinstance(value, bool)
-             and math.isfinite(float(value)) and value != 0),
-            None,
-        )
-        if final_nopat is not None and final_nopat < 0:
-            withheld = True
-            reason = _join_distinct_messages(
-                reason,
-                "The model's after-tax operating profit is still negative in its final "
-                "forecast year, so its terminal value capitalizes cash that does not come "
-                "from operations (such as inventory or working capital being run down). "
-                "No point valuation can be published from it.",
             )
 
     if withheld and alert:

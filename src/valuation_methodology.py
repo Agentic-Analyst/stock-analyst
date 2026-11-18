@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from src.agents.fm.bank_valuation import (
     build_bank_valuation_override,
@@ -508,10 +508,61 @@ def withhold_unbuilt_mid_cycle(suitability: Any, model_inputs: Any) -> Any:
     return suitability
 
 
-def built_method_suitability(financial_data: Dict[str, Any], model_inputs: Any) -> Dict[str, Any]:
-    """``assess_valuation_methodology`` for the workbook built from this data."""
-    return withhold_unbuilt_mid_cycle(
-        assess_valuation_methodology(financial_data or {}), model_inputs)
+# China Vanke's model (17 Nov 2026) lost money from operations in every forecast
+# year (-5.0B falling to -2.3B CNY) yet had positive free cash flow from running
+# down 239B of housing inventory; the terminal value capitalised that one-off
+# release forever and published STRONG BUY at +588%. A perpetuity on a business
+# the model itself says loses money is not an operating value.
+OPERATING_LOSS_SCENARIO_REASON = (
+    "No point valuation is published because the model's after-tax operating profit is "
+    "still negative in its final forecast year, so its terminal value would capitalize cash "
+    "that does not come from operations (such as inventory or working capital being run down)."
+)
+
+
+def workbook_nopat(computed: Any) -> List[Any]:
+    """The workbook's NOPAT row (Projections row 11), first forecast year first."""
+    tab = (computed or {}).get("Projections") if isinstance(computed, dict) else None
+    cells = (tab or {}).get("cells") if isinstance(tab, dict) else None
+    if not isinstance(cells, dict):
+        return []
+    # The five forecast years, as extract_projections reads them.
+    return [cells.get(f"(11, {column})") for column in range(2, 7)]
+
+
+def final_forecast_nopat(nopat: Any) -> Optional[float]:
+    """The last forecast year's NOPAT; a missing row (0 or blank) is no evidence."""
+    for value in reversed(list(nopat or [])):
+        if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(float(value)) and value != 0):
+            return float(value)
+    return None
+
+
+def withhold_operating_loss(suitability: Any, nopat: Any) -> Any:
+    """A cash-flow model still losing money in its last year is an audit scenario."""
+    final = final_forecast_nopat(nopat)
+    if (isinstance(suitability, dict)
+            and suitability.get("publication_allowed") is not False
+            and suitability.get("primary_method") != "justified_pb_roe"
+            and final is not None and final < 0):
+        return {
+            **suitability,
+            "primary_method": "scenario_only_pending_operating_profit",
+            "publication_allowed": False,
+            "reason": OPERATING_LOSS_SCENARIO_REASON,
+        }
+    return suitability
+
+
+def built_method_suitability(financial_data: Dict[str, Any], model_inputs: Any,
+                             nopat: Any = None) -> Dict[str, Any]:
+    """``assess_valuation_methodology`` for the workbook built from this data.
+
+    ``nopat`` is the built model's forecast NOPAT row, where the caller has it.
+    """
+    return withhold_operating_loss(withhold_unbuilt_mid_cycle(
+        assess_valuation_methodology(financial_data or {}), model_inputs), nopat)
 
 
 def peers_blended(peer_comps: Any, suitability: Any) -> bool:

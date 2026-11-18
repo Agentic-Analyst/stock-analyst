@@ -783,9 +783,10 @@ def _rehydrate_report_guard_state(base: Path, ticker: str, content: str):
         # is $3,656.10-$4,014.84", the audit scenario; with it, a follow-up on
         # a mid-cycle report says how the value was reached.
         try:
-            from src.valuation_methodology import built_method_suitability
+            from src.valuation_methodology import built_method_suitability, workbook_nopat
             metrics["method_suitability"] = built_method_suitability(
-                financial_data, (computed.get("_vynn") or {}).get("model_inputs"))
+                financial_data, (computed.get("_vynn") or {}).get("model_inputs"),
+                nopat=workbook_nopat(computed))
         except Exception:
             pass
 
