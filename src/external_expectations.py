@@ -871,11 +871,27 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
             implied_net_income / revenue_row["average"]
             if implied_net_income is not None and revenue_row["average"] else None
         )
+        # The provider measures each year against its own "year-ago" figure,
+        # which for the second year need not be its first-year estimate: China
+        # Vanke's next year read -18.4% while its own estimates, CNY 179.3B
+        # then 135.2B, fall 24.6%. A later year is measured against the year
+        # before it, as a reader checking the two rows would.
+        revenue_growth = revenue_row["growth"]
+        previous = years[-1]["revenue"] if years else None
+        if (index > 0 and isinstance(previous, (int, float)) and previous > 0
+                and isinstance(revenue_row["average"], (int, float)) and revenue_row["average"] > 0):
+            revenue_growth = revenue_row["average"] / previous - 1.0
+        # The same for EPS; across a loss a growth rate means nothing.
+        eps_growth = eps_row["growth"]
+        previous_eps = years[-1]["eps"] if years else None
+        if index > 0 and isinstance(previous_eps, (int, float)) and isinstance(eps_row["average"], (int, float)):
+            eps_growth = (eps_row["average"] / previous_eps - 1.0
+                          if previous_eps > 0 and eps_row["average"] > 0 else None)
         years.append({
             "period": period,
             "reported": revenue_row["reported"],
             "revenue": revenue_row["average"],
-            "revenue_growth": revenue_row["growth"],
+            "revenue_growth": revenue_growth,
             "revenue_analyst_count": revenue_row["analyst_count"],
             "eps": eps_row["average"],
             "eps_source_value": raw_eps[index]["average"],
@@ -886,7 +902,7 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
             ),
             "eps_unit_basis": eps_unit.get("basis"),
             "eps_unit_confidence": eps_unit.get("confidence"),
-            "eps_growth": eps_row["growth"],
+            "eps_growth": eps_growth,
             "eps_analyst_count": eps_row["analyst_count"],
             "implied_net_income": implied_net_income,
             "implied_net_margin": implied_net_margin,

@@ -2505,6 +2505,50 @@ def generate_section_company_overview(data: Dict[str, Any], llm) -> Tuple[str, f
     return f"{statistics_table}\n\n### Business Overview\n\n{overview}", 0.0
 
 
+def _margins_table(historical: Dict[str, Any], company: Dict[str, Any]) -> str:
+    """Margins from the latest fiscal year above, beside the provider's trailing ones."""
+    def ratio(numerator: Any, denominator: Any) -> Optional[float]:
+        if (isinstance(numerator, (int, float)) and not isinstance(numerator, bool)
+                and isinstance(denominator, (int, float)) and not isinstance(denominator, bool)
+                and math.isfinite(float(numerator)) and math.isfinite(float(denominator))
+                and denominator > 0):
+            return float(numerator) / float(denominator)
+        return None
+
+    years = list(historical.get("years") or [])
+    latest = len(years) - 1
+    def latest_of(key: str) -> Any:
+        series = historical.get(key) or []
+        return series[latest] if 0 <= latest < len(series) else None
+
+    revenue = latest_of("revenue")
+    fiscal = {
+        "gross": ratio(latest_of("gross_profit"), revenue),
+        "ebitda": ratio(latest_of("ebitda"), revenue),
+        "net": ratio(latest_of("net_income"), revenue),
+    }
+
+    def cell(value: Optional[float]) -> str:
+        return "—" if value is None else format_percent(value)
+
+    rows = (
+        ("Gross Margin", fiscal["gross"], company.get("gross_margin")),
+        ("Operating Margin", None, company.get("operating_margin")),
+        ("EBITDA Margin", fiscal["ebitda"], company.get("ebitda_margin")),
+        ("Net Margin", fiscal["net"], company.get("net_margin")),
+        ("ROE", None, company.get("roe")),
+        ("ROA", None, company.get("roa")),
+    )
+    if latest < 0 or all(value is None for value in fiscal.values()):
+        table = "| Metric | Trailing 12 Months (provider) |\n|--------|---------------|\n"
+        return table + "".join(f"| {name} | {cell(ttm)} |\n" for name, _fy, ttm in rows)
+    table = (
+        f"| Metric | Fiscal {years[latest]} (from the table above) | Trailing 12 Months (provider) |\n"
+        "|--------|---------------|---------------|\n"
+    )
+    return table + "".join(f"| {name} | {cell(fy)} | {cell(ttm)} |\n" for name, fy, ttm in rows)
+
+
 def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[str, float]:
     """Generate Financial Performance Analysis section with pre-built tables."""
     historical = data['historical']
@@ -2599,15 +2643,12 @@ def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[s
         )
         growth_table += f"| {years[i-1]}-{years[i]} | {cells} |\n"
     
-    # Margins table
-    margins_table = "| Metric | Current Value |\n"
-    margins_table += "|--------|---------------|\n"
-    margins_table += f"| Gross Margin | {format_percent(company['gross_margin'])} |\n"
-    margins_table += f"| Operating Margin | {format_percent(company['operating_margin'])} |\n"
-    margins_table += f"| EBITDA Margin | {format_percent(company['ebitda_margin'])} |\n"
-    margins_table += f"| Net Margin | {format_percent(company['net_margin'])} |\n"
-    margins_table += f"| ROE | {format_percent(company['roe'])} |\n"
-    margins_table += f"| ROA | {format_percent(company['roa'])} |\n"
+    # Margins table. The provider's margins are trailing twelve months on its
+    # own definitions; beside the fiscal-year table above they read as a
+    # contradiction: Hansen showed EBITDA of A$122.5M on revenue of A$386.5M
+    # (31.7%) and an "EBITDA Margin" of 19.9%, and every answer quoting the
+    # report repeated both. Each column now says what period it is.
+    margins_table = _margins_table(historical, company)
     
     commentary = []
     if years and historical['revenue']:
