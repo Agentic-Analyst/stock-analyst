@@ -35,7 +35,7 @@ _COMMODITY_CYCLE_INDUSTRY_HINTS = (
 # valued on mid-cycle economics after the Street's covered years
 # (src/agents/fm/memory_cycle.py), and stays a scenario when its reported
 # history cannot place a revenue trend.
-from src.agents.fm.memory_cycle import is_memory_maker, mid_cycle_inputs  # noqa: E402,F401
+from src.agents.fm.memory_cycle import is_memory_cycle_conglomerate, is_memory_maker, mid_cycle_inputs  # noqa: E402,F401
 
 _CONGLOMERATE_HINTS = (
     "conglomerate", "diversified industrial", "diversified holdings",
@@ -389,7 +389,8 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
             "receivables, matched funding debt, credit losses, and a reconciled "
             "operating-company plus finance-book sum-of-the-parts valuation"
         )
-    memory_cycle = is_memory_maker(industry_key, business_summary)
+    memory_cycle = is_memory_maker(industry_key, business_summary) or is_memory_cycle_conglomerate(
+        str((financial_data or {}).get("ticker") or basic.get("symbol") or ""))
     mid_cycle_detail = mid_cycle_inputs(financial_data) if memory_cycle else None
     mid_cycle = bool(mid_cycle_detail)
     if memory_cycle and not mid_cycle:

@@ -2045,12 +2045,13 @@ class BuildModelTool(_CtxTool):
 class AnalyzeNewsTool(_CtxTool):
     name = "analyze_news"
     description = (
-        "Analyze recent news for a company and extract investment insights: growth "
-        "catalysts, risks, and, only when fresh source-dated coverage is sufficient, "
-        "an overall news sentiment. Scrapes and screens news articles "
-        "(runs in parallel). Use for 'what's the latest on X', 'why did X move', "
-        "sentiment, catalysts, or risks. Always returns freshness metadata; stale or "
-        "limited coverage never returns a directional sentiment."
+        "SLOW (20-60 seconds): downloads and screens full news articles into growth "
+        "catalysts, risks and, only when fresh source-dated coverage is sufficient, an "
+        "overall news sentiment. Use it inside a full analysis, or when the user asks "
+        "specifically for catalysts, risks or news sentiment. For 'what's the latest on "
+        "X', a company overview or a bare ticker, use get_global_news with the ticker "
+        "(about a second); for 'why did X move', use explain_price_move. Always returns "
+        "freshness metadata; stale or limited coverage never returns a directional sentiment."
     )
     parameters = {"type": "object", "properties": _TICKER_PARAM, "required": ["ticker"]}
 

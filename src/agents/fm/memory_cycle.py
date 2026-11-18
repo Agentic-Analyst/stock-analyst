@@ -107,6 +107,24 @@ MID_CYCLE_SCENARIO_REASON = (
 )
 
 
+# Diversified companies whose profits swing with DRAM and NAND prices but whose
+# Yahoo industry and description never say so. Samsung Electronics is filed
+# under "Consumer Electronics" and described as making "semiconductors" and
+# "memory storage products", so the rules below cannot see its memory business.
+# On 9 Nov 2026 its boom-year consensus (+79% revenue, 52-55% operating margin)
+# was projected as permanent and the chat published a range 6x to 12x the share
+# price (+823% at the midpoint). Listed here, it gets the memory-cycle treatment:
+# a scenario only until a mid-cycle model exists for a diversified maker.
+MEMORY_CYCLE_CONGLOMERATES = frozenset({
+    "005930.KS",   # Samsung Electronics, common
+    "005935.KS",   # Samsung Electronics, preferred
+})
+
+
+def is_memory_cycle_conglomerate(ticker: str) -> bool:
+    return (ticker or "").strip().upper() in MEMORY_CYCLE_CONGLOMERATES
+
+
 def is_memory_maker(industry: str, business_summary: str) -> bool:
     """A maker of DRAM or NAND chips, read from Yahoo's industry and description."""
     industry_key = (industry or "").casefold()
