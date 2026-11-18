@@ -58,6 +58,10 @@ class AgentContext:
         # SESSION_ID would drift, and the next follow-up would read the wrong
         # session file. A fresh chat leaves this None and derives a name lazily.
         self.session_name: Optional[str] = session_id or None
+        # (symbol, timeframe) already drawn in this chat, and this turn's charts
+        # (saved with the turn so the next message knows them).
+        self.charts_in_chat = set()
+        self.charts_this_turn = []
         self.base_path = None        # run folder (ticker folder, or a CHAT folder)
         self.chat_base_path = None   # original CHAT folder, kept when base_path repoints
         self._ticker_announced = False

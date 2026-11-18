@@ -114,6 +114,7 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
 ## Visuals: show a live chart when it helps
 - Whenever your answer is about a price, trend, performance, momentum, or a "how has X done" question — for a stock OR a coin — call `show_chart` (symbol like "NVDA" or "BTC-USD", pick the timeframe that matches the question: 1D for today, 1M for recent, 1Y for the year). Do it BEFORE writing the final answer, then reference it naturally ("as the chart shows…"). It renders an interactive live chart for the user right in the chat.
 - One chart per subject; for a comparison of two names, two charts is fine. Skip charts for pure fundamentals/valuation questions where a price line adds nothing.
+- Each chart once per chat. The conversation context lists the charts already shown ("Charts shown"); they are live and stay above, so in a follow-up about the same company refer to "the chart above" instead of calling show_chart again. Only a different timeframe that the question needs (today's session after a one-year view) is a new chart.
 
 ## CRITICAL: reuse prior work — do NOT regenerate what already exists
 - If the conversation context shows a report was ALREADY generated for a company this session (look for "Report Generated" or a prior valuation/news block), and the user asks a follow-up about it ("summarize the report", "break out the bull/base/bear cases", "what were the risks", "explain the valuation") — call `read_report` for that ticker and answer from its content. Do NOT call write_report again; regenerating produces the identical file and wastes a minute of the user's time.
@@ -571,6 +572,66 @@ def translation_keeps_facts(source: str, translated: str, language: str) -> bool
     return True
 
 
+# ---- reuse of recent lookups ----------------------------------------------------
+#
+# Every message starts a fresh worker, and a follow-up downloaded the same
+# quote, headlines and technicals the message before it had fetched seconds
+# earlier. Lookups that touch no analysis state are kept on disk in the
+# user's cache folder for a few minutes; a missing cache folder only means
+# no reuse. Seconds, by tool (by period for prices: a live quote ages fast).
+_TOOL_CACHE_SECONDS = {
+    "resolve_symbol": 24 * 3600,
+    "get_technicals": 600,
+    "get_global_news": 600,
+    "get_macro": 3600,
+    "explain_price_move": 600,
+    "get_fund": 6 * 3600,
+    "get_crypto": 120,
+    "get_prediction_markets": 300,
+    "price_option": 300,
+    "compute_risk_metrics": 1800,
+    "optimize_portfolio": 1800,
+}
+
+
+def _tool_cache_seconds(name: str, arguments: Dict[str, Any]) -> int:
+    if name == "get_prices":
+        period = str((arguments or {}).get("period") or "").lower()
+        return 60 if period in ("", "1d", "5d") else 600
+    return _TOOL_CACHE_SECONDS.get(name, 0)
+
+
+def _tool_cache_name(name: str, arguments: Dict[str, Any]) -> str:
+    import hashlib
+    key = json.dumps({"tool": name, "args": arguments or {}}, sort_keys=True, ensure_ascii=False, default=str)
+    return f"tool_{name}_{hashlib.sha1(key.encode('utf-8')).hexdigest()[:20]}"
+
+
+def _cached_tool_result(name: str, arguments: Dict[str, Any]) -> Optional[str]:
+    seconds = _tool_cache_seconds(name, arguments)
+    if not seconds:
+        return None
+    try:
+        from agents.fm.netcache import cache_get
+        hit = cache_get(_tool_cache_name(name, arguments), seconds)
+    except Exception:
+        return None
+    return hit if isinstance(hit, str) else None
+
+
+def _cache_tool_result(name: str, arguments: Dict[str, Any], result_json: str) -> None:
+    """Keep a successful result only; an error is retried next time."""
+    if not _tool_cache_seconds(name, arguments) or not isinstance(result_json, str):
+        return
+    try:
+        if str(json.loads(result_json).get("status", "ok")) != "ok":
+            return
+        from agents.fm.netcache import cache_put
+        cache_put(_tool_cache_name(name, arguments), result_json)
+    except Exception:
+        return
+
+
 class GeneralistAgent:
     """Drives the ReAct tool-use loop for one chat turn."""
 
@@ -682,6 +743,7 @@ class GeneralistAgent:
         # info.log — not just stdout. Restores the observability the old
         # supervisor had.
         self.ctx.ensure_base_logger()
+        self.ctx.charts_in_chat = self._charts_in_chat()
 
         provider = get_async_llm()
         is_openai = provider.is_openai
@@ -1085,7 +1147,12 @@ class GeneralistAgent:
             self._log(friendly)  # picked up by the progress extractor
         self._log(f"[SUPERVISOR] 🔧 {name}({json.dumps(arguments, ensure_ascii=False)})")
         self._tools_used.add(name)
-        result_json = await self.registry.execute(name, arguments)
+        result_json = _cached_tool_result(name, arguments)
+        if result_json is None:
+            result_json = await self.registry.execute(name, arguments)
+            _cache_tool_result(name, arguments, result_json)
+        else:
+            self._log(f"[SUPERVISOR]    ↳ {name}: reused a result from the last few minutes")
         # Log a one-line result status so the log shows what each tool returned.
         try:
             _rd = json.loads(result_json)
@@ -1247,6 +1314,23 @@ class GeneralistAgent:
         # _localize drops it again when the whole fixed statement was translated.
         self._local_prefix = local
         return f"{local}\n\n{answer}" if local else answer
+
+    def _charts_in_chat(self) -> set:
+        """(symbol, timeframe) of every chart drawn earlier in this chat."""
+        if not self.session_id:
+            return set()
+        try:
+            from src.session_manager import SessionManager
+            sm = SessionManager(email=self.email, ticker="CHAT", session_name=self.session_id)
+            shown = set()
+            for turn in sm.get_conversation_history(limit=0):
+                for chart in ((turn.get("analysis_results") or {}).get("charts") or []):
+                    if isinstance(chart, dict) and chart.get("symbol"):
+                        shown.add((str(chart["symbol"]).upper(),
+                                   str(chart.get("timeframe") or "1M").upper()))
+            return shown
+        except Exception:
+            return set()
 
     def _with_short_answer(self, template: str) -> str:
         """The fixed statement, opened by its answer to "should I buy X?" when that was asked."""
@@ -1522,6 +1606,10 @@ class GeneralistAgent:
             if subject_ticker:
                 analysis_results = analysis_results or {}
                 analysis_results["ticker"] = subject_ticker
+            charts = list(getattr(self.ctx, "charts_this_turn", None) or [])
+            if charts:
+                analysis_results = analysis_results or {}
+                analysis_results["charts"] = charts
             # Link the turn to its persisted answer file (per-turn answers stop
             # multi-turn sessions overwriting each other).
             if self.ctx.base_path is not None:
