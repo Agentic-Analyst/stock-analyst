@@ -690,6 +690,9 @@ def external_benchmark(financial_data: Dict[str, Any],
         ),
         "target_source_means": source_means,
         "model_return_vs_market": model_gap,
+        "model_fair_value": model_value,
+        # The price comparisons below are against the cash-flow method alone.
+        "model_cash_flow_value": _number(metrics.get("perpetual_price"), positive=True),
         "benchmark_relationship": benchmark_relationship,
         "target_range_relationship": target_range_relationship,
         "target_implied_forward_pe": _number(
@@ -1132,6 +1135,22 @@ def _times(ratio: float) -> str:
     return f"{ratio:.1f}" if abs(ratio) >= 10 else f"{ratio:.2f}"
 
 
+def _method_basis_note(value: Dict[str, Any], currency: str) -> str:
+    """Say the price comparison is against the cash-flow method alone, when that differs.
+
+    Hansen's fair value of A$4.16 sat 17% above the price while the line said the
+    price needs slightly more cash flow than the model expects: the comparison
+    uses the cash-flow method alone, the fair value blends in a second method.
+    """
+    cash_flow = value.get("model_cash_flow_value")
+    fair = value.get("model_fair_value")
+    if not cash_flow or not fair or abs(cash_flow / fair - 1.0) < 0.05:
+        return ""
+    return (f" That is against VYNN's cash-flow method alone, which values the shares at "
+            f"{_money(cash_flow, currency)}; its fair value of {_money(fair, currency)} also uses "
+            "a second method.")
+
+
 def render_external_benchmark_compact(value: Dict[str, Any], *, model_comparison: bool = True) -> str:
     """The analysts' view and what the price assumes, in plain words.
 
@@ -1241,7 +1260,8 @@ def render_external_benchmark_compact(value: Dict[str, Any], *, model_comparison
             need = f"only {_times(ratio)} times the cash flow VYNN's model expects"
         analyst = (f"; the average analyst target needs {_times(target_path + 1)} times"
                    if target_path is not None else "")
-        lines.append(f"- To justify today's price, the company needs {need}{analyst}.")
+        lines.append(f"- To justify today's price, the company needs {need}{analyst}."
+                     + _method_basis_note(value, currency))
     if market_path is not None and market_path + 1 >= 3.0 and value.get("mid_cycle_value"):
         lines.append(
             "- That gap is the price betting that today's peak profits last longer than the "

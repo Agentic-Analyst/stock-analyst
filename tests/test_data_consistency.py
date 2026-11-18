@@ -99,3 +99,15 @@ def test_the_guard_accepts_plain_words_for_the_street_comparison():
 def test_a_good_investment_question_gets_the_same_guard_as_should_i_buy():
     from src.agents.generalist_agent import _BUY_QUESTION
     assert _BUY_QUESTION.search("Is Costco a good investment at today's price?")
+
+
+def test_the_price_comparison_says_it_uses_the_cash_flow_method_alone():
+    from src.summary_evidence import render_external_benchmark_compact
+    value = {"currency": "AUD", "market_implied_fcf_path_delta": 0.04,
+             "model_fair_value": 4.16, "model_cash_flow_value": 3.43}
+    text = render_external_benchmark_compact(value)
+    assert ("about the cash flow VYNN's model expects (1.04 times). That is against VYNN's "
+            "cash-flow method alone, which values the shares at A$3.43; its fair value of "
+            "A$4.16 also uses a second method.") in text
+    value["model_cash_flow_value"] = 4.10
+    assert "cash-flow method alone" not in render_external_benchmark_compact(value)
