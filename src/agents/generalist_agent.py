@@ -607,7 +607,15 @@ class GeneralistAgent:
                         )
                 except Exception as e:
                     self._log(f"[SUPERVISOR] ❌ LLM turn failed: {e}")
-                    final_text = ("I hit an error while working on that. Please try again in a moment.")
+                    from llms.async_client import is_account_exhausted
+                    if is_account_exhausted(e):
+                        # The operator's AI account is out of credit: retrying
+                        # will not help, so say so instead of "try again".
+                        self._log("[SUPERVISOR] ❌ AI provider account has no credit left")
+                        final_text = ("VYNN can't answer right now: its AI service is unavailable. "
+                                      "This is on our side, not your question. Please try again later.")
+                    else:
+                        final_text = ("I hit an error while working on that. Please try again in a moment.")
                     run_status = "failed"
                     run_error = str(e)
                     break

@@ -138,10 +138,24 @@ _MODEL_TO_ANTHROPIC_ID = {
 _OPENAI_MODELS = {"gpt-4o-mini", "gpt-5.4-mini", "gpt-5-mini", "gpt-6-luna"}
 
 
+# An exhausted account comes back as HTTP 429 like a rate limit, but waiting
+# never fixes it: on 17 Nov 2026 a run retried "You have no credits remaining"
+# four times (13 s) before answering "I hit an error".
+_ACCOUNT_EXHAUSTED = ("insufficient_quota", "credit_balance_exhausted", "no credits remaining",
+                      "credit balance is too low")
+
+
+def is_account_exhausted(exc: object) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in _ACCOUNT_EXHAUSTED)
+
+
 def _is_rate_limit_like(exc: Exception) -> bool:
     """True for errors that warrant a backoff-and-retry (rate/timeout/5xx)."""
     name = type(exc).__name__.lower()
     msg = str(exc).lower()
+    if is_account_exhausted(exc):
+        return False
     if any(k in name for k in ("ratelimit", "timeout", "connection", "apistatus", "internalserver")):
         return True
     return any(
