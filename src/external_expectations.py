@@ -883,6 +883,8 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
             revenue_growth = revenue_row["average"] / previous - 1.0
         # The same for EPS; across a loss a growth rate means nothing.
         eps_growth = eps_row["growth"]
+        if isinstance(eps_row["average"], (int, float)) and eps_row["average"] <= 0:
+            eps_growth = None
         previous_eps = years[-1]["eps"] if years else None
         if index > 0 and isinstance(previous_eps, (int, float)) and isinstance(eps_row["average"], (int, float)):
             eps_growth = (eps_row["average"] / previous_eps - 1.0

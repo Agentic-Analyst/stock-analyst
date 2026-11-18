@@ -56,4 +56,4 @@ def test_next_years_growth_is_measured_from_this_years_estimate():
     assert rows[0]["revenue_growth"] == pytest.approx(-0.2317)
     assert rows[1]["revenue_growth"] == pytest.approx(135.233 / 179.342 - 1)
     # Across a loss, a growth rate means nothing.
-    assert rows[1]["eps_growth"] is None
+    assert rows[0]["eps_growth"] is None and rows[1]["eps_growth"] is None
