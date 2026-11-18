@@ -57,3 +57,26 @@ def test_next_years_growth_is_measured_from_this_years_estimate():
     assert rows[1]["revenue_growth"] == pytest.approx(135.233 / 179.342 - 1)
     # Across a loss, a growth rate means nothing.
     assert rows[0]["eps_growth"] is None and rows[1]["eps_growth"] is None
+
+
+# ---- readings the tools work out, so the answer does not -------------------------
+
+def test_rsi_band_and_distance_readings():
+    from src.agents.tools.data_tools import band_position, pct_from, rsi_reading
+    assert rsi_reading(37.2).startswith("neutral")          # was called "oversold"
+    assert rsi_reading(29.9).startswith("oversold") and rsi_reading(71).startswith("overbought")
+    assert band_position(3.57, 3.49, 3.73) == "lower half of the band"   # was "upper half"
+    assert band_position(3.80, 3.49, 3.73) == "above the upper band"
+    assert pct_from(3.57, 2.95) == 21.0                      # was written as 40%
+    assert pct_from(3.57, 5.92) == -39.7
+    assert pct_from(3.57, None) is None
+
+
+def test_todays_move_against_the_market_in_words():
+    from src.agents.tools.move_tools import versus_market
+    out = versus_market(-1.0, -0.6, "the S&P/ASX 200")
+    assert out == ("The stock is down 1.0% today against the S&P/ASX 200 down 0.6%: "
+                   "0.4 points worse than the market.")
+    assert "better" in versus_market(0.5, -0.6, "the S&P 500")
+    assert "in line with" in versus_market(-0.62, -0.6, None)
+    assert versus_market(None, -0.6, "x") is None

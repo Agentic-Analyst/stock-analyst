@@ -447,6 +447,8 @@ class GetPricesTool(Tool):
                 "period_pct_change": round((last - first) / first * 100, 2) if first else None,
                 "period_high": round(float(df["High"].max()), 2),
                 "period_low": round(float(df["Low"].min()), 2),
+                "pct_from_period_high": pct_from(last, float(df["High"].max())),
+                "pct_from_period_low": pct_from(last, float(df["Low"].min())),
                 "start": str(df.index[0]),
                 "end": str(df.index[-1]),
             }
@@ -478,6 +480,37 @@ class GetPricesTool(Tool):
 # ---------------------------------------------------------------------------
 # get_technicals — RSI/MACD/SMA/Bollinger (computed locally from yfinance)
 # ---------------------------------------------------------------------------
+# Readings worked out here, so the answer does not: a blind review of real
+# answers found "RSI 37 is oversold", "A$3.57 sits in the upper half of the
+# A$3.49-3.73 band" and "21% above the low" written as 40%.
+def pct_from(value: Optional[float], reference: Optional[float]) -> Optional[float]:
+    """How far ``value`` is above (+) or below (-) ``reference``, in percent."""
+    if value is None or not reference:
+        return None
+    return round((value / reference - 1.0) * 100, 1)
+
+
+def rsi_reading(rsi: Optional[float]) -> Optional[str]:
+    if rsi is None:
+        return None
+    if rsi >= 70:
+        return "overbought (70 or above)"
+    if rsi <= 30:
+        return "oversold (30 or below)"
+    return "neutral (between 30 and 70; oversold is 30 or below, overbought 70 or above)"
+
+
+def band_position(last: float, lower: float, upper: float) -> Optional[str]:
+    if upper is None or lower is None or upper <= lower:
+        return None
+    if last > upper:
+        return "above the upper band"
+    if last < lower:
+        return "below the lower band"
+    share = (last - lower) / (upper - lower)
+    return "upper half of the band" if share > 0.5 else "lower half of the band" if share < 0.5 else "at the middle"
+
+
 def wilder_rsi(closes, period: int = 14) -> Optional[float]:
     """RSI as Wilder defined it, the figure every broker and chart shows.
 
@@ -570,6 +603,11 @@ class GetTechnicalsTool(Tool):
             return {
                 "latest_close": round(last, 2),
                 "rsi_14": round(rsi, 1) if rsi is not None else None,
+                "rsi_reading": rsi_reading(rsi),
+                "pct_vs_sma_50": pct_from(last, sma50),
+                "pct_vs_sma_200": pct_from(last, sma200),
+                "bollinger_middle": round((bb_upper + bb_lower) / 2, 2),
+                "bollinger_position": band_position(last, bb_lower, bb_upper),
                 "sma_50": round(sma50, 2) if sma50 else None,
                 "sma_200": round(sma200, 2) if sma200 else None,
                 "above_sma_50": (last > sma50) if sma50 else None,

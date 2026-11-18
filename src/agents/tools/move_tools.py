@@ -109,6 +109,24 @@ def session_open(last_session: str, exchange_tz: Optional[str], now=None) -> boo
     return local.date().isoformat() == last_session and (local.hour, local.minute) < close
 
 
+def versus_market(stock_pct: Any, index_pct: Any, index_name: Optional[str]) -> Optional[str]:
+    """Today's move against the market's, in words.
+
+    Worked out here: an answer called a 1% fall "a bit better than the ASX
+    200's 0.6% fall".
+    """
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (stock_pct, index_pct)):
+        return None
+    index = index_name or "the market"
+    gap = float(stock_pct) - float(index_pct)
+    stock = f"{'up' if stock_pct >= 0 else 'down'} {abs(stock_pct):.1f}%"
+    market = f"{'up' if index_pct >= 0 else 'down'} {abs(index_pct):.1f}%"
+    if abs(gap) < 0.05:
+        return f"The stock is {stock} today, in line with {index} ({market})."
+    return (f"The stock is {stock} today against {index} {market}: "
+            f"{abs(gap):.1f} points {'better' if gap > 0 else 'worse'} than the market.")
+
+
 def sector_fund(sector: Optional[str], industry: Optional[str], currency: Optional[str]) -> Optional[tuple]:
     """US sector funds compare a US listing; a home-market line gets none."""
     if currency not in (None, "USD"):
@@ -242,6 +260,10 @@ class ExplainPriceMoveTool(Tool):
             if episode:
                 episode[f"{fund[0]}_same_dates_pct"] = index_change(
                     fund_frame["Close"], episode["start_date"], episode["end_date"])
+        comparison = versus_market(payload.get("day_change_pct"), market_today.get("index_today_pct"),
+                                   index_name)
+        if comparison:
+            market_today["stock_vs_index_today"] = comparison
         payload["market_today"] = market_today
         payload["news"] = news
         if filings:
