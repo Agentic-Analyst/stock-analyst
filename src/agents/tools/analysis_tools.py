@@ -788,9 +788,12 @@ def _rehydrate_report_guard_state(base: Path, ticker: str, content: str):
         # a mid-cycle report says how the value was reached.
         try:
             from src.valuation_methodology import built_method_suitability, workbook_nopat
+            _published = (computed.get("_vynn") or {}).get("valuation_publication") or {}
             metrics["method_suitability"] = built_method_suitability(
                 financial_data, (computed.get("_vynn") or {}).get("model_inputs"),
-                nopat=workbook_nopat(computed))
+                nopat=workbook_nopat(computed),
+                model_value=_published.get("model_value_for_audit"),
+                comps_value=(_published.get("method_values_for_audit") or {}).get("market_comps"))
         except Exception:
             pass
 

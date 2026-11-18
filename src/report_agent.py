@@ -1663,6 +1663,12 @@ def enforce_valuation_publication_boundary(
         )
         reason = _join_distinct_messages(reason, freshness_reason)
 
+    if not is_bank:
+        from src.valuation_methodology import withhold_unconfirmed_outlier
+        suitability = withhold_unconfirmed_outlier(
+            suitability, financial_data or {}, authoritative_fair_value,
+            legs.get("market_comps") if comps_publishable else None,
+        )
     if not suitability.get("publication_allowed"):
         method_reason = suitability.get("reason") or (
             "The available data does not support a publishable point valuation."

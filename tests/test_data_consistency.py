@@ -111,3 +111,35 @@ def test_the_price_comparison_says_it_uses_the_cash_flow_method_alone():
             "A$4.16 also uses a second method.") in text
     value["model_cash_flow_value"] = 4.10
     assert "cash-flow method alone" not in render_external_benchmark_compact(value)
+
+
+# ---- a single model far outside every analyst target -----------------------------
+
+def _fin(low=128.11, high=600.0, count=40):
+    return {"external_expectations": {"price_target": {"low": low, "high": high, "analyst_count": count}}}
+
+
+def test_a_dcf_only_value_far_outside_every_analyst_target_is_a_scenario():
+    from src.valuation_methodology import withhold_unconfirmed_outlier
+    base = {"primary_method": "dcf", "publication_allowed": True}
+    tesla = withhold_unconfirmed_outlier(base, _fin(), 20.25)
+    assert tesla["publication_allowed"] is False
+    assert tesla["primary_method"] == "scenario_only_pending_corroboration"
+    from src.summary_evidence import unsuitable_method_note
+    assert unsuitable_method_note(tesla).startswith("VYNN's cash-flow model lands outside every analyst")
+    assert withhold_unconfirmed_outlier(base, _fin(770, 1315, 37), 554.95)["publication_allowed"] is False
+    assert withhold_unconfirmed_outlier(base, _fin(1.85, 8.30, 8), 20.24)["publication_allowed"] is False
+
+
+@pytest.mark.parametrize("suitability,financial,value,comps", [
+    ({"primary_method": "dcf", "publication_allowed": True}, _fin(3.20, 6.80, 9), 4.16, None),   # inside
+    ({"primary_method": "dcf", "publication_allowed": True}, _fin(), 120.0, None),     # within 10% of the low
+    ({"primary_method": "dcf", "publication_allowed": True}, _fin(count=4), 20.25, None),  # thin coverage
+    ({"primary_method": "dcf", "publication_allowed": True}, _fin(), 20.25, 25.0),     # a second method
+    ({"primary_method": "dcf_mid_cycle", "publication_allowed": True}, _fin(), 20.25, None),
+    ({"primary_method": "justified_pb_roe", "publication_allowed": True}, _fin(), 20.25, None),
+    ({"primary_method": "dcf", "publication_allowed": True}, {}, 20.25, None),         # no analysts
+])
+def test_the_outlier_rule_leaves_everything_else_alone(suitability, financial, value, comps):
+    from src.valuation_methodology import withhold_unconfirmed_outlier
+    assert withhold_unconfirmed_outlier(suitability, financial, value, comps) == suitability

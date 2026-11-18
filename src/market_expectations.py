@@ -50,7 +50,9 @@ def build_market_expectations(
         # built on it (report_agent): say what the workbook is, a scenario.
         suitability = built_method_suitability(
             financial_data or {}, ((computed or {}).get("_vynn") or {}).get("model_inputs"),
-            nopat=workbook_nopat(computed))
+            nopat=workbook_nopat(computed),
+            model_value=(publication or {}).get("model_value_for_audit"),
+            comps_value=((publication or {}).get("method_values_for_audit") or {}).get("market_comps"))
         method_note = unsuitable_method_note(suitability)
         required: Dict[str, Any] = (
             {} if method_note else required_revenue_growth_from_workbook(computed)

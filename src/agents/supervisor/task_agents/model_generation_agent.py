@@ -906,8 +906,12 @@ async def model_generation_agent(
             # workbook was not built on it is a scenario here too, so the
             # chat answer's audit-scenario checks see what the report sees.
             from src.valuation_methodology import built_method_suitability
-            suitability = built_method_suitability(raw or {}, recorded_model_inputs,
-                                                   nopat=recorded_nopat)
+            suitability = built_method_suitability(
+                raw or {}, recorded_model_inputs, nopat=recorded_nopat,
+                model_value=valuation_metrics.get("fair_value"),
+                comps_value=(valuation_metrics.get("comps_price")
+                             if valuation_metrics.get("comps_included_in_blended_value") else None),
+            )
             valuation_metrics["method_suitability"] = suitability
             if not suitability.get("publication_allowed"):
                 valuation_metrics["point_estimate_withheld"] = True

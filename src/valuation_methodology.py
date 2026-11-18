@@ -555,14 +555,71 @@ def withhold_operating_loss(suitability: Any, nopat: Any) -> Any:
     return suitability
 
 
+# Tesla (17 Nov 2026) was published STRONG SELL at $20.25 against a $380 price,
+# and Costco STRONG SELL at -50%: in both, the cash-flow model was the only
+# method and its value lay far outside the whole range of well-covered analyst
+# targets (Tesla's lowest of 40 was $128). A single model that far from every
+# analyst, with nothing to confirm it, is a scenario, not a rating.
+UNCONFIRMED_OUTLIER_REASON = (
+    "No point valuation is published because VYNN's cash-flow model lands outside every "
+    "analyst's price target and no second valuation method confirms it, so its figure is a "
+    "scenario rather than a fair value."
+)
+OUTLIER_MARGIN = 0.10          # beyond the range by more than this share of its edge
+OUTLIER_MIN_ANALYSTS = 5
+
+
+def withhold_unconfirmed_outlier(suitability: Any, financial_data: Any, model_value: Any,
+                                 comps_value: Any = None) -> Any:
+    """A DCF-only value far outside every analyst target is an audit scenario.
+
+    Not for a mid-cycle value (deliberately away from peak-cycle targets) or a
+    bank, and not when a peer valuation is blended in as a second method.
+    """
+    def positive(value: Any) -> Optional[float]:
+        return (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(float(value)) and value > 0 else None)
+
+    if (not isinstance(suitability, dict) or suitability.get("publication_allowed") is False
+            or suitability.get("primary_method") in ("justified_pb_roe", "dcf_mid_cycle")
+            or positive(comps_value) is not None):
+        return suitability
+    value = positive(model_value)
+    expectations = (financial_data or {}).get("external_expectations") if isinstance(financial_data, dict) else None
+    if not expectations and isinstance(financial_data, dict) and financial_data:
+        try:
+            from src.external_expectations import build_external_expectations
+            expectations = build_external_expectations(financial_data)
+        except Exception:
+            expectations = None
+    target = (expectations or {}).get("price_target") or {}
+    low, high = positive(target.get("low")), positive(target.get("high"))
+    try:
+        count = int(target.get("analyst_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if (value is None or low is None or high is None or count < OUTLIER_MIN_ANALYSTS
+            or (1 - OUTLIER_MARGIN) * low <= value <= (1 + OUTLIER_MARGIN) * high):
+        return suitability
+    return {
+        **suitability,
+        "primary_method": "scenario_only_pending_corroboration",
+        "publication_allowed": False,
+        "reason": UNCONFIRMED_OUTLIER_REASON,
+    }
+
+
 def built_method_suitability(financial_data: Dict[str, Any], model_inputs: Any,
-                             nopat: Any = None) -> Dict[str, Any]:
+                             nopat: Any = None, model_value: Any = None,
+                             comps_value: Any = None) -> Dict[str, Any]:
     """``assess_valuation_methodology`` for the workbook built from this data.
 
-    ``nopat`` is the built model's forecast NOPAT row, where the caller has it.
+    ``nopat`` is the built model's forecast NOPAT row and ``model_value`` /
+    ``comps_value`` its blended value and peer leg, where the caller has them.
     """
-    return withhold_operating_loss(withhold_unbuilt_mid_cycle(
+    suitability = withhold_operating_loss(withhold_unbuilt_mid_cycle(
         assess_valuation_methodology(financial_data or {}), model_inputs), nopat)
+    return withhold_unconfirmed_outlier(suitability, financial_data, model_value, comps_value)
 
 
 def peers_blended(peer_comps: Any, suitability: Any) -> bool:
