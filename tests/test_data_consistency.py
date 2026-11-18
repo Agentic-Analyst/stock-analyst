@@ -143,3 +143,18 @@ def test_a_dcf_only_value_far_outside_every_analyst_target_is_a_scenario():
 def test_the_outlier_rule_leaves_everything_else_alone(suitability, financial, value, comps):
     from src.valuation_methodology import withhold_unconfirmed_outlier
     assert withhold_unconfirmed_outlier(suitability, financial, value, comps) == suitability
+
+
+@pytest.mark.parametrize("stored,plain", [
+    ("The near-term operating case is not reconciled: FY1 model revenue is +22% versus Yahoo (12 analysts). "
+     "A point valuation cannot be published.", "VYNN's sales forecast for the next year or two differs"),
+    ("The valuation methods span more than 1.8x. That range is useful scenario evidence.",
+     "VYNN's valuation methods are more than 1.8 times apart"),
+    ("The DCF-only estimate is -50% from the market, but no independent market-comps valuation qualified.",
+     "VYNN's only valuation method puts the shares -50% from the market price"),
+    ("The financial statements are stale: the latest annual period ended 2023-12-31.",
+     "The financial statements are stale: the latest annual period ended 2023-12-31."),
+])
+def test_the_detail_line_says_the_reason_plainly(stored, plain):
+    from src.summary_evidence import plain_publication_reason
+    assert plain_publication_reason(stored).startswith(plain)

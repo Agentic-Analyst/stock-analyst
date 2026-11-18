@@ -233,7 +233,8 @@ class SupervisorWorkflowRunner:
             )
         else:
             range_text = "No supported positive valuation-method estimate is available."
-        reason = compact_publication_reason(
+        from src.summary_evidence import plain_publication_reason
+        reason = plain_publication_reason(
             metrics.get("publication_withheld_reason")
             or "The valuation evidence is not sufficiently reconciled for a point conclusion."
         )

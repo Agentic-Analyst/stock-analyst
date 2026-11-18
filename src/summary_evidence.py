@@ -39,6 +39,42 @@ def compact_publication_reason(value: Any, *, max_chars: int = 500) -> str:
     return shortened + "…"
 
 
+# The common publication reasons, as a reader would put them. The stored
+# reason stays complete for audit; the chat answer's "Detail:" used to quote
+# its first sentence ("The near-term operating case is not reconciled: FY1
+# model revenue is +22% versus ...").
+_PLAIN_REASONS = (
+    (re.compile(r"^At least one valuation method failed", re.I),
+     "One of VYNN's valuation methods gave no positive value, so the other cannot carry a "
+     "rating on its own."),
+    (re.compile(r"^The valuation methods disagree by more than 2\.5x", re.I),
+     "VYNN's valuation methods disagree by more than 2.5 times, so there is no single value to state."),
+    (re.compile(r"^The valuation methods span more than 1\.8x", re.I),
+     "VYNN's valuation methods are more than 1.8 times apart, too far for one value."),
+    (re.compile(r"^No finite positive intrinsic-value output", re.I),
+     "The model produced no positive value."),
+    (re.compile(r"^The near-term operating case is not reconciled", re.I),
+     "VYNN's sales forecast for the next year or two differs from the analysts' by more than "
+     "15%, and that has to be explained before a value is stated."),
+    (re.compile(r"^The near-term profitability case is not reconciled", re.I),
+     "VYNN's profit-margin forecast differs from what the analysts' earnings estimates imply "
+     "by more than 8 points, and that has to be explained before a value is stated."),
+    (re.compile(r"^The DCF-only estimate is ([+-]?\d+%) from the market", re.I),
+     "VYNN's only valuation method puts the shares {0} from the market price, and the analysts "
+     "do not back a gap that large."),
+)
+
+
+def plain_publication_reason(value: Any, *, max_chars: int = 500) -> str:
+    """The reason no single value is published, in plain words where it is a common one."""
+    first = compact_publication_reason(value, max_chars=max_chars)
+    for pattern, plain in _PLAIN_REASONS:
+        match = pattern.search(first)
+        if match:
+            return plain.format(*match.groups())
+    return first
+
+
 def _number(value: Any, *, positive: bool = False):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
