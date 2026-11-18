@@ -1000,6 +1000,9 @@ class GeneralistAgent:
             broad_valuation_request = bool(
                 wants_report(self.user_prompt)
                 or _CJK_VALUATION_QUESTION.search(self.user_prompt or "")
+                # "Is Costco a good investment?" skipped the guard that
+                # "should I buy Costco?" gets.
+                or _BUY_QUESTION.search(self.user_prompt or "")
                 or re.search(
                     r"\b(?:full|comprehensive|valuation|dcf|price\s+target|"
                     r"analy[sz](?:e|is)|should\s+(?:i|we)\s+(?:buy|sell))\b",

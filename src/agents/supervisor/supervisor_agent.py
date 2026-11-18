@@ -618,13 +618,16 @@ class SupervisorWorkflowRunner:
                 and not any(term in lower for term in (
                     "material conflict", "materially conflicts",
                     "unresolved calibration", "does not corroborate",
+                    # The plain words the answer is asked for.
+                    "disagree sharply", "sharply disagree", "far apart",
                 ))):
             return False
         if (isinstance(whole_path, (int, float))
                 and not isinstance(whole_path, bool)
                 and math.isfinite(float(whole_path))
                 and "whole-path" not in lower
-                and "whole path" not in lower):
+                and "whole path" not in lower
+                and "times the cash flow" not in lower):
             return False
         if (isinstance(whole_path, (int, float))
                 and not isinstance(whole_path, bool)
@@ -637,6 +640,7 @@ class SupervisorWorkflowRunner:
                     ("modeled cash-flow" in lower or "modeled fcf" in lower
                      or "operating cash-flow" in lower)
                     and "not a comprehensive" in lower
+                    or "not everything investors are paying for" in lower
                 )):
             return False
         covered_forward = [

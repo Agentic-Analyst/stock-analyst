@@ -80,3 +80,22 @@ def test_todays_move_against_the_market_in_words():
     assert "better" in versus_market(0.5, -0.6, "the S&P 500")
     assert "in line with" in versus_market(-0.62, -0.6, None)
     assert versus_market(None, -0.6, "x") is None
+
+
+def test_the_guard_accepts_plain_words_for_the_street_comparison():
+    from src.agents.supervisor.supervisor_agent import SupervisorWorkflowRunner as R
+    benchmark = {"target_mean": 412.48, "target_source": "yahoo_finance",
+                 "benchmark_relationship": "material_conflict",
+                 "market_implied_fcf_path_delta": 28.27}
+    plain = ("The 40 analysts' average target is $412.48 (yahoo_finance), and they disagree sharply "
+             "with VYNN's model. To justify today's price, the company needs about 29.3 times the cash "
+             "flow VYNN's model expects: the model counts only the cash flow it can forecast, not "
+             "everything investors are paying for.")
+    assert R._answer_covers_external_benchmark(plain, benchmark)
+    assert not R._answer_covers_external_benchmark(
+        "Analysts' average target is $412.48 (yahoo_finance).", benchmark)
+
+
+def test_a_good_investment_question_gets_the_same_guard_as_should_i_buy():
+    from src.agents.generalist_agent import _BUY_QUESTION
+    assert _BUY_QUESTION.search("Is Costco a good investment at today's price?")
