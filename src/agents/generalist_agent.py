@@ -568,6 +568,19 @@ _FIGURE_TOKEN = re.compile(r"\d+(?:[.,]\d+)*")
 _MIN_FIGURES_TO_CHECK = 3
 
 
+def _line_key(line: str) -> str:
+    return " ".join(re.sub(r"[*_`#>•|]+|^\s*[-+]\s+", " ", str(line or "")).split()).lower()
+
+
+def _without_template_lines(section: str, template: str) -> str:
+    """The section without lines that repeat a line of the fixed statement word for word."""
+    own = {_line_key(line) for line in str(template or "").split("\n") if len(_line_key(line)) >= 12}
+    if not own:
+        return section
+    kept = [line for line in str(section or "").split("\n") if _line_key(line) not in own]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+
+
 def parse_corrections(reply: Optional[str]) -> List[Dict[str, str]]:
     """The checker's JSON array of {"wrong", "right"}; [] for anything else."""
     text = str(reply or "")
@@ -1008,7 +1021,10 @@ class GeneralistAgent:
                 # can publish the unguarded draft.
                 final_text = guarded
                 if self._guard_template is not None and guarded == self._guard_template:
-                    template = self._with_short_answer(guarded)
+                    template = guarded
+                    # Added after the analysis is written: shown to the writer,
+                    # it was copied into the analysis and sank it (Costco).
+                    short = self._short_answer_line()
                     language = answer_language(self.user_prompt)
                     if language:
                         # The fixed statement is English; translate it while
@@ -1016,11 +1032,13 @@ class GeneralistAgent:
                         import asyncio as _asyncio
                         final_text, _ = await _asyncio.gather(
                             self._add_analysis(messages[:tool_work], provider, template, tool_defs),
-                            self._translate(provider, [p for p in template.split("\n\n")
+                            self._translate(provider, [p for p in ([short] if short else []) + template.split("\n\n")
                                                        if english_paragraph(p, language)]),
                         )
                     else:
                         final_text = await self._add_analysis(messages[:tool_work], provider, template, tool_defs)
+                    if short:
+                        final_text = f"{short}\n\n{final_text}"
                 else:
                     final_text = await self._checked_draft(messages, provider, draft, guarded, tool_defs)
                 final_text = await self._localize(provider, final_text)
@@ -1266,6 +1284,8 @@ class GeneralistAgent:
             self._log(friendly)  # picked up by the progress extractor
         self._log(f"[SUPERVISOR] 🔧 {name}({json.dumps(arguments, ensure_ascii=False)})")
         self._tools_used.add(name)
+        if name in ("build_model", "write_report", "get_financials") and (arguments or {}).get("ticker"):
+            self.__dict__.setdefault("_analysis_tickers", set()).add(str(arguments["ticker"]).strip().upper())
         result_json = _cached_tool_result(name, arguments)
         if result_json is None:
             result_json = await self.registry.execute(name, arguments)
@@ -1453,28 +1473,43 @@ class GeneralistAgent:
 
     def _with_short_answer(self, template: str) -> str:
         """The fixed statement, opened by its answer to "should I buy X?" when that was asked."""
+        line = self._short_answer_line()
+        return f"{line}\n\n{template}" if line else template
+
+    def _short_answer_line(self) -> str:
+        """The fixed statement's answer to "should I buy X?", bold, or "" when not asked."""
         prompt = self.user_prompt or ""
         if not _BUY_QUESTION.search(prompt) or _SELL_QUESTION.search(prompt):
-            return template
+            return ""
         kind = str(getattr(self, "_guard_kind", None) or "")
+        state = self._answer_subject()[0]
+        metrics = getattr(getattr(state, "financial_model", None), "valuation_metrics", {}) or {}
         if kind.startswith("published:"):
             answer = _SHORT_ANSWER.get(kind.split(":", 1)[1].strip().upper())
             if not answer:
-                return template
-            state = self._answer_subject()[0]
-            metrics = getattr(getattr(state, "financial_model", None), "valuation_metrics", {}) or {}
+                return ""
             from src.confidence_alert import alert_sentence
             low = bool(alert_sentence(metrics.get("confidence_alert")))
             line = f"Short answer: {answer}, on VYNN's numbers" + (", but with low confidence." if low else ".")
         elif kind == "withheld":
-            line = ("Short answer: VYNN gives no buy or sell call here, because its valuation "
-                    "is a range rather than one value.")
+            from src.summary_evidence import unsuitable_method_note
+            if unsuitable_method_note(metrics.get("method_suitability")):
+                # Tesla and Costco read "because its valuation is a range".
+                line = ("Short answer: VYNN gives no buy or sell call here, because its own "
+                        "valuation model is not reliable enough for this company; the reason is below.")
+            else:
+                line = ("Short answer: VYNN gives no buy or sell call here, because its valuation "
+                        "is a range rather than one value.")
         elif kind.startswith("refused"):
             line = ("Short answer: VYNN gives no buy or sell call here, because it has no "
                     "valuation of this company this time.")
         else:
-            return template
-        return f"**{line}**\n\n{template}"
+            return ""
+        return f"**{line}**"
+
+    def _multi_company(self) -> bool:
+        """Whether this turn analysed two or more companies (picks, a comparison)."""
+        return len(getattr(self, "_analysis_tickers", set()) or set()) >= 2
 
     async def _check_numbers(self, transcript: list, provider, text: str, tool_defs=None) -> str:
         """The text with the checker's exact-match corrections applied; the text itself on any doubt."""
@@ -1650,6 +1685,9 @@ class GeneralistAgent:
         if not section or answer_language_mismatch(self.user_prompt, section):
             self._log("[SUPERVISOR] ⚠️ The analysis was empty or not in the user's language — answering with the fixed statement.")
             return template
+        # Lines copied from the fixed statement are its own, not claims: Costco's
+        # analysis repeated the analysts' target line and was dropped whole.
+        section = _without_template_lines(section, template)
         # Before both checks, so they judge the text that is published.
         section = await self._check_numbers(retry, provider, section, tool_defs)
 
@@ -1676,6 +1714,11 @@ class GeneralistAgent:
             return template
         if review.repeated:
             self._log(f"[SUPERVISOR] ✂️ Left out {len(review.repeated)} sentence(s) that repeated the fixed statement.")
+        if self._multi_company():
+            # Picks or a comparison: one company's fixed statement is not the
+            # answer. A stock-picks reply opened with the last company's "no
+            # rating" statement; it now follows the (checked) analysis.
+            return f"{review.text.strip()}\n\n{template}" if review.text.strip() else template
         return compose_with_analysis(template, review.text)
 
     async def _text_only_turn(self, messages: list, provider, tool_defs=None):

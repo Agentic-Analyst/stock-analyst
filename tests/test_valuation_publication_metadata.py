@@ -550,3 +550,31 @@ def test_the_ruled_out_answer_states_its_reason_once_and_no_figure():
     assert answer.count("operating profit is still negative") == 1
     assert "20.24" not in answer and "+588%" not in answer and "Detail:" not in answer
     assert "no direction versus the market" in answer
+    # The note after it said a third time, and wrongly, that "the cash-flow
+    # method does not fit this company" (18 Nov Sonnet check, Vanke).
+    assert "does not fit this company" not in answer
+
+
+def test_the_outlier_answer_states_its_reason_once():
+    from types import SimpleNamespace
+    from src.agents.supervisor import supervisor_agent
+    from src.valuation_methodology import UNCONFIRMED_OUTLIER_REASON
+    runner = supervisor_agent.SupervisorWorkflowRunner.__new__(
+        supervisor_agent.SupervisorWorkflowRunner)
+    runner.ticker = "TSLA"
+    metrics = {
+        "perpetual_price": 20.25, "exit_multiple_price": None, "current_price": 380.11,
+        "point_estimate_withheld": True,
+        "publication_withheld_reason": UNCONFIRMED_OUTLIER_REASON,
+        "method_suitability": {
+            "primary_method": "scenario_only_pending_corroboration",
+            "publication_allowed": False, "reason": UNCONFIRMED_OUTLIER_REASON,
+        },
+    }
+    runner.state = SimpleNamespace(
+        financial_data=SimpleNamespace(key_metrics={"basic_info": {"currency": "USD"}}, raw_data={}),
+        news_analysis=None,
+        financial_model=SimpleNamespace(assumptions={}, valuation_metrics=metrics))
+    answer = runner._safe_withheld_valuation_answer()
+    assert answer.count("outside every analyst") == 1
+    assert "20.25" not in answer and "does not fit this company" not in answer

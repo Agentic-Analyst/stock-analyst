@@ -290,10 +290,13 @@ class SupervisorWorkflowRunner:
         # twice in a row.
         method_note = unsuitable_method_note(metrics.get("method_suitability"))
         detail = "" if method_note and method_note.rstrip(".") in reason else f" Detail: {reason}"
-        answer = (
-            f"{self.ticker}: {view['headline']}\n\n{body}"
-            f"\n\n{note}{detail}"
-        )
+        # The two newest method rules state their reason plainly in the
+        # evidence line; the note after it said the same a third time, and
+        # wrongly ("the cash-flow method does not fit this company").
+        if (metrics.get("method_suitability") or {}).get("primary_method") in (
+                "scenario_only_pending_operating_profit", "scenario_only_pending_corroboration"):
+            note, detail = "", ""
+        answer = f"{self.ticker}: {view['headline']}\n\n{body}" + (f"\n\n{note}{detail}" if note else "")
         # A ruled-out method states no direction, so the block does not
         # compare the analysts with it either.
         rendered = render_external_benchmark_compact(

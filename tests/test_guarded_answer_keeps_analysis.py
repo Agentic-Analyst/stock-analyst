@@ -714,3 +714,61 @@ def test_a_rating_action_in_the_first_person_is_still_a_call(text):
 def test_an_action_verb_near_a_rating_word_is_not_a_rating_action(text):
     review = review_section(XOM_SECTION + "\n\n" + text)
     assert review.publishable and text in review.text
+
+
+# --------------------------------------------------------------------------
+# From the 18 Nov Sonnet check
+# --------------------------------------------------------------------------
+
+def _ruled_out_state():
+    from src.valuation_methodology import UNCONFIRMED_OUTLIER_REASON
+    state = _withheld_state()
+    state.financial_model.valuation_metrics["method_suitability"] = {
+        "primary_method": "scenario_only_pending_corroboration",
+        "publication_allowed": False, "reason": UNCONFIRMED_OUTLIER_REASON,
+    }
+    return state
+
+
+def test_a_ruled_out_model_does_not_call_its_answer_a_range():
+    # Tesla and Costco read "because its valuation is a range rather than one
+    # value", while the reason below was that the model itself was ruled out.
+    ag = _chat_agent("is TSLA a buy?", _ruled_out_state(), "TSLA")
+    ag._guard_kind = "withheld"
+    line = ag._short_answer_line()
+    assert line.startswith("**Short answer: VYNN gives no buy or sell call here")
+    assert "not reliable enough" in line and "range" not in line
+    ag2 = _chat_agent("is TEST a buy?", _withheld_state(), "TEST")
+    ag2._guard_kind = "withheld"
+    assert "a range rather than one value" in ag2._short_answer_line()
+    assert _chat_agent("why is TSLA up?", _ruled_out_state(), "TSLA")._short_answer_line() == ""
+
+
+def test_lines_copied_from_the_fixed_statement_do_not_sink_the_analysis():
+    # Costco: the analysis repeated the analysts' target line word for word,
+    # the review counted it as a claim, and the whole analysis was dropped.
+    from src.agents.generalist_agent import _without_template_lines
+    template = ("COST: the cash-flow model is shown only as a scenario.\n\n"
+                "What analysts think, for comparison (not VYNN's view):\n"
+                "- Average price target: $1,085.35 from 37 analysts, 2.2% below today's price (Yahoo Finance).")
+    section = ("**Price.** Costco closed at $1,109.80.\n"
+               "- **Average price target: $1,085.35 from 37 analysts, 2.2% below today's price (Yahoo Finance).**\n"
+               "Membership fees rose 10%.")
+    out = _without_template_lines(section, template)
+    assert "1,085.35" not in out and "Costco closed at $1,109.80" in out and "Membership" in out
+
+
+def test_with_several_companies_the_analysis_comes_first():
+    # A stock-picks reply opened with the last company's "no rating" statement.
+    ag = _chat_agent("any stocks you would recommend today?", _withheld_state(), "TEST")
+    ag._analysis_tickers = {"GOOGL", "META", "TEST"}
+    section = ("I screened ten large companies on growth, margins and trading multiples, "
+               "then built models for three of them. Alphabet had the strongest growth.")
+    template, out = _analysis(ag, _Provider(section, "NO"),
+                              "Verdict: Buy. The model's midpoint of $167.67 sits well below the price.")
+    assert out.startswith("I screened ten large companies") and out.endswith(template)
+    # One company: the fixed statement still comes first.
+    ag1 = _chat_agent("Give me the bull and bear case for TEST.", _withheld_state(), "TEST")
+    template1, out1 = _analysis(ag1, _Provider(section, "NO"),
+                                "Verdict: Buy. The model's midpoint of $167.67 sits well below the price.")
+    assert out1.startswith(template1.split("\n\n")[0])
