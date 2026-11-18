@@ -524,3 +524,29 @@ def test_early_losses_that_turn_to_profit_are_not_blocked_by_that_rule():
     )
     assert "operating profit is still negative" not in (metadata["withheld_reason"] or "")
     assert metadata["point_estimate_withheld"] is False
+
+
+def test_the_ruled_out_answer_states_its_reason_once_and_no_figure():
+    from types import SimpleNamespace
+    from src.agents.supervisor import supervisor_agent
+    from src.valuation_methodology import OPERATING_LOSS_SCENARIO_REASON
+    runner = supervisor_agent.SupervisorWorkflowRunner.__new__(
+        supervisor_agent.SupervisorWorkflowRunner)
+    runner.ticker = "000002.SZ"
+    metrics = {
+        "perpetual_price": 20.24, "exit_multiple_price": None, "current_price": 2.94,
+        "point_estimate_withheld": True,
+        "publication_withheld_reason": OPERATING_LOSS_SCENARIO_REASON,
+        "method_suitability": {
+            "primary_method": "scenario_only_pending_operating_profit",
+            "publication_allowed": False, "reason": OPERATING_LOSS_SCENARIO_REASON,
+        },
+    }
+    runner.state = SimpleNamespace(
+        financial_data=SimpleNamespace(key_metrics={"basic_info": {"currency": "CNY"}}, raw_data={}),
+        news_analysis=None,
+        financial_model=SimpleNamespace(assumptions={}, valuation_metrics=metrics))
+    answer = runner._safe_withheld_valuation_answer()
+    assert answer.count("operating profit is still negative") == 1
+    assert "20.24" not in answer and "+588%" not in answer and "Detail:" not in answer
+    assert "no direction versus the market" in answer

@@ -270,9 +270,14 @@ class SupervisorWorkflowRunner:
             unsuitable_method_note(metrics.get("method_suitability")),
             shape=span["shape"],
         )
+        # A ruled-out method's reason is already the evidence line ("The
+        # method was ruled out because ..."); China Vanke's answer stated it
+        # twice in a row.
+        method_note = unsuitable_method_note(metrics.get("method_suitability"))
+        detail = "" if method_note and method_note.rstrip(".") in reason else f" Detail: {reason}"
         answer = (
             f"{self.ticker}: {view['headline']}\n\n{body}"
-            f"\n\n{note} Detail: {reason}"
+            f"\n\n{note}{detail}"
         )
         # A ruled-out method states no direction, so the block does not
         # compare the analysts with it either.

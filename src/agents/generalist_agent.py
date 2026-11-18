@@ -487,7 +487,8 @@ _NUMBER_CHECK_NOTE = (
     "P/E means earnings are expected to grow; a Form 144 is a notice of an intended sale, not a "
     "sale). Reply with only a JSON array of corrections, each {\"wrong\": \"<exact words from "
     "the text>\", \"right\": \"<the corrected words>\"}. Copy each wrong part exactly and keep it "
-    "short (a phrase or one sentence); change only what is wrong and add nothing new. Reply [] "
+    "short (a phrase or one sentence), including any linking word before it, so the corrected "
+    "sentence reads naturally in place; change only what is wrong and add nothing new. Reply [] "
     "when everything is right. Do not call any tool.]"
 )
 _FIGURE_TOKEN = re.compile(r"\d+(?:[.,]\d+)*")
