@@ -401,7 +401,9 @@ def _sentences(body: str) -> List[str]:
             continue
         # "approx." ends nothing; "$200." alone continues what came before. Only
         # the tail is examined, so a long run of joins stays linear.
-        if out and (_ABBREVIATION.search(_normalize(out[-1][-12:])) or _letters(part) < 4):
+        # A list number ("1.", "**1.") opens the line it numbers.
+        if out and (_ABBREVIATION.search(_normalize(out[-1][-12:])) or _letters(part) < 4
+                    or _letters(out[-1]) == 0):
             out[-1] = f"{out[-1]} {part}"
         else:
             out.append(part)
@@ -496,6 +498,144 @@ def _covered(quote_key: str, sentence_keys: Sequence[str]) -> bool:
     return _letters(rest) <= max(3, _letters(quote_key) // 10)
 
 
+class _Quotes:
+    """The sentences a check quoted, matched against the text they came from."""
+
+    def __init__(self, quotes: Sequence[str], *, min_share: float = 0.0, exact: bool = False):
+        quotes = list(quotes)
+        self.total = len(quotes)
+        self.exact = exact
+        # Exact units (sentences the caller took from the text itself) match
+        # at any length; a check's quotes need enough words to be matched.
+        self.keys = [key for key in (_quote_key(q) for q in quotes)
+                     if key and (exact or len(key) >= _QUOTE_MIN)]
+        self.min_share = min_share
+        self.hit_by: dict = {}
+
+    def matches(self, part: str) -> bool:
+        key = _quote_key(part)
+        if self.exact:
+            hits = [i for i, q in enumerate(self.keys) if q == key]
+        else:
+            # With min_share, a sentence inside a longer quote counts only as
+            # a real share of it: a heading such as "JPMorgan (JPM)" inside a
+            # quoted list sentence is not that sentence.
+            hits = [i for i, q in enumerate(self.keys)
+                    if q in key or (len(key) >= max(_QUOTE_MIN, self.min_share * len(q)) and key in q)]
+        for i in hits:
+            self.hit_by.setdefault(i, []).append(key)
+        return bool(hits)
+
+    def unmatched(self, text_left: str) -> int:
+        """Quotes the removal does not account for, short ones included.
+
+        A quote counts as found only if the sentences removed for it make up
+        the whole of it and none of it is left in the text: a long quote that
+        took in an innocent sentence must not leave its call behind.
+        """
+        if self.exact:
+            return (self.total - len(self.keys)) + sum(
+                1 for i in range(len(self.keys)) if i not in self.hit_by)
+        left = _quote_key(text_left)
+        return (self.total - len(self.keys)) + sum(
+            1 for i, q in enumerate(self.keys)
+            if not (_covered(q, self.hit_by.get(i, [])) and q not in left)
+        )
+
+
+def _without_units(text: str, removed) -> str:
+    """The text without each sentence (or table row) `removed` accepts, tidied.
+
+    A line that loses every sentence goes; one reduced to a fragment goes; a
+    heading or label left heading nothing goes.
+    """
+    kept: List[str] = []
+    for raw in str(text or "").replace("\r\n", "\n").split("\n"):
+        if not raw.strip():
+            kept.append("")
+            continue
+        if raw.lstrip().startswith("|"):
+            if not removed(raw):
+                kept.append(raw)
+            continue
+        prefix, body = _LINE_PREFIX.match(raw).groups()
+        prefix = prefix or ""
+        parts = _sentences(body)
+        good = [part for part in parts if not removed(part)]
+        line = _balance(" ".join(good))
+        if not line:
+            continue
+        # Only a line that lost a sentence can be reduced to a fragment.
+        if len(good) < len(parts) and _letters(line) < 12 and not _is_structural(f"{prefix}{line}"):
+            continue
+        kept.append(f"{prefix}{line}")
+
+    tidy: List[str] = []
+    for position, line in enumerate(kept):
+        if line.strip() and _is_structural(line):
+            following = next((l for l in kept[position + 1:] if l.strip()), None)
+            if following is None or (
+                _is_structural(following) and _heading_level(following) <= _heading_level(line)
+            ):
+                continue
+        tidy.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(tidy)).strip("\n")
+
+
+@dataclass
+class QuotedDrop:
+    """A text without the sentences a check quoted."""
+
+    text: str = ""
+    dropped: List[str] = field(default_factory=list)
+    # Quotes not accounted for: any means the check's reply cannot be trusted
+    # to name what it objected to.
+    unmatched: int = 0
+
+
+def text_units(text: str) -> List[str]:
+    """Every sentence (and table row) of a text, as drop_quoted matches them."""
+    out: List[str] = []
+    for raw in str(text or "").replace("\r\n", "\n").split("\n"):
+        if not raw.strip():
+            continue
+        if raw.lstrip().startswith("|"):
+            out.append(raw.strip())
+            continue
+        out.extend(part.strip() for part in _sentences(_LINE_PREFIX.match(raw).group(2)) if part.strip())
+    return out
+
+
+def prints_token(text: str, tokens: Iterable[str]) -> bool:
+    """Whether a figure appears as a whole number: "318.7" is in "$318.70" only as itself."""
+    plain = _normalize(text)
+    return any(
+        token and re.search(rf"(?<![\d.,]){re.escape(_normalize(token))}(?![\d]|[.,]\d)", plain)
+        for token in tokens
+    )
+
+
+def drop_quoted(text: str, quotes: Sequence[str], *, min_share: float = 0.0,
+                exact: bool = False) -> QuotedDrop:
+    """Remove every sentence a check quoted; count the quotes not wholly removed.
+
+    `exact`: the quotes are sentences taken from the text itself (text_units),
+    removed wherever they are, whatever their length.
+    """
+    out = QuotedDrop()
+    found = _Quotes(quotes, min_share=min_share, exact=exact)
+
+    def removed(part: str) -> bool:
+        if found.keys and found.matches(part):
+            out.dropped.append(part.strip())
+            return True
+        return False
+
+    out.text = _without_units(text, removed)
+    out.unmatched = found.unmatched(out.text)
+    return out
+
+
 def review_section(
     section: str,
     *,
@@ -513,60 +653,20 @@ def review_section(
     tokens = tuple(token for token in forbidden_tokens if token)
     view = published
     review = SectionReview()
-    lines = str(section or "").replace("\r\n", "\n").split("\n")
-    keys = [key for key in (_quote_key(q) for q in drop) if len(key) >= _QUOTE_MIN]
-    hit_by: dict = {}
-
-    def quoted(part: str) -> bool:
-        key = _quote_key(part)
-        hits = [i for i, q in enumerate(keys) if q in key or (len(key) >= _QUOTE_MIN and key in q)]
-        for i in hits:
-            hit_by.setdefault(i, []).append(key)
-        return bool(hits)
+    found = _Quotes(drop)
 
     def removed(part: str) -> bool:
         if restates(part, extra_patterns):
             review.repeated.append(part.strip())
             return True
-        if keys and quoted(part):
+        if found.keys and found.matches(part):
             review.dropped.append(part.strip())
             return True
         return False
 
     # Repeats go first: whatever they contain is never published, so a claim
     # inside one ("analysts rate it a Buy") cannot sink an otherwise good section.
-    kept: List[str] = []
-    for raw in lines:
-        if not raw.strip():
-            kept.append("")
-            continue
-        if raw.lstrip().startswith("|"):
-            if not removed(raw):
-                kept.append(raw)
-            continue
-        prefix, body = _LINE_PREFIX.match(raw).groups()
-        prefix = prefix or ""
-        parts = _sentences(body)
-        good = [part for part in parts if not removed(part)]
-        text = _balance(" ".join(good))
-        if not text:
-            continue
-        # Only a line that lost a sentence can be reduced to a fragment.
-        if len(good) < len(parts) and _letters(text) < 12 and not _is_structural(f"{prefix}{text}"):
-            continue
-        kept.append(f"{prefix}{text}")
-
-    # A heading or label whose content was all removed heads nothing.
-    tidy: List[str] = []
-    for position, line in enumerate(kept):
-        if line.strip() and _is_structural(line):
-            following = next((l for l in kept[position + 1:] if l.strip()), None)
-            if following is None or (
-                _is_structural(following) and _heading_level(following) <= _heading_level(line)
-            ):
-                continue
-        tidy.append(line)
-    text = re.sub(r"\n{3,}", "\n\n", "\n".join(tidy)).strip("\n")
+    text = _without_units(section, removed)
 
     # Claims in what would be published: each sentence, each label read with
     # the line it introduces ("Bull case:" / "$240"), and a table as one text.
@@ -586,14 +686,7 @@ def review_section(
         review.claims.append(table[:200])
 
     review.text = text if _letters(text) >= _MIN_SECTION_LETTERS else ""
-    # A quote counts as found only if the sentences removed for it make up
-    # the whole of it, and none of it is left in the text: a long quote
-    # that took in an innocent sentence must not leave its call behind.
-    # A quote too short to match is never found.
-    left = _quote_key(text)
-    review.quotes_unmatched = (len(list(drop)) - len(keys)) + sum(
-        1 for i, q in enumerate(keys) if not (_covered(q, hit_by.get(i, [])) and q not in left)
-    )
+    review.quotes_unmatched = found.unmatched(text)
     return review
 
 

@@ -31,7 +31,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from llms.async_client import get_async_llm
-from answer_evidence import compose as compose_with_analysis, flagged_sentences, review_section
+from answer_evidence import (
+    compose as compose_with_analysis, drop_quoted, flagged_sentences, makes_claim, prints_token,
+    review_section, text_units,
+)
 from agents.tools.base import ToolRegistry
 from agents.tools.analysis_tools import AgentContext, build_analysis_tools
 from agents.tools.data_tools import build_data_tools
@@ -139,6 +142,7 @@ You have TOOLS you can call to get real, current data and to run deep analysis. 
   2. CHEAP RANK: call `compare_tickers` on them and rank by the user's criterion using the returned multiples (trailing/forward P/E, growth, margins). Seconds, not minutes.
   3. DEEP DIVE: run `build_model` ONLY on the top 2-3 ranked candidates to confirm the thesis.
   4. DELIVER HONESTLY: present ONLY names that actually satisfy the user's criterion (for "undervalued": genuinely cheap vs peers and/or positive DCF upside). If fewer qualify than asked, either iterate steps 1-3 once with fresh candidates or say plainly that only K names qualify and present those. NEVER pad the list with names your own analysis just called overvalued.
+- A company whose build_model result has `no_single_fair_value` true (or that got no model) has NO VYNN view, in picks and comparisons as everywhere else: do not pick, rank or recommend it, do not call it cheap, expensive, undervalued or attractive, and do not quote its model's values, range or upside. Say in one line that VYNN gives no call on it and why (its model gives only a range, or is not reliable for it), and keep its facts, multiples, news and the analysts' view. Recommend only companies whose model published a view, and never against that view. The answer is checked company by company before it is published.
 
 ## Depth: answer well, then offer to go deeper
 - Give a genuinely useful answer — not a shallow one-liner. Bring in the relevant angles (numbers, drivers, risks, context) the question deserves.
@@ -517,6 +521,62 @@ _SECTION_CHECK = (
     "no other words.\n\nSection:\n<<<\n"
 )
 _SECTION_CHECK_ANCHOR = "Reply with exactly NO"
+
+# Picks and comparisons (18 Nov 2026): "Any stocks you would recommend today?"
+# recommended Alphabet and Meta, called them cheap and quoted +64% from cash-
+# flow ranges their own models had withheld, because the guard held only the
+# last company modelled (JPMorgan, published) to its rules. Each modelled
+# company's position is now checked on the whole answer.
+_COMPANY_CHECK = (
+    "You check a stock-research answer that covers several companies before it is published. "
+    "VYNN gives NO view (no rating, no fair value) on these companies: {held}. Answer YES if "
+    "the answer says any of the following about any of them, whether it names the company, "
+    "gives its ticker, or refers to it (\"both\", \"these two\", \"the top three\", \"the names "
+    "above\"):\n"
+    "- a suggestion to buy, add to, keep, hold, trim, sell or avoid it, or a pick or ranking "
+    "of it, including soft, conditional or suitability forms (\"stands out\", \"worth a look\", "
+    "\"suits growth investors\", \"scale in\", \"a core holding\", \"I'd pass on it\");\n"
+    "- a stance on the shares (bullish, bearish, constructive, a top pick);\n"
+    "- a judgement that it is cheap, inexpensive, expensive, undervalued, overvalued, fairly "
+    "valued or attractively priced;\n"
+    "- a fair value, value per share, model, DCF or scenario value or range, expected return, "
+    "or percentage upside or downside, other than analysts' ratings and price targets clearly "
+    "attributed to analysts.\n"
+    "{published}"
+    "These are fine and are NOT a reason to answer YES: saying VYNN gives no call on a company; "
+    "facts about the business, results and guidance, the price history, technical indicators, "
+    "valuation multiples stated as numbers, news, risks, and analysts' ratings and price targets "
+    "attributed to analysts. Statements about other companies only count as set out above. "
+    "Reply with exactly NO if the answer contains none of these. Otherwise reply YES on its own "
+    "line, followed only by each sentence that contains one, each on its own line, copied "
+    "exactly from the answer: no other words.\n\nAnswer:\n<<<\n"
+)
+_NO_CHECKED_ANSWER = (
+    "VYNN compared several companies here but could not check this answer against each "
+    "company's valuation, so it gives no buy or sell call on any of them. Ask about one "
+    "company at a time for VYNN's view on it."
+)
+
+
+def _paragraph_with(text: str, prefix: str) -> str:
+    """The first paragraph starting with `prefix`, else the first non-empty one."""
+    paragraphs = [p.strip() for p in str(text or "").split("\n\n") if p.strip()]
+    for paragraph in paragraphs:
+        if paragraph.startswith(prefix):
+            return paragraph
+    return paragraphs[0] if paragraphs else ""
+
+
+def _letters_in(text: str) -> int:
+    return len(re.findall(r"[^\W\d_]", str(text or "")))
+
+
+_COMPANY_CHECK_PUBLISHED = (
+    "VYNN publishes a view on these companies: {views}. The answer may give, recommend in line "
+    "with, or restate exactly those views. Answer YES also if it attributes to VYNN, its model "
+    "or its report a different rating or figure for one of them, or suggests the opposite of its "
+    "published rating (buying a company VYNN rates SELL, selling one it rates BUY).\n"
+)
 
 
 # ---- a direct answer to "should I buy X?" ---------------------------------------
@@ -1038,7 +1098,27 @@ class GeneralistAgent:
                 # Committed before the next step, so nothing after this point
                 # can publish the unguarded draft.
                 final_text = guarded
-                if self._guard_template is not None and guarded == self._guard_template:
+                try:
+                    several = self._several_company_turn()
+                except Exception:
+                    # Unsure whether another company's boundary applies: check.
+                    several = True
+                if several:
+                    # The guard above held only the last company modelled to
+                    # its rules. Until every company is checked, the answer is
+                    # one that makes no call on any of them.
+                    final_text = _NO_CHECKED_ANSWER
+                    try:
+                        final_text = await self._several_company_answer(
+                            messages, provider, draft, tool_defs, messages[:tool_work])
+                    except Exception as error:
+                        self._log(f"[SUPERVISOR] ⚠️ Could not check the answer company by company: "
+                                  f"{type(error).__name__}")
+                        try:
+                            final_text = self._positions_block(self._company_positions())
+                        except Exception:
+                            final_text = _NO_CHECKED_ANSWER
+                elif self._guard_template is not None and guarded == self._guard_template:
                     template = guarded
                     # Added after the analysis is written: shown to the writer,
                     # it was copied into the analysis and sank it (Costco).
@@ -1315,9 +1395,20 @@ class GeneralistAgent:
                 built = json.loads(result_json).get("status", "ok") == "ok"
             except (TypeError, ValueError, AttributeError):
                 built = False
+            key = str(self.ctx.ticker).strip().upper()
             if built:
-                self.__dict__.setdefault("_analysis_names", {})[str(self.ctx.ticker).strip().upper()] = (
+                self.__dict__.setdefault("_analysis_names", {})[key] = (
                     getattr(self.ctx, "company_name", None))
+            # Every company a model was asked for, with its own state: the
+            # context moves on to the next company, and each one's publication
+            # boundary is checked on the answer. A refused or failed build is a
+            # company VYNN gives no view on, and still one -- once its data was
+            # found: a symbol that resolved to nothing is no company at all.
+            state = getattr(self.ctx, "state", None)
+            financial = getattr(state, "financial_data", None)
+            if built or getattr(financial, "raw_data", None):
+                self.__dict__.setdefault("_company_states", {})[key] = state
+                self.__dict__.setdefault("_company_names", {})[key] = getattr(self.ctx, "company_name", None)
         # Log a one-line result status so the log shows what each tool returned.
         try:
             _rd = json.loads(result_json)
@@ -1536,6 +1627,319 @@ class GeneralistAgent:
     def _multi_company(self) -> bool:
         """Whether this turn analysed two or more companies (picks, a comparison)."""
         return len(getattr(self, "_analysis_names", {}) or {}) >= 2
+
+    # ---- several companies, each held to its own publication boundary -----
+    #
+    # The guard reads one state, the last company modelled. A picks answer
+    # that ended on JPMorgan (published) recommended Alphabet and Meta on the
+    # cash-flow ranges their own models withheld; one that ended on Verizon
+    # (withheld) recommended nothing. When two or more companies were modelled
+    # and any of them has no published view, the whole answer is checked
+    # against every company's position: the figures each withheld model hides
+    # are removed with their sentences, sentences naming a withheld company
+    # that make a claim go too, and a model check reads the rest for any call,
+    # judgement or figure on a withheld company, in any wording, and for any
+    # misquote of a published one. A YES that names its sentences narrows the
+    # answer once; anything else gets a call-free analysis beside each
+    # company's fixed position. VYNN's position on each company closes every
+    # such answer.
+
+    _JUDGEMENT = re.compile(
+        r"\b(?:cheap(?:er|est)?|inexpensive|expensive|pricey|undervalued|overvalued|"
+        r"under-?valued|over-?valued|bargains?|attractive(?:ly)?(?:\s+(?:valued|priced))?|"
+        r"top\s+picks?|stands?\s+out|worth\s+(?:buying|owning|a\s+look)|upside|downside|"
+        r"mispric\w*|room\s+to\s+run|scal(?:e|ing)\s+in|"
+        # Plain calls: "GOOGL: a buy.", "I'd buy GOOGL here", "my top recommendation".
+        r"buy(?:ing|s)?|sell(?:ing|s)?|add(?:ing)?|trim(?:ming)?|avoid(?:ing)?|accumulat\w*|"
+        r"recommend\w*|picks?|hold(?:ing)?)\b",
+        re.I,
+    )
+    _ANALYSTS = re.compile(r"\banalysts?'?\b|\bstreet\b|\bconsensus\b|\bwall\s+street\b", re.I)
+    _NAME_SUFFIX = re.compile(
+        r"[,.]?\s+(?:inc|corp|corporation|co|company|holdings?|group|plc|ltd|limited|sa|ag|nv|se|"
+        r"platforms|technologies|communications)\b\.?", re.I)
+
+    # A name's first word is a company's name only when it says which one:
+    # "The Coca-Cola Company" is not "The", "Bank of America" is not "Bank".
+    _GENERIC_FIRST_WORDS = frozenset({
+        "the", "bank", "first", "american", "america", "united", "general", "national",
+        "international", "global", "new", "china", "chinese", "japan", "royal", "british",
+        "canadian", "us", "u.s.", "north", "south", "east", "west", "western", "eastern",
+        "pacific", "atlantic", "standard", "public", "southern", "northern", "applied",
+        "advanced", "digital", "energy", "health", "financial", "capital", "real", "life",
+        "home", "great", "big", "old", "best", "first", "union", "federal", "central",
+    })
+
+    def _all_company_states(self) -> Dict[str, Any]:
+        """Every company this turn answers about, with the state its boundary is read from.
+
+        A report read back this turn is one of them, unless the same company
+        was also modelled this turn (then the fresh model governs).
+        """
+        states = dict(getattr(self, "_company_states", {}) or {})
+        # BRK.B failing and BRK-B building are one company: a modelless entry
+        # whose name another entry carries is that company's failed attempt.
+        def has_model(state) -> bool:
+            try:
+                return getattr(state, "financial_model", None) is not None
+            except Exception:
+                return False
+
+        modelled_names = {
+            self._company_name_of(t).lower() for t, s in states.items()
+            if has_model(s) and self._company_name_of(t)
+        }
+        states = {
+            t: s for t, s in states.items()
+            if has_model(s) or not self._company_name_of(t)
+            or self._company_name_of(t).lower() not in modelled_names
+        }
+        if "read_report" in getattr(self, "_tools_used", set()):
+            report_state = getattr(self.ctx, "report_guard_state", None)
+            report_ticker = str(getattr(self.ctx, "report_guard_ticker", None) or "").strip().upper()
+            if report_state is not None and report_ticker and report_ticker not in states:
+                states[report_ticker] = report_state
+        return states
+
+    def _company_name_of(self, ticker: str) -> str:
+        for source in (getattr(self, "_company_names", {}) or {}, getattr(self, "_analysis_names", {}) or {}):
+            if source.get(ticker):
+                return str(source[ticker]).strip()
+        if ticker == str(getattr(self.ctx, "report_guard_ticker", None) or "").strip().upper():
+            return str(getattr(self.ctx, "report_guard_company_name", None) or "").strip()
+        return ""
+
+    @staticmethod
+    def _state_published(state) -> bool:
+        """Whether VYNN published a view on this state; False on any doubt."""
+        try:
+            model = getattr(state, "financial_model", None)
+            if model is None:
+                return False
+            metrics = getattr(model, "valuation_metrics", None)
+            if not isinstance(metrics, dict):
+                return False
+            return not metrics.get("point_estimate_withheld")
+        except Exception:
+            return False
+
+    def _several_company_turn(self) -> bool:
+        """Two or more companies modelled (or read back), and one without a published view."""
+        published = [self._state_published(s) for s in self._all_company_states().values()]
+        return len(published) >= 2 and not all(published)
+
+    def _company_positions(self) -> List[Dict[str, Any]]:
+        """Each company's position, read from its own state.
+
+        A company with no published view gets a fixed "no call" line that
+        says why in plain words and carries no figure or direction: its own
+        statement (the model's direction and midpoint gap) is the model's
+        conclusion, and in a list of picks it reads as one. Fails closed: a
+        company whose position cannot be read counts as one with no view.
+        """
+        from agents.supervisor.supervisor_agent import SupervisorWorkflowRunner
+        from src.confidence_alert import alert_sentence
+        from src.summary_evidence import unsuitable_method_note
+        positions = []
+        for ticker, state in self._all_company_states().items():
+            name = self._company_name_of(ticker)
+            label = f"{name} ({ticker})" if name and name.upper() != ticker else ticker
+            entry = {"ticker": ticker, "label": label, "name": name, "published": False,
+                     "rating": "", "view": None, "forbidden": (),
+                     "statement": "no buy or sell call from VYNN, because it has no valuation of this "
+                                  "company this time."}
+            try:
+                guard = SupervisorWorkflowRunner.__new__(SupervisorWorkflowRunner)
+                guard.state, guard.ticker = state, ticker
+                if self._state_published(state):
+                    metrics = state.financial_model.valuation_metrics
+                    headline = guard._published_report_headline()
+                    rating = str(headline.get("rating") or "").strip().upper()
+                    statement = _paragraph_with(guard._safe_published_valuation_answer(headline),
+                                                "VYNN's report")
+                    alert = alert_sentence(metrics.get("confidence_alert"))
+                    entry.update(
+                        published=True, rating=rating,
+                        statement=statement + (f" {alert}" if alert else ""),
+                        view=guard._published_view(rating, metrics, headline,
+                                                   getattr(state, "listing_view", None)),
+                    )
+                elif getattr(state, "financial_model", None) is not None:
+                    metrics = state.financial_model.valuation_metrics
+                    # The figures the guard hides for this run: an empty answer
+                    # is never acceptable, so it answers with its template.
+                    guard._guard_user_answer("")
+                    entry["forbidden"] = tuple(getattr(guard, "guard_forbidden", ()) or ())
+                    entry["statement"] = (
+                        "no buy or sell call from VYNN, because its own valuation model is not "
+                        "reliable enough for this company."
+                        if unsuitable_method_note(metrics.get("method_suitability"))
+                        else "no buy or sell call from VYNN, because its valuation is a range "
+                             "rather than one value."
+                    )
+            except Exception as error:
+                self._log(f"[SUPERVISOR] ⚠️ Could not read {ticker}'s position: {type(error).__name__} "
+                          "— treating it as no view.")
+                entry.update(published=False, rating="", view=None)
+            positions.append(entry)
+        return positions
+
+    def _company_words(self, position: Dict[str, Any]) -> List[re.Pattern]:
+        """What a sentence names a company by: its ticker, its name, and a telling first word.
+
+        Tickers match in capitals only ("ON", not "on"); a one-letter ticker
+        only as "(A)" or "A:", since "A" opens sentences. Names match in any case.
+        """
+        patterns = []
+        for ticker in {position["ticker"], position["ticker"].split(".")[0]}:
+            if not ticker:
+                continue
+            if len(ticker) == 1:
+                patterns.append(re.compile(rf"\({re.escape(ticker)}\)|(?<![\w&]){re.escape(ticker)}:"))
+            else:
+                patterns.append(re.compile(rf"(?<![\w&]){re.escape(ticker)}(?![\w&])"))
+        name = self._NAME_SUFFIX.sub("", position.get("name") or "").strip()
+        name = re.sub(r"^the\s+", "", name, flags=re.I)
+        words = set()
+        if name:
+            words.add(name)
+            first = re.split(r"[\s,]+", name)[0]
+            if (len(re.sub(r"\W", "", first)) >= 3
+                    and first.lower().strip(".") not in self._GENERIC_FIRST_WORDS):
+                words.add(first)
+        patterns += [re.compile(rf"(?<![\w&]){re.escape(w)}(?![\w&])", re.I) for w in words if w]
+        return patterns
+
+    @staticmethod
+    def _names_one_of(sentence: str, patterns: List[re.Pattern]) -> bool:
+        return any(pattern.search(sentence) for pattern in patterns)
+
+    def _company_check(self, held: List[Dict[str, Any]], published: List[Dict[str, Any]]) -> str:
+        views = []
+        for p in published:
+            figures = ", ".join(f"{v:,.2f}" for v in dict.fromkeys((p.get("view") or {}).get("values") or []))
+            views.append(f"{p['label']}: " + (f"rated {p['rating']}" if p.get("rating") else "no rating")
+                         + (f", per-share figures {figures}" if figures else ""))
+        return _COMPANY_CHECK.format(
+            held=", ".join(p["label"] for p in held),
+            published=_COMPANY_CHECK_PUBLISHED.format(views="; ".join(views)) if views else "",
+        )
+
+    async def _ask_company_check(self, provider, prompt: str, text: str) -> str:
+        check = await provider.call_with_tools(
+            [{"role": "user", "content": prompt + text + "\n>>>"}], [], temperature=0.0)
+        self.total_cost += check.cost
+        return (check.text or "").strip()
+
+    def _contradicts_published(self, text: str, published: List[Dict[str, Any]]) -> Optional[str]:
+        """The first published company whose own guard finds a conflicting rating or figure.
+
+        The guard's patterns are not tied to a company, so a figure stated
+        for one company can read as a conflict for another: that only sends
+        the answer to the call-free fallback.
+        """
+        from agents.supervisor.supervisor_agent import SupervisorWorkflowRunner
+        states = self._all_company_states()
+        units = text_units(text)
+        for p in published:
+            try:
+                own = self._company_words(p)
+                others = [w for q in published if q["ticker"] != p["ticker"] for w in self._company_words(q)]
+                # Every sentence but those about another published company:
+                # "rates PG BUY" is not a conflict with JPM's HOLD, while "the
+                # report rates the bank BUY, unlike Meta" still is.
+                relevant = "\n".join(u for u in units
+                                     if self._names_one_of(u, own) or not self._names_one_of(u, others))
+                guard = SupervisorWorkflowRunner.__new__(SupervisorWorkflowRunner)
+                guard.state, guard.ticker = states[p["ticker"]], p["ticker"]
+                guard._guard_user_answer(relevant)
+                if getattr(guard, "guard_template", None) is not None:
+                    return p["ticker"]
+            except Exception:
+                return p["ticker"]
+        return None
+
+    @staticmethod
+    def _positions_block(positions: List[Dict[str, Any]]) -> str:
+        """One line per company: its published view, or "no buy or sell call" and why."""
+        lines = []
+        for p in positions:
+            statement = " ".join(str(p["statement"]).split())
+            prefix = f"{p['ticker']}:"
+            if statement.upper().startswith(prefix.upper()):
+                statement = statement[len(prefix):].strip()
+            lines.append(f"- {prefix} {statement}")
+        return "Where VYNN stands on each company it modelled:\n" + "\n".join(lines)
+
+    async def _several_company_answer(self, messages: list, provider, draft: str, tool_defs,
+                                      analysis_messages: list) -> str:
+        positions = self._company_positions()
+        held = [p for p in positions if not p["published"]]
+        published = [p for p in positions if p["published"]]
+        block = self._positions_block(positions)
+        hidden = tuple(dict.fromkeys(t for p in held for t in p["forbidden"]))
+
+        async def fallback(reason: str) -> str:
+            self._log(f"[SUPERVISOR] ⚠️ {reason} — answering with each company's position and a "
+                      "checked analysis.")
+            return await self._several_company_fallback(analysis_messages, provider, block, hidden,
+                                                        tool_defs)
+
+        # The number check runs first, so every check below reads the text
+        # that is published.
+        text = await self._check_numbers(messages, provider, draft, tool_defs)
+        # Deterministic first: a withheld model's hidden figures, and any
+        # sentence that names a withheld company and makes a claim or a
+        # valuation judgement (analysts' views attributed to analysts aside).
+        words = [w for p in held for w in self._company_words(p)]
+        flagged = []
+        for unit in text_units(text):
+            if hidden and prints_token(unit, hidden):
+                flagged.append(unit)
+            elif self._names_one_of(unit, words) and not self._ANALYSTS.search(unit) and (
+                    makes_claim(unit) or self._JUDGEMENT.search(unit)):
+                flagged.append(unit)
+        if flagged:
+            first = drop_quoted(text, flagged, exact=True)
+            for unit in first.dropped[:5]:
+                self._audit(f"[SUPERVISOR] several-company check removed: {unit[:300]}")
+            if first.unmatched or (hidden and prints_token(first.text, hidden)):
+                return await fallback("A flagged sentence could not be removed cleanly")
+            self._log(f"[SUPERVISOR] ✂️ Left out {len(first.dropped)} sentence(s) about a company VYNN "
+                      "gives no view on.")
+            text = first.text
+        conflict = self._contradicts_published(text, published)
+        if conflict:
+            return await fallback(f"The answer misstated VYNN's view on {conflict}")
+
+        prompt = self._company_check(held, published)
+        verdict = await self._ask_company_check(provider, prompt, text) if _letters_in(text) >= 40 else "YES"
+        if not re.fullmatch(r"[\W_]*NO[\W_]*", verdict, re.I):
+            self._audit(f"[SUPERVISOR] several-company check verdict: {verdict[:800]!r}")
+            quotes = flagged_sentences(verdict)
+            trimmed = drop_quoted(text, quotes, min_share=0.3) if quotes else None
+            second = ""
+            if trimmed and not trimmed.unmatched and trimmed.dropped and _letters_in(trimmed.text) >= 40:
+                second = await self._ask_company_check(provider, prompt, trimmed.text)
+            if not re.fullmatch(r"[\W_]*NO[\W_]*", second, re.I):
+                if second:
+                    self._audit(f"[SUPERVISOR] second several-company check verdict: {second[:800]!r}")
+                return await fallback("The answer made a call on a company VYNN gives no view on")
+            self._log(f"[SUPERVISOR] ✂️ Left out {len(trimmed.dropped)} more sentence(s) the check read "
+                      "as a call; the rest passed it.")
+            text = trimmed.text
+        from answer_evidence import _split_offer
+        body, offer = _split_offer(text)
+        return "\n\n".join(part for part in (body.strip(), block, offer) if part)
+
+    async def _several_company_fallback(self, analysis_messages, provider, block, hidden, tool_defs) -> str:
+        """A call-free, checked analysis, then each company's position."""
+        self._guard_template = block
+        self._guard_kind = None
+        self._guard_published = None
+        self._guard_forbidden = tuple(hidden)
+        self._guard_patterns = ()
+        return await self._add_analysis(analysis_messages, provider, block, tool_defs)
 
 
     async def _check_numbers(self, transcript: list, provider, text: str, tool_defs=None) -> str:
