@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Pattern, Sequence
+from typing import Iterable, List, Optional, Pattern, Sequence, Tuple
 
 _DASHES = dict.fromkeys(map(ord, "‐‑‒–—―−﹣－"), "-")
 _APOSTROPHES = dict.fromkeys(map(ord, "‘’ʼ＇`´"), "'")
@@ -721,3 +721,102 @@ def compose(template: str, section: str) -> str:
         tail = f"\n\n{offer}" if offer else ""
         return f"{parts[0].rstrip()}\n\n{body}\n\n{parts[1].lstrip()}{tail}"
     return f"{template}\n\n{section}"
+
+
+# ---- news outlets an answer names without the data to back it -------------
+#
+# Hansen (19 Nov 2026): "A Reuters-sourced headline the day before said Hansen
+# expects revenue growth in FY28." The headline came from TradingView; nothing
+# VYNN was given mentioned Reuters. An outlet named in an answer must appear in
+# the turn's evidence (tool results, the question, earlier answers). Matched
+# case-sensitively in the answer (proper nouns) and case-insensitively in the
+# evidence, where outlets also appear as web addresses ("wsj.com").
+_OUTLETS = {
+    "Reuters": r"\bReuters\b",
+    "Bloomberg": r"\bBloomberg(?:\s+News)?\b",
+    "The Wall Street Journal": r"\b(?:The\s+)?Wall\s+Street\s+Journal\b|\bWSJ\b",
+    "CNBC": r"\bCNBC\b",
+    "Financial Times": r"\b(?:the\s+)?Financial\s+Times\b|\bft\.com\b",
+    "Barron's": r"\bBarron['’]?s\b",
+    "MarketWatch": r"\bMarket\s?Watch\b",
+    "Benzinga": r"\bBenzinga\b",
+    "The Motley Fool": r"\b(?:The\s+)?Motley\s+Fool\b|\bfool\.com\b",
+    "Seeking Alpha": r"\bSeeking\s?Alpha\b",
+    "Investing.com": r"\bInvesting\.com\b",
+    "Business Insider": r"\bBusiness\s?Insider\b",
+    "Forbes": r"\bForbes\b",
+    "Associated Press": r"\b(?:the\s+)?Associated\s+Press\b|\bapnews\.com\b",
+    "Australian Financial Review": r"\b(?:the\s+)?Australian\s+Financial\s+Review\b|\bAFR\b",
+    "South China Morning Post": r"\b(?:the\s+)?South\s+China\s+Morning\s+Post\b|\bSCMP\b",
+    "Caixin": r"\bCaixin",
+    "Kalkine": r"\bKalkine\b",
+    "Simply Wall St": r"\bSimply\s?Wall\s?\.?\s?St\b",
+    "TradingView": r"\bTrading\s?View\b",
+    "Zacks": r"\bZacks\b",
+    "TipRanks": r"\bTip\s?Ranks\b",
+    "CoinDesk": r"\bCoin\s?Desk\b",
+    "Cointelegraph": r"\bCointelegraph\b",
+    "TheStreet": r"\bTheStreet\b",
+}
+
+
+def unsourced_outlets(text: str, evidence: str) -> List[str]:
+    """Outlets the text names that the evidence never mentions."""
+    out = []
+    for name, pattern in _OUTLETS.items():
+        if re.search(pattern, text or "") and not re.search(pattern, evidence or "", re.I):
+            out.append(name)
+    return out
+
+
+def without_unsourced_outlets(text: str, evidence: str) -> Tuple[str, List[str]]:
+    """The text with unsupported outlet attributions made general, and the outlets changed.
+
+    Only clear attribution forms are touched, and the claim always stays:
+    "A Reuters-sourced headline" -> "A headline"; "(Benzinga, Reuters)" ->
+    "(Benzinga)"; "according to Reuters" -> "according to reports"; "a
+    Reuters report" -> "a report". A name used otherwise (Thomson Reuters, the
+    Bloomberg U.S. Aggregate Bond Index, the Forbes Global 2000, a Zacks Rank)
+    is left alone, and no sentence is ever dropped.
+    """
+    changed = []
+    for name in unsourced_outlets(text, evidence):
+        r = f"(?:{_OUTLETS[name]})"
+        before = text
+        text = re.sub(rf"\b{r}[-‑–](?:sourced|reported|based)\s+", "", text)
+
+        def strip_group(match):
+            lead, inner, trail = match.group(1), match.group(2), match.group(3)
+            # Items are separated by ", " or ";": "1,234" stays one number.
+            parts = re.split(r"(,\s+|;\s*)", inner)
+            items, seps = parts[0::2], parts[1::2]
+            if not any(re.fullmatch(r, i.strip()) for i in items):
+                return match.group(0)
+            kept = []
+            for index, item in enumerate(items):
+                if re.fullmatch(r, item.strip()):
+                    continue
+                if kept:
+                    kept.append(seps[index - 1])
+                kept.append(item)
+            if kept:
+                return f"{lead}({''.join(kept).strip()}){trail}"
+            return " " if lead and trail else ""
+        text = re.sub(r"([ \t]?)\(([^()\n]{0,200})\)([ \t]?)", strip_group, text)
+        # Only when the outlet ends the phrase: "according to Bloomberg
+        # Intelligence" or "per the Forbes 400 list" name something else.
+        text = re.sub(rf"\b([Aa]ccording to|[Pp]er|[Cc]iting|[Vv]ia)\s+(?:the\s+)?{r}"
+                      rf"(?=[ \t]*[,.;:!?)\]]|[ \t]*$)",
+                      lambda m: "According to reports" if m.group(1)[0].isupper() else "according to reports",
+                      text, flags=re.M)
+        def general(match):
+            word, noun = match.group(1), match.group(2)
+            if word.lower() in ("a", "an"):
+                word = "an" if noun[0] in "aeiou" else "a"
+                word = word.capitalize() if match.group(1)[0].isupper() else word
+            return f"{word} {noun}"
+        text = re.sub(rf"\b([Aa]n?|[Tt]he)\s+{r}\s+(report|article|story|piece|headline|analysis)\b",
+                      general, text)
+        if text != before:
+            changed.append(name)
+    return text, changed

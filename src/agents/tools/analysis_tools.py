@@ -2008,6 +2008,7 @@ class BuildModelTool(_CtxTool):
 
         view = _view_for(self.ctx, state)
         coc = None if method == "justified_pb_roe" else _cost_of_capital(state)
+        margins = None if method == "justified_pb_roe" else _margin_assumptions(state)
         return tool_ok(
             # The listing the figures below are for (a US line moved to its
             # home listing is in listing_view).
@@ -2049,6 +2050,10 @@ class BuildModelTool(_CtxTool):
             # discount rate, and why?", Vanke's answer had to back 14.5% out of
             # the reverse DCF and could not say why it was so high.
             **({"cost_of_capital": coc} if coc else {}),
+            # The model's projected margins beside what the company earned.
+            # Asked "what margins does it assume?", Hansen's answer could not
+            # say: the tool returned only headline results.
+            **({"margin_assumptions": margins} if margins else {}),
             note=(note + " " + NO_SINGLE_VALUE_NOTE + CONFIDENCE_ALERT_NOTE
                   + "Treat Street targets/ratings as a decision-relevant external "
                   "benchmark, not intrinsic value. When benchmark_reconciliation is "
@@ -2111,6 +2116,110 @@ def _cost_of_capital(state) -> Optional[Dict[str, Any]]:
                           "(equity risk premium + country risk premium), never below the pre-tax cost of debt "
                           "because shareholders are paid after lenders; WACC weights it with the "
                           "after-tax cost of debt; credit_spread_basis says how the borrowing spread was set")
+    return out
+
+
+def _margin_assumptions(state) -> Optional[Dict[str, Any]]:
+    """The model's five projected years and the last three reported ones, as margins of revenue."""
+    import json as _json
+    from datetime import date as _date
+    model = getattr(state, "financial_model", None)
+    path = getattr(model, "json_computed_values_path", None) if model else None
+    if not path:
+        return None
+    try:
+        with open(path) as handle:
+            computed = _json.load(handle)
+    except Exception:
+        return None
+    cells = (computed.get("Projections") or {}).get("cells") or {}
+    growth_cells = (computed.get("Assumptions") or {}).get("cells") or {}
+
+    def number(value):
+        return (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(float(value)) else None)
+
+    def share(part, whole):
+        part, whole = number(part), number(whole)
+        return round(part / whole, 4) if part is not None and whole else None
+
+    # Reported years straight from the statements: a line the company did not
+    # report is missing, not zero (Booking has no EBITDA line for 2025).
+    raw = getattr(getattr(state, "financial_data", None), "raw_data", None)
+    statements = raw.get("financial_statements") if isinstance(raw, dict) else None
+    statements = statements if isinstance(statements, dict) else {}
+    income = statements.get("income_statement") or {}
+    cash = statements.get("cash_flow") or {}
+    def revenue_of(row):
+        return number(row.get("Total Revenue")) or number(row.get("Operating Revenue"))
+    periods = [p for p in sorted(income) if isinstance(income.get(p), dict) and revenue_of(income[p])][-3:]
+    reported = []
+    for period in periods:
+        row, flows = income[period], cash.get(period) or {}
+        revenue = revenue_of(row)
+        gross = share(row.get("Gross Profit"), revenue)
+        capex = number(flows.get("Capital Expenditure"))
+        reported.append({k: v for k, v in {
+            "fiscal_year": str(period),
+            "revenue": round(revenue),
+            "gross_margin": "not reported (no cost of revenue)" if gross is not None and gross >= 0.999 else gross,
+            "operating_margin": share(row.get("Operating Income"), revenue),
+            "ebitda_margin": share(row.get("EBITDA"), revenue),
+            "net_margin": share(row.get("Net Income"), revenue),
+            "capex_share_of_revenue": share(abs(capex), revenue) if capex is not None else None,
+        }.items() if v is not None})
+
+    # A model built on the latest twelve months projects twelve-month periods
+    # from that point, not fiscal years: its first year is not "FY2027".
+    assumptions = getattr(model, "assumptions", None)
+    basis = assumptions.get("forecast_basis") if isinstance(assumptions, dict) else None
+    rolling_end = None
+    if isinstance(basis, dict) and basis.get("basis") == "rolling_twelve_months":
+        try:
+            rolling_end = _date.fromisoformat(str(basis.get("period_end"))[:10])
+        except ValueError:
+            rolling_end = None
+
+    def label(i, col):
+        if rolling_end:
+            try:
+                end_day = rolling_end.replace(year=rolling_end.year + i + 1)
+            except ValueError:
+                end_day = rolling_end.replace(year=rolling_end.year + i + 1, day=28)
+            return f"12 months to {end_day.isoformat()}"
+        year = number(cells.get(f"(2, {col})"))
+        return f"FY{int(year)}" if year else f"forecast year {i + 1}"
+
+    projected = []
+    for i, col in enumerate(range(2, 7)):
+        revenue = number(cells.get(f"(3, {col})"))
+        if not revenue:
+            continue
+        capex = number(cells.get(f"(13, {col})"))
+        # The model's own growth assumption (Assumptions row 7, FY1-FY5 in C-G).
+        growth = number(growth_cells.get(f"(7, {col + 1})"))
+        projected.append({k: v for k, v in {
+            "period": label(i, col),
+            "revenue": round(revenue),
+            "revenue_growth": round(growth, 4) if growth is not None else None,
+            "gross_margin": share(cells.get(f"(5, {col})"), revenue),
+            "operating_margin": share(cells.get(f"(9, {col})"), revenue),
+            "ebitda_margin": share(cells.get(f"(21, {col})"), revenue),
+            "capex_share_of_revenue": share(abs(capex), revenue) if capex is not None else None,
+        }.items() if v is not None})
+    if not projected:
+        return None
+    out = {"projected": projected, "reported": reported,
+           "how_to_read": ("margins are decimals of revenue (0.131 = 13.1%); reported years are the "
+                           "company's fiscal statements (a missing line is left out, not zero); projected "
+                           "periods are VYNN's model, with its own revenue growth; operating margin is "
+                           "EBIT, EBITDA adds back depreciation and amortization")}
+    if rolling_end:
+        out["period_note"] = (f"the model projects twelve-month periods from {rolling_end.isoformat()}, "
+                              "not the company's fiscal years")
+    if any(r.get("gross_margin") == "not reported (no cost of revenue)" for r in reported):
+        out["gross_margin_note"] = ("the company reports no cost of revenue, so its gross margin has no "
+                                    "reported counterpart; compare operating and EBITDA margins instead")
     return out
 
 

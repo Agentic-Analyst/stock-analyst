@@ -1145,6 +1145,9 @@ class GeneralistAgent:
                 else:
                     final_text = await self._checked_draft(messages, provider, draft, guarded, tool_defs)
                 final_text = self._analysts_once(final_text)
+                # The whole conversation: a report run for the user after the
+                # model's own turns carries its sources in a later message.
+                final_text = self._outlets_checked(final_text, messages)
                 final_text = await self._localize(provider, final_text)
 
         except Exception as e:
@@ -1666,6 +1669,44 @@ class GeneralistAgent:
             return path.resolve().is_relative_to(root)
         except Exception:
             return False
+
+    def _outlets_checked(self, text: str, messages) -> str:
+        """The answer without news outlets the turn's evidence never mentions.
+
+        Evidence: the question with its earlier answers, and every tool
+        result; never the system prompt (its examples name outlets) nor the
+        model's own turns.
+        """
+        try:
+            from src.answer_evidence import without_unsourced_outlets
+            evidence = []
+            for message in messages or []:
+                if not isinstance(message, dict) or message.get("role") not in ("user", "tool"):
+                    continue
+                content = message.get("content")
+                if isinstance(content, str):
+                    evidence.append(content)
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_result":
+                            inner = block.get("content")
+                            evidence.append(inner if isinstance(inner, str) else json.dumps(inner, default=str))
+                        elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                            evidence.append(block["text"])
+            template = getattr(self, "_guard_template", None)
+            if isinstance(template, str):
+                evidence.append(template)
+            from src.answer_evidence import unsourced_outlets
+            joined = "\n".join(evidence)
+            named = unsourced_outlets(text, joined)
+            cleaned, changed = without_unsourced_outlets(text, joined)
+            if named:
+                self._audit(f"[SUPERVISOR] 🔎 Outlets named without a source in the data: {', '.join(named)}"
+                            f"; attribution made general for: {', '.join(changed) or 'none'}")
+            return cleaned if cleaned.strip() else text
+        except Exception as error:
+            self._log(f"[SUPERVISOR] ⚠️ Outlet check skipped: {type(error).__name__}")
+            return text
 
     def _analysts_once(self, text: str) -> str:
         """The analysts' own lines once per chat: a repeat becomes one line.
