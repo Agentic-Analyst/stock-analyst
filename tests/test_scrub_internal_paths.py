@@ -20,3 +20,12 @@ def test_relative_path_with_email_and_normal_text_untouched():
     assert "@" not in scrub_internal_paths("saved to data/a.b@c.com/NVDA/run/models/NVDA.xlsx today")
     plain = "Revenue rose 12% to $4.1B; the data/AI segment led, per the 10-K (see page 3/4)."
     assert scrub_internal_paths(plain) == plain
+
+
+def test_a_web_address_with_data_in_it_is_kept():
+    # Release review, 19 Nov 2026: SEC results-release links became
+    # "https://www.sec.gov/Archives/edgarthe attached file".
+    from src.agents.generalist_agent import scrub_internal_paths
+    url = "https://www.sec.gov/Archives/edgar/data/320193/000032019326000010/ex99.htm"
+    assert scrub_internal_paths(f"The release: {url}") == f"The release: {url}"
+    assert "/data/" not in scrub_internal_paths("Saved at /data/a@b.com/AAPL/r/AAPL.md")

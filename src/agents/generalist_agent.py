@@ -49,8 +49,10 @@ from agents.tools.ui_tools import build_ui_tools
 # A server path such as /data/<email>/1211.HK/<run>/reports/....md reached users
 # in 13 of 221 answers (Aug-Nov 2026), one of them carrying the user's email.
 # Any path into the data volume, or any path with an email in it, is replaced.
+# The data-volume path must start a path: inside a web address such as
+# https://www.sec.gov/Archives/edgar/data/320193/... it is not one (release review).
 _INTERNAL_PATH = re.compile(
-    r"`?(?:/data/|/app/data/)[^\s`)\]]+`?"
+    r"`?(?<![\w.\-/:])(?:/data/|/app/data/)[^\s`)\]]+`?"
     r"|`?/?(?:[\w.\-]+/)*[\w.+\-]+@[\w.\-]+\.[A-Za-z]{2,}/[^\s`)\]]+`?"
 )
 

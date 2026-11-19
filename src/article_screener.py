@@ -145,6 +145,13 @@ class AnalysisSummary:
     total_risks: int = 0
     total_mitigations: int = 0
 
+# Articles per insight-extraction call. Ten fitted GPT's replies (0 of 38 cut
+# off in production, Oct-Nov 2026) but not Claude Sonnet's (24 of 24 cut off at
+# 4,096 output tokens). Three keep a reply well under the cap; the calls run in
+# parallel, so a report waits for the slowest small batch, not one long one.
+ARTICLES_PER_BATCH = 3
+
+
 class ArticleScreener:
     def __init__(self, ticker: str, base_path: pathlib.Path,
                  company_name: Optional[str] = None):
@@ -254,6 +261,11 @@ class ArticleScreener:
             
             # Parse response into structured insights (shared by sync + async paths)
             analysis_data = self._parse_llm_json_response(response, "batch_analysis")
+            if self._split_unreadable(analysis_data, articles, batch_num, depth):
+                mid = batch_size // 2
+                first = self._analyze_article_batch(articles[:mid], f"{batch_num}a", depth + 1)
+                second = self._analyze_article_batch(articles[mid:], f"{batch_num}b", depth + 1)
+                return first[0] + second[0], first[1] + second[1], first[2] + second[2]
             catalysts, risks, mitigations = self._parse_batch_analysis_data(analysis_data)
             catalysts, risks, mitigations = self._ground_insights(
                 catalysts, risks, mitigations, articles
@@ -969,7 +981,9 @@ class ArticleScreener:
                     "analysis_summary": {"overall_sentiment": "neutral", "key_themes": [], "confidence_score": 0.5},
                     "catalysts": [],
                     "risks": [],
-                    "mitigations": []
+                    "mitigations": [],
+                    # The batch functions split and retry a several-article batch.
+                    "_unparsed": True,
                 }
             elif response_type == "deduplication_analysis":
                 return {
@@ -995,7 +1009,9 @@ class ArticleScreener:
                     "analysis_summary": {"overall_sentiment": "neutral", "key_themes": [], "confidence_score": 0.5},
                     "catalysts": [],
                     "risks": [],
-                    "mitigations": []
+                    "mitigations": [],
+                    # The batch functions split and retry a several-article batch.
+                    "_unparsed": True,
                 }
             elif response_type == "deduplication_analysis":
                 return {
@@ -1117,7 +1133,7 @@ class ArticleScreener:
             }
             return []
 
-    def analyze_all_articles(self, articles: List[Dict], batch_size: int = 10) -> Tuple[List[Catalyst], List[Risk], List[Mitigation], AnalysisSummary]:
+    def analyze_all_articles(self, articles: List[Dict], batch_size: int = ARTICLES_PER_BATCH) -> Tuple[List[Catalyst], List[Risk], List[Mitigation], AnalysisSummary]:
         """
         Analyze all articles using batch processing to send multiple articles to LLM at once.
         Articles are processed in batches of the specified size (default 10) for efficiency.
@@ -1192,7 +1208,7 @@ class ArticleScreener:
     async def analyze_all_articles_async(
         self,
         articles: List[Dict],
-        batch_size: int = 10,
+        batch_size: int = ARTICLES_PER_BATCH,
         max_concurrency: int = 5,
     ) -> Tuple[List[Catalyst], List[Risk], List[Mitigation], AnalysisSummary]:
         """
@@ -1299,6 +1315,13 @@ class ArticleScreener:
             self.llm_call_count += 1
 
             analysis_data = self._parse_llm_json_response(response, "batch_analysis")
+            if self._split_unreadable(analysis_data, articles, batch_num, depth):
+                mid = batch_size // 2
+                first, second = await asyncio.gather(
+                    self._analyze_article_batch_async(articles[:mid], f"{batch_num}a", depth + 1),
+                    self._analyze_article_batch_async(articles[mid:], f"{batch_num}b", depth + 1),
+                )
+                return first[0] + second[0], first[1] + second[1], first[2] + second[2]
             catalysts, risks, mitigations = self._parse_batch_analysis_data(analysis_data)
             catalysts, risks, mitigations = self._ground_insights(
                 catalysts, risks, mitigations, articles
@@ -1313,6 +1336,22 @@ class ArticleScreener:
 
         except Exception as e:
             return await self._handle_batch_error_async(e, articles, batch_num, depth)
+
+    # A batch reply cut off at the output cap cannot be read. Claude Sonnet
+    # wrote more than 4,096 tokens for 9-10 articles and every such reply was
+    # lost (24 of 24 Sonnet report runs, 17-18 Nov 2026: 0 catalysts, 0 risks).
+    # Halves are retried, at most twice down, so one bad reply costs a few
+    # cents instead of the report's news evidence.
+    _MAX_UNREADABLE_SPLIT_DEPTH = 2
+
+    def _split_unreadable(self, analysis_data: Dict, articles: List[Dict], batch_num, depth: int) -> bool:
+        if not (isinstance(analysis_data, dict) and analysis_data.get("_unparsed")):
+            return False
+        if len(articles) < 2 or depth >= self._MAX_UNREADABLE_SPLIT_DEPTH:
+            return False
+        self._log("warning", f"{'  ' * depth}✂️  Batch {batch_num} reply was unreadable (likely cut off); "
+                             f"retrying as 2 smaller batches")
+        return True
 
     async def _handle_batch_error_async(
         self, e: Exception, articles: List[Dict], batch_num, depth: int

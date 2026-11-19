@@ -2532,8 +2532,10 @@ def _margins_table(historical: Dict[str, Any], company: Dict[str, Any]) -> str:
     fiscal = {
         "gross": ratio(latest_of("gross_profit"), revenue),
         "operating": ratio(latest_of("operating_income"), revenue),
-        "ebitda": ratio(latest_of("ebitda"), revenue),
-        "net": ratio(latest_of("net_income"), revenue),
+        # EBITDA and net income default to 0 when the provider has no line, so
+        # an exact 0 is "not reported", not a 0.0% margin (release review, 19 Nov).
+        "ebitda": ratio(latest_of("ebitda") or None, revenue),
+        "net": ratio(latest_of("net_income") or None, revenue),
     }
     # An issuer that reports no cost of revenue has gross profit equal to
     # revenue: Hansen's table read "Gross Margin 100.0%" beside the provider's

@@ -267,3 +267,16 @@ def test_a_missing_operating_income_is_not_a_zero_margin():
                   "operating_income": [None], "ebitda": [20e6], "net_income": [10e6]}
     table = _margins_table(historical, {"operating_margin": 0.12})
     assert "| Operating Margin | — | 12.0% |" in table
+
+
+def test_a_missing_ebitda_or_net_income_line_is_not_a_zero_margin():
+    # Release review, 19 Nov 2026: the history defaults a missing EBITDA or net
+    # income line to 0, and the fiscal-year column printed "0.0%".
+    from src.report_agent import _margins_table
+    historical = {"years": ["2025"], "revenue": [1000.0], "gross_profit": [400.0],
+                  "operating_income": [150.0], "ebitda": [0], "net_income": [0]}
+    table = _margins_table(historical, {"ebitda_margin": 0.2, "net_margin": 0.1})
+    ebitda_row = next(line for line in table.splitlines() if line.startswith("| EBITDA Margin"))
+    net_row = next(line for line in table.splitlines() if line.startswith("| Net Margin"))
+    assert ebitda_row.split("|")[2].strip() == "—"
+    assert net_row.split("|")[2].strip() == "—"

@@ -1183,6 +1183,10 @@ def _method_basis_note(value: Dict[str, Any], currency: str) -> str:
     price needs slightly more cash flow than the model expects: the comparison
     uses the cash-flow method alone, the fair value blends in a second method.
     """
+    # A withheld point (stale statements, methods far apart, the outlier rule)
+    # is a figure the guard hides; this note printed it (release review, 19 Nov).
+    if value.get("model_point_withheld"):
+        return ""
     cash_flow = value.get("model_cash_flow_value")
     fair = value.get("model_fair_value")
     if not cash_flow or not fair or abs(cash_flow / fair - 1.0) < 0.05:
