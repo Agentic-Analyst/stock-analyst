@@ -1,16 +1,16 @@
 {
-  "_comment": "Expected publication outcome per basket name for the pre-deploy gate (scripts/valuation_canary_summary.py --expect). Change an entry only together with the engine change that explains it, and say why here. 2026-09-27: calibrated premium (3.24%) is the default. 2026-10-02: a sound model that well-covered analysts do not back is published with a confidence alert (FLAGGED) instead of withheld; WITHHELD now means the model itself supports no single value (a failed or contradicting method, stale statements, a method the company does not fit) and the answer is the range. 2026-11-19: TSLA moves to WITHHELD under the unconfirmed-outlier rule (2026-11-18); other DCF-only names far outside every analyst target would move the same way, so run the canary before release. 2026-11-19 (canary run old vs new, Duke job 13865086): AMD, PYPL, TEX also move to WITHHELD under the same rule; valuations unchanged for all 17. A healthy engine now publishes about 9-10 of 17, so the nightly floor is 0.41.",
+  "_comment": "Expected publication outcome per basket name for the pre-deploy gate (scripts/valuation_canary_summary.py --expect). Change an entry only together with the engine change that explains it, and say why here. 2026-09-27: calibrated premium (3.24%) is the default. 2026-10-02: a sound model that well-covered analysts do not back is published with a confidence alert (FLAGGED) instead of withheld; WITHHELD now means the model itself supports no single value (a failed or contradicting method, stale statements, a method the company does not fit) and the answer is the range. 2026-11-19: TSLA moves to WITHHELD under the unconfirmed-outlier rule (2026-11-18); other DCF-only names far outside every analyst target would move the same way, so run the canary before release. 2026-11-19 (canary run old vs new, Duke job 13865086): AMD, PYPL, TEX also move to WITHHELD under the same rule; valuations unchanged for all 17. A healthy engine now publishes about 9-10 of 17, so the nightly floor is 0.41. 2026-11-19 (production host, live vs candidate same time): NVDA, META, SNDK updated to today's outcome, identical on the live worker (data drift).",
   "NVDA": {
-    "status": "PUBLISHED",
-    "why": "Calibrated premium lifts the DCF to about +57%; the 59-analyst Street target (+46%) covers more than half the move in the same direction."
+    "status": "FLAGGED",
+    "why": "Data drift, not an engine change: on 2026-11-19 the live worker (sha256:aa4948af) and the candidate gave this same outcome side by side on the production host. DCF about +148% vs the Street's +69% (55 analysts): published with a confidence alert because the Street covers less than the model's gap. Was PUBLISHED."
   },
   "MSFT": {
     "status": "PUBLISHED",
     "why": "DCF about +14% with the calibrated premium; the Street (+12%) corroborates if it lands above 15%."
   },
   "META": {
-    "status": "FLAGGED",
-    "why": "Calibrated premium lifts the DCF to about +23%; the Street target (+5%) covers less than half the move. Published with a confidence alert since 2026-10-02 (was withheld)."
+    "status": "PUBLISHED",
+    "why": "Data drift, not an engine change: on 2026-11-19 the live worker (sha256:aa4948af) and the candidate gave this same outcome side by side on the production host. DCF about +73% vs the Street's +42%: the Street now covers enough of the gap to publish without an alert. Was FLAGGED."
   },
   "GOOGL": {
     "status": "PUBLISHED",
@@ -72,7 +72,7 @@
     "why": "Reports no cost of revenue in any year (expenses by function). It must build and pass integrity: before 2026-09-27 every Booking model failed the historical-period check, and payables measured against the absent line were projected at zero. Any publication outcome is accepted because the methods span right at the 1.8x limit: DCF about +34%, comps about +134% on Airbnb, Hilton and Royal Caribbean at 26.7x EBITDA versus Booking's own 12.2x. When the methods land inside the limit the value publishes, flagged if the Street does not back it."
   },
   "SNDK": {
-    "status": "FLAGGED",
-    "why": "NAND-only memory maker valued mid-cycle: the Street's two covered years, then revenue back to trend and an 18% NAND through-cycle operating margin. Far below the price while the Street sits above it, so published with a confidence alert."
+    "status": "PUBLISHED",
+    "why": "Data drift, not an engine change: on 2026-11-19 the live worker (sha256:aa4948af) and the candidate gave this same outcome side by side on the production host. Mid-cycle value about at the price (gap about 0%), so no alert. Was FLAGGED."
   }
 }
