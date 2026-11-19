@@ -28,6 +28,18 @@ def test_the_margin_table_says_which_period_each_figure_is():
     assert "| Operating Margin | — | 18.1% |" in table
 
 
+def test_no_cost_of_revenue_is_not_a_100_percent_gross_margin():
+    # Hansen reports no cost of revenue: gross profit equals revenue. The table
+    # read "Gross Margin 100.0%" beside the provider's 37.4% (18 Nov answer).
+    historical = {"years": ["2026"], "revenue": [386.494e6], "gross_profit": [386.494e6],
+                  "operating_income": [70.0e6], "ebitda": [122.54e6], "net_income": [47.8e6]}
+    table = _margins_table(historical, {"gross_margin": 0.374, "operating_margin": 0.181})
+    assert "| Gross Margin | not reported (no cost of revenue) | 37.4% |" in table
+    assert "100.0%" not in table
+    # The fiscal operating margin, from the same table, is shown too.
+    assert "| Operating Margin | 18.1% | 18.1% |" in table
+
+
 def test_without_statements_only_the_provider_column_is_shown():
     table = _margins_table({"years": []}, {"ebitda_margin": 0.199})
     assert table.startswith("| Metric | Trailing 12 Months (provider) |")
@@ -222,3 +234,15 @@ def test_a_window_move_is_read_against_the_market_in_words():
     out = versus_market(7.9, 3.6, "the S&P 500", period="from 2026-11-10 to 2026-11-13")
     assert out == ("The stock was up 7.9% from 2026-11-10 to 2026-11-13 against the S&P 500 up 3.6%: "
                    "4.3 points better than the market.")
+
+
+def test_a_first_year_growth_from_a_different_eps_base_is_not_given():
+    # Hansen (18 Nov): the A$0.238 estimate read "-26%" against the provider's
+    # year-ago A$0.32, while the company reported about A$0.23.
+    import json
+    import pathlib
+    from src.external_expectations import build_external_expectations
+    data = json.loads((pathlib.Path(__file__).parent / "fixtures" / "hsn_ax_2026_11_18.json").read_text())
+    first, second = build_external_expectations(data)["forward_estimates"][:2]
+    assert first["eps_growth"] is None and "0.323" in first["eps_growth_note"]
+    assert second["eps_growth"] == pytest.approx(0.29358 / 0.23797 - 1.0)

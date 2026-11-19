@@ -705,6 +705,26 @@ def _infer_eps_source_currency(
     }
 
 
+# How far the provider's year-ago EPS may sit from the reported one before its
+# first-year growth rate is a different basis, not a rounding difference.
+_EPS_BASE_TOLERANCE = 0.15
+
+
+def _latest_reported_eps(data: Dict[str, Any]) -> Optional[float]:
+    """The latest annual diluted (else basic) EPS the company reported; None on doubt."""
+    rows = ((data.get("financial_statements") or {}).get("income_statement") or {})
+    if not isinstance(rows, dict) or not rows:
+        return None
+    latest = rows.get(sorted(rows, key=str)[-1])
+    if not isinstance(latest, dict):
+        return None
+    for key in ("Diluted EPS", "Basic EPS"):
+        value = _number(latest.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any]:
     """Build an auditable Street case from the artifact's normalized inputs."""
     data = financial_data if isinstance(financial_data, dict) else {}
@@ -893,6 +913,26 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
         if index > 0 and isinstance(previous_eps, (int, float)) and isinstance(eps_row["average"], (int, float)):
             eps_growth = (eps_row["average"] / previous_eps - 1.0
                           if previous_eps > 0 and eps_row["average"] > 0 else None)
+        # The first year is measured from the provider's own year-ago EPS. When
+        # that is not the EPS the company reported, the rate mixes two bases:
+        # Hansen's A$0.238 estimate read "-26%" against the provider's A$0.32
+        # while the reported A$0.234 sits beside it in the same answer.
+        eps_growth_note = None
+        if index == 0 and eps_growth is not None:
+            year_ago = _eps_in_model_currency(
+                raw_eps[0].get("year_ago"), source_currency=eps_source_currency,
+                financial_currency=financial_currency, fx_rate=fx_rate,
+            )
+            reported_eps = _latest_reported_eps(data)
+            if (isinstance(year_ago, (int, float)) and year_ago > 0
+                    and isinstance(reported_eps, (int, float)) and reported_eps > 0
+                    and abs(year_ago / reported_eps - 1.0) > _EPS_BASE_TOLERANCE):
+                eps_growth = None
+                eps_growth_note = (
+                    f"No growth rate: the provider measures it from a year-ago EPS of "
+                    f"{year_ago:.3f}, not the {reported_eps:.3f} the company reported "
+                    "(likely an adjusted basis)."
+                )
         years.append({
             "period": period,
             "reported": revenue_row["reported"],
@@ -909,6 +949,7 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
             "eps_unit_basis": eps_unit.get("basis"),
             "eps_unit_confidence": eps_unit.get("confidence"),
             "eps_growth": eps_growth,
+            **({"eps_growth_note": eps_growth_note} if eps_growth_note else {}),
             "eps_analyst_count": eps_row["analyst_count"],
             "implied_net_income": implied_net_income,
             "implied_net_margin": implied_net_margin,

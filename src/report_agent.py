@@ -2530,16 +2530,22 @@ def _margins_table(historical: Dict[str, Any], company: Dict[str, Any]) -> str:
     revenue = latest_of("revenue")
     fiscal = {
         "gross": ratio(latest_of("gross_profit"), revenue),
+        "operating": ratio(latest_of("operating_income"), revenue),
         "ebitda": ratio(latest_of("ebitda"), revenue),
         "net": ratio(latest_of("net_income"), revenue),
     }
+    # An issuer that reports no cost of revenue has gross profit equal to
+    # revenue: Hansen's table read "Gross Margin 100.0%" beside the provider's
+    # 37.4%, and an answer quoted both.
+    no_cost_of_revenue = fiscal["gross"] is not None and fiscal["gross"] >= 0.999
 
     def cell(value: Optional[float]) -> str:
         return "—" if value is None else format_percent(value)
 
     rows = (
-        ("Gross Margin", fiscal["gross"], company.get("gross_margin")),
-        ("Operating Margin", None, company.get("operating_margin")),
+        ("Gross Margin", "not reported (no cost of revenue)" if no_cost_of_revenue else fiscal["gross"],
+         company.get("gross_margin")),
+        ("Operating Margin", fiscal["operating"], company.get("operating_margin")),
         ("EBITDA Margin", fiscal["ebitda"], company.get("ebitda_margin")),
         ("Net Margin", fiscal["net"], company.get("net_margin")),
         ("ROE", None, company.get("roe")),
@@ -2552,7 +2558,8 @@ def _margins_table(historical: Dict[str, Any], company: Dict[str, Any]) -> str:
         f"| Metric | Fiscal {years[latest]} (from the table above) | Trailing 12 Months (provider) |\n"
         "|--------|---------------|---------------|\n"
     )
-    return table + "".join(f"| {name} | {cell(fy)} | {cell(ttm)} |\n" for name, fy, ttm in rows)
+    return table + "".join(
+        f"| {name} | {fy if isinstance(fy, str) else cell(fy)} | {cell(ttm)} |\n" for name, fy, ttm in rows)
 
 
 def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[str, float]:
