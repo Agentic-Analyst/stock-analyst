@@ -3149,10 +3149,15 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
             coc_table += f"| Premium build | {coc['erp_source']} |\n"
         if coc.get('kd_source'):
             coc_table += f"| Cost of debt build | {coc['kd_source']} |\n"
+        parts = [coc.get(k) for k in ('risk_free_rate', 'beta', 'equity_risk_premium', 'cost_of_equity')]
+        if all(isinstance(v, (int, float)) for v in parts) and parts[3] > parts[0] + parts[1] * parts[2] + 1e-6:
+            # The table's cost of equity is not rf + beta x ERP: say why.
+            coc_table += ("| Cost of equity floor | raised to the pre-tax cost of debt: with debt a large "
+                          "part of the capital, shareholders, paid after lenders, require at least as much |\n")
         if bank_method_required:
-            coc_table += ("\n_The justified P/B x ROE valuation uses the cost of equity from this build "
-                          "(risk-free rate + beta x equity risk premium, held within 8-14%); the WACC "
-                          "and cost of debt describe the cash-flow DCF that was not applied._\n")
+            coc_table += ("\n_The justified P/B x ROE valuation prices equity at the risk-free rate + beta x "
+                          "equity risk premium, held within 8-14%; the WACC, the cost of debt and any "
+                          "cost-of-equity floor above describe the cash-flow DCF that was not applied._\n")
 
     # A WACC x growth grid describes an FCF DCF. For a bank the DCF was not
     # applied, and recomputing it prints a grid of zeros under a P/B x ROE

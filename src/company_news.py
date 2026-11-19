@@ -315,6 +315,8 @@ def rank_and_align(items: List[Dict[str, Any]], names: Sequence[str],
         local = story["published"].astimezone(zone)
         # A search result dated by its day alone sits at local noon: say the day.
         stamp = local.strftime("%Y-%m-%d") if story.get("time_unknown") else local.strftime("%Y-%m-%d %H:%M %Z")
+        if story.get("date_approximate"):
+            stamp = f"around {stamp}"
         row = {"published": stamp, "title": story["title"],
                "source": story["source"], "summary": story.get("summary") or None,
                "url": story["url"]}
@@ -466,45 +468,128 @@ def search_name(name: Optional[str]) -> Optional[str]:
     return clean
 
 
-def _search_result_time(row: Dict[str, Any], lo: date, hi: date, zone) -> Optional[Dict[str, Any]]:
+def _visible(text: str) -> str:
+    """The text without invisible format marks: Google put right-to-left marks inside "19/08/2026"."""
+    import unicodedata
+    return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+
+
+def _numeric_days(first: int, second: int, year: int) -> List[date]:
+    """Both readings of "a/b/yyyy": Google writes the day first or the month first by locale."""
+    out = []
+    for month, day_ in ((first, second), (second, first)):
+        try:
+            candidate = date(year, month, day_)
+        except ValueError:
+            continue
+        if candidate not in out:
+            out.append(candidate)
+    return out
+
+
+_RELATIVE_AGE = re.compile(r"\b(\d+|an?|one)\s+(minute|hour|day|week|month)s?\s+ago\b", re.I)
+
+
+def _relative_days(text: str, fetched_at: datetime, zone) -> Optional[tuple]:
+    """The exchange-local days a relative age ("2 weeks ago", "yesterday") allows.
+
+    Counted from the moment of the search, not its date: "1 week ago" read at
+    10 pm in New York (the next day in UTC) moved a 5 Nov article to 6 Nov.
+    "n units ago" means more than n and at most n+1 units before the search.
+    """
+    if re.search(r"\byesterday\b", text, re.I):
+        oldest, newest = fetched_at - timedelta(days=2), fetched_at
+    else:
+        match = _RELATIVE_AGE.search(text)
+        if not match:
+            return None
+        count = 1 if match.group(1).lower() in ("a", "an", "one") else int(match.group(1))
+        unit = match.group(2).lower()
+        if unit == "month":
+            oldest = fetched_at - timedelta(days=31 * (count + 1))
+            newest = fetched_at - timedelta(days=28 * count)
+        else:
+            step = {"minute": timedelta(minutes=1), "hour": timedelta(hours=1),
+                    "day": timedelta(days=1), "week": timedelta(days=7)}[unit]
+            oldest, newest = fetched_at - step * (count + 1), fetched_at - step * count
+    return oldest.astimezone(zone).date(), newest.astimezone(zone).date()
+
+
+def _search_result_time(row: Dict[str, Any], lo: date, hi: date, zone,
+                        fetched_at: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
     """A result's time, or its day at local noon when only the day is given; None outside the days.
 
-    "2 months ago" and the like are dropped: a guessed date would file an
-    article under the wrong session.
+    The search covers three days, so of the two readings of "08/09/2026" at
+    most one lies inside them: that one is the date, whatever the locale. An
+    exact date outside the days rules the result out. A relative age ("2 weeks
+    ago") is used only when no exact date is given and the search's time is
+    known; the article is then placed on the session if the age allows it,
+    marked approximate.
     """
     from dateutil import parser
-    for text in (row.get("iso_date"), row.get("date")):
-        if not text:
+
+    def inside(d: date) -> bool:
+        return lo <= d <= hi
+
+    exact_outside = False
+    for raw in (row.get("iso_date"), row.get("date")):
+        if not raw:
             continue
-        text = str(text)
+        text = _visible(str(raw))
         full = _DATED_TIMESTAMP.search(text)
         if full:
-            month, day_, year, hour, minute, ampm, sign, oh, om = full.groups()
+            first, second, year, hour, minute, ampm, sign, oh, om = full.groups()
             hour = int(hour) % 12 + (12 if ampm.upper() == "PM" else 0)
             offset = timedelta(hours=int(oh or 0), minutes=int(om or 0)) * (-1 if sign == "-" else 1)
-            stamp = datetime(int(year), int(month), int(day_), hour, int(minute),
-                             tzinfo=timezone(offset))
-            if lo <= stamp.astimezone(zone).date() <= hi:
-                return {"published": stamp.astimezone(timezone.utc), "time_unknown": False}
+            for d in _numeric_days(int(first), int(second), int(year)):
+                stamp = datetime(d.year, d.month, d.day, hour, int(minute), tzinfo=timezone(offset))
+                if inside(stamp.astimezone(zone).date()):
+                    return {"published": stamp.astimezone(timezone.utc), "time_unknown": False}
+            exact_outside = True
             continue
         try:
             iso = datetime.fromisoformat(text.replace("Z", "+00:00"))
             if iso.tzinfo is not None and ("T" in text or ":" in text):
-                if lo <= iso.astimezone(zone).date() <= hi:
+                if inside(iso.astimezone(zone).date()):
                     return {"published": iso.astimezone(timezone.utc), "time_unknown": False}
+                exact_outside = True
                 continue
         except ValueError:
             pass
         match = _DATED_DAY.search(text)
         if not match:
             continue
-        try:
-            day_only = parser.parse(match.group(0)).date()
-        except (ValueError, OverflowError):
-            continue
-        if lo <= day_only <= hi:
+        numeric = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", match.group(0))
+        if numeric:
+            days = _numeric_days(int(numeric.group(1)), int(numeric.group(2)), int(numeric.group(3)))
+        else:
+            try:
+                days = [parser.parse(match.group(0)).date()]
+            except (ValueError, OverflowError):
+                continue
+        day_only = next((d for d in days if inside(d)), None)
+        if day_only is not None:
             noon = datetime(day_only.year, day_only.month, day_only.day, 12, tzinfo=zone)
             return {"published": noon.astimezone(timezone.utc), "time_unknown": True}
+        exact_outside = True
+    # Only a relative age ("2 weeks ago": Robinhood's ten results for 5 Nov
+    # 2026, all dropped). The search is limited to the three days, so a result
+    # whose age allows them is placed on the session searched, marked approximate.
+    if exact_outside or fetched_at is None:
+        return None
+    for raw in (row.get("date"),):
+        if not raw:
+            continue
+        span = _relative_days(_visible(str(raw)), fetched_at, zone)
+        if span is None:
+            continue
+        first, last = max(span[0], lo), min(span[1], hi)
+        if first > last:
+            return None
+        session = lo + timedelta(days=1)
+        chosen = session if first <= session <= last else (first if session < first else last)
+        noon = datetime(chosen.year, chosen.month, chosen.day, 12, tzinfo=zone)
+        return {"published": noon.astimezone(timezone.utc), "time_unknown": True, "date_approximate": True}
     return None
 
 
@@ -533,10 +618,23 @@ def dated_news(name: Optional[str], day: date, api_key: Optional[str] = None, se
     # The search's own rows are cached, not their times: a day-only date is
     # placed at noon on the exchange's clock, which differs between listings.
     cached = netcache.cache_get(cache_name, 6 * 3600 if recent else 30 * 86400)
-    rows = cached if isinstance(cached, list) else None
+    rows, fetched_at = None, None
+    if isinstance(cached, dict) and isinstance(cached.get("rows"), list):
+        rows = cached["rows"]
+        try:
+            stamp = datetime.fromisoformat(str(cached.get("fetched_at")))
+            fetched_at = stamp if stamp.tzinfo else None
+        except ValueError:
+            fetched_at = None      # relative ages are then not used
+    elif isinstance(cached, list):
+        rows = cached              # an old entry: when it was searched is unknown
     if rows is None:
+        fetched_at = datetime.now(timezone.utc)
         params = {"q": f'"{query}"', "tbm": "nws", "num": _DATED_NEWS_MAX,
                   "tbs": f"cdr:1,cd_min:{lo:%m/%d/%Y},cd_max:{hi:%m/%d/%Y}", "api_key": key}
+        import logging
+        logging.getLogger(__name__).info(
+            "serpapi dated news search: %s, %s to %s", query, lo.isoformat(), hi.isoformat())
         try:
             if search is None:
                 from serpapi import GoogleSearch
@@ -552,13 +650,13 @@ def dated_news(name: Optional[str], day: date, api_key: Optional[str] = None, se
             return None
         rows = [{k: row.get(k) for k in ("title", "link", "source", "date", "iso_date", "snippet")}
                 for row in result.get("news_results") or [] if isinstance(row, dict)]
-        netcache.cache_put(cache_name, rows)
+        netcache.cache_put(cache_name, {"fetched_at": fetched_at.isoformat(), "rows": rows})
     out = []
     for row in rows:
         if not isinstance(row, dict):
             continue
         title = html.unescape(str(row.get("title") or "")).strip()
-        when = _search_result_time(row, lo, hi, zone)
+        when = _search_result_time(row, lo, hi, zone, fetched_at=fetched_at)
         if not title or when is None:
             continue
         source = row.get("source")

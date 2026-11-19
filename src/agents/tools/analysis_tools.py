@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from .base import Tool, tool_ok, tool_error
 
@@ -2007,6 +2007,7 @@ class BuildModelTool(_CtxTool):
             benchmark_reconciliation = None
 
         view = _view_for(self.ctx, state)
+        coc = None if method == "justified_pb_roe" else _cost_of_capital(state)
         return tool_ok(
             # The listing the figures below are for (a US line moved to its
             # home listing is in listing_view).
@@ -2043,6 +2044,11 @@ class BuildModelTool(_CtxTool):
                if isinstance(vm, dict) and vm.get("dcf_fair_value") is not None
                and method and method != "justified_pb_roe" else {}),
             **({"data_quality_warning": warning} if warning else {}),
+            # How the discount rate was built: an input, not a conclusion, so
+            # it is shown whether or not a value is published. Asked "what
+            # discount rate, and why?", Vanke's answer had to back 14.5% out of
+            # the reverse DCF and could not say why it was so high.
+            **({"cost_of_capital": coc} if coc else {}),
             note=(note + " " + NO_SINGLE_VALUE_NOTE + CONFIDENCE_ALERT_NOTE
                   + "Treat Street targets/ratings as a decision-relevant external "
                   "benchmark, not intrinsic value. When benchmark_reconciliation is "
@@ -2058,6 +2064,54 @@ class BuildModelTool(_CtxTool):
                   "an audit scenario only: surface it when material, but never count "
                   "it as an independent valuation vote or forward-capex guidance."),
         )
+
+
+def _cost_of_capital(state) -> Optional[Dict[str, Any]]:
+    """The discount rate and its build-up, from the model's own CAPM record; None without one."""
+    model = getattr(state, "financial_model", None)
+    assumptions = getattr(model, "assumptions", None) if model else None
+    capm = assumptions.get("capm") if isinstance(assumptions, dict) else None
+    if not isinstance(capm, dict) or not isinstance(capm.get("wacc"), (int, float)):
+        return None
+
+    def pct(key):
+        value = capm.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            return None
+        return round(float(value), 4)
+
+    out = {
+        "wacc": pct("wacc"),
+        "risk_free_rate": pct("risk_free_rate"), "risk_free_source": capm.get("risk_free_source"),
+        "beta": None if pct("beta") is None else round(float(capm["beta"]), 2),
+        "beta_source": capm.get("beta_source"),
+        "equity_risk_premium": pct("equity_risk_premium"),
+        "country_risk_premium": pct("country_risk_premium"),
+        "cost_of_equity": pct("cost_of_equity"),
+        "cost_of_equity_capm": pct("cost_of_equity_capm") if capm.get("cost_of_equity_floored_at_debt") else None,
+        "cost_of_equity_raised_to_cost_of_debt": True if capm.get("cost_of_equity_floored_at_debt") else None,
+        "pre_tax_cost_of_debt": pct("pre_tax_cost_of_debt"),
+        "issuer_credit_spread": pct("issuer_credit_spread"),
+        "issuer_synthetic_rating": capm.get("issuer_synthetic_rating"),
+        "issuer_interest_coverage": (None if pct("issuer_interest_coverage") is None
+                                     else round(float(capm["issuer_interest_coverage"]), 2)),
+        "credit_spread_basis": capm.get("issuer_credit_spread_source"),
+        "after_tax_cost_of_debt": pct("after_tax_cost_of_debt"),
+        "equity_weight": pct("equity_weight"),
+        "debt_weight": pct("debt_weight"),
+        # The chat's copy names it terminal_growth; the grounded one, terminal_growth_rate.
+        "terminal_growth": next((round(float(v), 4) for v in (assumptions.get("terminal_growth"),
+                                                              assumptions.get("terminal_growth_rate"))
+                                 if isinstance(v, (int, float)) and not isinstance(v, bool)), None),
+    }
+    if capm.get("wacc_clamped"):
+        out["wacc_outside_usual_band"] = True
+    out = {k: (str(v)[:300] if isinstance(v, str) else v) for k, v in out.items() if v is not None}
+    out["how_to_read"] = ("rates are decimals (0.145 = 14.5%); cost of equity = risk-free + beta x "
+                          "(equity risk premium + country risk premium), never below the pre-tax cost of debt "
+                          "because shareholders are paid after lenders; WACC weights it with the "
+                          "after-tax cost of debt; credit_spread_basis says how the borrowing spread was set")
+    return out
 
 
 class AnalyzeNewsTool(_CtxTool):

@@ -468,6 +468,10 @@ async def model_generation_agent(
                 if isinstance(_capm.get("risk_free_rate"), (int, float)):
                     assumptions["risk_free_rate"] = _capm["risk_free_rate"]
                     assumptions["currency"] = _capm.get("currency")
+                # The whole build-up, so the chat can say why the rate is what
+                # it is (Vanke's 14.5%: a distressed borrower's spread).
+                if isinstance(_capm, dict) and isinstance(_capm.get("wacc"), (int, float)):
+                    assumptions["capm"] = dict(_capm)
                 if exit_multiple is not None:
                     assumptions["exit_multiple"] = exit_multiple
                 # Terminal-year cash flows. Terminal value dominates both

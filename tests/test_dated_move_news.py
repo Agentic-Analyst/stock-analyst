@@ -19,7 +19,7 @@ ROWS = [
      "snippet": "Hansen Technologies fell after its FY26 result."},
     {"title": "Hansen guides to a transition year", "link": "https://x/2", "source": "AFR",
      "date": "Aug 20, 2026"},
-    {"title": "An old story", "link": "https://x/3", "date": "2 months ago"},     # relative: dropped
+    {"title": "Too recent", "link": "https://x/3", "date": "3 hours ago"},       # an age outside the days: dropped
     {"title": "Outside the days", "link": "https://x/4", "date": "Aug 25, 2026"},  # outside: dropped
 ]
 
@@ -140,3 +140,100 @@ def test_a_damaged_cache_entry_does_not_break_the_tool(monkeypatch):
 @pytest.mark.parametrize("name, expected", [("AT&T Inc.", "AT&T"), ("BHP Group Limited", "BHP"), ("3M Company", "3M")])
 def test_short_real_names_are_searchable(name, expected):
     assert search_name(name) == expected
+
+
+def test_day_first_dates_with_invisible_marks_are_read():
+    # The real search for Hansen (19 Nov 2026): nine articles dated like
+    # "19‏/08‏/2026", all dropped as unreadable.
+    rows = [
+        {"title": "Hansen Technologies Shares Slide 19% as Revenue Falls 1.5%", "link": "https://x/1",
+         "source": {"name": "Kalkine"}, "date": "19‏/08‏/2026"},
+        {"title": "Hansen Technologies Limited Expects Revenue Growth In Fy28", "link": "https://x/2",
+         "source": {"name": "TradingView"}, "date": "18‏/08‏/2026"},
+    ]
+    found = dated_news("Hansen Technologies Limited", AUG19, api_key="k", search=_search(rows, []),
+                       exchange_tz="Australia/Sydney")
+    assert [f["published"].astimezone(cn._zone("Australia/Sydney")).date().isoformat() for f in found] == \
+        ["2026-08-19", "2026-08-18"]
+
+
+def test_month_first_dates_still_read():
+    rows = [{"title": "Acme results", "link": "https://x/1", "date": "08/19/2026"}]
+    found = dated_news("Acme Corp", AUG19, api_key="k", search=_search(rows, []))
+    assert found and found[0]["published"].date() == AUG19
+
+
+def test_an_ambiguous_date_takes_the_reading_inside_the_searched_days():
+    rows = [{"title": "Acme results", "link": "https://x/1", "date": "08/09/2026"}]   # 9 Aug or 8 Sep
+    aug9 = dated_news("Acme Corp", date(2026, 8, 9), api_key="k", search=_search(rows, []))
+    assert aug9 and aug9[0]["published"].date() == date(2026, 8, 9)
+    sep8 = dated_news("Acme Industries", date(2026, 9, 8), api_key="k", search=_search(rows, []))
+    assert sep8 and sep8[0]["published"].date() == date(2026, 9, 8)
+
+
+def test_relative_ages_inside_the_searched_days_are_kept_as_approximate(monkeypatch):
+    # The real search for Robinhood's 5 Nov 2026 fall (asked 19 Nov): ten
+    # results, all "2 weeks ago", all dropped; the answer said none were found.
+    rows = [
+        {"title": "Robinhood Stock Plunges as Bitcoin Dips After Elections", "link": "https://x/1",
+         "source": {"name": "Benzinga"}, "date": "2 weeks ago"},
+        {"title": "Robinhood Markets, Inc. (HOOD) Seasonal returns chart", "link": "https://x/2",
+         "date": "3 weeks ago"},                                     # 21-27 days: outside 4-6 Nov
+    ]
+    from src.agents.fm import netcache
+    store = {}
+    monkeypatch.setattr(netcache, "cache_get", lambda name, age: store.get(name))
+    monkeypatch.setattr(netcache, "cache_put", lambda name, obj: store.__setitem__(name, obj))
+    import src.company_news as module
+    real = module.datetime
+
+    class Clock(real):
+        @classmethod
+        def now(cls, tz=None):
+            return real(2026, 11, 19, 6, tzinfo=timezone.utc)
+    monkeypatch.setattr(module, "datetime", Clock)
+    found = dated_news("Robinhood Markets", date(2026, 11, 5), api_key="k", search=_search(rows, []))
+    assert [f["title"] for f in found] == ["Robinhood Stock Plunges as Bitcoin Dips After Elections"]
+    assert found[0]["date_approximate"] and found[0]["published"].date() == date(2026, 11, 5)
+    # The cache keeps the search day: read a month later, the age still counts from 19 Nov.
+    class Later(real):
+        @classmethod
+        def now(cls, tz=None):
+            return real(2026, 12, 19, 6, tzinfo=timezone.utc)
+    monkeypatch.setattr(module, "datetime", Later)
+    again = dated_news("Robinhood Markets", date(2026, 11, 5), api_key="k", search=_search(rows, []))
+    assert [f["title"] for f in again] == ["Robinhood Stock Plunges as Bitcoin Dips After Elections"]
+
+
+def _zone(name):
+    return cn._zone(name)
+
+
+def test_an_exact_date_outside_the_days_is_not_overruled_by_a_relative_age():
+    # The review's case: both fields sent; the exact one is 28 Oct.
+    row = {"iso_date": "2026-10-28T14:00:00Z", "date": "2 weeks ago"}
+    fetched = datetime(2026, 11, 19, 3, tzinfo=timezone.utc)
+    assert cn._search_result_time(row, date(2026, 11, 4), date(2026, 11, 6), _zone("America/New_York"),
+                                  fetched_at=fetched) is None
+
+
+def test_relative_ages_count_from_the_moment_of_the_search():
+    ny = _zone("America/New_York")
+    # Searched 18 Nov at 10 pm New York time (19 Nov in UTC): "1 week ago"
+    # covers 4-11 Nov local, so a 5 Nov article lands on its own session (it
+    # was counted from the UTC date and landed on 6 Nov, the session after).
+    late = datetime(2026, 11, 19, 3, tzinfo=timezone.utc)
+    assert cn._relative_days("1 week ago", late, ny) == (date(2026, 11, 4), date(2026, 11, 11))
+    row = {"date": "5 days ago"}
+    # Truly from 12 Nov, searched 18 Nov 9 pm New York: the span reaches 12 Nov.
+    first, last = cn._relative_days("5 days ago", datetime(2026, 11, 19, 2, tzinfo=timezone.utc), ny)
+    assert first <= date(2026, 11, 12) <= last
+
+
+def test_an_old_cache_entry_without_a_search_time_uses_no_relative_ages(monkeypatch):
+    from src.agents.fm import netcache
+    rows = [{"title": "Robinhood Stock Plunges", "link": "https://x/1", "date": "2 weeks ago"},
+            {"title": "Robinhood results", "link": "https://x/2", "date": "Nov 5, 2026"}]
+    monkeypatch.setattr(netcache, "cache_get", lambda name, age: rows)       # the old list format
+    found = dated_news("Robinhood Markets", date(2026, 11, 5), api_key="k", search=_search([], []))
+    assert [f["title"] for f in found] == ["Robinhood results"]

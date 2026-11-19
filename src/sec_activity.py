@@ -205,6 +205,17 @@ def plain_text(markup: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
+_FILING_HEADER_LINE = re.compile(r"(?i)ex-?99(?:\.\d+)?|exhibit\s*99(?:\.\d+)?|\d{1,3}|document|[\w\-.]+\.(?:htm|html|txt)")
+
+
+def _without_filing_header(text: str) -> str:
+    """The release without the filing's own header lines ("EX-99.1", "2", the file name, "Document")."""
+    lines = text.split("\n")
+    while lines and _FILING_HEADER_LINE.fullmatch(lines[0].strip()):
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
 def results_release(cik: int, row: Dict[str, Any], deadline: float) -> Optional[Dict[str, Any]]:
     """The opening of the press release a results 8-K carries (Exhibit 99.1); None on any doubt.
 
@@ -243,9 +254,10 @@ def results_release(cik: int, row: Dict[str, Any], deadline: float) -> Optional[
             excerpt = excerpt[:cut + 1]
         cached = {"excerpt": excerpt.strip(), "document": document}
         cache.cache_put(name, cached)
-    if not cached.get("excerpt"):
+    excerpt = _without_filing_header(cached.get("excerpt") or "")
+    if not excerpt:
         return None
-    return {"document": cached["document"], "excerpt": cached["excerpt"],
+    return {"document": cached["document"], "excerpt": excerpt,
             "url": _ARCHIVE_URL.format(cik=cik, accession=accession, document=cached["document"])}
 
 

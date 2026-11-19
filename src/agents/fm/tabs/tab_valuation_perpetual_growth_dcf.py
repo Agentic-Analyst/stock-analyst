@@ -101,7 +101,7 @@ class ValuationPerpetualGrowthDCFBuilder:
         Row 2: Risk-Free Rate = Assumptions!C30
         Row 3: Equity Risk Premium = Assumptions!C31
         Row 4: Levered Beta = Assumptions!C32
-        Row 5: Cost of Equity (Ke) = Rf + Beta * ERP
+        Row 5: Cost of Equity (Ke) = Rf + Beta * ERP, floored at pre-tax Kd when D/V >= 30%
         Row 6: Pre-Tax Cost of Debt = Assumptions!C33
         Row 7: Tax Rate = Assumptions!C20
         Row 8: After-Tax Cost of Debt = Kd * (1 - T)
@@ -131,7 +131,11 @@ class ValuationPerpetualGrowthDCFBuilder:
         # Row 6: Cost of Equity
         ws.cell(row=6, column=1, value="Cost of Equity (Ke)")
         ws.cell(row=6, column=1).font = Font(bold=True)
-        ws.cell(row=6, column=2, value='=B3+B5*B4')  # Rf + Beta * ERP
+        # Rf + Beta * ERP; where debt is 30%+ of capital, never below the
+        # pre-tax cost of debt (equity ranks below debt). The grounding
+        # applies the same rule (_KE_FLOOR_DEBT_WEIGHT).
+        from src.agents.fm.assumption_grounding import _KE_FLOOR_DEBT_WEIGHT
+        ws.cell(row=6, column=2, value=f'=IF(B11>={_KE_FLOOR_DEBT_WEIGHT},MAX(B3+B5*B4,B7),B3+B5*B4)')
         ws.cell(row=6, column=2).number_format = '0.00%'
         
         # Row 7: Pre-Tax Cost of Debt

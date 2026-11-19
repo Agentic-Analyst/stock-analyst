@@ -293,6 +293,8 @@ class ExplainPriceMoveTool(Tool):
             "market_today.stock_vs_index_today say it in words; use them); from_window_high is the fall "
             "from the window's high to now; a session_in_progress has only part of its volume. "
             "A Form 144 is a notice of intent to sell, not a completed sale. "
+            "news.dated_search is a news search limited to the days around the session that moved "
+            "most; an article dated 'around' a day was within those days by the search's own filter. "
             "sec_filings.other_filings[].results_release.excerpt is the opening of the company's own "
             "results press release (8-K Exhibit 99.1): primary evidence for that day's move. "
             "exchange_announcements.price_sensitive_by_session lists the company's own "

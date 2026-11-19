@@ -108,3 +108,8 @@ def test_characters_that_change_length_when_lowercased_do_not_shift_the_cuts():
     page = "<p>İİİİ Results</p><style>.a{}</style><p>Guidance cut.</p>"
     text = sec_activity.plain_text(page)
     assert ".a{}" not in text and "Guidance cut." in text
+
+
+def test_the_filing_header_lines_are_not_part_of_the_release():
+    text = "EX-99.1\n2\nq32026robinhoodexhibit991.htm\nEX-99.1\nDocument\nRobinhood Reports Third Quarter 2026 Results"
+    assert sec_activity._without_filing_header(text) == "Robinhood Reports Third Quarter 2026 Results"
