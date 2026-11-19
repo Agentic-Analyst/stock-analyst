@@ -1,5 +1,5 @@
 {
-  "_comment": "Expected publication outcome per basket name for the pre-deploy gate (scripts/valuation_canary_summary.py --expect). Change an entry only together with the engine change that explains it, and say why here. 2026-09-27: calibrated premium (3.24%) is the default. 2026-10-02: a sound model that well-covered analysts do not back is published with a confidence alert (FLAGGED) instead of withheld; WITHHELD now means the model itself supports no single value (a failed or contradicting method, stale statements, a method the company does not fit) and the answer is the range. 2026-11-19: TSLA moves to WITHHELD under the unconfirmed-outlier rule (2026-11-18); other DCF-only names far outside every analyst target would move the same way, so run the canary before release.",
+  "_comment": "Expected publication outcome per basket name for the pre-deploy gate (scripts/valuation_canary_summary.py --expect). Change an entry only together with the engine change that explains it, and say why here. 2026-09-27: calibrated premium (3.24%) is the default. 2026-10-02: a sound model that well-covered analysts do not back is published with a confidence alert (FLAGGED) instead of withheld; WITHHELD now means the model itself supports no single value (a failed or contradicting method, stale statements, a method the company does not fit) and the answer is the range. 2026-11-19: TSLA moves to WITHHELD under the unconfirmed-outlier rule (2026-11-18); other DCF-only names far outside every analyst target would move the same way, so run the canary before release. 2026-11-19 (canary run old vs new, Duke job 13865086): AMD, PYPL, TEX also move to WITHHELD under the same rule; valuations unchanged for all 17. A healthy engine now publishes about 9-10 of 17, so the nightly floor is 0.41.",
   "NVDA": {
     "status": "PUBLISHED",
     "why": "Calibrated premium lifts the DCF to about +57%; the 59-analyst Street target (+46%) covers more than half the move in the same direction."
@@ -25,8 +25,8 @@
     "why": "Since 2026-11-18 a cash-flow model with no second method, more than 10% outside every current target of at least 5 analysts, is a scenario, not a rating (valuation_methodology.withhold_unconfirmed_outlier). Tesla's DCF (about $20) sits far below the lowest of ~40 targets (about $128). Range only. Was FLAGGED."
   },
   "AMD": {
-    "status": "FLAGGED",
-    "why": "DCF far below market on a 30%-capped fade; the Street target sits at the market, so nothing corroborates the gap. Published with a confidence alert since 2026-10-02 (was withheld)."
+    "status": "WITHHELD",
+    "why": "Since 2026-11-19, range only under the unconfirmed-outlier rule (2026-11-18): a cash-flow model with no second method, more than 10% outside every current target of at least 5 analysts, is a scenario, not a rating. AMD's DCF (about $200-223) sits far below the price (about $488) and below every one of ~49 targets (mean about $658). Was FLAGGED."
   },
   "AAPL": {
     "status": "FLAGGED",
@@ -40,8 +40,8 @@
     "why": "DCF about -29% vs market while the Street is +31%: model and Street point opposite ways, so it publishes with a confidence alert whenever its statements are current. Range only while they are not. On 2026-10-02 the provider had Amazon's June-2026 income statement but no balance sheet or cash flow for that quarter, so the last complete quarter (2026-03-31) was past the 150-day limit and the annual filing (2025-12-31) past the 200-day limit. The engine before 2026-10-02 carried the same statements blocker behind its Street reason, where a reader of the first sentence never saw it; the first pre-deploy gate run found it."
   },
   "PYPL": {
-    "status": "FLAGGED",
-    "why": "DCF well above market while the Street target sits at the market. Published with a confidence alert since 2026-10-02 (was withheld)."
+    "status": "WITHHELD",
+    "why": "Since 2026-11-19, range only under the unconfirmed-outlier rule (2026-11-18): a cash-flow model with no second method, more than 10% outside every current target of at least 5 analysts, is a scenario, not a rating. PayPal's DCF (about $96-124) sits far above the price (about $56) and above every one of ~33 targets (mean about $57). Was FLAGGED."
   },
   "MC.PA": {
     "status": "WITHHELD",
@@ -60,8 +60,8 @@
     "why": "GM Financial is a consolidated captive lender; scenario only until an operating/finance split exists. Range only."
   },
   "TEX": {
-    "status": "PUBLISHED",
-    "why": "Acquisition debt but no lending arm keeps its DCF. BORDERLINE: DCF about +74% needs the Street (+39%) to cover half the move (37%)."
+    "status": "WITHHELD",
+    "why": "Since 2026-11-19, range only under the unconfirmed-outlier rule (2026-11-18): a cash-flow model with no second method, more than 10% outside every current target of at least 5 analysts, is a scenario, not a rating. Terex's DCF (about $94-119) sits about +100% above the price (about $53) and above every one of ~13 targets (mean about $74). Was PUBLISHED (borderline)."
   },
   "BKNG": {
     "status": [

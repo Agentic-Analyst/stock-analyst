@@ -239,17 +239,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("candidate", type=Path)
     parser.add_argument("--baseline", type=Path)
-    # The nightly basket publishes 12 to 14 of 17: five the Street
-    # corroborates (NVDA, GOOGL, MSFT, CRH, TEX), seven published with a
-    # confidence alert (META, TSLA, AMD, AAPL, PYPL, and the memory makers MU
-    # and SNDK on mid-cycle economics), Amazon with an alert once the
-    # provider's statements for it are current, and Booking when it clears its
-    # boundary. At 0.52 the floor fails once fewer than 9 of 17 judged
-    # equities publish: it catches a collapse, not a single flip, which
-    # is the --expect check's job before a deploy. (Before 2026-10-02 a name
-    # the Street did not back was withheld, 5 of 16 published, and the floor
-    # was 0.30.)
-    parser.add_argument("--min-publish-rate", type=float, default=0.52)
+    # The nightly basket publishes 8 to 10 of 17: four the Street
+    # corroborates (NVDA, GOOGL, MSFT, CRH), four published with a confidence
+    # alert (META, AAPL, and the memory makers MU and SNDK on mid-cycle
+    # economics), Amazon with an alert once the provider's statements for it
+    # are current, and Booking when it clears its boundary. At 0.41 the floor
+    # fails once fewer than 7 of 17 judged equities publish: it catches a
+    # collapse, not a single flip, which is the --expect check's job before a
+    # deploy. (0.30 before 2026-10-02, when unbacked names were withheld; 0.52
+    # until 2026-11-19, when the unconfirmed-outlier rule made TSLA, AMD, PYPL
+    # and TEX range-only.)
+    parser.add_argument("--min-publish-rate", type=float, default=0.41)
     parser.add_argument("--expect", type=Path, help="per-name expected outcomes (JSON)")
     # A refused equity leaves the rate's denominator, so a classification
     # regression that refused every name would otherwise raise the rate.
