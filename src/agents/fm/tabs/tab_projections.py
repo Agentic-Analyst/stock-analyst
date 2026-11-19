@@ -14,7 +14,7 @@ Professional-grade financial model following investment banking standards:
 """
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 import openpyxl
 from openpyxl.worksheet.worksheet import Worksheet
@@ -24,23 +24,20 @@ from ..financial_model_builder import ExcelFormats
 from ..financial_metrics import WORKING_CAPITAL_COST_BASE_REVENUE
 
 
-def _usable_split(split: Optional[Dict[str, Any]]) -> Optional[Tuple[float, float]]:
-    """(depreciation share of D&A, intangibles spending / revenue) when the split rule is on.
+def _usable_split(split: Optional[Dict[str, Any]]) -> Optional[float]:
+    """The share of D&A the year-five capex target replaces, or None for the plain 1.1x D&A.
 
-    Off unless VYNN_REINVESTMENT_SPLIT=1: it changes valuations, so it waits
-    for the owner's decision (19 Nov 2026).
+    On unless VYNN_REINVESTMENT_SPLIT=0 (owner's decision, 19 Nov 2026).
     """
     import os
-    if os.getenv("VYNN_REINVESTMENT_SPLIT", "").strip().lower() not in ("1", "true", "yes", "on"):
+    if os.getenv("VYNN_REINVESTMENT_SPLIT", "").strip().lower() in ("0", "false", "no", "off"):
         return None
     if not isinstance(split, dict):
         return None
-    share, other = split.get("depreciation_share_of_da"), split.get("intangibles_purchase_to_revenue")
-    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in (share, other)):
+    share = split.get("da_replaced_share")
+    if isinstance(share, bool) or not isinstance(share, (int, float)) or not math.isfinite(share):
         return None
-    if not (0.0 < share <= 1.0 and 0.0 <= other <= 0.5):
-        return None
-    return float(share), float(other)
+    return float(share) if 0.0 <= share < 1.0 else None
 
 
 # Per-year D&A and capex ratios to projected revenue the workbook accepts
@@ -427,23 +424,20 @@ class ProjectionsTabBuilder:
             col_letter = chr(64 + col)  # B, C, D, E, F
             frac = i / max(1, self.projection_years - 1)  # 0 .. 1 across FY1..FY5
 
-            split = _usable_split(self.reinvestment_split)
+            replaced = _usable_split(self.reinvestment_split)
             if capex_by_year:
                 formula = f'={col_letter}3*{capex_by_year[i]:.12f}'
-            elif split and use_ttm_capex and use_ttm_da:
-                # Spending on capitalised intangibles counts as reinvestment,
-                # and the steady state replaces worn equipment, not the
-                # amortisation of acquired intangibles.
-                share, other = split
+            elif replaced is not None and use_ttm_capex and use_ttm_da:
+                # The target replaces only the D&A ongoing spending keeps up
+                # (reinvestment_split): not acquired intangibles running off.
                 formula = (
-                    f'={col_letter}3*(({float(capex_ratio):.12f}-{other:.12f})*{1 - frac:.2f}'
-                    f'-1.1*({float(da_ratio):.12f}*{share:.12f}+{other:.12f})*{frac:.2f})'
+                    f'={col_letter}3*({float(capex_ratio):.12f}*{1 - frac:.2f}'
+                    f'-1.1*{float(da_ratio):.12f}*{replaced:.12f}*{frac:.2f})'
                 )
-            elif split:
-                share, other = split
+            elif replaced is not None:
                 formula = (
-                    f'={col_letter}3*(((Historical!$F$24/Historical!$F$3)-{other:.12f})*{1 - frac:.2f}'
-                    f'-1.1*(ABS(Historical!$F$18)/Historical!$F$3*{share:.12f}+{other:.12f})*{frac:.2f})'
+                    f'={col_letter}3*((Historical!$F$24/Historical!$F$3)*{1 - frac:.2f}'
+                    f'-1.1*ABS(Historical!$F$18)/Historical!$F$3*{replaced:.12f}*{frac:.2f})'
                 )
             elif use_ttm_capex and use_ttm_da:
                 formula = (

@@ -1194,13 +1194,19 @@ def _anchor_path(path: List[float], trailing: float,
 
 
 def reinvestment_split(json_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """How much of D&A is depreciation of equipment, and what the company keeps spending on intangibles.
+    """The share of D&A that ongoing spending replaces, when amortisation outruns it.
 
-    Projected capex glides to 1.1x D&A by year five. Where D&A is mostly the
-    amortisation of acquired intangibles, that target is spending the company
-    has never made: Hansen's D&A is 14.7% of revenue, of which depreciation is
-    5.0%, and its capex was 3.9-6.0%, plus 3.5-4.7% on capitalised software.
-    None when the latest annual statements do not split D&A.
+    Projected capex glides to 1.1x D&A by year five. D&A includes the
+    amortisation of intangibles; capex (equipment plus intangibles bought or
+    capitalised, as the provider reports it) replaces only what the company
+    keeps spending on. Hansen: D&A 14.7% of revenue, of which amortisation
+    9.7%; intangibles spending averaged 4.2% (software, inside its capex). The
+    other 5.5% is amortisation of acquired intangibles that no spending
+    replaces, and gliding to it took capex to 16.2% of revenue and halved
+    projected free cash flow. The target becomes 1.1 x (D&A - max(0,
+    amortisation - intangibles spending)): it can only fall, and one-off
+    purchases can only cancel the cut. None when the statements do not split
+    D&A or report no intangibles spending, or nothing is unmatched.
     """
     statements = (json_data or {}).get("financial_statements") or {}
     income = statements.get("income_statement") or {}
@@ -1214,34 +1220,49 @@ def reinvestment_split(json_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not periods:
         return None
     latest = periods[-1]
-    row, flows = income[latest], cash.get(latest) if isinstance(cash.get(latest), dict) else {}
-    pairs = (
-        (_number(row, "Depreciation Income Statement"),
-         _number(row, "Depreciation And Amortization In Income Statement",
-                 "Depreciation Amortization Depletion Income Statement", "Reconciled Depreciation")),
-        (_number(flows, "Depreciation"),
-         _number(flows, "Depreciation And Amortization", "Depreciation Amortization Depletion")),
-    )
-    depreciation, total = next(((d, t) for d, t in pairs if d is not None and t), (None, None))
-    if depreciation is None:
-        amortization = _number(row, "Amortization Of Intangibles Income Statement")
-        total = pairs[0][1]
-        if amortization is not None and total:
-            depreciation = total - amortization
-    if depreciation is None or not total or total <= 0:
+    row = income[latest]
+    flows = cash.get(latest) if isinstance(cash.get(latest), dict) else {}
+    # The cash-flow pair first: the model's D&A comes from the cash-flow
+    # statement. Samsung's income-statement lines are a small subset of it.
+    cash_total = _number(flows, "Depreciation And Amortization", "Depreciation Amortization Depletion")
+    cash_depreciation = _number(flows, "Depreciation")
+    income_total = _number(row, "Depreciation And Amortization In Income Statement",
+                           "Depreciation Amortization Depletion Income Statement", "Reconciled Depreciation")
+    if cash_depreciation is not None and cash_total and cash_total > 0:
+        total, depreciation, source = cash_total, cash_depreciation, "cash-flow statement"
+    elif income_total and income_total > 0 and (not cash_total or abs(income_total / cash_total - 1) <= 0.05):
+        depreciation = _number(row, "Depreciation Income Statement")
+        if depreciation is None:
+            amortization = _number(row, "Amortization Of Intangibles Income Statement")
+            depreciation = income_total - amortization if amortization is not None else None
+        total, source = income_total, "income statement"
+    else:
         return None
-    share = depreciation / total
-    if not 0.0 < share <= 1.0:
+    # No depreciation reported is a gap in the data, not a company with
+    # nothing to replace: the target would glide to zero.
+    if depreciation is None or not 0.0 < depreciation <= total:
         return None
-    ratios = []
+    spends = []
     for period in periods:
         spent = _number(cash.get(period) or {}, "Purchase Of Intangibles")
         if spent is not None:
-            ratios.append(abs(spent) / revenue(period))
+            spends.append(max(0.0, -spent) / revenue(period))
+    if not spends:
+        return None
+    latest_revenue = revenue(latest)
+    amortization_ratio = (total - depreciation) / latest_revenue
+    spend_ratio = sum(spends) / len(spends)
+    unmatched = max(0.0, amortization_ratio - spend_ratio)
+    if unmatched <= 0.0:
+        return None
     return {
         "fiscal_year": str(latest),
-        "depreciation_share_of_da": share,
-        "intangibles_purchase_to_revenue": sum(ratios) / len(ratios) if ratios else 0.0,
+        "source": source,
+        "da_to_revenue": total / latest_revenue,
+        "amortization_to_revenue": amortization_ratio,
+        "intangibles_purchase_to_revenue": spend_ratio,
+        "unmatched_amortization_to_revenue": unmatched,
+        "da_replaced_share": max(0.0, 1.0 - unmatched / (total / latest_revenue)),
     }
 
 
@@ -2529,5 +2550,17 @@ def ground_assumptions(
         note = apply_mid_cycle(a, mid_cycle)
         if note:
             notes.append(note)
+
+    # Said only when the projections will use it: not when switched off, nor
+    # when a memory maker's capex follows its own year-by-year path.
+    by_year = (a.get("modeling_basis") or {}).get("capex_to_revenue_by_year")
+    if (split and not by_year
+            and os.getenv("VYNN_REINVESTMENT_SPLIT", "").strip().lower() not in ("0", "false", "no", "off")):
+        notes.append(
+            f"Year-five capex target: 1.1x D&A less amortisation that ongoing intangibles spending "
+            f"does not replace ({split['unmatched_amortization_to_revenue'] * 100:.1f}% of revenue in "
+            f"{split['fiscal_year'][:4]}: amortisation {split['amortization_to_revenue'] * 100:.1f}%, "
+            f"intangibles spending {split['intangibles_purchase_to_revenue'] * 100:.1f}%)"
+        )
 
     return a, notes
