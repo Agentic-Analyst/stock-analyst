@@ -1193,6 +1193,58 @@ def _anchor_path(path: List[float], trailing: float,
     return new, True
 
 
+def reinvestment_split(json_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """How much of D&A is depreciation of equipment, and what the company keeps spending on intangibles.
+
+    Projected capex glides to 1.1x D&A by year five. Where D&A is mostly the
+    amortisation of acquired intangibles, that target is spending the company
+    has never made: Hansen's D&A is 14.7% of revenue, of which depreciation is
+    5.0%, and its capex was 3.9-6.0%, plus 3.5-4.7% on capitalised software.
+    None when the latest annual statements do not split D&A.
+    """
+    statements = (json_data or {}).get("financial_statements") or {}
+    income = statements.get("income_statement") or {}
+    cash = statements.get("cash_flow") or {}
+
+    def revenue(period):
+        row = income.get(period)
+        return _positive_number(_number(row, "Total Revenue", "Operating Revenue")) if isinstance(row, dict) else None
+
+    periods = [period for period in sorted(income, key=str) if revenue(period)][-3:]
+    if not periods:
+        return None
+    latest = periods[-1]
+    row, flows = income[latest], cash.get(latest) if isinstance(cash.get(latest), dict) else {}
+    pairs = (
+        (_number(row, "Depreciation Income Statement"),
+         _number(row, "Depreciation And Amortization In Income Statement",
+                 "Depreciation Amortization Depletion Income Statement", "Reconciled Depreciation")),
+        (_number(flows, "Depreciation"),
+         _number(flows, "Depreciation And Amortization", "Depreciation Amortization Depletion")),
+    )
+    depreciation, total = next(((d, t) for d, t in pairs if d is not None and t), (None, None))
+    if depreciation is None:
+        amortization = _number(row, "Amortization Of Intangibles Income Statement")
+        total = pairs[0][1]
+        if amortization is not None and total:
+            depreciation = total - amortization
+    if depreciation is None or not total or total <= 0:
+        return None
+    share = depreciation / total
+    if not 0.0 < share <= 1.0:
+        return None
+    ratios = []
+    for period in periods:
+        spent = _number(cash.get(period) or {}, "Purchase Of Intangibles")
+        if spent is not None:
+            ratios.append(abs(spent) / revenue(period))
+    return {
+        "fiscal_year": str(latest),
+        "depreciation_share_of_da": share,
+        "intangibles_purchase_to_revenue": sum(ratios) / len(ratios) if ratios else 0.0,
+    }
+
+
 def _ordered_statement_rows(json_data: Dict[str, Any], statement: str) -> List[Dict[str, Any]]:
     rows = (((json_data or {}).get("financial_statements") or {}).get(statement) or {})
     if not isinstance(rows, dict):
@@ -2040,6 +2092,9 @@ def ground_assumptions(
     # the places where an annual snapshot goes stale. Revenue is replaced below
     # by a rolling consensus bridge when the current TTM and both covered annual
     # endpoints are available.
+    split = reinvestment_split(json_data)
+    if split:
+        a["reinvestment_split"] = split
     if current_bridge:
         normalized = current_bridge.get("normalized") or {}
         basis = {
