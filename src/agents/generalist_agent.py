@@ -565,6 +565,11 @@ _COMPANY_CHECK = (
     "line, followed only by each sentence that contains one, each on its own line, copied "
     "exactly from the answer: no other words.\n\nAnswer:\n<<<\n"
 )
+_SAYS_NO_CALL = re.compile(
+    r"\bno\s+(?:buy\s+or\s+sell\s+|buy/sell\s+)?call\b|\bno\s+single\s+fair\s+value\b|"
+    r"\bcan(?:no|')t\s+name\s+a\s+winner\b|\bno\s+(?:rating|recommendation)\b",
+    re.I,
+)
 _NO_CHECKED_ANSWER = (
     "VYNN compared several companies here but could not check this answer against each "
     "company's valuation, so it gives no buy or sell call on any of them. Ask about one "
@@ -1771,8 +1776,11 @@ class GeneralistAgent:
         r"top\s+picks?|stands?\s+out|worth\s+(?:buying|owning|a\s+look)|upside|downside|"
         r"mispric\w*|room\s+to\s+run|scal(?:e|ing)\s+in|"
         # Plain calls: "GOOGL: a buy.", "I'd buy GOOGL here", "my top recommendation".
-        r"buy(?:ing|s)?|sell(?:ing|s)?|add(?:ing)?|trim(?:ming)?|avoid(?:ing)?|accumulat\w*|"
-        r"recommend\w*|picks?|hold(?:ing)?)\b",
+        # Only the call forms: "Verizon is holding above both averages" was
+        # cut on 18 Nov, and "buy back", "sell-off", "picks up" are facts.
+        r"buy(?!\s*-?\s*backs?\b)|sell(?!\s*-?\s*(?:offs?|side)\b)|avoid|accumulat\w*|"
+        r"recommend\w*|picks?(?!\s+up\b)|hold|"
+        r"(?:add|trim)\s+(?:to\s+)?(?:it|them|the\s+(?:stock|shares|position)|shares|a\s+position|on\s+dips))\b",
         re.I,
     )
     _ANALYSTS = re.compile(r"\banalysts?'?\b|\bstreet\b|\bconsensus\b|\bwall\s+street\b", re.I)
@@ -2045,7 +2053,12 @@ class GeneralistAgent:
             short = f"**Short answer: VYNN gives no buy or sell call on {listed}; {where}.**"
 
         def opened(answer: str) -> str:
-            return f"{short}\n\n{answer}" if short and answer else answer
+            # Not twice: the Verizon-AT&T draft opened "I can't name a winner ...
+            # it gives no call on either" under this very line.
+            body = answer.split("Where VYNN stands on each company", 1)[0]
+            if not short or not answer or _SAYS_NO_CALL.search(body[:400]):
+                return answer
+            return f"{short}\n\n{answer}"
 
         async def fallback(reason: str) -> str:
             self._log(f"[SUPERVISOR] ⚠️ {reason} — answering with each company's position and a "

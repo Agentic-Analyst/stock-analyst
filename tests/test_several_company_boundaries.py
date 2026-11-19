@@ -334,3 +334,26 @@ def test_alphabet_and_meta_published_with_a_dcf_only_caution_are_not_withheld():
     ag = _picks_agent()
     ag._company_states = {t: base._published_state() for t in ("GOOGL", "META", "JPM")}
     assert not ag._several_company_turn()
+
+
+@pytest.mark.parametrize("fact", [
+    "Verizon is holding above both its 50-day ($45.69) and 200-day ($45.96) averages.",   # 18 Nov run
+    "Alphabet will buy back $70 billion of stock.",
+    "Meta shares fell in a broad tech sell-off.",
+    "Alphabet picks up share in cloud.",
+])
+def test_a_fact_with_a_call_like_word_stays(fact):
+    ag = _picks_agent()
+    draft = DRAFT.replace("**3. JPMorgan (JPM)**", f"- {fact}\n\n**3. JPMorgan (JPM)**")
+    out = asyncio.run(ag._several_company_answer([], base._Provider("NO"), draft, None, []))
+    assert fact in out
+
+
+def test_the_no_call_line_is_not_said_twice():
+    ag = _picks_agent("Verizon or AT&T, which is the better buy right now?")
+    ag._company_states = {"VZ": base._withheld_state(), "T": _second_withheld_state()}
+    ag._company_names = {"VZ": "Verizon Communications Inc.", "T": "AT&T Inc."}
+    draft = ("**I can't name a winner. VYNN's model gives no single fair value for either stock, so it "
+             "gives no call on either.**\n\nVerizon trades at 8.7 times forward earnings and AT&T at 8.5.")
+    out = asyncio.run(ag._several_company_answer([], base._Provider("NO"), draft, None, []))
+    assert not out.startswith("**Short answer") and out.count("no call on either") == 1
