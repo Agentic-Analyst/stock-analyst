@@ -1905,6 +1905,11 @@ class BuildModelTool(_CtxTool):
             "value is defensible, so the range is reported instead."
         )
         withheld_payload = {}
+        if isinstance(vm, dict):
+            # What the chat was told, kept with the model: methods this far
+            # apart withhold the point here without setting
+            # point_estimate_withheld, and a picks answer is checked against it.
+            vm["chat_no_single_fair_value"] = withheld
         if withheld:
             fair_value_out, upside_out = None, None
             withheld_payload = {
@@ -2287,6 +2292,9 @@ class WriteReportTool(_CtxTool):
             "The valuation methods disagree by more than 2.5x. The report "
             "publishes the supported range and no directional rating or target."
         )
+        if isinstance(vm, dict):
+            # As in build_model: what the chat was told, kept with the model.
+            vm["chat_no_single_fair_value"] = withheld
         if withheld:
             fair_value = None
             upside = None

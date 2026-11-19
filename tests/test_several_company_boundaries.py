@@ -314,3 +314,23 @@ def test_the_single_company_section_review_still_trims_a_quote_spanning_two_sent
                "against peers.\n\nComparable sales grew 6% excluding fuel, and traffic rose 3%.")
     review = review_section(section, drop=["Margins rose. The shares look stretched against peers."])
     assert review.quotes_unmatched == 0 and len(review.dropped) == 2
+
+
+def test_a_view_the_chat_was_told_is_not_single_counts_as_no_view():
+    # 18 Nov: the methods' spread can withhold the point in build_model's
+    # answer to the chat without setting point_estimate_withheld.
+    ag = _picks_agent()
+    spread = base._published_state()
+    spread.financial_model.valuation_metrics = {"fair_value": 134.75, "point_estimate_withheld": False,
+                                                "chat_no_single_fair_value": True}
+    ag._company_states = {"JPM": base._published_state(), "XYZ": spread}
+    assert ag._several_company_turn()
+    assert not {p["ticker"]: p for p in ag._company_positions()}["XYZ"]["published"]
+
+
+def test_alphabet_and_meta_published_with_a_dcf_only_caution_are_not_withheld():
+    # What the 18 Nov picks runs actually had: publication allowed, no point
+    # withheld, a "DCF-only, present as a scenario range" note in the log only.
+    ag = _picks_agent()
+    ag._company_states = {t: base._published_state() for t in ("GOOGL", "META", "JPM")}
+    assert not ag._several_company_turn()

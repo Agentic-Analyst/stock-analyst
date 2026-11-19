@@ -1719,7 +1719,9 @@ class GeneralistAgent:
             metrics = getattr(model, "valuation_metrics", None)
             if not isinstance(metrics, dict):
                 return False
-            return not metrics.get("point_estimate_withheld")
+            # Either the model withheld its point, or the chat was told there is
+            # no single fair value (methods too far apart).
+            return not (metrics.get("point_estimate_withheld") or metrics.get("chat_no_single_fair_value"))
         except Exception:
             return False
 
@@ -1766,6 +1768,7 @@ class GeneralistAgent:
                     )
                 elif getattr(state, "financial_model", None) is not None:
                     metrics = state.financial_model.valuation_metrics
+                    metrics = metrics if isinstance(metrics, dict) else {}
                     # The figures the guard hides for this run: an empty answer
                     # is never acceptable, so it answers with its template.
                     guard._guard_user_answer("")

@@ -131,6 +131,8 @@ def test_write_report_executes_and_machine_gate_bounds_markdown(monkeypatch):
     assert payload["fair_value"] is None
     assert payload["no_single_fair_value"] is True
     assert payload["no_single_fair_value_reason"]
+    # Kept with the model, for the several-company check.
+    assert state.financial_model.valuation_metrics["chat_no_single_fair_value"] is True
     # No rating exists, and the prose model is handed no label to repeat.
     assert "rating" not in payload and payload["valuation_view"] == "no_single_fair_value"
     assert "confidence_alert" not in payload
