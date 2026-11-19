@@ -122,14 +122,14 @@ class AssumptionsTabBuilder:
         # revenue) beside a projected 27.8% (D&A at 14.7%, as reported), and the
         # report printed the 14.9%. It is now derived from the same cells; the
         # grounded number is only the fallback if those cannot be read.
-        ws.cell(row=6, column=1, value="EBITDA Margin (operating margin + projected D&A)")
+        ws.cell(row=6, column=1, value="EBITDA Margin (projected EBIT + D&A)")
         ebitda = self.llm_assumptions.get('ebitda_margins', [None] * 5)
         for i, margin in enumerate(ebitda):
             col = chr(66 + i)  # B..F: FY1..FY5 here and on Projections
             fallback = (f"{float(margin):.12f}"
                         if isinstance(margin, (int, float)) and not isinstance(margin, bool) else '""')
             ws.cell(row=6, column=2 + i,
-                    value=f"=IFERROR({col}7+Projections!{col}12/Projections!{col}3,{fallback})")
+                    value=f"=IFERROR((Projections!{col}9+Projections!{col}12)/Projections!{col}3,{fallback})")
         
         # Operating Margins (FY1-FY5)
         ws.cell(row=7, column=1, value="Operating Margin")

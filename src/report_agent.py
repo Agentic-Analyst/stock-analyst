@@ -908,7 +908,8 @@ def extract_historical_financials(financial_data: Dict[str, Any]) -> Dict[str, A
         # Not reported is not zero: Booking Holdings reports no gross profit
         # in any year, and a 0 default printed a gross profit of $0.00.
         historical['gross_profit'].append(is_data.get('Gross Profit'))
-        historical['operating_income'].append(is_data.get('Operating Income', 0))
+        # Not reported is not zero (an insurer has no operating income line).
+        historical['operating_income'].append(is_data.get('Operating Income'))
         historical['ebitda'].append(is_data.get('EBITDA', 0))
         historical['net_income'].append(is_data.get('Net Income', 0))
         historical['operating_cf'].append(cf_data.get('Operating Cash Flow', 0))

@@ -245,4 +245,25 @@ def test_a_first_year_growth_from_a_different_eps_base_is_not_given():
     data = json.loads((pathlib.Path(__file__).parent / "fixtures" / "hsn_ax_2026_11_18.json").read_text())
     first, second = build_external_expectations(data)["forward_estimates"][:2]
     assert first["eps_growth"] is None and "0.323" in first["eps_growth_note"]
+    assert "a different basis" in first["eps_growth_note"]
     assert second["eps_growth"] == pytest.approx(0.29358 / 0.23797 - 1.0)
+
+
+
+def test_an_adjusted_growth_rate_on_a_consistent_basis_is_kept():
+    # The independent review's case: Booking's provider rate (9.12 to 10.45,
+    # both adjusted) is consistent although GAAP EPS was 6.62.
+    import json
+    import pathlib
+    from src.external_expectations import build_external_expectations
+    data = json.loads((pathlib.Path(__file__).parent / "fixtures" / "bkng_no_cost_of_revenue.json").read_text())
+    first = build_external_expectations(data)["forward_estimates"][0]
+    assert first["eps_growth"] is not None and "eps_growth_note" not in first
+
+
+def test_a_missing_operating_income_is_not_a_zero_margin():
+    # An insurer reports no operating income line.
+    historical = {"years": ["2026"], "revenue": [100e6], "gross_profit": [None],
+                  "operating_income": [None], "ebitda": [20e6], "net_income": [10e6]}
+    table = _margins_table(historical, {"operating_margin": 0.12})
+    assert "| Operating Margin | — | 12.0% |" in table

@@ -913,10 +913,12 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
         if index > 0 and isinstance(previous_eps, (int, float)) and isinstance(eps_row["average"], (int, float)):
             eps_growth = (eps_row["average"] / previous_eps - 1.0
                           if previous_eps > 0 and eps_row["average"] > 0 else None)
-        # The first year is measured from the provider's own year-ago EPS. When
-        # that is not the EPS the company reported, the rate mixes two bases:
-        # Hansen's A$0.238 estimate read "-26%" against the provider's A$0.32
-        # while the reported A$0.234 sits beside it in the same answer.
+        # The first year is measured from the provider's own year-ago EPS,
+        # usually an adjusted figure, and so is the estimate: that rate is
+        # consistent (Booking: 9.12 to 10.45 adjusted, though GAAP EPS was
+        # 6.62). It mixes bases only when the estimate sits on the reported
+        # EPS while the year-ago does not: Hansen's A$0.238 estimate beside a
+        # reported A$0.231 read "-26%" against the provider's A$0.323.
         eps_growth_note = None
         if index == 0 and eps_growth is not None:
             year_ago = _eps_in_model_currency(
@@ -924,14 +926,21 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
                 financial_currency=financial_currency, fx_rate=fx_rate,
             )
             reported_eps = _latest_reported_eps(data)
-            if (isinstance(year_ago, (int, float)) and year_ago > 0
+            estimate = eps_row["average"]
+            converted = eps_row.get("currency_conversion_rate") not in (None, 1.0)
+            if (not converted
+                    and isinstance(year_ago, (int, float)) and year_ago > 0
                     and isinstance(reported_eps, (int, float)) and reported_eps > 0
+                    and isinstance(estimate, (int, float)) and estimate > 0
+                    # Same units: an ADR's EPS is a multiple of the share's.
+                    and 0.2 <= year_ago / reported_eps <= 5.0
+                    and abs(estimate / reported_eps - 1.0) <= _EPS_BASE_TOLERANCE
                     and abs(year_ago / reported_eps - 1.0) > _EPS_BASE_TOLERANCE):
                 eps_growth = None
                 eps_growth_note = (
                     f"No growth rate: the provider measures it from a year-ago EPS of "
-                    f"{year_ago:.3f}, not the {reported_eps:.3f} the company reported "
-                    "(likely an adjusted basis)."
+                    f"{year_ago:.3f}, while the estimate sits near the {reported_eps:.3f} "
+                    "the company reported (a different basis)."
                 )
         years.append({
             "period": period,
