@@ -726,6 +726,9 @@ def external_benchmark(financial_data: Dict[str, Any],
         ),
         "target_source_means": source_means,
         "model_return_vs_market": model_gap,
+        # A withheld point's gap is a figure the guard hides; never print it.
+        "model_point_withheld": bool(
+            metrics.get("point_estimate_withheld") or metrics.get("chat_no_single_fair_value")),
         # fair_value, read again: ``model_value`` is reused for each forward
         # year's revenue in the loop above.
         "model_fair_value": _number(metrics.get("fair_value"), positive=True),
@@ -1253,7 +1256,19 @@ def render_external_benchmark_compact(value: Dict[str, Any], *, model_comparison
         }.get(value.get("target_range_relationship"), "")
         lines.append("- VYNN's model and the analysts disagree sharply." + range_note)
     elif relationship == "corroborates":
-        lines.append("- The analysts' targets back the direction of VYNN's model and much of its size.")
+        # "Back the direction and much of its size" read as agreement when the
+        # analysts saw +52% and the model +17% (Hansen, 18 Nov): say both.
+        model_gap = _number(value.get("model_return_vs_market"))
+        target_gap = _number(value.get("target_return_vs_market"))
+        if (model_gap is not None and target_gap is not None
+                and value.get("model_point_withheld") is False):
+            how = "further" if abs(target_gap) > abs(model_gap) else "less far"
+            lines.append(
+                f"- The analysts' targets point the same way as VYNN's model, and {how}: "
+                f"{target_gap:+.0%} against the model's {model_gap:+.0%}."
+            )
+        else:
+            lines.append("- The analysts' targets point the same way as VYNN's model.")
 
     sources = value.get("target_source_means") or {}
     if len(sources) >= 2:
