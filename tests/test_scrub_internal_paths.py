@@ -29,3 +29,14 @@ def test_a_web_address_with_data_in_it_is_kept():
     url = "https://www.sec.gov/Archives/edgar/data/320193/000032019326000010/ex99.htm"
     assert scrub_internal_paths(f"The release: {url}") == f"The release: {url}"
     assert "/data/" not in scrub_internal_paths("Saved at /data/a@b.com/AAPL/r/AAPL.md")
+
+
+
+def test_file_and_sandbox_links_into_the_data_volume_are_still_scrubbed():
+    # Fix review, 19 Nov 2026: the first anchor also let these through.
+    from src.agents.generalist_agent import scrub_internal_paths
+    for text in ("file:///data/NVDA/run/reports/NVDA.md", "[report](file:///data/NVDA/run/r.md)",
+                 "sandbox:/data/NVDA/run/r.md", "file:///app/data/NVDA/r.md", "'/data/NVDA/r.md'"):
+        assert "/data/" not in scrub_internal_paths(text), text
+    for url in ("https://fred.stlouisfed.org/data/DGS10.txt", "http://localhost:8080/data/x"):
+        assert scrub_internal_paths(url) == url

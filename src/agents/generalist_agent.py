@@ -52,7 +52,7 @@ from agents.tools.ui_tools import build_ui_tools
 # The data-volume path must start a path: inside a web address such as
 # https://www.sec.gov/Archives/edgar/data/320193/... it is not one (release review).
 _INTERNAL_PATH = re.compile(
-    r"`?(?<![\w.\-/:])(?:/data/|/app/data/)[^\s`)\]]+`?"
+    r"`?(?<![\w.\-])(?:/data/|/app/data/)[^\s`)\]]+`?"
     r"|`?/?(?:[\w.\-]+/)*[\w.+\-]+@[\w.\-]+\.[A-Za-z]{2,}/[^\s`)\]]+`?"
 )
 

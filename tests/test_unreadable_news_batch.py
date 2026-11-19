@@ -57,3 +57,18 @@ def test_batches_are_small_by_default():
     assert ARTICLES_PER_BATCH == 3
     for method in (ArticleScreener.analyze_all_articles, ArticleScreener.analyze_all_articles_async):
         assert inspect.signature(method).parameters["batch_size"].default == ARTICLES_PER_BATCH
+
+
+def test_the_sequential_path_splits_too(tmp_path, monkeypatch):
+    import src.article_screener as screener_module
+    screener, calls = _screener(tmp_path, monkeypatch, cut_off_above=1)
+    fake_async = async_client.get_async_llm()
+
+    def fake_sync(prompt):
+        return asyncio.run(fake_async(prompt))
+
+    monkeypatch.setattr(screener_module, "get_llm", lambda: fake_sync)
+    articles = [{"title": f"a{i}"} for i in range(3)]
+    catalysts, _, _ = screener._analyze_article_batch(articles, 1)
+    assert len(catalysts) == 3
+    assert calls == [3, 1, 2, 1, 1]
