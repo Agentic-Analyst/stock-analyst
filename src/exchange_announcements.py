@@ -77,15 +77,29 @@ def _session_for(item: Dict[str, Any], sessions: Sequence[str]) -> Optional[str]
     return None
 
 
+# Off unless switched on. The ASX makes company announcements freely available
+# for private and personal use; commercial use, including aggregating and
+# redistributing them, needs the ASX's express written authority. VYNN is a
+# commercial service: set VYNN_ASX_ANNOUNCEMENTS=1 only once that is held (or
+# replace the source with a licensed feed).
+_ENABLE = "VYNN_ASX_ANNOUNCEMENTS"
+
+
+def enabled() -> bool:
+    import os
+    return os.getenv(_ENABLE, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def announcements_for_move(ticker: str, start: date, end: date, sessions: Sequence[str],
                            fetch=None) -> Optional[Dict[str, Any]]:
     """Announcements between ``start`` and ``end`` for an ASX listing, filed by session.
 
-    Returns None for a non-ASX ticker or when the exchange cannot be reached, so the
-    caller simply omits the field. ``fetch(url) -> str`` is injectable for tests.
+    Returns None for a non-ASX ticker, when the lookup is not switched on, or
+    when the exchange cannot be reached, so the caller simply omits the field.
+    ``fetch(url) -> str`` is injectable for tests.
     """
     code = asx_code(ticker)
-    if not code:
+    if not code or not enabled():
         return None
     fetch = fetch or _get
     items: List[Dict[str, Any]] = []

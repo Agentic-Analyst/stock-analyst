@@ -313,7 +313,9 @@ def rank_and_align(items: List[Dict[str, Any]], names: Sequence[str],
 
     def public(story: Dict[str, Any]) -> Dict[str, Any]:
         local = story["published"].astimezone(zone)
-        row = {"published": local.strftime("%Y-%m-%d %H:%M %Z"), "title": story["title"],
+        # A search result dated by its day alone sits at local noon: say the day.
+        stamp = local.strftime("%Y-%m-%d") if story.get("time_unknown") else local.strftime("%Y-%m-%d %H:%M %Z")
+        row = {"published": stamp, "title": story["title"],
                "source": story["source"], "summary": story.get("summary") or None,
                "url": story["url"]}
         if story["outlets"] > 1:
@@ -426,11 +428,171 @@ def yahoo_items(ticker: str, count: int = 10) -> List[Dict[str, Any]]:
     return [i for i in out if i["title"]]
 
 
+# ---- a dated search for a move older than the feed reaches ------------------
+#
+# Hansen Technologies fell 21.2% on 19 Aug 2026 on its FY26 results and a
+# leadership change. Asked in November, VYNN could not say why: the company
+# news feed covers mainly US listings, and the fallback (Yahoo's latest
+# headlines) reaches back a few days. One Google News search for the company's
+# name around the session that moved most finds the coverage of the day.
+_DATED_NEWS_MAX = 8
+_DATED_TIMESTAMP = re.compile(
+    r"(\d{1,2})/(\d{1,2})/(\d{4}),\s*(\d{1,2}):(\d{2})\s*([AP]M)(?:,\s*([+-])(\d{2})(\d{2}))?", re.I)
+_DATED_DAY = re.compile(
+    r"\b\d{1,2}/\d{1,2}/\d{4}\b|\b\d{4}-\d{2}-\d{2}\b|"
+    r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}\b|"
+    r"\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}\b",
+    re.I,
+)
+_LEGAL_ENDING = re.compile(
+    r",?\s+(?:Inc|Incorporated|Corp|Corporation|Co|Company|Ltd|Limited|plc|PLC|AG|SA|S\.A|NV|N\.V|SE|"
+    r"Holdings?|Group|Pty|LLC|L\.P|LP)\.?$", re.I)
+# A quote-system name ("HANSEN TEC FPO") finds nothing, but is billed.
+_CODE_NAME = re.compile(r"\b(?:FPO|ORD|CDI|NPV|UNITS?|STAPLED|DEF|REG)\b")
+
+
+def search_name(name: Optional[str]) -> Optional[str]:
+    """The company's name as the press writes it, or None when there is none to search."""
+    clean = (name or "").strip()
+    if clean.lower().startswith("the "):
+        clean = clean[4:].strip()
+    # Legal endings only: "Hansen Technologies Limited" is "Hansen
+    # Technologies" in the press, and "Hansen" alone would find anything.
+    while clean and _LEGAL_ENDING.search(clean):
+        clean = _LEGAL_ENDING.sub("", clean).strip(" ,.")
+    characters = re.sub(r"[^A-Za-z0-9]", "", clean)
+    if len(characters) < 2 or _CODE_NAME.search(clean) or (clean.isupper() and len(clean.split()) > 1):
+        return None
+    return clean
+
+
+def _search_result_time(row: Dict[str, Any], lo: date, hi: date, zone) -> Optional[Dict[str, Any]]:
+    """A result's time, or its day at local noon when only the day is given; None outside the days.
+
+    "2 months ago" and the like are dropped: a guessed date would file an
+    article under the wrong session.
+    """
+    from dateutil import parser
+    for text in (row.get("iso_date"), row.get("date")):
+        if not text:
+            continue
+        text = str(text)
+        full = _DATED_TIMESTAMP.search(text)
+        if full:
+            month, day_, year, hour, minute, ampm, sign, oh, om = full.groups()
+            hour = int(hour) % 12 + (12 if ampm.upper() == "PM" else 0)
+            offset = timedelta(hours=int(oh or 0), minutes=int(om or 0)) * (-1 if sign == "-" else 1)
+            stamp = datetime(int(year), int(month), int(day_), hour, int(minute),
+                             tzinfo=timezone(offset))
+            if lo <= stamp.astimezone(zone).date() <= hi:
+                return {"published": stamp.astimezone(timezone.utc), "time_unknown": False}
+            continue
+        try:
+            iso = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if iso.tzinfo is not None and ("T" in text or ":" in text):
+                if lo <= iso.astimezone(zone).date() <= hi:
+                    return {"published": iso.astimezone(timezone.utc), "time_unknown": False}
+                continue
+        except ValueError:
+            pass
+        match = _DATED_DAY.search(text)
+        if not match:
+            continue
+        try:
+            day_only = parser.parse(match.group(0)).date()
+        except (ValueError, OverflowError):
+            continue
+        if lo <= day_only <= hi:
+            noon = datetime(day_only.year, day_only.month, day_only.day, 12, tzinfo=zone)
+            return {"published": noon.astimezone(timezone.utc), "time_unknown": True}
+    return None
+
+
+def _dated_cache_name(name: str, day: date) -> str:
+    import hashlib
+    return "dated_news_" + hashlib.sha1(f"{name}|{day.isoformat()}".encode()).hexdigest()[:20]
+
+
+def dated_news(name: Optional[str], day: date, api_key: Optional[str] = None, search=None,
+               exchange_tz: Optional[str] = "America/New_York") -> Optional[List[Dict[str, Any]]]:
+    """Google News articles naming the company from the day before a session to the day after.
+
+    One SerpAPI search, cached (a past day's results do not change). None when
+    no search was made (no key, no searchable name, a failure); [] when it
+    found nothing. ``search(params) -> dict`` is injectable for tests.
+    """
+    query = search_name(name)
+    key = api_key or os.getenv("SERPAPI_API_KEY")
+    if not query or not key:
+        return None
+    zone = _zone(exchange_tz)
+    lo, hi = day - timedelta(days=1), day + timedelta(days=1)
+    from src.agents.fm import netcache
+    cache_name = _dated_cache_name(query, day)
+    recent = (datetime.now(timezone.utc).date() - day).days <= 7
+    # The search's own rows are cached, not their times: a day-only date is
+    # placed at noon on the exchange's clock, which differs between listings.
+    cached = netcache.cache_get(cache_name, 6 * 3600 if recent else 30 * 86400)
+    rows = cached if isinstance(cached, list) else None
+    if rows is None:
+        params = {"q": f'"{query}"', "tbm": "nws", "num": _DATED_NEWS_MAX,
+                  "tbs": f"cdr:1,cd_min:{lo:%m/%d/%Y},cd_max:{hi:%m/%d/%Y}", "api_key": key}
+        try:
+            if search is None:
+                from serpapi import GoogleSearch
+                client = GoogleSearch(params)
+                client.timeout = 8
+                result = client.get_dict()
+            else:
+                result = search(params)
+        except Exception:
+            return None
+        if not isinstance(result, dict) or (
+                "error" in result and "hasn't returned any results" not in str(result["error"])):
+            return None
+        rows = [{k: row.get(k) for k in ("title", "link", "source", "date", "iso_date", "snippet")}
+                for row in result.get("news_results") or [] if isinstance(row, dict)]
+        netcache.cache_put(cache_name, rows)
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = html.unescape(str(row.get("title") or "")).strip()
+        when = _search_result_time(row, lo, hi, zone)
+        if not title or when is None:
+            continue
+        source = row.get("source")
+        summary = html.unescape(str(row.get("snippet") or "")).strip()
+        out.append({
+            **when,
+            "title": title,
+            "source": (source.get("name") if isinstance(source, dict) else source) or None,
+            "summary": summary[:_SUMMARY_CHARS] + ("…" if len(summary) > _SUMMARY_CHARS else ""),
+            "url": row.get("link") or None,
+        })
+    return out[:_DATED_NEWS_MAX]
+
+
+def _reaches(items: List[Dict[str, Any]], day: date) -> bool:
+    """Whether the feed has anything from the day before the session to the day after."""
+    return any(day - timedelta(days=1) <= i["published"].date() <= day + timedelta(days=1) for i in items)
+
+
+def _coverage(items: List[Dict[str, Any]], exchange_tz: Optional[str]) -> Optional[Dict[str, str]]:
+    zone = _zone(exchange_tz)
+    stamps = [i["published"] for i in items]
+    if not stamps:
+        return None
+    return {"earliest": min(stamps).astimezone(zone).date().isoformat(),
+            "latest": max(stamps).astimezone(zone).date().isoformat()}
+
+
 def news_for_move(ticker: str, name: Optional[str], start: date, end: date,
                   sessions: Sequence[str], focus_sessions: Sequence[str] = (),
                   recent_sessions: Sequence[str] = (), exchange_tz: Optional[str] = "America/New_York",
                   require_name: bool = True,
-                  session_moves: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+                  session_moves: Optional[Dict[str, float]] = None,
+                  dated_search=None) -> Dict[str, Any]:
     """Ranked, session-aligned articles for a ticker over a date range."""
     names = company_names(name, ticker)
     if ticker.upper().endswith("-USD"):
@@ -449,9 +611,34 @@ def news_for_move(ticker: str, name: Optional[str], start: date, end: date,
         items, source = yahoo_items(ticker), "Yahoo Finance latest headlines (titles only, recent days only)"
     lo = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
     items = [i for i in items if i["published"] >= lo]
+    # The session that moved most, when the feed has nothing near it: one dated
+    # search. Companies only (not a fund, an index, a currency or a coin), and
+    # never for the last sessions, which the feed covers.
+    feed = items
+    dated = None
+    moves = session_moves or {}
+    if focus_sessions and require_name and not ticker.upper().endswith("-USD"):
+        biggest = max(focus_sessions, key=lambda s: abs(moves.get(s) or 0.0))
+        try:
+            top = date.fromisoformat(str(biggest))
+        except ValueError:
+            top = None
+        if top and str(top) not in set(recent_sessions) and not _reaches(items, top):
+            found = dated_news(name, top, search=dated_search, exchange_tz=exchange_tz)
+            if found is not None:
+                dated = {"session": str(top), "query": search_name(name), "articles": len(found),
+                         "days": f"{top - timedelta(days=1)} to {top + timedelta(days=1)}"}
+                items = items + [i for i in found if i["published"] >= lo]
     result = rank_and_align(items, names, sessions, focus_sessions, recent_sessions=recent_sessions,
                             exchange_tz=exchange_tz, require_name=require_name,
                             session_moves=session_moves)
+    if dated:
+        source += (f"; plus a Google News search for {dated['days']} "
+                   f"({dated['articles']} article{'s' if dated['articles'] != 1 else ''} found)")
+        result["dated_search"] = dated
+        # The days the feed reaches, not the search: an August search does not
+        # mean the feed covers August to November.
+        result["coverage"] = _coverage(feed, exchange_tz)
     result["source"] = source
     result["matched_names"] = names
     return result

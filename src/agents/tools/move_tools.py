@@ -171,11 +171,12 @@ class ExplainPriceMoveTool(Tool):
         "dates), the biggest sessions with their volume versus normal, performance "
         "over 5d/1mo/3mo/ytd/1y, the 52-week high and drawdown (and the first close "
         "for a recent IPO), the dated news for the sessions that moved, each article "
-        "with its source and summary, and insider/company SEC filings over the same "
-        "days (Form 144 sale notices, Form 4 trades, 8-Ks, offerings), and for an "
-        "Australian (.AX) listing the company's ASX announcements (results, guidance, "
-        "leadership changes) filed under the session each could have moved. Prefer it to "
-        "get_prices + get_global_news for any why-did-it-move question."
+        "with its source and summary (and, when the feed does not reach the day that "
+        "moved most, a dated news search for it), and insider/company SEC filings over "
+        "the same days (Form 144 sale notices, Form 4 trades, 8-Ks with the opening of a "
+        "results press release, offerings), and, where enabled, an Australian (.AX) "
+        "listing's ASX announcements filed under the session each could have moved. "
+        "Prefer it to get_prices + get_global_news for any why-did-it-move question."
     )
     parameters = {
         "type": "object",
@@ -292,6 +293,8 @@ class ExplainPriceMoveTool(Tool):
             "market_today.stock_vs_index_today say it in words; use them); from_window_high is the fall "
             "from the window's high to now; a session_in_progress has only part of its volume. "
             "A Form 144 is a notice of intent to sell, not a completed sale. "
+            "sec_filings.other_filings[].results_release.excerpt is the opening of the company's own "
+            "results press release (8-K Exhibit 99.1): primary evidence for that day's move. "
             "exchange_announcements.price_sensitive_by_session lists the company's own "
             "price-sensitive releases (results, guidance, leadership) under the session they "
             "could have moved; they are primary evidence for that day's move."

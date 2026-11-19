@@ -39,7 +39,8 @@ def test_rows_are_parsed_with_time_flag_and_link():
     assert rows[2]["price_sensitive"] is False and rows[2]["time_sydney"] == "15:21"
 
 
-def test_announcements_are_filed_under_the_session_they_could_move():
+def test_announcements_are_filed_under_the_session_they_could_move(monkeypatch):
+    monkeypatch.setenv("VYNN_ASX_ANNOUNCEMENTS", "1")
     sessions = ["2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21", "2026-08-24", "2026-09-22"]
     out = announcements_for_move("HSN.AX", date(2026, 8, 15), date(2026, 9, 30), sessions, fetch=lambda u: PAGE)
     by = out["price_sensitive_by_session"]
@@ -48,7 +49,19 @@ def test_announcements_are_filed_under_the_session_they_could_move():
     assert all("Director" not in i["headline"] for items in by.values() for i in items)    # not price-sensitive
 
 
-def test_an_unreachable_exchange_just_omits_the_field():
+def test_an_unreachable_exchange_just_omits_the_field(monkeypatch):
+    monkeypatch.setenv("VYNN_ASX_ANNOUNCEMENTS", "1")
     def boom(url):
         raise OSError("timeout")
     assert announcements_for_move("HSN.AX", date(2026, 8, 1), date(2026, 9, 30), [], fetch=boom) is None
+
+
+
+def test_off_by_default_nothing_is_fetched(monkeypatch):
+    # ASX announcements are free for private and personal use only; VYNN is
+    # commercial, so the lookup waits for the ASX's written authority.
+    monkeypatch.delenv("VYNN_ASX_ANNOUNCEMENTS", raising=False)
+    fetched = []
+    out = announcements_for_move("HSN.AX", date(2026, 8, 15), date(2026, 9, 30), ["2026-08-19"],
+                                 fetch=lambda u: fetched.append(u) or PAGE)
+    assert out is None and fetched == []

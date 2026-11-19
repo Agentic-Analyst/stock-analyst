@@ -17,7 +17,9 @@ Never raises; None means nothing could be read.
 
 from __future__ import annotations
 
+import html
 import json
+import re
 import time
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
@@ -29,6 +31,14 @@ _ARCHIVE_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{docum
 _SUBMISSIONS_MAX_AGE = 3600
 _DOCUMENT_MAX_AGE = 10 * 365 * 86400
 _MAX_DOCUMENTS = 24
+_INDEX_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/index.json"
+# A results 8-K (Item 2.02) carries the company's press release as Exhibit
+# 99.1; its file name says so in a dozen spellings (ex99-1, ex991, exhibit991).
+_EXHIBIT_99_1 = re.compile(r"(?:ex|exhibit)[-_]?99[-_.]?0?1(?!\d)", re.I)
+_RELEASE_CHARS = 2500
+_MAX_RELEASES = 2
+# The opening is all that is kept; a release is read no further than this.
+_RELEASE_MAX_BYTES = 512 * 1024
 
 FORM_MEANINGS = {
     "144": "notice of an insider's proposed sale (intent, not a completed sale)",
@@ -163,6 +173,82 @@ def _document(cik: int, row: Dict[str, Any], deadline: float) -> Optional[str]:
     return xml_text
 
 
+_BLOCK_START = re.compile(r"<(script|style)\b", re.I)
+
+
+def _without_blocks(markup: str) -> str:
+    """The markup without script and style blocks, in one pass (an unclosed one ends it).
+
+    Positions come from the text itself: lower-casing first shifts them ("İ"
+    becomes two characters) and cut "Guidance cut." to "ce cut.".
+    """
+    out, at = [], 0
+    while True:
+        start = _BLOCK_START.search(markup, at)
+        if not start:
+            out.append(markup[at:])
+            break
+        out.append(markup[at:start.start()])
+        close = re.compile(rf"</{start.group(1)}\s*>", re.I).search(markup, start.end())
+        if not close:
+            break
+        at = close.end()
+    return " ".join(out)
+
+
+def plain_text(markup: str) -> str:
+    """A filing's HTML as running text: no scripts, styles or tags."""
+    text = _without_blocks(markup or "")
+    text = re.sub(r"(?i)<br\s*/?>|</(?:p|div|tr|li|h\d)>", "\n", text)
+    text = html.unescape(re.sub(r"<[^>]+>", " ", text))
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def results_release(cik: int, row: Dict[str, Any], deadline: float) -> Optional[Dict[str, Any]]:
+    """The opening of the press release a results 8-K carries (Exhibit 99.1); None on any doubt.
+
+    Robinhood's and Hansen's answers could say that results were filed, not
+    what they said. The opening is the headline, the date line and the
+    highlights; the tables come later.
+    """
+    cache = _netcache()
+    accession = str(row.get("accessionNumber") or "").replace("-", "")
+    if not accession:
+        return None
+    name = f"sec_release_{accession}"
+    cached = cache.cache_get(name, _DOCUMENT_MAX_AGE)
+    if not (isinstance(cached, dict) and "excerpt" in cached):
+        if time.monotonic() > deadline:
+            return None
+        try:
+            index = json.loads(cache.http_get(_INDEX_URL.format(cik=cik, accession=accession), timeout=6.0))
+            files = [str(item.get("name") or "") for item in (index.get("directory") or {}).get("item") or []]
+            document = next((f for f in files if _EXHIBIT_99_1.search(f)
+                             and f.lower().endswith((".htm", ".html", ".txt"))), None)
+            if not document:
+                # Remembered: this filing has no release to read.
+                cache.cache_put(name, {"excerpt": "", "document": None})
+                return None
+            if time.monotonic() > deadline:
+                return None
+            raw = cache.http_get(_ARCHIVE_URL.format(cik=cik, accession=accession, document=document),
+                                 timeout=6.0, max_bytes=_RELEASE_MAX_BYTES).decode("utf-8", "replace")
+        except Exception:
+            return None
+        text = plain_text(raw[:_RELEASE_MAX_BYTES])
+        excerpt = text[:_RELEASE_CHARS]
+        cut = max(excerpt.rfind(". "), excerpt.rfind("\n"))
+        if len(text) > _RELEASE_CHARS and cut > _RELEASE_CHARS // 2:
+            excerpt = excerpt[:cut + 1]
+        cached = {"excerpt": excerpt.strip(), "document": document}
+        cache.cache_put(name, cached)
+    if not cached.get("excerpt"):
+        return None
+    return {"document": cached["document"], "excerpt": cached["excerpt"],
+            "url": _ARCHIVE_URL.format(cik=cik, accession=accession, document=cached["document"])}
+
+
 def filing_activity(ticker: str, start: date, end: date, budget_seconds: float = 8.0) -> Optional[Dict[str, Any]]:
     """Counts and parsed details of the SEC filings dated between two days."""
     try:
@@ -245,12 +331,21 @@ def filing_activity(ticker: str, start: date, end: date, budget_seconds: float =
             out["form4_transactions"]["partial"] = f"totals cover {parsed4} of {len(form4_rows)} filings (the newest)"
 
     events = []
+    releases = 0
     for row in rows:
         form = str(row.get("form"))
         if form == "8-K":
             items = [i.strip() for i in str(row.get("items") or "").split(",") if i.strip()]
-            events.append({"filed": row.get("filingDate"), "form": form,
-                           "items": [f"{i} {EIGHT_K_ITEMS.get(i, '')}".strip() for i in items if i != "9.01"]})
+            event = {"filed": row.get("filingDate"), "form": form,
+                     "items": [f"{i} {EIGHT_K_ITEMS.get(i, '')}".strip() for i in items if i != "9.01"]}
+            # Results (Item 2.02): what the company said, newest first; at
+            # most two filings looked at, found or not.
+            if "2.02" in items and releases < _MAX_RELEASES:
+                releases += 1
+                release = results_release(cik, row, deadline)
+                if release:
+                    event["results_release"] = release
+            events.append(event)
         elif form in FORM_MEANINGS and form not in ("4", "144"):
             events.append({"filed": row.get("filingDate"), "form": form, "meaning": FORM_MEANINGS[form]})
     if events:
