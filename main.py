@@ -935,6 +935,23 @@ def _finalize_dead_chat_run(args, agent, exc):
         logger.program_end()
 
 
+def bootstrap_model(pipeline: str, llm: str, argv, environ) -> str:
+    """The model the worker starts with.
+
+    A chat started by the server names no --llm: the chat model travels in
+    CHAT_MODEL. Starting with the default (an OpenAI model) failed the whole
+    chat when only a Bedrock key was set, before the chat path ever read
+    CHAT_MODEL (found running the full stack locally, 19 Nov 2026).
+    """
+    chosen = any(arg == "--llm" or str(arg).startswith("--llm=") for arg in argv)
+    chat_model = str(environ.get("CHAT_MODEL") or "").strip()
+    # Only a model whose key is set: otherwise starting on it fails the run
+    # before anything is written, where the default at least answers.
+    if pipeline == "chat" and not chosen and chat_model in list_available_models():
+        return chat_model
+    return llm
+
+
 def main():
     """Main entry point for the comprehensive stock analysis pipeline."""
     parser = argparse.ArgumentParser(
@@ -1020,6 +1037,7 @@ Examples:
             
     try:
         # Initialize LLM model
+        args.llm = bootstrap_model(args.pipeline, args.llm, sys.argv[1:], os.environ)
         os.environ["ANALYSIS_LLM_MODEL"] = args.llm
         init_llm(args.llm)
 

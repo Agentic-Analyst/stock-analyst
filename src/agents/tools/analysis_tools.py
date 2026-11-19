@@ -1565,13 +1565,23 @@ class GetFinancialsTool(_CtxTool):
         km = state.financial_data.key_metrics if state.financial_data else {}
         basic = km.get("basic_info", {}) if isinstance(km, dict) else {}
         market = km.get("market_data", {}) if isinstance(km, dict) else {}
+        # The analysts' targets, rating and estimates were collected but not
+        # returned: asked "what are analysts saying about it?", the answer
+        # said it had none (local full-stack run, 19 Nov 2026). The same
+        # block build_model returns, an outside view and not VYNN's.
+        raw = getattr(state.financial_data, "raw_data", None) if state.financial_data else None
+        street = raw.get("external_expectations") if isinstance(raw, dict) else None
         return tool_ok(
             ticker=getattr(state, "ticker", None) or ticker,
             company_name=state.company_name,
             sector=basic.get("sector"),
             industry=basic.get("industry"),
             trailing_pe=market.get("trailing_pe"),
-            note="Financial data collected and saved. You can now build_model or write_report.",
+            **({"street_expectations": street} if isinstance(street, dict) and street else {}),
+            note=("Financial data collected and saved. You can now build_model or write_report."
+                  + (" street_expectations holds the analysts' price targets, rating and estimates, "
+                     "with their dates: an outside view, never VYNN's own."
+                     if isinstance(street, dict) and street else "")),
             **listing_figures(basic, market),
             **_listing_view_payload(_view_for(self.ctx, state), street=_street_of(state)),
         )
