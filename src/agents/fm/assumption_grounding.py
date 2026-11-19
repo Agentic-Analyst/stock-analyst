@@ -52,6 +52,9 @@ _ERP = 0.055                # mature-market equity risk premium; in the range
                             # Damodaran publishes for developed markets, and the
                             # figure a sell-side DCF on a euro large-cap would use
 _DEBT_SPREAD = 0.015        # explicit fallback when issuer coverage is unavailable
+# Operating profit below this multiple of interest is CCC or worse on the
+# synthetic-rating table: distress, whatever the currency or size.
+_DISTRESS_COVERAGE = 1.25
 _TAX_DEFAULT = 0.25         # mature-market average; overridden by the
                             # company's own effective rate when available
 _BETA_MIN, _BETA_MAX = 0.5, 2.0
@@ -145,8 +148,12 @@ def _issuer_credit_spread(
 
     A single noisy period is not enough to assign a synthetic rating. Use the
     median of at least two valid current/annual EBIT-to-interest observations.
-    The published cutoff is denominated in US dollars and calibrated on US
-    firms, so apply it only to USD-reporting subjects above $5B.
+    The published cutoffs are calibrated on US firms, so the full table applies
+    only to USD-reporting subjects above $5B. Distress is the exception: a
+    company whose operating profit does not cover its interest (below 1.25x,
+    CCC or worse) is distressed in any currency and at any size. China Vanke,
+    losing money from operations, was lent to at the 1.5% house spread (3.1%
+    all in) and discounted at 2.5%.
     """
     fallback = {
         "spread": _DEBT_SPREAD,
@@ -158,22 +165,6 @@ def _issuer_credit_spread(
     }
     if not isinstance(json_data, dict):
         return fallback
-    currency = str(
-        (company_data.get("basic_info", {}) or {}).get("currency") or ""
-    ).upper()
-    if currency != "USD":
-        return {**fallback, "source": (
-            "1.5% house credit-spread fallback; the available synthetic-rating "
-            "table is calibrated to USD-reporting US firms"
-        )}
-    market = company_data.get("market_data", {}) or {}
-    equity = market.get("market_cap_financial") or market.get("market_cap")
-    if (not isinstance(equity, (int, float)) or isinstance(equity, bool)
-            or not math.isfinite(float(equity)) or float(equity) <= 5_000_000_000):
-        return {**fallback, "source": (
-            "1.5% house credit-spread fallback; the available market capitalization "
-            "does not meet the source table's >$5B large-firm scope"
-        )}
 
     observations = []
 
@@ -203,26 +194,51 @@ def _issuer_credit_spread(
         observe(str(period), row)
         if len(observations) >= 4:
             break
-    if len(observations) < 2:
-        return {**fallback, "coverage_observations": observations}
+    coverage = (statistics.median(row["interest_coverage"] for row in observations)
+                if len(observations) >= 2 else None)
 
-    coverage = statistics.median(
-        row["interest_coverage"] for row in observations
-    )
-    upper, rating, spread = next(
-        row for row in _LARGE_FIRM_COVERAGE_TABLE if coverage <= row[0]
-    )
-    return {
-        "spread": spread,
-        "rating": rating,
-        "coverage": coverage,
-        "coverage_observations": observations,
-        "source": (
-            f"{spread*100:.2f}% synthetic {rating} spread from normalized "
-            f"EBIT/interest coverage {coverage:.2f}x; {_SYNTHETIC_RATING_SOURCE}"
-        ),
-        "synthetic": True,
-    }
+    def synthetic(note: str) -> Dict[str, Any]:
+        upper, rating, spread = next(
+            row for row in _LARGE_FIRM_COVERAGE_TABLE if coverage <= row[0]
+        )
+        return {
+            "spread": spread,
+            "rating": rating,
+            "coverage": coverage,
+            "coverage_observations": observations,
+            "source": (
+                f"{spread*100:.2f}% synthetic {rating} spread from normalized "
+                f"EBIT/interest coverage {coverage:.2f}x; {_SYNTHETIC_RATING_SOURCE}{note}"
+            ),
+            "synthetic": True,
+        }
+
+    distressed = coverage is not None and coverage < _DISTRESS_COVERAGE
+    currency = str(
+        (company_data.get("basic_info", {}) or {}).get("currency") or ""
+    ).upper()
+    if currency != "USD":
+        if distressed:
+            return synthetic("; applied outside its USD scope because operating profit does "
+                             f"not cover interest (below {_DISTRESS_COVERAGE:.2f}x)")
+        return {**fallback, "coverage_observations": observations, "source": (
+            "1.5% house credit-spread fallback; the available synthetic-rating "
+            "table is calibrated to USD-reporting US firms"
+        )}
+    market = company_data.get("market_data", {}) or {}
+    equity = market.get("market_cap_financial") or market.get("market_cap")
+    if (not isinstance(equity, (int, float)) or isinstance(equity, bool)
+            or not math.isfinite(float(equity)) or float(equity) <= 5_000_000_000):
+        if distressed:
+            return synthetic("; applied below its >$5B scope because operating profit does "
+                             f"not cover interest (below {_DISTRESS_COVERAGE:.2f}x)")
+        return {**fallback, "coverage_observations": observations, "source": (
+            "1.5% house credit-spread fallback; the available market capitalization "
+            "does not meet the source table's >$5B large-firm scope"
+        )}
+    if coverage is None:
+        return {**fallback, "coverage_observations": observations}
+    return synthetic("")
 
 
 # The risk-free rate is built from two published inputs, both printed:
