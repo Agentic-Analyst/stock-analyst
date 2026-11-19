@@ -1148,6 +1148,7 @@ class GeneralistAgent:
                 # The whole conversation: a report run for the user after the
                 # model's own turns carries its sources in a later message.
                 final_text = self._outlets_checked(final_text, messages)
+                final_text = self._tool_names_plain(final_text)
                 final_text = await self._localize(provider, final_text)
 
         except Exception as e:
@@ -1669,6 +1670,28 @@ class GeneralistAgent:
             return path.resolve().is_relative_to(root)
         except Exception:
             return False
+
+    def _tool_names_plain(self, text: str) -> str:
+        """The answer with internal tool names in plain words."""
+        try:
+            from src.answer_evidence import TOOL_WORDS, plain_tool_names
+            # English words inside an answer in another language stay English
+            # (the translation step leaves a mostly-Chinese paragraph alone).
+            if answer_language(getattr(self, "user_prompt", "") or ""):
+                return text
+            registry = getattr(self, "registry", None)
+            names = set(TOOL_WORDS)
+            try:
+                names |= set(getattr(registry, "_tools", {}) or {})
+            except Exception:
+                pass
+            cleaned, replaced = plain_tool_names(text, names)
+            if replaced:
+                self._audit(f"[SUPERVISOR] 🔎 Tool names in the answer put in plain words: {', '.join(replaced)}")
+            return cleaned if cleaned.strip() else text
+        except Exception as error:
+            self._log(f"[SUPERVISOR] ⚠️ Tool-name check skipped: {type(error).__name__}")
+            return text
 
     def _outlets_checked(self, text: str, messages) -> str:
         """The answer without news outlets the turn's evidence never mentions.

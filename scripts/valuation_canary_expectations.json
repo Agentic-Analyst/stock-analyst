@@ -1,5 +1,5 @@
 {
-  "_comment": "Expected publication outcome per basket name for the pre-deploy gate (scripts/valuation_canary_summary.py --expect). Change an entry only together with the engine change that explains it, and say why here. 2026-09-27: calibrated premium (3.24%) is the default. 2026-10-02: a sound model that well-covered analysts do not back is published with a confidence alert (FLAGGED) instead of withheld; WITHHELD now means the model itself supports no single value (a failed or contradicting method, stale statements, a method the company does not fit) and the answer is the range.",
+  "_comment": "Expected publication outcome per basket name for the pre-deploy gate (scripts/valuation_canary_summary.py --expect). Change an entry only together with the engine change that explains it, and say why here. 2026-09-27: calibrated premium (3.24%) is the default. 2026-10-02: a sound model that well-covered analysts do not back is published with a confidence alert (FLAGGED) instead of withheld; WITHHELD now means the model itself supports no single value (a failed or contradicting method, stale statements, a method the company does not fit) and the answer is the range. 2026-11-19: TSLA moves to WITHHELD under the unconfirmed-outlier rule (2026-11-18); other DCF-only names far outside every analyst target would move the same way, so run the canary before release.",
   "NVDA": {
     "status": "PUBLISHED",
     "why": "Calibrated premium lifts the DCF to about +57%; the 59-analyst Street target (+46%) covers more than half the move in the same direction."
@@ -21,8 +21,8 @@
     "why": "DCF about +25% with the calibrated premium; the Street (+57%) corroborates."
   },
   "TSLA": {
-    "status": "FLAGGED",
-    "why": "Consensus cash flows support a value far below the market while the Street target sits above it; the exit leg is unavailable above the 80x boundary, which omits it rather than failing it. Published with a confidence alert since 2026-10-02 (was withheld)."
+    "status": "WITHHELD",
+    "why": "Since 2026-11-18 a cash-flow model with no second method, more than 10% outside every current target of at least 5 analysts, is a scenario, not a rating (valuation_methodology.withhold_unconfirmed_outlier). Tesla's DCF (about $20) sits far below the lowest of ~40 targets (about $128). Range only. Was FLAGGED."
   },
   "AMD": {
     "status": "FLAGGED",

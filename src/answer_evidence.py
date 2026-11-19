@@ -820,3 +820,51 @@ def without_unsourced_outlets(text: str, evidence: str) -> Tuple[str, List[str]]
         if text != before:
             changed.append(name)
     return text, changed
+
+
+# ---- internal tool names in an answer ------------------------------------------
+#
+# "I can run `explain_price_move` over a 1-year window" (full-stack run, 19 Nov
+# 2026): the model offered a tool by its internal name. Each becomes what the
+# reader would call it.
+TOOL_WORDS = {
+    "explain_price_move": "a breakdown of the price move",
+    "build_model": "the valuation model",
+    "write_report": "the full report",
+    "read_report": "the report",
+    "get_financials": "the financial data",
+    "analyze_news": "a news analysis",
+    "get_global_news": "the latest headlines",
+    "get_technicals": "the technical indicators",
+    "get_prices": "the price data",
+    "show_chart": "a chart",
+    "compare_tickers": "a side-by-side comparison",
+    "resolve_symbol": "the symbol lookup",
+    "get_macro": "the macro data",
+    "get_fund": "the fund data",
+    "get_crypto": "the crypto data",
+    "get_prediction_markets": "prediction-market odds",
+    "price_option": "an option price",
+    "compute_risk_metrics": "risk metrics",
+    "optimize_portfolio": "a portfolio optimization",
+}
+
+
+def plain_tool_names(text: str, names: Optional[Iterable[str]] = None) -> Tuple[str, List[str]]:
+    """The text with internal tool names (bare or in backticks) in plain words, and the names replaced."""
+    replaced = []
+    for name in sorted(set(names or TOOL_WORDS), key=len, reverse=True):
+        words = TOOL_WORDS.get(name) or name.replace("_", " ")
+        core = rf"(?:`{re.escape(name)}(?:\(\))?`|(?<![\w/.-]){re.escape(name)}(?:\(\))?(?![\w/-]))"
+        # "the `build_model` tool" is one phrase: the article and "tool" go with
+        # the name, or it read "the the valuation model tool" (review).
+        pattern = rf"(?:\b(?P<article>[Tt]he|[Aa]n?)\s+)?{core}(?:\s+(?:tool|function)\b)?"
+
+        def plain(match, words=words):
+            article = match.group("article")
+            return words[0].upper() + words[1:] if article and article[0].isupper() else words
+
+        text, count = re.subn(pattern, plain, text or "")
+        if count:
+            replaced.append(name)
+    return text, replaced
