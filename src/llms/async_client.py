@@ -465,6 +465,8 @@ class AsyncLLMProvider:
 
 _global_async_provider: Optional[AsyncLLMProvider] = None
 _global_async_model: Optional[str] = None
+_chat_async_provider: Optional[AsyncLLMProvider] = None
+_chat_async_model: Optional[str] = None
 
 
 def get_async_llm() -> AsyncLLMProvider:
@@ -487,3 +489,26 @@ def get_async_llm() -> AsyncLLMProvider:
         _global_async_provider = AsyncLLMProvider(model_name)
         _global_async_model = model_name
     return _global_async_provider
+
+
+def get_chat_llm() -> AsyncLLMProvider:
+    """
+    The chat agent's own model: CHAT_MODEL when it is known and its key is set,
+    otherwise the worker's model (``get_async_llm``).
+
+    Only the chat agent reasons and writes its answer on CHAT_MODEL. The tools'
+    bulk text steps (news insights, article scoring, the report's write-up)
+    stay on the worker's model, as in production: on Claude Sonnet the news
+    step alone cost about 60 times what GPT-6 Luna costs for it (release
+    check, 19 Nov 2026: ~$0.45 against ~$0.007 per report).
+    """
+    global _chat_async_provider, _chat_async_model
+    from .config import LLMProvider
+
+    name = (os.getenv("CHAT_MODEL") or "").strip()
+    if not name or name not in LLMProvider.MODELS or name not in LLMProvider.list_available_models():
+        return get_async_llm()
+    if _chat_async_provider is None or _chat_async_model != name:
+        _chat_async_provider = AsyncLLMProvider(name)
+        _chat_async_model = name
+    return _chat_async_provider

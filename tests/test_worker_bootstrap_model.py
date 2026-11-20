@@ -1,8 +1,9 @@
-"""A chat the server starts names no --llm; it must start on CHAT_MODEL (19 Nov 2026).
+"""The model a worker starts with, which the tools' bulk steps use (19 Nov 2026).
 
-Run locally end to end with only a Bedrock key, every chat failed at start-up:
-the worker initialised its default OpenAI model before the chat path read
-CHAT_MODEL, and that model's key was missing.
+A chat starts on the default (GPT-6 Luna) when its key is set; the chat agent
+itself reasons on CHAT_MODEL through get_chat_llm. Only without the default's
+key does a chat start on CHAT_MODEL: run locally with only a Bedrock key, every
+chat failed at start-up on the default's missing key.
 """
 import importlib.util
 import pathlib
@@ -12,10 +13,21 @@ worker_main = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(worker_main)
 
 
-def test_a_server_chat_starts_on_the_chat_model(monkeypatch):
+ARGV = ["--email", "a@example.com", "--timestamp", "t", "--pipeline", "chat", "--user-prompt", "hi"]
+
+
+def test_a_chat_with_both_keys_starts_on_the_default(monkeypatch):
+    # The tools' bulk steps stay on the default: on Sonnet the news step cost ~60x.
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "set-for-the-test")
-    argv = ["--email", "a@example.com", "--timestamp", "t", "--pipeline", "chat", "--user-prompt", "hi"]
-    assert worker_main.bootstrap_model("chat", "gpt-6-luna", argv,
+    monkeypatch.setenv("OPENAI_API_KEY", "set-for-the-test")
+    assert worker_main.bootstrap_model("chat", "gpt-6-luna", ARGV,
+                                       {"CHAT_MODEL": "claude-sonnet-5-5-bedrock"}) == "gpt-6-luna"
+
+
+def test_a_chat_with_only_the_chat_model_s_key_starts_on_it(monkeypatch):
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "set-for-the-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert worker_main.bootstrap_model("chat", "gpt-6-luna", ARGV,
                                        {"CHAT_MODEL": "claude-sonnet-5-5-bedrock"}) == "claude-sonnet-5-5-bedrock"
 
 

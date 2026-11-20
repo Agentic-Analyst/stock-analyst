@@ -936,18 +936,21 @@ def _finalize_dead_chat_run(args, agent, exc):
 
 
 def bootstrap_model(pipeline: str, llm: str, argv, environ) -> str:
-    """The model the worker starts with.
+    """The model the worker starts with, which the tools' bulk steps use.
 
-    A chat started by the server names no --llm: the chat model travels in
-    CHAT_MODEL. Starting with the default (an OpenAI model) failed the whole
-    chat when only a Bedrock key was set, before the chat path ever read
-    CHAT_MODEL (found running the full stack locally, 19 Nov 2026).
+    A chat started by the server names no --llm. It starts on the default
+    (GPT-6 Luna) when that model's key is set: the chat agent itself reasons
+    and writes on CHAT_MODEL through its own provider (get_chat_llm), while the
+    news insights, article scoring and the report's write-up stay on the
+    default, as in production (on Claude Sonnet the news step cost ~60x,
+    release check 19 Nov 2026). Without the default's key, a chat starts on
+    CHAT_MODEL instead: starting on a model without its key failed the whole
+    chat (found running the full stack locally, 19 Nov 2026).
     """
     chosen = any(arg == "--llm" or str(arg).startswith("--llm=") for arg in argv)
     chat_model = str(environ.get("CHAT_MODEL") or "").strip()
-    # Only a model whose key is set: otherwise starting on it fails the run
-    # before anything is written, where the default at least answers.
-    if pipeline == "chat" and not chosen and chat_model in list_available_models():
+    available = list_available_models()
+    if pipeline == "chat" and not chosen and llm not in available and chat_model in available:
         return chat_model
     return llm
 
@@ -1096,19 +1099,15 @@ Examples:
             # USE_LEGACY_SUPERVISOR=1 to fall back to the old supervisor.
             if os.getenv("USE_LEGACY_SUPERVISOR", "").strip() not in ("1", "true", "yes"):
                 from src.agents.generalist_agent import GeneralistAgent
-                # The generalizable chat agent uses a stronger model for reasoning +
-                # tool selection (overridable via CHAT_MODEL). This governs both the
-                # sync and async providers for the chat path.
+                # The chat agent reasons and writes on CHAT_MODEL through its
+                # own provider (llms.async_client.get_chat_llm). The worker's
+                # model (args.llm) stays global, so the tools' bulk steps (news
+                # insights, article scoring, the report's write-up) and the
+                # artifacts' manifest stay on it, as in production (19 Nov 2026:
+                # on Claude Sonnet the news step alone cost ~60x).
                 chat_model = os.getenv("CHAT_MODEL", "gpt-6-luna").strip()
-                try:
-                    init_llm(chat_model)
-                    # Financial artifacts are created after this override.
-                    # Keep their immutable manifest aligned with the provider
-                    # that actually handled the run, not the CLI bootstrap
-                    # model that was replaced above.
-                    os.environ["ANALYSIS_LLM_MODEL"] = chat_model
-                except Exception as _e:
-                    print(f"[chat] Could not init '{chat_model}' ({_e}); using {args.llm}")
+                if chat_model not in list_available_models():
+                    print(f"[chat] '{chat_model}' has no key here; the chat agent uses {args.llm}")
                 # Load prior conversation context for follow-ups (best-effort).
                 # Must use the SAME key the agent writes with in _save_session:
                 # a fixed "CHAT" namespace + the session_id as session_name. This

@@ -30,7 +30,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from llms.async_client import get_async_llm
+from llms.async_client import get_chat_llm
 from answer_evidence import (
     compose as compose_with_analysis, drop_quoted, flagged_sentences, makes_claim, prints_token,
     review_section, text_units,
@@ -971,7 +971,7 @@ class GeneralistAgent:
         self.ctx.ensure_base_logger()
         self.ctx.charts_in_chat = self._charts_in_chat()
 
-        provider = get_async_llm()
+        provider = get_chat_llm()
         is_openai = provider.is_openai
 
         # Build the initial transcript.
