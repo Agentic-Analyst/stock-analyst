@@ -264,6 +264,11 @@ class SessionManager:
                 summary_lines.append(f"- Subject: {turn_ticker}")
             summary_lines.append(f"- Status: {status}")
             summary_lines.append(f"- Agents Used: {', '.join(agents) if agents else 'None (direct answer)'}")
+            charts = (analysis_results or {}).get("charts") or []
+            if charts:
+                summary_lines.append(
+                    "- Charts shown (still on screen, live): " + ", ".join(
+                        f"{c.get('symbol')} {c.get('timeframe')}" for c in charts if isinstance(c, dict)))
             if findings:
                 summary_lines.append(f"- Key Findings: {findings}")
             

@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Pattern, Sequence
+from typing import Iterable, List, Optional, Pattern, Sequence, Tuple
 
 _DASHES = dict.fromkeys(map(ord, "‐‑‒–—―−﹣－"), "-")
 _APOSTROPHES = dict.fromkeys(map(ord, "‘’ʼ＇`´"), "'")
@@ -165,6 +165,14 @@ _SHARE_WORD = re.compile(r"\b(?:stock|shares?|share\s+price|valued?|worth|target
 _UNIT_AFTER = re.compile(
     r"^\s*(?:/\s*|a\s+|an\s+|per\s+)(?:bbl|barrel|boe|mmbtu|mcf|ton|tonne|oz|ounce|mwh|kwh|gallon)", re.I
 )
+# A Chinese stock rating: 评级 next to a rating word. 评级 alone is usually a
+# credit rating -- "高评级企业突发信用困境" (highly rated firms in sudden credit
+# trouble, a Bloomberg story) sank China Vanke's whole analysis section.
+_ZH_RATING_TERM = r"(?:强烈买入|买入|卖出|持有|增持|减持|强烈卖出|中性|推荐|跑赢大市|跑输大市|优于大市|弱于大市|買入|賣出)"
+_ZH_RATING_CLAIM = (
+    rf"(?<!信用)(?:评级|評級)[^。！？\n]{{0,6}}?{_ZH_RATING_TERM}"
+    rf"|{_ZH_RATING_TERM}[^。！？\n]{{0,4}}?(?:评级|評級)|"
+)
 # Explicit rating and valuation terms in the other languages answers come back
 # in; not 信用评级 (a credit rating) or 公允价值变动 (fair-value accounting).
 _OTHER_LANGUAGE_CLAIM = re.compile(
@@ -175,7 +183,8 @@ _OTHER_LANGUAGE_CLAIM = re.compile(
     r"上涨空间|上行空间|下跌空间|下行空间)[^。！？，,；;\n]{0,20}?\d"
     r"|\d[^。！？，,；;\n]{0,12}?(?:目标价|目標價|目标股价|目標株価|公允价值(?!变动|计量|变化)|合理价值|"
     r"合理估值|内在价值|適正価格)|"
-    r"(?<!信用)评级|評級|低估|高估|割安|割高|"
+    + _ZH_RATING_CLAIM +
+    r"低估|高估|割安|割高|"
     r"\b(?:precio\s+objetivo|objetivo\s+de\s+precio|pre[cç]o[-\s]alvo|prix\s+cible|kursziel|"
     r"valor\s+(?:justo|razonable|intr[ií]nseco)|juste\s+valeur|fairer\s+wert|"
     r"infravalorad\w*|sobrevalorad\w*|subvalorizad\w*|sous-[ée]valu\w*|sur[ée]valu\w*|"
@@ -184,15 +193,9 @@ _OTHER_LANGUAGE_CLAIM = re.compile(
     re.I,
 )
 _ZH_RATING_WORDS = {"STRONG BUY": "强烈买入", "BUY": "买入", "HOLD": "持有", "SELL": "卖出", "STRONG SELL": "强烈卖出"}
-_PUBLISHED_OTHER_LANGUAGE_CLAIM = re.compile(
-    _OTHER_LANGUAGE_CLAIM.pattern.replace(
-        r"(?<!信用)评级|評級|",
-        r"(?<!信用)(?:评级|評級)[^。！？\n]{0,6}?(?:强烈买入|买入|卖出|持有|增持|减持|强烈卖出)"
-        r"|(?:强烈买入|买入|卖出|持有|增持|减持|强烈卖出)[^。！？\n]{0,4}?(?:评级|評級)|",
-    ),
-    re.I,
-)
-assert _PUBLISHED_OTHER_LANGUAGE_CLAIM.pattern != _OTHER_LANGUAGE_CLAIM.pattern
+# With a published view the same terms apply: its own rating word is masked
+# before the check, so only a different rating still reads as a claim.
+_PUBLISHED_OTHER_LANGUAGE_CLAIM = _OTHER_LANGUAGE_CLAIM
 
 _ANY_RATING_PHRASE = re.compile(
     r"(?<![-\w])(?:strong[-\s]+(?:buy|sell)|buy|hold|sell|accumulate|outperform|underperform|"
@@ -306,7 +309,8 @@ _LETTER = re.compile(r"[^\W\d_]", re.U)
 
 # The benchmark block every guard template ends with.
 _BENCHMARK_BLOCK = re.compile(
-    r"\n\n(?=(?:The Street's view|Human-analyst and market benchmark reconciliation|"
+    r"\n\n(?=(?:What analysts think|What today's price assumes|The Street's view|"
+    r"Human-analyst and market benchmark reconciliation|"
     r"Market benchmark reconciliation|External benchmark reconciliation)\b)"
 )
 
@@ -397,7 +401,9 @@ def _sentences(body: str) -> List[str]:
             continue
         # "approx." ends nothing; "$200." alone continues what came before. Only
         # the tail is examined, so a long run of joins stays linear.
-        if out and (_ABBREVIATION.search(_normalize(out[-1][-12:])) or _letters(part) < 4):
+        # A list number ("1.", "**1.") opens the line it numbers.
+        if out and (_ABBREVIATION.search(_normalize(out[-1][-12:])) or _letters(part) < 4
+                    or _letters(out[-1]) == 0):
             out[-1] = f"{out[-1]} {part}"
         else:
             out.append(part)
@@ -440,52 +446,130 @@ class SectionReview:
     repeated: List[str] = field(default_factory=list)
     # Explicit claims; any one of them means the section is not published.
     claims: List[str] = field(default_factory=list)
+    # Sentences removed because the model check quoted them as a call, and
+    # how many quotes were not accounted for (any means the check's reply
+    # cannot be trusted to name what it objected to).
+    dropped: List[str] = field(default_factory=list)
+    quotes_unmatched: int = 0
 
     @property
     def publishable(self) -> bool:
         return bool(self.text) and not self.claims
 
 
-def review_section(
-    section: str,
-    *,
-    forbidden_tokens: Iterable[str] = (),
-    extra_patterns: Sequence[Pattern[str]] = (),
-    published: Optional[dict] = None,
-) -> SectionReview:
-    """Strip what repeats the fixed statement, then list every explicit claim left."""
-    tokens = tuple(token for token in forbidden_tokens if token)
-    view = published
-    review = SectionReview()
-    lines = str(section or "").replace("\r\n", "\n").split("\n")
+_QUOTE_MIN = 12
 
-    # Repeats go first: whatever they contain is never published, so a claim
-    # inside one ("analysts rate it a Buy") cannot sink an otherwise good section.
+
+def _quote_key(text: str) -> str:
+    """A sentence as the check might quote it: no emphasis, quotes or end punctuation."""
+    plain = re.sub(r"[*_`\"“”‘’']", "", str(text or "")).lower()
+    return " ".join(plain.split()).strip(" .;:,!?。；：，！？")
+
+
+def flagged_sentences(verdict: str) -> List[str]:
+    """Every line a YES verdict gives after the YES; [] for anything else.
+
+    Nothing is filtered out here: a line too short to match ("Looks
+    cheap.") or a preface ("these sentences:") matches no sentence, and an
+    unmatched quote sends the caller back to the fixed statement.
+    """
+    lines = [line.strip() for line in str(verdict or "").strip().splitlines()]
+    if not lines:
+        return []
+    head = re.match(r"^[\W_]*YES\b[\W_]*(.*)$", lines[0], re.I)
+    if not head:
+        return []
+    quotes = []
+    for line in [head.group(1), *lines[1:]]:
+        line = re.sub(r"^(?:[-*•]\s+|\d+[.)]\s+)", "", line.strip())
+        if _quote_key(line):
+            quotes.append(line)
+    return quotes
+
+
+def _covered(quote_key: str, sentence_keys: Sequence[str]) -> bool:
+    """Whether the removed sentences account for the whole quote, not just part of it."""
+    if any(quote_key in key for key in sentence_keys):
+        return True
+    rest = quote_key
+    for key in sorted(sentence_keys, key=len, reverse=True):
+        rest = rest.replace(key, " ")
+    # A quote joining two sentences leaves only joining words ("and", a comma).
+    return _letters(rest) <= max(3, _letters(quote_key) // 10)
+
+
+class _Quotes:
+    """The sentences a check quoted, matched against the text they came from."""
+
+    def __init__(self, quotes: Sequence[str], *, min_share: float = 0.0, exact: bool = False):
+        quotes = list(quotes)
+        self.total = len(quotes)
+        self.exact = exact
+        # Exact units (sentences the caller took from the text itself) match
+        # at any length; a check's quotes need enough words to be matched.
+        self.keys = [key for key in (_quote_key(q) for q in quotes)
+                     if key and (exact or len(key) >= _QUOTE_MIN)]
+        self.min_share = min_share
+        self.hit_by: dict = {}
+
+    def matches(self, part: str) -> bool:
+        key = _quote_key(part)
+        if self.exact:
+            hits = [i for i, q in enumerate(self.keys) if q == key]
+        else:
+            # With min_share, a sentence inside a longer quote counts only as
+            # a real share of it: a heading such as "JPMorgan (JPM)" inside a
+            # quoted list sentence is not that sentence.
+            hits = [i for i, q in enumerate(self.keys)
+                    if q in key or (len(key) >= max(_QUOTE_MIN, self.min_share * len(q)) and key in q)]
+        for i in hits:
+            self.hit_by.setdefault(i, []).append(key)
+        return bool(hits)
+
+    def unmatched(self, text_left: str) -> int:
+        """Quotes the removal does not account for, short ones included.
+
+        A quote counts as found only if the sentences removed for it make up
+        the whole of it and none of it is left in the text: a long quote that
+        took in an innocent sentence must not leave its call behind.
+        """
+        if self.exact:
+            return (self.total - len(self.keys)) + sum(
+                1 for i in range(len(self.keys)) if i not in self.hit_by)
+        left = _quote_key(text_left)
+        return (self.total - len(self.keys)) + sum(
+            1 for i, q in enumerate(self.keys)
+            if not (_covered(q, self.hit_by.get(i, [])) and q not in left)
+        )
+
+
+def _without_units(text: str, removed) -> str:
+    """The text without each sentence (or table row) `removed` accepts, tidied.
+
+    A line that loses every sentence goes; one reduced to a fragment goes; a
+    heading or label left heading nothing goes.
+    """
     kept: List[str] = []
-    for raw in lines:
+    for raw in str(text or "").replace("\r\n", "\n").split("\n"):
         if not raw.strip():
             kept.append("")
             continue
         if raw.lstrip().startswith("|"):
-            if restates(raw, extra_patterns):
-                review.repeated.append(raw.strip())
-            else:
+            if not removed(raw):
                 kept.append(raw)
             continue
         prefix, body = _LINE_PREFIX.match(raw).groups()
         prefix = prefix or ""
         parts = _sentences(body)
-        good = [part for part in parts if not restates(part, extra_patterns)]
-        review.repeated.extend(part for part in parts if restates(part, extra_patterns))
-        text = _balance(" ".join(good))
-        if not text:
+        good = [part for part in parts if not removed(part)]
+        line = _balance(" ".join(good))
+        if not line:
             continue
         # Only a line that lost a sentence can be reduced to a fragment.
-        if len(good) < len(parts) and _letters(text) < 12 and not _is_structural(f"{prefix}{text}"):
+        if len(good) < len(parts) and _letters(line) < 12 and not _is_structural(f"{prefix}{line}"):
             continue
-        kept.append(f"{prefix}{text}")
+        kept.append(f"{prefix}{line}")
 
-    # A heading or label whose content was all removed heads nothing.
     tidy: List[str] = []
     for position, line in enumerate(kept):
         if line.strip() and _is_structural(line):
@@ -495,7 +579,94 @@ def review_section(
             ):
                 continue
         tidy.append(line)
-    text = re.sub(r"\n{3,}", "\n\n", "\n".join(tidy)).strip("\n")
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(tidy)).strip("\n")
+
+
+@dataclass
+class QuotedDrop:
+    """A text without the sentences a check quoted."""
+
+    text: str = ""
+    dropped: List[str] = field(default_factory=list)
+    # Quotes not accounted for: any means the check's reply cannot be trusted
+    # to name what it objected to.
+    unmatched: int = 0
+
+
+def text_units(text: str) -> List[str]:
+    """Every sentence (and table row) of a text, as drop_quoted matches them."""
+    out: List[str] = []
+    for raw in str(text or "").replace("\r\n", "\n").split("\n"):
+        if not raw.strip():
+            continue
+        if raw.lstrip().startswith("|"):
+            out.append(raw.strip())
+            continue
+        out.extend(part.strip() for part in _sentences(_LINE_PREFIX.match(raw).group(2)) if part.strip())
+    return out
+
+
+def prints_token(text: str, tokens: Iterable[str]) -> bool:
+    """Whether a figure appears as a whole number: "318.7" is in "$318.70" only as itself."""
+    plain = _normalize(text)
+    return any(
+        token and re.search(rf"(?<![\d.,]){re.escape(_normalize(token))}(?![\d]|[.,]\d)", plain)
+        for token in tokens
+    )
+
+
+def drop_quoted(text: str, quotes: Sequence[str], *, min_share: float = 0.0,
+                exact: bool = False) -> QuotedDrop:
+    """Remove every sentence a check quoted; count the quotes not wholly removed.
+
+    `exact`: the quotes are sentences taken from the text itself (text_units),
+    removed wherever they are, whatever their length.
+    """
+    out = QuotedDrop()
+    found = _Quotes(quotes, min_share=min_share, exact=exact)
+
+    def removed(part: str) -> bool:
+        if found.keys and found.matches(part):
+            out.dropped.append(part.strip())
+            return True
+        return False
+
+    out.text = _without_units(text, removed)
+    out.unmatched = found.unmatched(out.text)
+    return out
+
+
+def review_section(
+    section: str,
+    *,
+    forbidden_tokens: Iterable[str] = (),
+    extra_patterns: Sequence[Pattern[str]] = (),
+    published: Optional[dict] = None,
+    drop: Sequence[str] = (),
+) -> SectionReview:
+    """Strip what repeats the fixed statement, then list every explicit claim left.
+
+    `drop` holds sentences the model check quoted as a call: each sentence
+    that matches one is removed like a repeat, and the rest is reviewed (and
+    checked again by the caller) as if the model had written only that.
+    """
+    tokens = tuple(token for token in forbidden_tokens if token)
+    view = published
+    review = SectionReview()
+    found = _Quotes(drop)
+
+    def removed(part: str) -> bool:
+        if restates(part, extra_patterns):
+            review.repeated.append(part.strip())
+            return True
+        if found.keys and found.matches(part):
+            review.dropped.append(part.strip())
+            return True
+        return False
+
+    # Repeats go first: whatever they contain is never published, so a claim
+    # inside one ("analysts rate it a Buy") cannot sink an otherwise good section.
+    text = _without_units(section, removed)
 
     # Claims in what would be published: each sentence, each label read with
     # the line it introduces ("Bull case:" / "$240"), and a table as one text.
@@ -515,7 +686,27 @@ def review_section(
         review.claims.append(table[:200])
 
     review.text = text if _letters(text) >= _MIN_SECTION_LETTERS else ""
+    review.quotes_unmatched = found.unmatched(text)
     return review
+
+
+# The analysis's closing offer to do more ("If you'd like, I can ..."). It sat
+# between the analysis and the analysts' block; it goes last.
+_OFFER = re.compile(
+    r"^\W*(?:if you(?:'d| would)? like|if you want|if you tell me|want me to|would you like|"
+    r"i can (?:also )?|let me know|should i\b|shall i\b|happy to|"
+    r"如果你|如果您|需要的话|要不要|我可以|ご希望|必要であれば|원하시면|"
+    r"zal ik|wil je|soll ich|möchten sie|voulez-vous|si vous|souhaitez|¿quieres|si quieres|"
+    r"vuoi|se vuoi|quer que|se quiser)", re.I)
+
+
+def _split_offer(section: str):
+    """The section and its closing offer to do more, apart; the offer is "" when there is none."""
+    paragraphs = section.rstrip().split("\n\n")
+    last = paragraphs[-1].strip()
+    if len(paragraphs) > 1 and len(last) <= 500 and _OFFER.search(last):
+        return "\n\n".join(paragraphs[:-1]).rstrip(), last
+    return section, ""
 
 
 def compose(template: str, section: str) -> str:
@@ -526,5 +717,154 @@ def compose(template: str, section: str) -> str:
         return template
     parts = _BENCHMARK_BLOCK.split(template, maxsplit=1)
     if len(parts) == 2:
-        return f"{parts[0].rstrip()}\n\n{section}\n\n{parts[1].lstrip()}"
+        body, offer = _split_offer(section)
+        tail = f"\n\n{offer}" if offer else ""
+        return f"{parts[0].rstrip()}\n\n{body}\n\n{parts[1].lstrip()}{tail}"
     return f"{template}\n\n{section}"
+
+
+# ---- news outlets an answer names without the data to back it -------------
+#
+# Hansen (19 Nov 2026): "A Reuters-sourced headline the day before said Hansen
+# expects revenue growth in FY28." The headline came from TradingView; nothing
+# VYNN was given mentioned Reuters. An outlet named in an answer must appear in
+# the turn's evidence (tool results, the question, earlier answers). Matched
+# case-sensitively in the answer (proper nouns) and case-insensitively in the
+# evidence, where outlets also appear as web addresses ("wsj.com").
+_OUTLETS = {
+    "Reuters": r"\bReuters\b",
+    "Bloomberg": r"\bBloomberg(?:\s+News)?\b",
+    "The Wall Street Journal": r"\b(?:The\s+)?Wall\s+Street\s+Journal\b|\bWSJ\b",
+    "CNBC": r"\bCNBC\b",
+    "Financial Times": r"\b(?:the\s+)?Financial\s+Times\b|\bft\.com\b",
+    "Barron's": r"\bBarron['’]?s\b",
+    "MarketWatch": r"\bMarket\s?Watch\b",
+    "Benzinga": r"\bBenzinga\b",
+    "The Motley Fool": r"\b(?:The\s+)?Motley\s+Fool\b|\bfool\.com\b",
+    "Seeking Alpha": r"\bSeeking\s?Alpha\b",
+    "Investing.com": r"\bInvesting\.com\b",
+    "Business Insider": r"\bBusiness\s?Insider\b",
+    "Forbes": r"\bForbes\b",
+    "Associated Press": r"\b(?:the\s+)?Associated\s+Press\b|\bapnews\.com\b",
+    "Australian Financial Review": r"\b(?:the\s+)?Australian\s+Financial\s+Review\b|\bAFR\b",
+    "South China Morning Post": r"\b(?:the\s+)?South\s+China\s+Morning\s+Post\b|\bSCMP\b",
+    "Caixin": r"\bCaixin",
+    "Kalkine": r"\bKalkine\b",
+    "Simply Wall St": r"\bSimply\s?Wall\s?\.?\s?St\b",
+    "TradingView": r"\bTrading\s?View\b",
+    "Zacks": r"\bZacks\b",
+    "TipRanks": r"\bTip\s?Ranks\b",
+    "CoinDesk": r"\bCoin\s?Desk\b",
+    "Cointelegraph": r"\bCointelegraph\b",
+    "TheStreet": r"\bTheStreet\b",
+}
+
+
+def unsourced_outlets(text: str, evidence: str) -> List[str]:
+    """Outlets the text names that the evidence never mentions."""
+    out = []
+    for name, pattern in _OUTLETS.items():
+        if re.search(pattern, text or "") and not re.search(pattern, evidence or "", re.I):
+            out.append(name)
+    return out
+
+
+def without_unsourced_outlets(text: str, evidence: str) -> Tuple[str, List[str]]:
+    """The text with unsupported outlet attributions made general, and the outlets changed.
+
+    Only clear attribution forms are touched, and the claim always stays:
+    "A Reuters-sourced headline" -> "A headline"; "(Benzinga, Reuters)" ->
+    "(Benzinga)"; "according to Reuters" -> "according to reports"; "a
+    Reuters report" -> "a report". A name used otherwise (Thomson Reuters, the
+    Bloomberg U.S. Aggregate Bond Index, the Forbes Global 2000, a Zacks Rank)
+    is left alone, and no sentence is ever dropped.
+    """
+    changed = []
+    for name in unsourced_outlets(text, evidence):
+        r = f"(?:{_OUTLETS[name]})"
+        before = text
+        text = re.sub(rf"\b{r}[-‑–](?:sourced|reported|based)\s+", "", text)
+
+        def strip_group(match):
+            lead, inner, trail = match.group(1), match.group(2), match.group(3)
+            # Items are separated by ", " or ";": "1,234" stays one number.
+            parts = re.split(r"(,\s+|;\s*)", inner)
+            items, seps = parts[0::2], parts[1::2]
+            if not any(re.fullmatch(r, i.strip()) for i in items):
+                return match.group(0)
+            kept = []
+            for index, item in enumerate(items):
+                if re.fullmatch(r, item.strip()):
+                    continue
+                if kept:
+                    kept.append(seps[index - 1])
+                kept.append(item)
+            if kept:
+                return f"{lead}({''.join(kept).strip()}){trail}"
+            return " " if lead and trail else ""
+        text = re.sub(r"([ \t]?)\(([^()\n]{0,200})\)([ \t]?)", strip_group, text)
+        # Only when the outlet ends the phrase: "according to Bloomberg
+        # Intelligence" or "per the Forbes 400 list" name something else.
+        text = re.sub(rf"\b([Aa]ccording to|[Pp]er|[Cc]iting|[Vv]ia)\s+(?:the\s+)?{r}"
+                      rf"(?=[ \t]*[,.;:!?)\]]|[ \t]*$)",
+                      lambda m: "According to reports" if m.group(1)[0].isupper() else "according to reports",
+                      text, flags=re.M)
+        def general(match):
+            word, noun = match.group(1), match.group(2)
+            if word.lower() in ("a", "an"):
+                word = "an" if noun[0] in "aeiou" else "a"
+                word = word.capitalize() if match.group(1)[0].isupper() else word
+            return f"{word} {noun}"
+        text = re.sub(rf"\b([Aa]n?|[Tt]he)\s+{r}\s+(report|article|story|piece|headline|analysis)\b",
+                      general, text)
+        if text != before:
+            changed.append(name)
+    return text, changed
+
+
+# ---- internal tool names in an answer ------------------------------------------
+#
+# "I can run `explain_price_move` over a 1-year window" (full-stack run, 19 Nov
+# 2026): the model offered a tool by its internal name. Each becomes what the
+# reader would call it.
+TOOL_WORDS = {
+    "explain_price_move": "a breakdown of the price move",
+    "build_model": "the valuation model",
+    "write_report": "the full report",
+    "read_report": "the report",
+    "get_financials": "the financial data",
+    "analyze_news": "a news analysis",
+    "get_global_news": "the latest headlines",
+    "get_technicals": "the technical indicators",
+    "get_prices": "the price data",
+    "show_chart": "a chart",
+    "compare_tickers": "a side-by-side comparison",
+    "resolve_symbol": "the symbol lookup",
+    "get_macro": "the macro data",
+    "get_fund": "the fund data",
+    "get_crypto": "the crypto data",
+    "get_prediction_markets": "prediction-market odds",
+    "price_option": "an option price",
+    "compute_risk_metrics": "risk metrics",
+    "optimize_portfolio": "a portfolio optimization",
+}
+
+
+def plain_tool_names(text: str, names: Optional[Iterable[str]] = None) -> Tuple[str, List[str]]:
+    """The text with internal tool names (bare or in backticks) in plain words, and the names replaced."""
+    replaced = []
+    for name in sorted(set(names or TOOL_WORDS), key=len, reverse=True):
+        words = TOOL_WORDS.get(name) or name.replace("_", " ")
+        core = rf"(?:`{re.escape(name)}(?:\(\))?`|(?<![\w/.-]){re.escape(name)}(?:\(\))?(?![\w/-]))"
+        # "the `build_model` tool" is one phrase: the article and "tool" go with
+        # the name, or it read "the the valuation model tool" (review).
+        pattern = rf"(?:\b(?P<article>[Tt]he|[Aa]n?)\s+)?{core}(?:\s+(?:tool|function)\b)?"
+
+        def plain(match, words=words):
+            article = match.group("article")
+            return words[0].upper() + words[1:] if article and article[0].isupper() else words
+
+        text, count = re.subn(pattern, plain, text or "")
+        if count:
+            replaced.append(name)
+    return text, replaced

@@ -82,3 +82,10 @@ def _offline_reference_data(monkeypatch, tmp_path):
     yield
     country_risk._reset_memo()
     sovereign_rates._reset_memo()
+
+
+@pytest.fixture(autouse=True)
+def _no_paid_search(monkeypatch):
+    """No test spends a SerpAPI search: the dated move search runs whenever a key is set."""
+    monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
+    yield

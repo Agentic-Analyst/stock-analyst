@@ -268,6 +268,7 @@ async def model_generation_agent(
         # What the workbook was built on (a memory maker's mid-cycle rewrite),
         # so this agent reads the method exactly as the report boundary does.
         recorded_model_inputs = {}
+        recorded_nopat = []
         if computed_values_path and Path(computed_values_path).exists():
             try:
                 import json
@@ -275,6 +276,8 @@ async def model_generation_agent(
                     computed_data = json.load(f)
                 recorded_model_inputs = ((computed_data.get("_vynn") or {}).get(
                     "model_inputs") or {})
+                from src.valuation_methodology import workbook_nopat
+                recorded_nopat = workbook_nopat(computed_data)
                 integrity = ((computed_data.get("_vynn") or {}).get(
                     "formula_integrity") or {})
                 if integrity and integrity.get("status") != "ready":
@@ -465,6 +468,10 @@ async def model_generation_agent(
                 if isinstance(_capm.get("risk_free_rate"), (int, float)):
                     assumptions["risk_free_rate"] = _capm["risk_free_rate"]
                     assumptions["currency"] = _capm.get("currency")
+                # The whole build-up, so the chat can say why the rate is what
+                # it is (Vanke's 14.5%: a distressed borrower's spread).
+                if isinstance(_capm, dict) and isinstance(_capm.get("wacc"), (int, float)):
+                    assumptions["capm"] = dict(_capm)
                 if exit_multiple is not None:
                     assumptions["exit_multiple"] = exit_multiple
                 # Terminal-year cash flows. Terminal value dominates both
@@ -903,7 +910,12 @@ async def model_generation_agent(
             # workbook was not built on it is a scenario here too, so the
             # chat answer's audit-scenario checks see what the report sees.
             from src.valuation_methodology import built_method_suitability
-            suitability = built_method_suitability(raw or {}, recorded_model_inputs)
+            suitability = built_method_suitability(
+                raw or {}, recorded_model_inputs, nopat=recorded_nopat,
+                model_value=valuation_metrics.get("fair_value"),
+                comps_value=(valuation_metrics.get("comps_price")
+                             if valuation_metrics.get("comps_included_in_blended_value") else None),
+            )
             valuation_metrics["method_suitability"] = suitability
             if not suitability.get("publication_allowed"):
                 valuation_metrics["point_estimate_withheld"] = True

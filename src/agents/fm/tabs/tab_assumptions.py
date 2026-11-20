@@ -114,11 +114,22 @@ class AssumptionsTabBuilder:
         for i, margin in enumerate(margins):
             ws.cell(row=5, column=2 + i, value=margin)
         
-        # EBITDA Margins (FY1-FY5)
-        ws.cell(row=6, column=1, value="EBITDA Margin")
+        # EBITDA Margins (FY1-FY5), as the projections make them.
+        #
+        # Projected EBITDA is operating income plus D&A at the Projections
+        # tab's own rate; this row was a separate number the projections never
+        # read. Hansen's showed 14.9% (D&A from a trailing statement, 1.8% of
+        # revenue) beside a projected 27.8% (D&A at 14.7%, as reported), and the
+        # report printed the 14.9%. It is now derived from the same cells; the
+        # grounded number is only the fallback if those cannot be read.
+        ws.cell(row=6, column=1, value="EBITDA Margin (projected EBIT + D&A)")
         ebitda = self.llm_assumptions.get('ebitda_margins', [None] * 5)
         for i, margin in enumerate(ebitda):
-            ws.cell(row=6, column=2 + i, value=margin)
+            col = chr(66 + i)  # B..F: FY1..FY5 here and on Projections
+            fallback = (f"{float(margin):.12f}"
+                        if isinstance(margin, (int, float)) and not isinstance(margin, bool) else '""')
+            ws.cell(row=6, column=2 + i,
+                    value=f"=IFERROR((Projections!{col}9+Projections!{col}12)/Projections!{col}3,{fallback})")
         
         # Operating Margins (FY1-FY5)
         ws.cell(row=7, column=1, value="Operating Margin")

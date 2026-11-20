@@ -254,3 +254,25 @@ def test_a_year_with_almost_no_revenue_is_skipped():
         "Total Revenue": 1.0e6, "Gross Profit": -2.0e6, "Operating Income": -6.5e6,
     }}
     assert assumption_grounding._operating_cost_ratio_floor(payload) == 0.0
+
+
+def test_samsung_is_a_scenario_not_a_boom_year_point_value():
+    """Yahoo files Samsung under Consumer Electronics and never says DRAM or NAND."""
+    from test_valuation_methodology import _operating_company
+    from src.valuation_methodology import assess_valuation_methodology
+    data = _operating_company()
+    data["ticker"] = "005930.KS"
+    data["company_data"]["basic_info"].update({
+        "industry": "Consumer Electronics",
+        "business_summary": "Samsung Electronics Co., Ltd. engages in the consumer electronics, "
+                            "information technology and mobile communications, and device solutions "
+                            "businesses worldwide. It offers monitors and memory storage products; "
+                            "and manufacture of semiconductors and display panels.",
+    })
+    result = assess_valuation_methodology(data)
+    assert result["primary_method"] == "scenario_only_pending_cycle_normalization"
+    assert result["publication_allowed"] is False
+    other = _operating_company()
+    other["ticker"] = "SONY"
+    other["company_data"]["basic_info"].update({"industry": "Consumer Electronics"})
+    assert assess_valuation_methodology(other)["primary_method"] != "scenario_only_pending_cycle_normalization"

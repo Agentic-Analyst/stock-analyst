@@ -327,3 +327,42 @@ def test_news_agent_screens_current_articles_during_database_outage(
     assert result.news_analysis.freshness["persistence_status"] == (
         "unavailable_current_run_retained"
     )
+
+
+def test_a_query_google_finds_nothing_for_is_empty_not_an_outage(monkeypatch):
+    """30 such answers in one replay tripped the breaker and skipped every other query."""
+    captured = {}
+
+    class FakeSearch:
+        def __init__(self, params):
+            captured.update(params)
+
+        def get_dict(self):
+            return {"error": "Google hasn't returned any results for this query."}
+
+    monkeypatch.setattr(article_scraper_module, "GoogleSearch", FakeSearch)
+    value = ArticleScraper.__new__(ArticleScraper)
+    value.max_articles, value.api_key, value.logger = 10, "key", None
+    assert value._serpapi_news_links("China Vanke 000002 SZ debt") == []
+    # The last week, not the last 24 hours.
+    assert captured["tbs"] == "qdr:w"
+
+    class DownSearch(FakeSearch):
+        def get_dict(self):
+            return {"error": "Invalid API key."}
+
+    monkeypatch.setattr(article_scraper_module, "GoogleSearch", DownSearch)
+    assert value._serpapi_news_links("Apple news") is None
+
+
+def test_a_google_news_link_is_kept_as_its_headline_not_downloaded(monkeypatch, tmp_path: Path):
+    """Its page is Google's, not the article's: it was downloaded and parsed as the article."""
+    from src.article_scraper import _headline_only, _is_google_news_link
+    assert _is_google_news_link("https://news.google.com/rss/articles/CBMi123?oc=5")
+    assert not _is_google_news_link("https://www.google.com/goto?url=CAES")
+    item = _headline_only("https://news.google.com/rss/articles/x",
+                          {"title": "Vanke posts third-quarter loss", "source_name": "Bloomberg",
+                           "published_date": "2026-11-08"})
+    assert item["text"] == "Vanke posts third-quarter loss. (Reported by Bloomberg.)"
+    assert item["headline_only"] is True and item["publish_date"] == "2026-11-08"
+    assert _headline_only("https://news.google.com/x", {"title": ""}) is None

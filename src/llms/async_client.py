@@ -44,6 +44,7 @@ from logger import get_logger
 from .openai import calculate_cost as _openai_cost
 from .openai import openai_request_options as _openai_options
 from .claude import calculate_cost as _claude_cost
+from . import bedrock as _bedrock
 from .config import LLMProvider
 
 
@@ -86,14 +87,23 @@ class _CircuitBreaker:
             self._opened_at = time.monotonic()
 
 
-# One breaker per process. The news fan-out shares it, so a genuine provider
-# outage trips it once for everyone rather than each batch discovering it.
-_breaker = _CircuitBreaker()
+# One breaker per provider family per process. The news fan-out shares it, so
+# a genuine outage trips it once for everyone rather than each batch
+# discovering it. Per family since 19 Nov 2026: with the chat agent on Claude
+# (Bedrock) and the news step on OpenAI, failing OpenAI batches opened the one
+# shared breaker and the chat agent's healthy Claude turn failed with it.
+_breakers = {"openai": _CircuitBreaker(), "other": _CircuitBreaker()}
+_breaker = _breakers["openai"]
+
+
+def _breaker_for(is_openai: bool) -> "_CircuitBreaker":
+    return _breakers["openai" if is_openai else "other"]
 
 
 def reset_circuit_breaker() -> None:
-    """Test/ops hook: force the breaker closed."""
-    _breaker.record_success()
+    """Test/ops hook: force every breaker closed."""
+    for breaker in _breakers.values():
+        breaker.record_success()
 
 
 class CircuitOpenError(RuntimeError):
@@ -134,14 +144,37 @@ _MODEL_TO_ANTHROPIC_ID = {
     "claude-3.5-sonnet": "claude-3-5-sonnet-20241022",
     "claude-3.5-haiku": "claude-3-5-haiku-20241022",
     "claude-3-opus": "claude-3-opus-20240229",
+    **{name: name for name in _bedrock.PROFILES},     # routed to Bedrock by name
 }
+
+
+def _anthropic_client_for(model_id: str):
+    return _bedrock.AsyncBedrockClaude() if _bedrock.is_bedrock_model(model_id) else _get_async_anthropic()
+
+
+def _anthropic_cost(response, model_id: str) -> float:
+    return _bedrock.cost(response, model_id) if _bedrock.is_bedrock_model(model_id) else _claude_cost(response, model_id)
 _OPENAI_MODELS = {"gpt-4o-mini", "gpt-5.4-mini", "gpt-5-mini", "gpt-6-luna"}
+
+
+# An exhausted account comes back as HTTP 429 like a rate limit, but waiting
+# never fixes it: on 17 Nov 2026 a run retried "You have no credits remaining"
+# four times (13 s) before answering "I hit an error".
+_ACCOUNT_EXHAUSTED = ("insufficient_quota", "credit_balance_exhausted", "no credits remaining",
+                      "credit balance is too low")
+
+
+def is_account_exhausted(exc: object) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in _ACCOUNT_EXHAUSTED)
 
 
 def _is_rate_limit_like(exc: Exception) -> bool:
     """True for errors that warrant a backoff-and-retry (rate/timeout/5xx)."""
     name = type(exc).__name__.lower()
     msg = str(exc).lower()
+    if is_account_exhausted(exc):
+        return False
     if any(k in name for k in ("ratelimit", "timeout", "connection", "apistatus", "internalserver")):
         return True
     return any(
@@ -173,10 +206,12 @@ async def _call_anthropic_async(
     if system_message:
         kwargs["system"] = system_message
 
-    client = _get_async_anthropic()
+    client = _anthropic_client_for(model_id)
     response = await client.messages.create(**kwargs)
-    cost = _claude_cost(response, model_id)
-    return response.content[0].text, cost
+    cost = _anthropic_cost(response, model_id)
+    # Claude 5.5 may open with a thinking block; the answer is the text blocks.
+    text = "".join(getattr(b, "text", "") for b in response.content if getattr(b, "type", "") == "text")
+    return text, cost
 
 
 async def _call_openai_async(
@@ -261,9 +296,9 @@ async def _call_anthropic_tools(model_id, messages, tools, temperature, tool_cho
     if system_message:
         kwargs["system"] = system_message
 
-    client = _get_async_anthropic()
+    client = _anthropic_client_for(model_id)
     resp = await client.messages.create(**kwargs)
-    cost = _claude_cost(resp, model_id)
+    cost = _anthropic_cost(resp, model_id)
 
     text_parts, calls = [], []
     for block in resp.content:
@@ -338,7 +373,7 @@ class AsyncLLMProvider:
     ) -> Tuple[str, float]:
         logger = get_logger()
 
-        if _breaker.is_open():
+        if _breaker_for(self.is_openai).is_open():
             # Fail fast — do not add load to a provider we already believe is down.
             raise CircuitOpenError(
                 "LLM circuit breaker is open (too many consecutive failures); "
@@ -354,7 +389,7 @@ class AsyncLLMProvider:
                     model_id = _MODEL_TO_ANTHROPIC_ID.get(self.model_name, self.model_name)
                     text, cost = await _call_anthropic_async(model_id, messages, temperature)
 
-                _breaker.record_success()
+                _breaker_for(self.is_openai).record_success()
                 if logger:
                     logger.llm_call(self.model_name, cost, 0)
                 return text, cost
@@ -369,7 +404,7 @@ class AsyncLLMProvider:
                     )
                 if not retryable or attempt == max_retries - 1:
                     # Only hard/terminal failures count toward the breaker.
-                    _breaker.record_failure()
+                    _breaker_for(self.is_openai).record_failure()
                     break
                 # Exponential backoff with full jitter: 0.5, 1, 2, 4 … + [0, base).
                 base = 0.5 * (2 ** attempt)
@@ -397,7 +432,7 @@ class AsyncLLMProvider:
         Same backoff + circuit-breaker behaviour as ``__call__``.
         """
         logger = get_logger()
-        if _breaker.is_open():
+        if _breaker_for(self.is_openai).is_open():
             raise CircuitOpenError(
                 "LLM circuit breaker is open (too many consecutive failures)."
             )
@@ -413,7 +448,7 @@ class AsyncLLMProvider:
                     resp = await _call_anthropic_tools(
                         self.resolved_model_id(), messages, tools, temperature, tool_choice
                     )
-                _breaker.record_success()
+                _breaker_for(self.is_openai).record_success()
                 if logger:
                     logger.llm_call(self.model_name, resp.cost, 0)
                 return resp
@@ -426,7 +461,7 @@ class AsyncLLMProvider:
                         f"{attempt + 1}/{max_retries} (retryable={retryable}): {exc}"
                     )
                 if not retryable or attempt == max_retries - 1:
-                    _breaker.record_failure()
+                    _breaker_for(self.is_openai).record_failure()
                     break
                 base = 0.5 * (2 ** attempt)
                 await asyncio.sleep(base + random.uniform(0, base))
@@ -439,6 +474,8 @@ class AsyncLLMProvider:
 
 _global_async_provider: Optional[AsyncLLMProvider] = None
 _global_async_model: Optional[str] = None
+_chat_async_provider: Optional[AsyncLLMProvider] = None
+_chat_async_model: Optional[str] = None
 
 
 def get_async_llm() -> AsyncLLMProvider:
@@ -461,3 +498,26 @@ def get_async_llm() -> AsyncLLMProvider:
         _global_async_provider = AsyncLLMProvider(model_name)
         _global_async_model = model_name
     return _global_async_provider
+
+
+def get_chat_llm() -> AsyncLLMProvider:
+    """
+    The chat agent's own model: CHAT_MODEL when it is known and its key is set,
+    otherwise the worker's model (``get_async_llm``).
+
+    Only the chat agent reasons and writes its answer on CHAT_MODEL. The tools'
+    bulk text steps (news insights, article scoring, the report's write-up)
+    stay on the worker's model, as in production: on Claude Sonnet the news
+    step alone cost about 60 times what GPT-6 Luna costs for it (release
+    check, 19 Nov 2026: ~$0.45 against ~$0.007 per report).
+    """
+    global _chat_async_provider, _chat_async_model
+    from .config import LLMProvider
+
+    name = (os.getenv("CHAT_MODEL") or "").strip()
+    if not name or name not in LLMProvider.MODELS or name not in LLMProvider.list_available_models():
+        return get_async_llm()
+    if _chat_async_provider is None or _chat_async_model != name:
+        _chat_async_provider = AsyncLLMProvider(name)
+        _chat_async_model = name
+    return _chat_async_provider

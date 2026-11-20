@@ -287,3 +287,28 @@ def test_semantic_bank_integrity_rejects_a_phantom_peer_value():
 
     assert manifest["status"] == "error"
     assert manifest["issues"][0]["check"] == "bank_summary_peer_absent"
+
+
+def test_text_constant_with_a_slash_is_text_not_arithmetic():
+    # The sensitivity grid returns "n/m" where the discount rate is at or
+    # below terminal growth. The "/" sent the constant to the arithmetic
+    # path, the cell became an evaluation error, and integrity failed the
+    # whole workbook (China Vanke, 17 Nov 2026).
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Sensitivity"
+    sheet["A13"] = 0.02
+    sheet["E12"] = 0.025
+    sheet["B4"] = 0.5
+    sheet["E13"] = '=IF($A13<=E$12,"n/m",IFERROR(100/(1+$A13)^(1-$B$4),"n/m"))'
+    sheet["A14"] = 0.09
+    sheet["E14"] = '=IF($A14<=E$12,"n/m",IFERROR(100/(1+$A14)^(1-$B$4),"n/m"))'
+    sheet["F1"] = '="say ""n/m"""'
+
+    result = _evaluate(workbook, ["Sensitivity"])
+    cells = result["Sensitivity"]["cells"]
+
+    assert cells["(13, 5)"] == "n/m"
+    assert abs(cells["(14, 5)"] - 100 / 1.09 ** 0.5) < 1e-9
+    assert cells["(1, 6)"] == 'say "n/m"'
+    assert formula_integrity(result)["status"] == "ready"

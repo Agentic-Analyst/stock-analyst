@@ -908,7 +908,8 @@ def extract_historical_financials(financial_data: Dict[str, Any]) -> Dict[str, A
         # Not reported is not zero: Booking Holdings reports no gross profit
         # in any year, and a 0 default printed a gross profit of $0.00.
         historical['gross_profit'].append(is_data.get('Gross Profit'))
-        historical['operating_income'].append(is_data.get('Operating Income', 0))
+        # Not reported is not zero (an insurer has no operating income line).
+        historical['operating_income'].append(is_data.get('Operating Income'))
         historical['ebitda'].append(is_data.get('EBITDA', 0))
         historical['net_income'].append(is_data.get('Net Income', 0))
         historical['operating_cf'].append(cf_data.get('Operating Cash Flow', 0))
@@ -1414,7 +1415,10 @@ def enforce_valuation_publication_boundary(
 
     # A memory maker's workbook built without the mid-cycle rewrite holds the
     # covered years' peak margins through the terminal value: a scenario.
-    suitability = built_method_suitability(financial_data or {}, data.get("model_inputs"))
+    suitability = built_method_suitability(
+        financial_data or {}, data.get("model_inputs"),
+        nopat=(data.get("projections") or {}).get("nopat"),
+    )
     reconstructed_bank_override = None
     if (
         suitability.get("primary_method") == "justified_pb_roe"
@@ -1660,6 +1664,12 @@ def enforce_valuation_publication_boundary(
         )
         reason = _join_distinct_messages(reason, freshness_reason)
 
+    if not is_bank:
+        from src.valuation_methodology import withhold_unconfirmed_outlier
+        suitability = withhold_unconfirmed_outlier(
+            suitability, financial_data or {}, authoritative_fair_value,
+            legs.get("market_comps") if comps_publishable else None,
+        )
     if not suitability.get("publication_allowed"):
         method_reason = suitability.get("reason") or (
             "The available data does not support a publishable point valuation."
@@ -2502,6 +2512,59 @@ def generate_section_company_overview(data: Dict[str, Any], llm) -> Tuple[str, f
     return f"{statistics_table}\n\n### Business Overview\n\n{overview}", 0.0
 
 
+def _margins_table(historical: Dict[str, Any], company: Dict[str, Any]) -> str:
+    """Margins from the latest fiscal year above, beside the provider's trailing ones."""
+    def ratio(numerator: Any, denominator: Any) -> Optional[float]:
+        if (isinstance(numerator, (int, float)) and not isinstance(numerator, bool)
+                and isinstance(denominator, (int, float)) and not isinstance(denominator, bool)
+                and math.isfinite(float(numerator)) and math.isfinite(float(denominator))
+                and denominator > 0):
+            return float(numerator) / float(denominator)
+        return None
+
+    years = list(historical.get("years") or [])
+    latest = len(years) - 1
+    def latest_of(key: str) -> Any:
+        series = historical.get(key) or []
+        return series[latest] if 0 <= latest < len(series) else None
+
+    revenue = latest_of("revenue")
+    fiscal = {
+        "gross": ratio(latest_of("gross_profit"), revenue),
+        "operating": ratio(latest_of("operating_income"), revenue),
+        # EBITDA and net income default to 0 when the provider has no line, so
+        # an exact 0 is "not reported", not a 0.0% margin (release review, 19 Nov).
+        "ebitda": ratio(latest_of("ebitda") or None, revenue),
+        "net": ratio(latest_of("net_income") or None, revenue),
+    }
+    # An issuer that reports no cost of revenue has gross profit equal to
+    # revenue: Hansen's table read "Gross Margin 100.0%" beside the provider's
+    # 37.4%, and an answer quoted both.
+    no_cost_of_revenue = fiscal["gross"] is not None and fiscal["gross"] >= 0.999
+
+    def cell(value: Optional[float]) -> str:
+        return "—" if value is None else format_percent(value)
+
+    rows = (
+        ("Gross Margin", "not reported (no cost of revenue)" if no_cost_of_revenue else fiscal["gross"],
+         company.get("gross_margin")),
+        ("Operating Margin", fiscal["operating"], company.get("operating_margin")),
+        ("EBITDA Margin", fiscal["ebitda"], company.get("ebitda_margin")),
+        ("Net Margin", fiscal["net"], company.get("net_margin")),
+        ("ROE", None, company.get("roe")),
+        ("ROA", None, company.get("roa")),
+    )
+    if latest < 0 or all(value is None for value in fiscal.values()):
+        table = "| Metric | Trailing 12 Months (provider) |\n|--------|---------------|\n"
+        return table + "".join(f"| {name} | {cell(ttm)} |\n" for name, _fy, ttm in rows)
+    table = (
+        f"| Metric | Fiscal {years[latest]} (from the table above) | Trailing 12 Months (provider) |\n"
+        "|--------|---------------|---------------|\n"
+    )
+    return table + "".join(
+        f"| {name} | {fy if isinstance(fy, str) else cell(fy)} | {cell(ttm)} |\n" for name, fy, ttm in rows)
+
+
 def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[str, float]:
     """Generate Financial Performance Analysis section with pre-built tables."""
     historical = data['historical']
@@ -2596,15 +2659,12 @@ def generate_section_financial_performance(data: Dict[str, Any], llm) -> Tuple[s
         )
         growth_table += f"| {years[i-1]}-{years[i]} | {cells} |\n"
     
-    # Margins table
-    margins_table = "| Metric | Current Value |\n"
-    margins_table += "|--------|---------------|\n"
-    margins_table += f"| Gross Margin | {format_percent(company['gross_margin'])} |\n"
-    margins_table += f"| Operating Margin | {format_percent(company['operating_margin'])} |\n"
-    margins_table += f"| EBITDA Margin | {format_percent(company['ebitda_margin'])} |\n"
-    margins_table += f"| Net Margin | {format_percent(company['net_margin'])} |\n"
-    margins_table += f"| ROE | {format_percent(company['roe'])} |\n"
-    margins_table += f"| ROA | {format_percent(company['roa'])} |\n"
+    # Margins table. The provider's margins are trailing twelve months on its
+    # own definitions; beside the fiscal-year table above they read as a
+    # contradiction: Hansen showed EBITDA of A$122.5M on revenue of A$386.5M
+    # (31.7%) and an "EBITDA Margin" of 19.9%, and every answer quoting the
+    # report repeated both. Each column now says what period it is.
+    margins_table = _margins_table(historical, company)
     
     commentary = []
     if years and historical['revenue']:
@@ -3091,10 +3151,15 @@ def generate_section_valuation(data: Dict[str, Any], llm) -> Tuple[str, float]:
             coc_table += f"| Premium build | {coc['erp_source']} |\n"
         if coc.get('kd_source'):
             coc_table += f"| Cost of debt build | {coc['kd_source']} |\n"
+        parts = [coc.get(k) for k in ('risk_free_rate', 'beta', 'equity_risk_premium', 'cost_of_equity')]
+        if all(isinstance(v, (int, float)) for v in parts) and parts[3] > parts[0] + parts[1] * parts[2] + 1e-6:
+            # The table's cost of equity is not rf + beta x ERP: say why.
+            coc_table += ("| Cost of equity floor | raised to the pre-tax cost of debt: with debt a large "
+                          "part of the capital, shareholders, paid after lenders, require at least as much |\n")
         if bank_method_required:
-            coc_table += ("\n_The justified P/B x ROE valuation uses the cost of equity from this build "
-                          "(risk-free rate + beta x equity risk premium, held within 8-14%); the WACC "
-                          "and cost of debt describe the cash-flow DCF that was not applied._\n")
+            coc_table += ("\n_The justified P/B x ROE valuation prices equity at the risk-free rate + beta x "
+                          "equity risk premium, held within 8-14%; the WACC, the cost of debt and any "
+                          "cost-of-equity floor above describe the cash-flow DCF that was not applied._\n")
 
     # A WACC x growth grid describes an FCF DCF. For a bank the DCF was not
     # applied, and recomputing it prints a grid of zeros under a P/B x ROE

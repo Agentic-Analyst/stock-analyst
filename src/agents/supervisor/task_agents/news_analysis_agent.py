@@ -14,6 +14,7 @@ This agent:
 """
 
 import os
+import asyncio
 from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
@@ -208,7 +209,9 @@ async def news_analysis_agent(
             state.log_action("news_analysis_agent", f"Articles currently in local storage: {current_count}")
             
             # Perform comprehensive scraping (uses config internally)
-            scraping_results = scraper.run_comprehensive_scraping()
+            # Blocking network work, moved off the event loop so a concurrent model
+            # build and the progress stream keep moving while pages download.
+            scraping_results = await asyncio.to_thread(scraper.run_comprehensive_scraping)
             
             state.log_action(
                 "news_analysis_agent",

@@ -494,3 +494,140 @@ def test_bank_metadata_publishes_only_the_appropriate_method_and_inputs():
     assert metadata["valuation_method_inputs"]["justified_price_to_book"] == pytest.approx(
         2.0769230769)
     assert metadata["comps_included_in_blended_value"] is False
+
+
+def _with_nopat(computed, nopat):
+    computed["Projections"] = {
+        "cells": {f"(11, {column})": value for column, value in zip(range(2, 7), nopat)},
+        "metadata": {"total_cells": len(nopat)},
+    }
+    return computed
+
+
+def test_a_model_still_losing_money_in_its_last_year_publishes_no_value():
+    # China Vanke, 17 Nov 2026: operating losses every forecast year, positive
+    # free cash flow only from running down housing inventory, and a terminal
+    # value that capitalised that release forever: STRONG BUY at +588%.
+    metadata = build_publication_metadata(
+        _with_nopat(_computed(perpetual=650.0, exit_value=700.0), [-5.0, -3.9, -3.2, -2.7, -2.3]),
+        _financials(),
+    )
+    assert metadata["point_estimate_withheld"] is True
+    assert metadata["canonical_fair_value"] is None
+    assert metadata["confidence_alert"] is None
+    assert "operating profit is still negative in its final forecast year" in metadata["withheld_reason"]
+
+
+def test_early_losses_that_turn_to_profit_are_not_blocked_by_that_rule():
+    metadata = build_publication_metadata(
+        _with_nopat(_computed(), [-5.0, -1.0, 2.0, 4.0, 6.0]), _financials(),
+    )
+    assert "operating profit is still negative" not in (metadata["withheld_reason"] or "")
+    assert metadata["point_estimate_withheld"] is False
+
+
+def test_the_ruled_out_answer_states_its_reason_once_and_no_figure():
+    from types import SimpleNamespace
+    from src.agents.supervisor import supervisor_agent
+    from src.valuation_methodology import OPERATING_LOSS_SCENARIO_REASON
+    runner = supervisor_agent.SupervisorWorkflowRunner.__new__(
+        supervisor_agent.SupervisorWorkflowRunner)
+    runner.ticker = "000002.SZ"
+    metrics = {
+        "perpetual_price": 20.24, "exit_multiple_price": None, "current_price": 2.94,
+        "point_estimate_withheld": True,
+        "publication_withheld_reason": OPERATING_LOSS_SCENARIO_REASON,
+        "method_suitability": {
+            "primary_method": "scenario_only_pending_operating_profit",
+            "publication_allowed": False, "reason": OPERATING_LOSS_SCENARIO_REASON,
+        },
+    }
+    runner.state = SimpleNamespace(
+        financial_data=SimpleNamespace(key_metrics={"basic_info": {"currency": "CNY"}}, raw_data={}),
+        news_analysis=None,
+        financial_model=SimpleNamespace(assumptions={}, valuation_metrics=metrics))
+    answer = runner._safe_withheld_valuation_answer()
+    assert answer.count("operating profit is still negative") == 1
+    assert "20.24" not in answer and "+588%" not in answer and "Detail:" not in answer
+    assert "no direction versus the market" in answer
+    # The note after it said a third time, and wrongly, that "the cash-flow
+    # method does not fit this company" (18 Nov Sonnet check, Vanke).
+    assert "does not fit this company" not in answer
+
+
+def test_the_outlier_answer_states_its_reason_once():
+    from types import SimpleNamespace
+    from src.agents.supervisor import supervisor_agent
+    from src.valuation_methodology import UNCONFIRMED_OUTLIER_REASON
+    runner = supervisor_agent.SupervisorWorkflowRunner.__new__(
+        supervisor_agent.SupervisorWorkflowRunner)
+    runner.ticker = "TSLA"
+    metrics = {
+        "perpetual_price": 20.25, "exit_multiple_price": None, "current_price": 380.11,
+        "point_estimate_withheld": True,
+        "publication_withheld_reason": UNCONFIRMED_OUTLIER_REASON,
+        "method_suitability": {
+            "primary_method": "scenario_only_pending_corroboration",
+            "publication_allowed": False, "reason": UNCONFIRMED_OUTLIER_REASON,
+        },
+    }
+    runner.state = SimpleNamespace(
+        financial_data=SimpleNamespace(key_metrics={"basic_info": {"currency": "USD"}}, raw_data={}),
+        news_analysis=None,
+        financial_model=SimpleNamespace(assumptions={}, valuation_metrics=metrics))
+    answer = runner._safe_withheld_valuation_answer()
+    assert answer.count("outside every analyst") == 1
+    assert "20.25" not in answer and "does not fit this company" not in answer
+
+
+def test_another_cause_joined_to_the_method_reason_still_shows():
+    from types import SimpleNamespace
+    from src.agents.supervisor import supervisor_agent
+    from src.valuation_methodology import UNCONFIRMED_OUTLIER_REASON
+    runner = supervisor_agent.SupervisorWorkflowRunner.__new__(
+        supervisor_agent.SupervisorWorkflowRunner)
+    runner.ticker = "TSLA"
+    extra = "The model's machine-readable publication decision is missing or incomplete."
+    metrics = {
+        "perpetual_price": 20.25, "exit_multiple_price": None, "current_price": 380.11,
+        "point_estimate_withheld": True,
+        # The chat shows the stored reason's first sentence (the rest stays
+        # in the report); a cause that comes first must still show.
+        "publication_withheld_reason": f"{extra} {UNCONFIRMED_OUTLIER_REASON}",
+        "method_suitability": {
+            "primary_method": "scenario_only_pending_corroboration",
+            "publication_allowed": False, "reason": UNCONFIRMED_OUTLIER_REASON,
+        },
+    }
+    runner.state = SimpleNamespace(
+        financial_data=SimpleNamespace(key_metrics={"basic_info": {"currency": "USD"}}, raw_data={}),
+        news_analysis=None,
+        financial_model=SimpleNamespace(assumptions={}, valuation_metrics=metrics))
+    answer = runner._safe_withheld_valuation_answer()
+    assert "publication decision is missing or incomplete" in answer
+    assert answer.count("outside every analyst") == 1
+
+
+def test_no_cut_sentence_is_left_when_the_reason_is_the_method_alone():
+    # Costco, 18 Nov check: "Also: No point valuation is published because."
+    from types import SimpleNamespace
+    from src.agents.supervisor import supervisor_agent
+    from src.valuation_methodology import OPERATING_LOSS_SCENARIO_REASON, UNCONFIRMED_OUTLIER_REASON
+    for primary, reason in (("scenario_only_pending_corroboration", UNCONFIRMED_OUTLIER_REASON),
+                            ("scenario_only_pending_operating_profit", OPERATING_LOSS_SCENARIO_REASON)):
+        runner = supervisor_agent.SupervisorWorkflowRunner.__new__(
+            supervisor_agent.SupervisorWorkflowRunner)
+        runner.ticker = "COST"
+        metrics = {
+            "perpetual_price": 499.44, "exit_multiple_price": 626.49, "current_price": 1111.69,
+            "point_estimate_withheld": True, "publication_withheld_reason": reason,
+            "method_suitability": {"primary_method": primary, "publication_allowed": False,
+                                   "reason": reason},
+        }
+        runner.state = SimpleNamespace(
+            financial_data=SimpleNamespace(key_metrics={"basic_info": {"currency": "USD"}}, raw_data={}),
+            news_analysis=None,
+            financial_model=SimpleNamespace(assumptions={}, valuation_metrics=metrics))
+        answer = runner._safe_withheld_valuation_answer()
+        assert "Also:" not in answer and "because." not in answer
+        assert "Detail:" not in answer

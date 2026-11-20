@@ -22,12 +22,24 @@ from typing import Any, Optional
 _UA = "VYNN/1.0 (+https://vynnai.com; reference data)"
 
 
-def http_get(url: str, timeout: float = 8.0) -> bytes:
-    """Raw bytes of ``url``; raises on any failure. Tests replace this."""
+def http_get(url: str, timeout: float = 8.0, max_bytes: Optional[int] = None) -> bytes:
+    """Raw bytes of ``url`` (the first ``max_bytes`` when given); raises on any failure.
+
+    Tests replace this.
+    """
     import requests
-    r = requests.get(url, timeout=timeout, headers={"User-Agent": _UA})
-    r.raise_for_status()
-    return r.content
+    if max_bytes is None:
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": _UA})
+        r.raise_for_status()
+        return r.content
+    with requests.get(url, timeout=timeout, headers={"User-Agent": _UA}, stream=True) as r:
+        r.raise_for_status()
+        out = bytearray()
+        for chunk in r.iter_content(65536):
+            out += chunk
+            if len(out) >= max_bytes:
+                break
+        return bytes(out[:max_bytes])
 
 
 def http_post(url: str, body: bytes, timeout: float = 8.0) -> bytes:

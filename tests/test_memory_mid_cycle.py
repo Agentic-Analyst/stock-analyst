@@ -219,7 +219,7 @@ def test_the_published_answer_says_how_and_what_the_price_pays_for():
         }),
     )
     answer = runner._safe_published_valuation_answer({"rating": "STRONG SELL"})
-    assert "model fair value $587.36 USD" in answer
+    assert "model fair value of $587.36 USD" in answer
     assert "mid-cycle economics" in answer and "18% operating margin" in answer
     assert "NAND industry's through-cycle level" in answer
     assert "about 7 years of the Street's peak-cycle cash flow" in answer

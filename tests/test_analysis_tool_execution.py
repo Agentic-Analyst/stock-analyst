@@ -71,8 +71,30 @@ def test_get_financials_executes_without_report_state(monkeypatch):
     assert payload["status"] == "ok"
     assert payload["ticker"] == "AAPL"
     assert payload["current_price"] == 250.0
+    assert "street_expectations" not in payload          # none collected
     assert state.report is None
     assert state.financial_model is None
+
+
+def test_get_financials_returns_the_analysts_view_it_collected(monkeypatch):
+    # Local full-stack run, 19 Nov 2026: "what are analysts saying about it?"
+    # got "no ratings or targets" although they had been collected.
+    state = _state()
+    street = {"price_target": {"mean": 625.0, "count": 52}, "recommendation": {"key": "buy"}}
+
+    async def fake_financial_data_agent(incoming):
+        incoming.financial_data = FinancialData(
+            ticker="MSFT", company_name="Microsoft",
+            key_metrics={"basic_info": {"currency": "USD"}, "market_data": {"current_price": 509.0}},
+            raw_data={"external_expectations": street},
+        )
+        return incoming
+
+    module = importlib.import_module("src.agents.supervisor.task_agents.financial_data_agent")
+    monkeypatch.setattr(module, "financial_data_agent", fake_financial_data_agent)
+    payload = json.loads(asyncio.run(GetFinancialsTool(_context(state)).execute("MSFT")))
+    assert payload["street_expectations"] == street
+    assert "never VYNN's own" in payload["note"]
 
 
 def test_write_report_executes_and_machine_gate_bounds_markdown(monkeypatch):
@@ -131,6 +153,8 @@ def test_write_report_executes_and_machine_gate_bounds_markdown(monkeypatch):
     assert payload["fair_value"] is None
     assert payload["no_single_fair_value"] is True
     assert payload["no_single_fair_value_reason"]
+    # Kept with the model, for the several-company check.
+    assert state.financial_model.valuation_metrics["chat_no_single_fair_value"] is True
     # No rating exists, and the prose model is handed no label to repeat.
     assert "rating" not in payload and payload["valuation_view"] == "no_single_fair_value"
     assert "confidence_alert" not in payload

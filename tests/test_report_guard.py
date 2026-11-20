@@ -288,9 +288,8 @@ def test_generalist_final_answer_uses_shared_withheld_and_analyst_guard():
     assert "VYNN's answer here is a range, not a single fair value" in guarded
     assert "NOT RATED" not in guarded
     assert "154.04–$180.33" in guarded
-    assert "human-analyst mean target USD 335.72" in guarded
-    assert "reverse DCF" in guarded
-    assert "209.0% above the model" in guarded
+    assert "Average price target: $335.72" in guarded
+    assert "Today's price assumes long-run cash flow 209.0% above VYNN's model" in guarded
     assert "overall sentiment" not in guarded.lower()
 
 
@@ -309,7 +308,7 @@ def test_crypto_answer_guard_removes_unsupported_valuation_labels_only():
 
     guarded = ag._guard_specialized_answer(answer)
 
-    assert guarded.startswith("This crypto snapshot has no defensible")
+    assert guarded.rstrip().endswith("_") and "does not call it cheap or expensive" in guarded
     assert "Bitcoin looks constructive" not in guarded
     assert "call it a bargain" not in guarded
     assert "Price: $77,250" in guarded
@@ -339,8 +338,8 @@ def test_crypto_answer_guard_blocks_valuation_synonyms_and_snapshot_health_label
 
     guarded = ag._guard_specialized_answer(answer)
 
-    assert guarded.startswith("This crypto snapshot has no defensible")
-    assert "Point-in-time network" in guarded
+    assert guarded.rstrip().endswith("_") and "does not call it cheap or expensive" in guarded
+    assert "are a snapshot" in guarded
     assert "### Network health" in guarded
     assert "Block height: 966,761" in guarded
     assert "One-year volatility: 44.4%" in guarded
@@ -366,7 +365,7 @@ def test_crypto_snapshot_guard_uses_heading_context_and_removes_empty_subheading
         "- One-year max drawdown: -53%."
     )
     guarded = ag._guard_specialized_answer(answer)
-    assert "Point-in-time network" in guarded
+    assert "are a snapshot" in guarded
     assert "Network interpretation" not in guarded
     assert "Healthy" not in guarded
     assert "overheated" not in guarded
@@ -392,7 +391,7 @@ def test_crypto_snapshot_guard_removes_quality_labels_repeated_in_conclusion():
     assert "network is functioning well" not in guarded
     assert "Liquidity is excellent" not in guarded
     assert "**Hold** is my base-case conclusion" in guarded
-    assert "risk-and-momentum stance" in guarded
+    assert "not on a valuation" in guarded
     assert "One-year volatility is 44%" in guarded
 
 
@@ -539,9 +538,9 @@ def test_published_report_guard_corrects_conflicting_headline_claims():
         "and the report's 12-month price target is $190."
     )
 
-    assert "investment rating HOLD" in guarded
-    assert "model fair value $134.75 USD" in guarded
-    assert "12-month price target USD 142.00" in guarded
+    assert "VYNN's report rates PG HOLD" in guarded
+    assert "model fair value of $134.75 USD" in guarded
+    assert "12-month price target of USD 142.00" in guarded
     assert "167.67" not in guarded
     assert "190" not in guarded
 
@@ -642,7 +641,7 @@ def test_read_report_uses_separate_guard_without_replacing_live_state(
         "freshness": {"status": "limited", "fresh_articles": 1},
         "analysis_summary": {"overall_sentiment": "bearish"},
     }))
-    monkeypatch.setattr("path_utils.get_latest_analysis_path", lambda *_: base)
+    monkeypatch.setattr("path_utils.find_latest_report", lambda *_: (base, sorted(base.rglob("*Report*.md"))[-1]) if list(base.rglob("*Report*.md")) else None)
     live_state = types.SimpleNamespace(
         financial_model=types.SimpleNamespace(
             valuation_metrics={
@@ -697,9 +696,8 @@ def test_read_report_uses_separate_guard_without_replacing_live_state(
     assert guarded.startswith("AAPL: the modeled cash flows support a value below the market")
     assert "VYNN's answer here is a range, not a single fair value" in guarded
     assert "154.04–$180.33" in guarded
-    assert "human-analyst mean target USD 335.72" in guarded
-    assert "reverse DCF" in guarded
-    assert "209.0% above the model" in guarded
+    assert "Average price target: $335.72" in guarded
+    assert "Today's price assumes long-run cash flow 209.0% above VYNN's model" in guarded
 
     fresh_ctx = types.SimpleNamespace(
         email="launch@example.com", state=None, ticker=None, company_name=None,

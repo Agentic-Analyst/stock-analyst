@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from src.agents.fm.bank_valuation import (
     build_bank_valuation_override,
@@ -35,7 +35,7 @@ _COMMODITY_CYCLE_INDUSTRY_HINTS = (
 # valued on mid-cycle economics after the Street's covered years
 # (src/agents/fm/memory_cycle.py), and stays a scenario when its reported
 # history cannot place a revenue trend.
-from src.agents.fm.memory_cycle import is_memory_maker, mid_cycle_inputs  # noqa: E402,F401
+from src.agents.fm.memory_cycle import is_memory_cycle_conglomerate, is_memory_maker, mid_cycle_inputs  # noqa: E402,F401
 
 _CONGLOMERATE_HINTS = (
     "conglomerate", "diversified industrial", "diversified holdings",
@@ -389,7 +389,8 @@ def assess_valuation_methodology(financial_data: Dict[str, Any]) -> Dict[str, An
             "receivables, matched funding debt, credit losses, and a reconciled "
             "operating-company plus finance-book sum-of-the-parts valuation"
         )
-    memory_cycle = is_memory_maker(industry_key, business_summary)
+    memory_cycle = is_memory_maker(industry_key, business_summary) or is_memory_cycle_conglomerate(
+        str((financial_data or {}).get("ticker") or basic.get("symbol") or ""))
     mid_cycle_detail = mid_cycle_inputs(financial_data) if memory_cycle else None
     mid_cycle = bool(mid_cycle_detail)
     if memory_cycle and not mid_cycle:
@@ -507,10 +508,126 @@ def withhold_unbuilt_mid_cycle(suitability: Any, model_inputs: Any) -> Any:
     return suitability
 
 
-def built_method_suitability(financial_data: Dict[str, Any], model_inputs: Any) -> Dict[str, Any]:
-    """``assess_valuation_methodology`` for the workbook built from this data."""
-    return withhold_unbuilt_mid_cycle(
-        assess_valuation_methodology(financial_data or {}), model_inputs)
+# China Vanke's model (17 Nov 2026) lost money from operations in every forecast
+# year (-5.0B falling to -2.3B CNY) yet had positive free cash flow from running
+# down 239B of housing inventory; the terminal value capitalised that one-off
+# release forever and published STRONG BUY at +588%. A perpetuity on a business
+# the model itself says loses money is not an operating value.
+OPERATING_LOSS_SCENARIO_REASON = (
+    "No point valuation is published because the model's after-tax operating profit is "
+    "still negative in its final forecast year, so its terminal value would capitalize cash "
+    "that does not come from operations (such as inventory or working capital being run down)."
+)
+
+
+def workbook_nopat(computed: Any) -> List[Any]:
+    """The workbook's NOPAT row (Projections row 11), first forecast year first."""
+    tab = (computed or {}).get("Projections") if isinstance(computed, dict) else None
+    cells = (tab or {}).get("cells") if isinstance(tab, dict) else None
+    if not isinstance(cells, dict):
+        return []
+    # The five forecast years, as extract_projections reads them.
+    return [cells.get(f"(11, {column})") for column in range(2, 7)]
+
+
+def final_forecast_nopat(nopat: Any) -> Optional[float]:
+    """The last forecast year's NOPAT; a missing row (0 or blank) is no evidence."""
+    for value in reversed(list(nopat or [])):
+        if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(float(value)) and value != 0):
+            return float(value)
+    return None
+
+
+def withhold_operating_loss(suitability: Any, nopat: Any) -> Any:
+    """A cash-flow model still losing money in its last year is an audit scenario."""
+    final = final_forecast_nopat(nopat)
+    if (isinstance(suitability, dict)
+            and suitability.get("publication_allowed") is not False
+            and suitability.get("primary_method") != "justified_pb_roe"
+            and final is not None and final < 0):
+        return {
+            **suitability,
+            "primary_method": "scenario_only_pending_operating_profit",
+            "publication_allowed": False,
+            "reason": OPERATING_LOSS_SCENARIO_REASON,
+        }
+    return suitability
+
+
+# Tesla (17 Nov 2026) was published STRONG SELL at $20.25 against a $380 price,
+# and Costco STRONG SELL at -50%: in both, the cash-flow model was the only
+# method and its value lay far outside the whole range of well-covered analyst
+# targets (Tesla's lowest of 40 was $128). A single model that far from every
+# analyst, with nothing to confirm it, is a scenario, not a rating.
+UNCONFIRMED_OUTLIER_REASON = (
+    "No point valuation is published because VYNN's cash-flow model lands outside every "
+    "analyst's price target and no second valuation method confirms it, so its figure is a "
+    "scenario rather than a fair value."
+)
+OUTLIER_MARGIN = 0.10          # beyond the range by more than this share of its edge
+OUTLIER_MIN_ANALYSTS = 5
+
+
+def withhold_unconfirmed_outlier(suitability: Any, financial_data: Any, model_value: Any,
+                                 comps_value: Any = None) -> Any:
+    """A DCF-only value far outside every analyst target is an audit scenario.
+
+    Not for a mid-cycle value (deliberately away from peak-cycle targets) or a
+    bank, and not when a peer valuation is blended in as a second method.
+    """
+    def positive(value: Any) -> Optional[float]:
+        return (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(float(value)) and value > 0 else None)
+
+    if (not isinstance(suitability, dict) or suitability.get("publication_allowed") is False
+            or suitability.get("primary_method") in ("justified_pb_roe", "dcf_mid_cycle")
+            or positive(comps_value) is not None):
+        return suitability
+    value = positive(model_value)
+    expectations = (financial_data or {}).get("external_expectations") if isinstance(financial_data, dict) else None
+    if not expectations and isinstance(financial_data, dict) and financial_data:
+        try:
+            from src.external_expectations import build_external_expectations
+            expectations = build_external_expectations(financial_data)
+        except Exception:
+            expectations = None
+    target = (expectations or {}).get("price_target") or {}
+    # Only targets the publication rules already accept as a challenge: in the
+    # model's currency and current. Unconvertible targets are left in their own
+    # currency on purpose, and a stale range says nothing about today.
+    active = ((target.get("source_evidence") or {}).get(str(target.get("source") or "")) or {})
+    if not (target.get("qualified_for_contradiction") or active.get("qualified_for_contradiction")):
+        return suitability
+    if active and active.get("currency_comparable") is False:
+        return suitability
+    low, high = positive(target.get("low")), positive(target.get("high"))
+    try:
+        count = int(target.get("analyst_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if (value is None or low is None or high is None or count < OUTLIER_MIN_ANALYSTS
+            or (1 - OUTLIER_MARGIN) * low <= value <= (1 + OUTLIER_MARGIN) * high):
+        return suitability
+    return {
+        **suitability,
+        "primary_method": "scenario_only_pending_corroboration",
+        "publication_allowed": False,
+        "reason": UNCONFIRMED_OUTLIER_REASON,
+    }
+
+
+def built_method_suitability(financial_data: Dict[str, Any], model_inputs: Any,
+                             nopat: Any = None, model_value: Any = None,
+                             comps_value: Any = None) -> Dict[str, Any]:
+    """``assess_valuation_methodology`` for the workbook built from this data.
+
+    ``nopat`` is the built model's forecast NOPAT row and ``model_value`` /
+    ``comps_value`` its blended value and peer leg, where the caller has them.
+    """
+    suitability = withhold_operating_loss(withhold_unbuilt_mid_cycle(
+        assess_valuation_methodology(financial_data or {}), model_inputs), nopat)
+    return withhold_unconfirmed_outlier(suitability, financial_data, model_value, comps_value)
 
 
 def peers_blended(peer_comps: Any, suitability: Any) -> bool:

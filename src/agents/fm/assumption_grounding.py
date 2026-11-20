@@ -52,6 +52,9 @@ _ERP = 0.055                # mature-market equity risk premium; in the range
                             # Damodaran publishes for developed markets, and the
                             # figure a sell-side DCF on a euro large-cap would use
 _DEBT_SPREAD = 0.015        # explicit fallback when issuer coverage is unavailable
+# Operating profit below this multiple of interest is CCC or worse on the
+# synthetic-rating table: distress, whatever the currency or size.
+_DISTRESS_COVERAGE = 1.25
 _TAX_DEFAULT = 0.25         # mature-market average; overridden by the
                             # company's own effective rate when available
 _BETA_MIN, _BETA_MAX = 0.5, 2.0
@@ -138,6 +141,11 @@ _LARGE_FIRM_COVERAGE_TABLE = (
 )
 
 
+# Debt weight from which the cost of equity is floored at the pre-tax cost of
+# debt (the DCF tab's formula uses the same number).
+_KE_FLOOR_DEBT_WEIGHT = 0.30
+
+
 def _issuer_credit_spread(
     company_data: Dict[str, Any], json_data: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
@@ -145,8 +153,12 @@ def _issuer_credit_spread(
 
     A single noisy period is not enough to assign a synthetic rating. Use the
     median of at least two valid current/annual EBIT-to-interest observations.
-    The published cutoff is denominated in US dollars and calibrated on US
-    firms, so apply it only to USD-reporting subjects above $5B.
+    The published cutoffs are calibrated on US firms, so the full table applies
+    only to USD-reporting subjects above $5B. Distress is the exception: a
+    company whose operating profit does not cover its interest (below 1.25x,
+    CCC or worse) is distressed in any currency and at any size. China Vanke,
+    losing money from operations, was lent to at the 1.5% house spread (3.1%
+    all in) and discounted at 2.5%.
     """
     fallback = {
         "spread": _DEBT_SPREAD,
@@ -158,22 +170,6 @@ def _issuer_credit_spread(
     }
     if not isinstance(json_data, dict):
         return fallback
-    currency = str(
-        (company_data.get("basic_info", {}) or {}).get("currency") or ""
-    ).upper()
-    if currency != "USD":
-        return {**fallback, "source": (
-            "1.5% house credit-spread fallback; the available synthetic-rating "
-            "table is calibrated to USD-reporting US firms"
-        )}
-    market = company_data.get("market_data", {}) or {}
-    equity = market.get("market_cap_financial") or market.get("market_cap")
-    if (not isinstance(equity, (int, float)) or isinstance(equity, bool)
-            or not math.isfinite(float(equity)) or float(equity) <= 5_000_000_000):
-        return {**fallback, "source": (
-            "1.5% house credit-spread fallback; the available market capitalization "
-            "does not meet the source table's >$5B large-firm scope"
-        )}
 
     observations = []
 
@@ -203,26 +199,51 @@ def _issuer_credit_spread(
         observe(str(period), row)
         if len(observations) >= 4:
             break
-    if len(observations) < 2:
-        return {**fallback, "coverage_observations": observations}
+    coverage = (statistics.median(row["interest_coverage"] for row in observations)
+                if len(observations) >= 2 else None)
 
-    coverage = statistics.median(
-        row["interest_coverage"] for row in observations
-    )
-    upper, rating, spread = next(
-        row for row in _LARGE_FIRM_COVERAGE_TABLE if coverage <= row[0]
-    )
-    return {
-        "spread": spread,
-        "rating": rating,
-        "coverage": coverage,
-        "coverage_observations": observations,
-        "source": (
-            f"{spread*100:.2f}% synthetic {rating} spread from normalized "
-            f"EBIT/interest coverage {coverage:.2f}x; {_SYNTHETIC_RATING_SOURCE}"
-        ),
-        "synthetic": True,
-    }
+    def synthetic(note: str) -> Dict[str, Any]:
+        upper, rating, spread = next(
+            row for row in _LARGE_FIRM_COVERAGE_TABLE if coverage <= row[0]
+        )
+        return {
+            "spread": spread,
+            "rating": rating,
+            "coverage": coverage,
+            "coverage_observations": observations,
+            "source": (
+                f"{spread*100:.2f}% synthetic {rating} spread from normalized "
+                f"EBIT/interest coverage {coverage:.2f}x; {_SYNTHETIC_RATING_SOURCE}{note}"
+            ),
+            "synthetic": True,
+        }
+
+    distressed = coverage is not None and coverage < _DISTRESS_COVERAGE
+    currency = str(
+        (company_data.get("basic_info", {}) or {}).get("currency") or ""
+    ).upper()
+    if currency != "USD":
+        if distressed:
+            return synthetic("; applied outside its USD scope because operating profit does "
+                             f"not cover interest (below {_DISTRESS_COVERAGE:.2f}x)")
+        return {**fallback, "coverage_observations": observations, "source": (
+            "1.5% house credit-spread fallback; the available synthetic-rating "
+            "table is calibrated to USD-reporting US firms"
+        )}
+    market = company_data.get("market_data", {}) or {}
+    equity = market.get("market_cap_financial") or market.get("market_cap")
+    if (not isinstance(equity, (int, float)) or isinstance(equity, bool)
+            or not math.isfinite(float(equity)) or float(equity) <= 5_000_000_000):
+        if distressed:
+            return synthetic("; applied below its >$5B scope because operating profit does "
+                             f"not cover interest (below {_DISTRESS_COVERAGE:.2f}x)")
+        return {**fallback, "coverage_observations": observations, "source": (
+            "1.5% house credit-spread fallback; the available market capitalization "
+            "does not meet the source table's >$5B large-firm scope"
+        )}
+    if coverage is None:
+        return {**fallback, "coverage_observations": observations}
+    return synthetic("")
 
 
 # The risk-free rate is built from two published inputs, both printed:
@@ -749,7 +770,7 @@ def capm_components(company_data: Dict[str, Any],
 
     tax_details = _effective_tax_rate_details(company_data, json_data)
     tax = tax_details["rate"]
-    ke = rf + beta * erp_total
+    ke_capm = rf + beta * erp_total
     # Corporate debt is priced off the government bond in the same currency,
     # not off the default-free rate: an Indian issuer borrows above the G-Sec,
     # not above the G-Sec less India's default spread.
@@ -833,6 +854,14 @@ def capm_components(company_data: Dict[str, Any],
             weights_note = "market cap unavailable — all-equity weights used"
     w_d = 1.0 - w_e
 
+    # Shareholders are paid after lenders, so where debt is a real part of the
+    # capital they never require less than it costs. CAPM alone gave China
+    # Vanke (91% debt) 4.1% on equity beside 20.6% on debt. A sliver of debt
+    # says little about the equity: a loss-making growth company with one
+    # convertible would otherwise be discounted at the 24% a distressed
+    # lender charges. The workbook applies the same rule (DCF tab row 6).
+    ke = max(ke_capm, kd_pre_tax) if w_d >= _KE_FLOOR_DEBT_WEIGHT else ke_capm
+
     # The WACC is what the components produce. It is NOT clamped: the workbook
     # recomputes it from the same seeded cells, so altering the number here
     # would put two different rates in one model (13% in the summary, 20% in
@@ -872,6 +901,8 @@ def capm_components(company_data: Dict[str, Any],
         "beta_r_squared": beta_r2,
         "beta_index": beta_index,
         "cost_of_equity": ke,
+        "cost_of_equity_capm": ke_capm,
+        "cost_of_equity_floored_at_debt": ke > ke_capm + 1e-12,
         "pre_tax_cost_of_debt": kd_pre_tax,
         "kd_source": kd_source,
         "issuer_credit_spread": credit_spread,
@@ -925,6 +956,9 @@ def compute_capm_wacc(company_data: Dict[str, Any],
         f"ERP {c['equity_risk_premium']*100:.1f}% + CRP {c['country_risk_premium']*100:.2f}%, "
         f"Ke {c['cost_of_equity']*100:.2f}%, D/(D+E) {c['debt_weight']*100:.0f}%)"
     )
+    if c.get("cost_of_equity_floored_at_debt"):
+        note += (f" [Ke raised from the CAPM {c['cost_of_equity_capm']*100:.2f}% to the pre-tax "
+                 f"cost of debt {c['pre_tax_cost_of_debt']*100:.2f}%: equity ranks below debt]")
     if c["wacc_clamped"]:
         lo, hi = c.get("wacc_band", (_WACC_MIN, _WACC_MAX))
         note += f" [OUTSIDE the {lo*100:.1f}-{hi*100:.0f}% band — check the inputs]"
@@ -1157,6 +1191,79 @@ def _anchor_path(path: List[float], trailing: float,
     n = len(path)
     new = [fy1 + (fy5 - fy1) * i / (n - 1) for i in range(n)]
     return new, True
+
+
+def reinvestment_split(json_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The share of D&A that ongoing spending replaces, when amortisation outruns it.
+
+    Projected capex glides to 1.1x D&A by year five. D&A includes the
+    amortisation of intangibles; capex (equipment plus intangibles bought or
+    capitalised, as the provider reports it) replaces only what the company
+    keeps spending on. Hansen: D&A 14.7% of revenue, of which amortisation
+    9.7%; intangibles spending averaged 4.2% (software, inside its capex). The
+    other 5.5% is amortisation of acquired intangibles that no spending
+    replaces, and gliding to it took capex to 16.2% of revenue and halved
+    projected free cash flow. The target becomes 1.1 x (D&A - max(0,
+    amortisation - intangibles spending)): it can only fall, and one-off
+    purchases can only cancel the cut. None when the statements do not split
+    D&A or report no intangibles spending, or nothing is unmatched.
+    """
+    statements = (json_data or {}).get("financial_statements") or {}
+    income = statements.get("income_statement") or {}
+    cash = statements.get("cash_flow") or {}
+
+    def revenue(period):
+        row = income.get(period)
+        return _positive_number(_number(row, "Total Revenue", "Operating Revenue")) if isinstance(row, dict) else None
+
+    periods = [period for period in sorted(income, key=str) if revenue(period)][-3:]
+    if not periods:
+        return None
+    latest = periods[-1]
+    row = income[latest]
+    flows = cash.get(latest) if isinstance(cash.get(latest), dict) else {}
+    # The cash-flow pair first: the model's D&A comes from the cash-flow
+    # statement. Samsung's income-statement lines are a small subset of it.
+    cash_total = _number(flows, "Depreciation And Amortization", "Depreciation Amortization Depletion")
+    cash_depreciation = _number(flows, "Depreciation")
+    income_total = _number(row, "Depreciation And Amortization In Income Statement",
+                           "Depreciation Amortization Depletion Income Statement", "Reconciled Depreciation")
+    if cash_depreciation is not None and cash_total and cash_total > 0:
+        total, depreciation, source = cash_total, cash_depreciation, "cash-flow statement"
+    elif income_total and income_total > 0 and (not cash_total or abs(income_total / cash_total - 1) <= 0.05):
+        depreciation = _number(row, "Depreciation Income Statement")
+        if depreciation is None:
+            amortization = _number(row, "Amortization Of Intangibles Income Statement")
+            depreciation = income_total - amortization if amortization is not None else None
+        total, source = income_total, "income statement"
+    else:
+        return None
+    # No depreciation reported is a gap in the data, not a company with
+    # nothing to replace: the target would glide to zero.
+    if depreciation is None or not 0.0 < depreciation <= total:
+        return None
+    spends = []
+    for period in periods:
+        spent = _number(cash.get(period) or {}, "Purchase Of Intangibles")
+        if spent is not None:
+            spends.append(max(0.0, -spent) / revenue(period))
+    if not spends:
+        return None
+    latest_revenue = revenue(latest)
+    amortization_ratio = (total - depreciation) / latest_revenue
+    spend_ratio = sum(spends) / len(spends)
+    unmatched = max(0.0, amortization_ratio - spend_ratio)
+    if unmatched <= 0.0:
+        return None
+    return {
+        "fiscal_year": str(latest),
+        "source": source,
+        "da_to_revenue": total / latest_revenue,
+        "amortization_to_revenue": amortization_ratio,
+        "intangibles_purchase_to_revenue": spend_ratio,
+        "unmatched_amortization_to_revenue": unmatched,
+        "da_replaced_share": max(0.0, 1.0 - unmatched / (total / latest_revenue)),
+    }
 
 
 def _ordered_statement_rows(json_data: Dict[str, Any], statement: str) -> List[Dict[str, Any]]:
@@ -2006,6 +2113,9 @@ def ground_assumptions(
     # the places where an annual snapshot goes stale. Revenue is replaced below
     # by a rolling consensus bridge when the current TTM and both covered annual
     # endpoints are available.
+    split = reinvestment_split(json_data)
+    if split:
+        a["reinvestment_split"] = split
     if current_bridge:
         normalized = current_bridge.get("normalized") or {}
         basis = {
@@ -2440,5 +2550,17 @@ def ground_assumptions(
         note = apply_mid_cycle(a, mid_cycle)
         if note:
             notes.append(note)
+
+    # Said only when the projections will use it: not when switched off, nor
+    # when a memory maker's capex follows its own year-by-year path.
+    by_year = (a.get("modeling_basis") or {}).get("capex_to_revenue_by_year")
+    if (split and not by_year
+            and os.getenv("VYNN_REINVESTMENT_SPLIT", "").strip().lower() not in ("0", "false", "no", "off")):
+        notes.append(
+            f"Year-five capex target: 1.1x D&A less amortisation that ongoing intangibles spending "
+            f"does not replace ({split['unmatched_amortization_to_revenue'] * 100:.1f}% of revenue in "
+            f"{split['fiscal_year'][:4]}: amortisation {split['amortization_to_revenue'] * 100:.1f}%, "
+            f"intangibles spending {split['intangibles_purchase_to_revenue'] * 100:.1f}%)"
+        )
 
     return a, notes

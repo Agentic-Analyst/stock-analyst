@@ -149,26 +149,29 @@ def test_real_expectation_file_covers_the_nightly_basket():
     # The basket must keep exercising all three outcomes: a corroborated value,
     # one the Street does not back, and a model that supports no single value.
     single = {t: e["status"] for t, e in expectations.items() if isinstance(e["status"], str)}
-    assert sum(status == "FLAGGED" for status in single.values()) >= 5
+    # At least three of each since 2026-11-19, when the unconfirmed-outlier
+    # rule made TSLA, AMD, PYPL and TEX range-only and the day's data moved
+    # NVDA, META and SNDK (five of each before).
+    assert sum(status == "FLAGGED" for status in single.values()) >= 3
     assert sum(status == "WITHHELD" for status in single.values()) >= 3
-    assert sum(status == "PUBLISHED" for status in single.values()) >= 5
+    assert sum(status == "PUBLISHED" for status in single.values()) >= 3
     # The default floor must sit under the healthy rate and above a collapse.
     healthy = sum(status != "WITHHELD" for status in single.values()) / len(basket)
     floor = float(re.search(r"MIN_PUBLISH_RATE=\$\{MIN_PUBLISH_RATE:-([0-9.]+)\}", nightly).group(1))
-    assert floor == 0.52 and floor < healthy
-    # One name flipping from the bottom of the healthy band (10 publish)
+    assert floor == 0.41 and floor < healthy
+    # One name flipping from the bottom of the healthy band (8 publish)
     # still passes: the floor catches a collapse, the --expect gate a flip.
-    assert (10 - 1) / len(basket) >= floor
+    assert (8 - 1) / len(basket) >= floor
 
 
 def test_the_default_floor_matches_the_nightly_script(tmp_path):
-    rows = [_row(f"T{i}") for i in range(9)] + [_row(f"W{i}", withheld=True) for i in range(7)]
+    rows = [_row(f"T{i}") for i in range(7)] + [_row(f"W{i}", withheld=True) for i in range(10)]
     candidate = tmp_path / "cand.json"
     candidate.write_text(json.dumps(rows), encoding="utf-8")
-    assert summary.main([str(candidate)]) == 0          # 9 of 16 publish
-    rows[8] = _row("T8", withheld=True)
+    assert summary.main([str(candidate)]) == 0          # 7 of 17 publish
+    rows[6] = _row("T6", withheld=True)
     candidate.write_text(json.dumps(rows), encoding="utf-8")
-    assert summary.main([str(candidate)]) == 1          # 8 of 16 is a collapse
+    assert summary.main([str(candidate)]) == 1          # 6 of 17 is a collapse
 
 
 def test_a_list_accepts_either_outcome_but_never_a_failure():

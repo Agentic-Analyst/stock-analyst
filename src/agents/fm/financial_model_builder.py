@@ -293,6 +293,7 @@ class FinancialModelBuilder:
         self.projections_builder = ProjectionsTabBuilder(
             modeling_basis=modeling_basis,
             working_capital_cost_base=working_capital_cost_base,
+            reinvestment_split=self.llm_assumptions.get("reinvestment_split"),
         )
         self.perpetual_growth_dcf_builder = ValuationPerpetualGrowthDCFBuilder(
             modeling_basis=modeling_basis

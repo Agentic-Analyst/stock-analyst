@@ -8,6 +8,7 @@ Kept as a flat src-root module so both import styles used in this repo
 from the repo root) can reach it.
 """
 
+import re
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -46,6 +47,80 @@ def extract_news_item(n: dict) -> Optional[dict]:
     }
 
 
+# Yahoo's news endpoint is the only source the chat's quick news tool had. On
+# 17 Nov 2026 it answered "YAHOO! FINANCE IS CURRENTLY DOWN" and 9 of 10
+# replayed overview answers said "I couldn't retrieve fresh headlines". Google
+# News' public search feed (no key) fills in when Yahoo returns nothing.
+GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
+
+
+def parse_google_news(xml_bytes: bytes, count: int = 10) -> List[dict]:
+    """Items from a Google News RSS document, newest first, in Yahoo's item shape."""
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+    items = []
+    for it in ET.fromstring(xml_bytes).findall("./channel/item"):
+        title = (it.findtext("title") or "").strip()
+        publisher = (it.findtext("source") or "").strip() or None
+        if publisher and title.endswith(" - " + publisher):
+            title = title[: -len(" - " + publisher)]
+        try:
+            when = parsedate_to_datetime(it.findtext("pubDate") or "").astimezone(timezone.utc)
+        except Exception:
+            when = None
+        if title:
+            items.append({"title": title, "publisher": publisher, "link": it.findtext("link"),
+                          "published": when.isoformat() if when else None, "_when": when})
+    items.sort(key=lambda i: i["_when"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    for i in items:
+        i.pop("_when", None)
+    return items[:count]
+
+
+def fetch_google_news(query: str, count: int = 10, days: int = 30, timeout: int = 10) -> List[dict]:
+    """Headlines from Google News search for the last ``days`` days; empty on any failure."""
+    import urllib.parse
+    import urllib.request
+    url = GOOGLE_NEWS_RSS + "?" + urllib.parse.urlencode(
+        {"q": f"{query} when:{days}d", "hl": "en-US", "gl": "US", "ceid": "US:en"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; VYNN research)"})
+    for attempt in range(2):   # one retry: a lone failed request returned nothing for Costco
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return parse_google_news(r.read(), count)
+        except Exception:
+            if attempt == 0:
+                time.sleep(1.0)
+    return []
+
+
+# Trailing legal forms people leave out when they write about a company.
+_LEGAL_FORM = re.compile(
+    r"[\s,]+(?:limited|ltd\.?|inc\.?|incorporated|corporation|corp\.?|co\.?|company|plc|"
+    r"n\.?v\.?|s\.?a\.?|ag|se|holdings?|group|\(the\))$", re.I)
+
+
+def search_name(name: Optional[str]) -> Optional[str]:
+    """'China Vanke Co., Ltd.' -> 'China Vanke'; 'Hansen Technologies Limited' -> 'Hansen Technologies'."""
+    text = " ".join(str(name or "").split())
+    previous = None
+    while text and text != previous:
+        previous = text
+        text = _LEGAL_FORM.sub("", text).strip(" ,")
+    return text or None
+
+
+def _company_name(ticker: str) -> Optional[str]:
+    # The long name: for ASX listings the short one is a code ("HANSEN TEC FPO
+    # [HSN]") that finds no articles.
+    try:
+        import yfinance as yf
+        info = yf.Ticker(ticker).info or {}
+        return search_name(info.get("longName") or info.get("shortName"))
+    except Exception:
+        return None
+
+
 def fetch_ticker_news(ticker: str, count: int = 10) -> List[dict]:
     """
     Fetch recent headlines for a ticker via yfinance, with one short retry.
@@ -68,6 +143,9 @@ def fetch_ticker_news(ticker: str, count: int = 10) -> List[dict]:
             if attempt == 0:
                 time.sleep(1.2)
             continue
+    if not items:
+        name = _company_name(ticker)
+        items = fetch_google_news(f'"{name}"' if name else f"{ticker} stock", count)
     return items[:count]
 
 
@@ -84,4 +162,6 @@ def fetch_topic_news(topic: str, count: int = 10) -> List[dict]:
                 items.append(item)
     except Exception:
         pass
+    if not items:
+        items = fetch_google_news(topic, count)
     return items[:count]

@@ -109,6 +109,26 @@ def session_open(last_session: str, exchange_tz: Optional[str], now=None) -> boo
     return local.date().isoformat() == last_session and (local.hour, local.minute) < close
 
 
+def versus_market(stock_pct: Any, index_pct: Any, index_name: Optional[str],
+                  session: Optional[str] = None, period: Optional[str] = None) -> Optional[str]:
+    """A move against the market's over the same time, in words.
+
+    Worked out here: an answer called a 1% fall "a bit better than the ASX
+    200's 0.6% fall".
+    """
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (stock_pct, index_pct)):
+        return None
+    index = index_name or "the market"
+    gap = float(stock_pct) - float(index_pct)
+    when = period or (f"on {session}" if session else "in the latest session")
+    stock = f"{'up' if stock_pct >= 0 else 'down'} {abs(stock_pct):.1f}%"
+    market = f"{'up' if index_pct >= 0 else 'down'} {abs(index_pct):.1f}%"
+    if abs(gap) < 0.05:
+        return f"The stock was {stock} {when}, in line with {index} ({market})."
+    return (f"The stock was {stock} {when} against {index} {market}: "
+            f"{abs(gap):.1f} points {'better' if gap > 0 else 'worse'} than the market.")
+
+
 def sector_fund(sector: Optional[str], industry: Optional[str], currency: Optional[str]) -> Optional[tuple]:
     """US sector funds compare a US listing; a home-market line gets none."""
     if currency not in (None, "USD"):
@@ -151,9 +171,12 @@ class ExplainPriceMoveTool(Tool):
         "dates), the biggest sessions with their volume versus normal, performance "
         "over 5d/1mo/3mo/ytd/1y, the 52-week high and drawdown (and the first close "
         "for a recent IPO), the dated news for the sessions that moved, each article "
-        "with its source and summary, and insider/company SEC filings over the same "
-        "days (Form 144 sale notices, Form 4 trades, 8-Ks, offerings). Prefer it to "
-        "get_prices + get_global_news for any why-did-it-move question."
+        "with its source and summary (and, when the feed does not reach the day that "
+        "moved most, a dated news search for it), and insider/company SEC filings over "
+        "the same days (Form 144 sale notices, Form 4 trades, 8-Ks with the opening of a "
+        "results press release, offerings), and, where enabled, an Australian (.AX) "
+        "listing's ASX announcements filed under the session each could have moved. "
+        "Prefer it to get_prices + get_global_news for any why-did-it-move question."
     )
     parameters = {
         "type": "object",
@@ -216,13 +239,15 @@ class ExplainPriceMoveTool(Tool):
 
         from src.company_news import news_for_move
         from src.sec_activity import filing_activity
+        from src.exchange_announcements import announcements_for_move
         fund = None if crypto else sector_fund(identity.get("sector"), identity.get("industry"), currency)
         require_name = identity.get("quote_type") not in _UNNAMED_QUOTE_TYPES and not crypto
-        news, filings, fund_frame = await asyncio.gather(
+        news, filings, fund_frame, announcements = await asyncio.gather(
             asyncio.to_thread(news_for_move, ticker, name, start, end, sessions, focus, recent,
                               exchange_tz, require_name, session_moves),
             asyncio.to_thread(lambda: None if not require_name else filing_activity(ticker, start, end)),
             asyncio.to_thread(lambda: _live_frame(fund[0]) if fund else None),
+            asyncio.to_thread(announcements_for_move, ticker, start, end, sessions),
         )
         payload: Dict[str, Any] = {"ticker": ticker, **move}
         if name:
@@ -238,19 +263,43 @@ class ExplainPriceMoveTool(Tool):
             if episode:
                 episode[f"{fund[0]}_same_dates_pct"] = index_change(
                     fund_frame["Close"], episode["start_date"], episode["end_date"])
+        # Not for a coin: it trades every day and its "market" index does not.
+        comparison = None if crypto else versus_market(
+            payload.get("day_change_pct"), market_today.get("index_today_pct"), index_name,
+            session=payload.get("as_of_session"))
+        if comparison:
+            market_today["stock_vs_index_today"] = comparison
+        episode = payload.get("episode")
+        if episode and not crypto:
+            # The same reading for the window's main move: Robinhood's +7.9%
+            # against the S&P 500's +3.6% was called "lagged the market".
+            over = versus_market(episode.get("change_pct"), episode.get("market_same_dates_pct"), index_name,
+                                 period=f"from {episode.get('start_date')} to {episode.get('end_date')}")
+            if over:
+                episode["stock_vs_market"] = over
         payload["market_today"] = market_today
         payload["news"] = news
         if filings:
             payload["sec_filings"] = filings
+        if announcements:
+            payload["exchange_announcements"] = announcements
         payload["how_to_read"] = (
             "episode = the largest move in the window; biggest_days = the sessions that made it "
             "(volume_vs_average 2+ means heavy trading); news.by_session lists articles under the "
             "first session they could have moved (after-close news moves the next session unless it "
             "looks back at the day); news.coverage is the span of days the news feed reaches; "
             "market_same_dates_pct and the sector fund's same-dates/today moves separate a "
-            "stock-specific move from the market's or the sector's; from_window_high is the fall "
+            "stock-specific move from the market's or the sector's (episode.stock_vs_market and "
+            "market_today.stock_vs_index_today say it in words; use them); from_window_high is the fall "
             "from the window's high to now; a session_in_progress has only part of its volume. "
-            "A Form 144 is a notice of intent to sell, not a completed sale."
+            "A Form 144 is a notice of intent to sell, not a completed sale. "
+            "news.dated_search is a news search limited to the days around the session that moved "
+            "most; an article dated 'around' a day was within those days by the search's own filter. "
+            "sec_filings.other_filings[].results_release.excerpt is the opening of the company's own "
+            "results press release (8-K Exhibit 99.1): primary evidence for that day's move. "
+            "exchange_announcements.price_sensitive_by_session lists the company's own "
+            "price-sensitive releases (results, guidance, leadership) under the session they "
+            "could have moved; they are primary evidence for that day's move."
         )
         return tool_ok(**payload)
 

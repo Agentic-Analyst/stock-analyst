@@ -43,8 +43,50 @@ from slugify import slugify
 
 from serpapi import GoogleSearch
 from newspaper import Article
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+# Articles used to be downloaded one at a time with a one-second pause after
+# each, and newspaper3k also downloaded every image on the page to pick the
+# largest: most of a typical 45-second news step in production (Aug-Nov 2026).
+# Pages now download side by side, without image downloads (the publisher's
+# og:image is read from the page itself) and with a bounded timeout.
+ARTICLE_FETCH_WORKERS = 8
+ARTICLE_TIMEOUT_SECONDS = 8
+_COUNT_LOCK = threading.Lock()
 from llms.config import get_llm
 from financial_scraper import FinancialScraper
+
+def _is_google_news_link(url: str) -> bool:
+    """A Google News page that stands in for an article (the free news fallback's links).
+
+    Downloading one returns Google's own page (600 KB) rather than the article,
+    so its text was never the article's.
+    """
+    from urllib.parse import urlparse
+    try:
+        return urlparse(str(url or "")).netloc.lower() == "news.google.com"
+    except Exception:
+        return False
+
+
+def _headline_only(url: str, metadata: Dict) -> Optional[Dict]:
+    """The headline and outlet as the article's text, without a download."""
+    title = str((metadata or {}).get("title") or "").strip()
+    if not title:
+        return None
+    outlet = str((metadata or {}).get("source_name") or "").strip()
+    text = f"{title}." + (f" (Reported by {outlet}.)" if outlet else "")
+    return {
+        "url": url,
+        "title": title,
+        "publish_date": str((metadata or {}).get("published_date") or ""),
+        "text": text,
+        "word_count": len(text.split()),
+        "top_image": "",
+        "headline_only": True,
+    }
+
 
 class ArticleScraper:
     """News article scraper for collecting stock-related news articles."""
@@ -401,7 +443,11 @@ class ArticleScraper:
                 "q": query,
                 "tbm": "nws",
                 "num": self.max_articles,
-                "tbs": "qdr:d",  # Last 24 hours
+                # The last week. Articles are accepted up to NEWS_MAX_AGE_DAYS
+                # old and at least NEWS_MIN_FRESH_ARTICLES are needed, but the
+                # search asked for the last 24 hours only: Tesla found 6 and
+                # China Vanke 7, too few for any news reading at all.
+                "tbs": "qdr:w",
                 "api_key": self.api_key
             })
             # The client's default timeout is 60000 (seconds — effectively
@@ -413,6 +459,13 @@ class ArticleScraper:
             if not isinstance(result, dict):
                 self._log("warning", f"Unexpected SerpAPI response type: {type(result)}")
                 return None
+
+            # Google found nothing: an empty result, not an outage. Treated
+            # as an outage, it tripped the circuit breaker and skipped every
+            # remaining query (30 times in one night's replay).
+            if "error" in result and "hasn't returned any results" in str(result.get("error")):
+                self._log("warning", f"No news results found for query: {query}")
+                return []
 
             # Check for API errors
             if "error" in result:
@@ -486,7 +539,8 @@ class ArticleScraper:
     def _scrape_article(self, url: str) -> Optional[Dict]:
         """Download & parse an article. Returns dict or None on failure."""
         try:
-            art = Article(url, language="en")
+            art = Article(url, language="en", request_timeout=ARTICLE_TIMEOUT_SECONDS,
+                          fetch_images=False)
             art.download()
             art.parse()
             return {
@@ -502,7 +556,8 @@ class ArticleScraper:
             }
         except Exception as e:
             self._log("warning", f"Could not scrape {url}: {e}")
-            self.failed_count += 1
+            with _COUNT_LOCK:
+                self.failed_count += 1
             return None
     
     def _save_article_markdown(self, article_data: Dict) -> pathlib.Path:
@@ -684,16 +739,24 @@ og_image: "{article_data.get('top_image', '')}"
                 metadata["search_category"] = category.replace('_', ' ')
                 unique_articles[url] = metadata
 
-        # Scrape each article
-        for url, metadata in unique_articles.items():
+        # Download the articles side by side, then save and count them in the
+        # original order on this thread.
+        pending = list(unique_articles.items())
+        for url, _metadata in pending:
             progress_logger = getattr(self.logger, "scraping_progress", None)
             if callable(progress_logger):
                 progress_logger(url, "in progress")
             else:
                 self._log("info", f"🌐 Scraping in progress: {url}")
-            
-            article_data = self._scrape_article(url)
-            
+        workers = max(1, min(ARTICLE_FETCH_WORKERS, len(pending)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            downloaded = list(pool.map(
+                lambda item: (_headline_only(item[0], item[1]) if _is_google_news_link(item[0])
+                              else self._scrape_article(item[0])),
+                pending,
+            ))
+
+        for (url, metadata), article_data in zip(pending, downloaded):
             if not article_data:
                 continue  # Failed scraping already counted in _scrape_article
             
@@ -733,8 +796,6 @@ og_image: "{article_data.get('top_image', '')}"
                 f"   📊 Sector: {self.company_sector}, Industry: {self.company_industry}",
             )
 
-            time.sleep(1)  # Be polite to servers
-        
         results = self._get_scraping_results()
         results["scraped_files"] = scraped_files
         results["industry_info"] = self.industry_info

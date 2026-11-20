@@ -132,6 +132,17 @@ class ShowChartTool(Tool):
         if tf not in _TIMEFRAMES:
             tf = "1M"
 
+        # Once per chat: a follow-up about the same company drew the same
+        # chart again under every answer. The frontend's chart is live, so
+        # the one above stays current. Another timeframe is a new chart.
+        shown = getattr(self.ctx, "charts_in_chat", None)
+        if isinstance(shown, set) and (sym, tf) in shown:
+            return tool_ok(
+                symbol=sym, timeframe=tf, already_shown=True,
+                note=("This chart is already in the chat above, so it was not drawn again. "
+                      "Refer to it as the chart above; do not say a new chart is shown."),
+            )
+
         spec = {
             "id": f"{sym}-{tf}",
             "kind": "price",
@@ -147,6 +158,11 @@ class ShowChartTool(Tool):
         self.ctx.logger.info(
             "[CHART_DIRECTIVE] " + json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
         )
+        if isinstance(shown, set):
+            shown.add((sym, tf))
+        drawn = getattr(self.ctx, "charts_this_turn", None)
+        if isinstance(drawn, list):
+            drawn.append({"symbol": sym, "timeframe": tf})
         return tool_ok(
             note="Interactive live chart is now displayed to the user in the chat.",
             **spec,

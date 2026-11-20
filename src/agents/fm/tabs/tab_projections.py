@@ -24,6 +24,22 @@ from ..financial_model_builder import ExcelFormats
 from ..financial_metrics import WORKING_CAPITAL_COST_BASE_REVENUE
 
 
+def _usable_split(split: Optional[Dict[str, Any]]) -> Optional[float]:
+    """The share of D&A the year-five capex target replaces, or None for the plain 1.1x D&A.
+
+    On unless VYNN_REINVESTMENT_SPLIT=0 (owner's decision, 19 Nov 2026).
+    """
+    import os
+    if os.getenv("VYNN_REINVESTMENT_SPLIT", "").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    if not isinstance(split, dict):
+        return None
+    share = split.get("da_replaced_share")
+    if isinstance(share, bool) or not isinstance(share, (int, float)) or not math.isfinite(share):
+        return None
+    return float(share) if 0.0 <= share < 1.0 else None
+
+
 # Per-year D&A and capex ratios to projected revenue the workbook accepts
 # (memory_cycle.asset_base_path writes them and checks the same bounds).
 YEAR_RATIO_BOUNDS = {"da": (0.0, 1.0), "capex": (-2.0, 0.0)}
@@ -53,7 +69,8 @@ class ProjectionsTabBuilder:
     
     def __init__(self, projection_years: int = 5,
                  modeling_basis: Optional[Dict[str, Any]] = None,
-                 working_capital_cost_base: Optional[str] = None):
+                 working_capital_cost_base: Optional[str] = None,
+                 reinvestment_split: Optional[Dict[str, Any]] = None):
         """
         Initialize the Projections builder.
         
@@ -65,6 +82,7 @@ class ProjectionsTabBuilder:
         """
         self.projection_years = projection_years
         self.modeling_basis = modeling_basis or {}
+        self.reinvestment_split = reinvestment_split if isinstance(reinvestment_split, dict) else None
         # Row 3 is revenue, row 4 cost of revenue. The balances must be
         # rebuilt on the base their days were measured on, or a payables
         # ratio measured on revenue would be applied to a cost line.
@@ -406,8 +424,21 @@ class ProjectionsTabBuilder:
             col_letter = chr(64 + col)  # B, C, D, E, F
             frac = i / max(1, self.projection_years - 1)  # 0 .. 1 across FY1..FY5
 
+            replaced = _usable_split(self.reinvestment_split)
             if capex_by_year:
                 formula = f'={col_letter}3*{capex_by_year[i]:.12f}'
+            elif replaced is not None and use_ttm_capex and use_ttm_da:
+                # The target replaces only the D&A ongoing spending keeps up
+                # (reinvestment_split): not acquired intangibles running off.
+                formula = (
+                    f'={col_letter}3*({float(capex_ratio):.12f}*{1 - frac:.2f}'
+                    f'-1.1*{float(da_ratio):.12f}*{replaced:.12f}*{frac:.2f})'
+                )
+            elif replaced is not None:
+                formula = (
+                    f'={col_letter}3*((Historical!$F$24/Historical!$F$3)*{1 - frac:.2f}'
+                    f'-1.1*ABS(Historical!$F$18)/Historical!$F$3*{replaced:.12f}*{frac:.2f})'
+                )
             elif use_ttm_capex and use_ttm_da:
                 formula = (
                     f'={col_letter}3*({float(capex_ratio):.12f}*{1 - frac:.2f}'

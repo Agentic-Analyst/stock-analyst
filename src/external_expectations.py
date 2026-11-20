@@ -588,6 +588,8 @@ def _estimate(rows: Any, period: str, *, positive_values: bool) -> Dict[str, Any
         "low": _number(row.get("low"), positive=positive_values),
         "high": _number(row.get("high"), positive=positive_values),
         "growth": _number(row.get("growth")),
+        # The provider's base for that growth rate.
+        "year_ago": _number(row.get("yearAgoEps") if "yearAgoEps" in row else row.get("yearAgoRevenue")),
         "analyst_count": _count(row.get("numberOfAnalysts")),
         # A year the company has reported, realigned into the table
         # (src/estimate_alignment.py): not a forecast.
@@ -701,6 +703,26 @@ def _infer_eps_source_currency(
         "listing_currency_candidate_pe": candidates[listing],
         "reporting_currency_candidate_pe": candidates[financial],
     }
+
+
+# How far the provider's year-ago EPS may sit from the reported one before its
+# first-year growth rate is a different basis, not a rounding difference.
+_EPS_BASE_TOLERANCE = 0.15
+
+
+def _latest_reported_eps(data: Dict[str, Any]) -> Optional[float]:
+    """The latest annual diluted (else basic) EPS the company reported; None on doubt."""
+    rows = ((data.get("financial_statements") or {}).get("income_statement") or {})
+    if not isinstance(rows, dict) or not rows:
+        return None
+    latest = rows.get(sorted(rows, key=str)[-1])
+    if not isinstance(latest, dict):
+        return None
+    for key in ("Diluted EPS", "Basic EPS"):
+        value = _number(latest.get(key))
+        if value is not None:
+            return value
+    return None
 
 
 def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -871,11 +893,60 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
             implied_net_income / revenue_row["average"]
             if implied_net_income is not None and revenue_row["average"] else None
         )
+        # The provider measures each year against its own "year-ago" figure,
+        # which for the second year need not be its first-year estimate: China
+        # Vanke's next year read -18.4% while its own estimates, CNY 179.3B
+        # then 135.2B, fall 24.6%. A later year is measured against the year
+        # before it, as a reader checking the two rows would.
+        revenue_growth = revenue_row["growth"]
+        previous = years[-1]["revenue"] if years else None
+        if (index > 0 and isinstance(previous, (int, float)) and previous > 0
+                and isinstance(revenue_row["average"], (int, float)) and revenue_row["average"] > 0):
+            revenue_growth = revenue_row["average"] / previous - 1.0
+        # The same for EPS; across a loss a growth rate means nothing.
+        eps_growth = eps_row["growth"]
+        if isinstance(eps_row["average"], (int, float)) and eps_row["average"] <= 0:
+            eps_growth = None
+        if isinstance(raw_eps[index].get("year_ago"), (int, float)) and raw_eps[index]["year_ago"] <= 0:
+            eps_growth = None    # from a loss a year ago
+        previous_eps = years[-1]["eps"] if years else None
+        if index > 0 and isinstance(previous_eps, (int, float)) and isinstance(eps_row["average"], (int, float)):
+            eps_growth = (eps_row["average"] / previous_eps - 1.0
+                          if previous_eps > 0 and eps_row["average"] > 0 else None)
+        # The first year is measured from the provider's own year-ago EPS,
+        # usually an adjusted figure, and so is the estimate: that rate is
+        # consistent (Booking: 9.12 to 10.45 adjusted, though GAAP EPS was
+        # 6.62). It mixes bases only when the estimate sits on the reported
+        # EPS while the year-ago does not: Hansen's A$0.238 estimate beside a
+        # reported A$0.231 read "-26%" against the provider's A$0.323.
+        eps_growth_note = None
+        if index == 0 and eps_growth is not None:
+            year_ago = _eps_in_model_currency(
+                raw_eps[0].get("year_ago"), source_currency=eps_source_currency,
+                financial_currency=financial_currency, fx_rate=fx_rate,
+            )
+            reported_eps = _latest_reported_eps(data)
+            estimate = eps_row["average"]
+            converted = eps_row.get("currency_conversion_rate") not in (None, 1.0)
+            if (not converted
+                    and isinstance(year_ago, (int, float)) and year_ago > 0
+                    and isinstance(reported_eps, (int, float)) and reported_eps > 0
+                    and isinstance(estimate, (int, float)) and estimate > 0
+                    # Same units: an ADR's EPS is a multiple of the share's.
+                    and 0.2 <= year_ago / reported_eps <= 5.0
+                    and abs(estimate / reported_eps - 1.0) <= _EPS_BASE_TOLERANCE
+                    and abs(year_ago / reported_eps - 1.0) > _EPS_BASE_TOLERANCE):
+                eps_growth = None
+                eps_growth_note = (
+                    f"No growth rate: the provider measures it from a year-ago EPS of "
+                    f"{year_ago:.3f}, while the estimate sits near the {reported_eps:.3f} "
+                    "the company reported (a different basis)."
+                )
         years.append({
             "period": period,
             "reported": revenue_row["reported"],
             "revenue": revenue_row["average"],
-            "revenue_growth": revenue_row["growth"],
+            "revenue_growth": revenue_growth,
             "revenue_analyst_count": revenue_row["analyst_count"],
             "eps": eps_row["average"],
             "eps_source_value": raw_eps[index]["average"],
@@ -886,7 +957,8 @@ def build_external_expectations(financial_data: Dict[str, Any]) -> Dict[str, Any
             ),
             "eps_unit_basis": eps_unit.get("basis"),
             "eps_unit_confidence": eps_unit.get("confidence"),
-            "eps_growth": eps_row["growth"],
+            "eps_growth": eps_growth,
+            **({"eps_growth_note": eps_growth_note} if eps_growth_note else {}),
             "eps_analyst_count": eps_row["analyst_count"],
             "implied_net_income": implied_net_income,
             "implied_net_margin": implied_net_margin,

@@ -169,6 +169,41 @@ import yfinance as yf
 from dotenv import load_dotenv
 load_dotenv()
 
+
+def _states_cash_flow_multiple(answer: str, ratio: float) -> bool:
+    """The plain form of the whole-path reverse DCF, with its own number.
+
+    "Trades at 40 times the cash flow" is not it: the multiple the answer
+    states must be the one the market price implies.
+    """
+    lower = str(answer or "").lower()
+    if "times the cash flow" not in lower:
+        return False
+    tokens = {f"{ratio:.2f}", f"{ratio:.1f}", f"{ratio:.0f}"} if abs(ratio) >= 1 else {f"{ratio:.2f}"}
+    return any(re.search(rf"(?<![\d.]){re.escape(token)}(?![\d])\s*(?:times|×|x)\b", lower)
+               for token in tokens)
+
+
+def _has_human_benchmark(benchmark: Dict[str, object]) -> bool:
+    """Analysts' targets, ratings or forecasts, as opposed to market-implied figures only."""
+    return bool(
+        benchmark.get("target_mean") is not None
+        or benchmark.get("rating")
+        or benchmark.get("analyst_observation_count")
+        or any(row.get("street_revenue") is not None for row in benchmark.get("forward") or [])
+    )
+
+
+def _same_amount(a: str, b: str) -> bool:
+    """'$20.25 USD' and '$20.25' state the same amount."""
+    import re as _re
+    num = lambda t: (_re.search(r"\d[\d,]*(?:\.\d+)?", t) or [None])[0]
+    x, y = num(a), num(b)
+    try:
+        return x is not None and y is not None and abs(float(x.replace(",", "")) - float(y.replace(",", ""))) < 0.005
+    except ValueError:
+        return False
+
 class SupervisorWorkflowRunner:
     """
     Orchestrates the LLM-powered agentic workflow with supervisor routing.
@@ -212,7 +247,8 @@ class SupervisorWorkflowRunner:
             )
         else:
             range_text = "No supported positive valuation-method estimate is available."
-        reason = compact_publication_reason(
+        from src.summary_evidence import plain_publication_reason
+        reason = plain_publication_reason(
             metrics.get("publication_withheld_reason")
             or "The valuation evidence is not sufficiently reconciled for a point conclusion."
         )
@@ -249,11 +285,33 @@ class SupervisorWorkflowRunner:
             unsuitable_method_note(metrics.get("method_suitability")),
             shape=span["shape"],
         )
-        answer = (
-            f"{self.ticker}: {view['headline']}\n\n{body}"
-            f"\n\n{note} Detail: {reason}"
+        # A ruled-out method's reason is already the evidence line ("The
+        # method was ruled out because ..."); China Vanke's answer stated it
+        # twice in a row.
+        method_note = unsuitable_method_note(metrics.get("method_suitability"))
+        detail = f" Detail: {reason}"
+        if method_note and method_note.rstrip(".") in reason:
+            # The chat shows the reason's first sentence (the rest stays in
+            # the report), and here that sentence is the method's own reason:
+            # nothing is left to add. A cause that comes first shows under
+            # "Detail:" below. Cutting the method's words out of its sentence
+            # printed "Also: No point valuation is published because."
+            # under Costco (18 Nov check).
+            detail = ""
+        # The two newest method rules state their reason plainly in the
+        # evidence line; the note after it said the same a third time, and
+        # wrongly ("the cash-flow method does not fit this company").
+        if (metrics.get("method_suitability") or {}).get("primary_method") in (
+                "scenario_only_pending_operating_profit", "scenario_only_pending_corroboration"):
+            note = ""
+        tail = f"{note}{detail}".strip()
+        answer = f"{self.ticker}: {view['headline']}\n\n{body}" + (f"\n\n{tail}" if tail else "")
+        # A ruled-out method states no direction, so the block does not
+        # compare the analysts with it either.
+        rendered = render_external_benchmark_compact(
+            benchmark,
+            model_comparison=not unsuitable_method_note(metrics.get("method_suitability")),
         )
-        rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
             has_human_benchmark = bool(
                 benchmark.get("target_mean") is not None
@@ -264,11 +322,7 @@ class SupervisorWorkflowRunner:
                     for row in benchmark.get("forward") or []
                 )
             )
-            label = (
-                "Human-analyst and market benchmark reconciliation"
-                if has_human_benchmark else "Market benchmark reconciliation"
-            )
-            answer += f"\n\n{label}{self._benchmark_basis()}:\n{rendered}"
+            answer += f"\n\n{self._benchmark_label(has_human_benchmark)}\n{rendered}"
         lead = self._listing_lead("withheld", metrics, benchmark=benchmark)
         return f"{lead}\n\n{answer}" if lead else answer
 
@@ -292,6 +346,12 @@ class SupervisorWorkflowRunner:
             return lead_paragraph(view, company=company, kind=kind, figures=figures)
         except Exception:
             return ""
+
+    def _benchmark_label(self, has_human_benchmark: bool) -> str:
+        """The heading over the Street block, in words a retail reader uses."""
+        if has_human_benchmark:
+            return f"What analysts think{self._benchmark_basis()}, for comparison (not VYNN's view):"
+        return f"What today's price assumes{self._benchmark_basis()}:"
 
     def _benchmark_basis(self) -> str:
         """
@@ -324,16 +384,30 @@ class SupervisorWorkflowRunner:
             symbol = currency_symbol(currency)
         except Exception:
             symbol = ""
-        parts = []
-        if headline.get("rating"):
-            parts.append(f"investment rating {headline['rating']}")
+        # One plain sentence. It used to read "TSLA audited report headline:
+        # investment rating STRONG SELL; model fair value $20.25 USD; 12-month
+        # price target $20.25." (12% of saved answers opened with this form).
+        rating = str(headline.get("rating") or "").strip()
         fair_value = metrics.get("fair_value")
+        value_text = None
         if isinstance(fair_value, (int, float)) and not isinstance(fair_value, bool):
-            parts.append(f"model fair value {symbol}{float(fair_value):,.2f} {currency}")
-        if headline.get("price_target_12m"):
-            parts.append(f"12-month price target {headline['price_target_12m']}")
-        detail = "; ".join(parts) if parts else "published without a point headline"
-        answer = f"{self.ticker} audited report headline: {detail}."
+            value_text = f"{symbol}{float(fair_value):,.2f} {currency}"
+        target = str(headline.get("price_target_12m") or "").strip()
+        same = bool(value_text and target) and _same_amount(value_text, target)
+        figures = []
+        if value_text and (not target or same):
+            figures.append(f"a model fair value{' and 12-month price target' if same else ''} of {value_text}")
+        elif value_text:
+            figures.append(f"a model fair value of {value_text}")
+        if target and not same:
+            figures.append(f"a 12-month price target of {target}")
+        if rating:
+            answer = f"VYNN's report rates {self.ticker} {rating}"
+            answer += (", with " + " and ".join(figures) + ".") if figures else "."
+        elif figures:
+            answer = f"VYNN's report on {self.ticker} gives " + " and ".join(figures) + "."
+        else:
+            answer = f"VYNN's report on {self.ticker} is published without a rating or a single fair value."
         # A memory maker's value is mid-cycle: say how it was reached, and how
         # many years of peak-cycle cash flow the price pays for.
         from src.summary_evidence import mid_cycle_method_note, required_growth_sentence
@@ -349,7 +423,7 @@ class SupervisorWorkflowRunner:
         benchmark = self._current_external_benchmark()
         rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
-            answer += f"\n\nExternal benchmark reconciliation{self._benchmark_basis()}:\n" + rendered
+            answer += f"\n\n{self._benchmark_label(_has_human_benchmark(benchmark))}\n{rendered}"
         lead = self._listing_lead("published", metrics, headline, benchmark)
         return f"{lead}\n\n{answer}" if lead else answer
 
@@ -492,10 +566,7 @@ class SupervisorWorkflowRunner:
         benchmark = self._current_external_benchmark()
         rendered = render_external_benchmark_compact(benchmark)
         if rendered and not rendered.startswith("Human-analyst benchmark unavailable"):
-            answer += (
-                f"\n\nThe Street's view{self._benchmark_basis()}, shown as a benchmark and not as "
-                "VYNN's rating:\n" + rendered
-            )
+            answer += f"\n\n{self._benchmark_label(_has_human_benchmark(benchmark))}\n{rendered}"
         lead = self._listing_lead("refused", benchmark=benchmark)
         return f"{lead}\n\n{answer}" if lead else answer
 
@@ -574,13 +645,16 @@ class SupervisorWorkflowRunner:
                 and not any(term in lower for term in (
                     "material conflict", "materially conflicts",
                     "unresolved calibration", "does not corroborate",
+                    # The plain words the answer is asked for.
+                    "disagree sharply", "sharply disagree",
                 ))):
             return False
         if (isinstance(whole_path, (int, float))
                 and not isinstance(whole_path, bool)
                 and math.isfinite(float(whole_path))
                 and "whole-path" not in lower
-                and "whole path" not in lower):
+                and "whole path" not in lower
+                and not _states_cash_flow_multiple(answer, float(whole_path) + 1)):
             return False
         if (isinstance(whole_path, (int, float))
                 and not isinstance(whole_path, bool)
@@ -593,6 +667,7 @@ class SupervisorWorkflowRunner:
                     ("modeled cash-flow" in lower or "modeled fcf" in lower
                      or "operating cash-flow" in lower)
                     and "not a comprehensive" in lower
+                    or "not everything investors are paying for" in lower
                 )):
             return False
         covered_forward = [

@@ -273,7 +273,7 @@ NEAR_MISS_CLAIMS = [
     "PT $200.", "Our PT of $200.", "Price target $200.", "target price 200",
     "My DCF puts the shares at $180.", "The model's midpoint implies $167.67.", "Our model gives a value of $180.",
     "The valuation implies $180 per share.",
-    "目标价200美元", "合理估值约为180美元", "公允价值约为180美元", "维持买入评级", "评级：买入", "目前被低估",
+    "目标价200美元", "合理估值约为180美元", "公允价值约为180美元", "维持买入评级", "评级：买入", "目前被低估", "给予增持评级", "评级为中性",
 ]
 IDIOMS = [
     "The main downside is China exposure, which is about 17% of revenue.",
@@ -306,6 +306,10 @@ IDIOMS = [
     "Tesla's direct-sales model gives it about $2,000 per car of margin advantage.",
     "净利润同比增长16%，主要受所持股权投资公允价值变动收益影响。",
     "穆迪维持阿里巴巴A1信用评级，展望稳定。",
+    # A credit-rating story is not a stock rating (China Vanke, 17 Nov 2026).
+    "**行业**:彭博 11 月 8 日有一篇关于\"高评级企业突发信用困境、考验中国评级整治\"的报道。",
+    "惠誉将万科主体评级下调至CCC。",
+    "彭博社另有报道，一家信用评级较高的企业出现突发财务困境，引发市场对中国评级监管力度的关注，但该报道并未直接点名万科。",
 ]
 
 
@@ -356,10 +360,10 @@ def test_a_withheld_figure_matches_only_as_a_whole_number():
 def test_compose_puts_the_answer_first_and_the_benchmark_last():
     template = (
         "XOM: VYNN's answer here is the evidence, not a fair value, because reason.\n\n"
-        "The Street's view, shown as a benchmark and not as VYNN's rating:\n- mean target 172.55"
+        "What analysts think, for comparison (not VYNN's view):\n- Average price target: $172.55"
     )
     out = compose(template, "Price and trend: up 41% over the year.")
-    assert out.index("the evidence, not a fair value") < out.index("Price and trend") < out.index("The Street's view")
+    assert out.index("the evidence, not a fair value") < out.index("Price and trend") < out.index("What analysts think")
     assert compose(template, "") == template
 
 
@@ -477,7 +481,7 @@ def test_the_withheld_template_is_recorded_with_its_point_figures():
 def test_the_published_template_is_recorded_with_the_contradicted_figures():
     ag = _chat_agent("summarize the report", _published_state(), "PG")
     out = ag._guard_final_answer("The report rating is SELL and the report's fair value is $167.67.")
-    assert out.startswith("PG audited report headline: investment rating HOLD")
+    assert out.startswith("VYNN's report rates PG HOLD")
     assert ag._guard_template == out and "167.67" in ag._guard_forbidden
 
 
@@ -522,7 +526,7 @@ def test_a_clean_section_that_passes_both_checks_is_published():
     template, out = _analysis(ag, provider, XOM_DRAFT_2)
 
     assert (out.index("XOM: VYNN's answer here is the evidence")
-            < out.index("Guyana and the Permian") < out.index("The Street's view"))
+            < out.index("Guyana and the Permian") < out.index("What analysts think"))
     assert out.count("the evidence, not a fair value") == 1 and "172.55" in out
     assert "NOT RATED" not in out
     write, check = provider.calls
@@ -598,7 +602,7 @@ def test_a_withheld_section_with_the_bull_and_bear_case_is_published():
     _, out = _analysis(ag, _Provider(section, "NO"), "Verdict: Buy. The midpoint of $167.67 is below.")
     assert "ad revenue grew 22% last quarter" in out and "EU regulators are circling" in out
     assert (out.index("VYNN's answer here is a range, not a single fair value")
-            < out.index("Bull case") < out.index("benchmark reconciliation"))
+            < out.index("Bull case") < out.index("What analysts think"))
     assert "NOT RATED" not in out
 
 
@@ -616,7 +620,7 @@ def test_a_contradicted_published_headline_gets_its_analysis_too():
     section = ("Organic sales rose 4% as pricing held up across beauty and grooming. "
                "Margins widened for a third straight quarter on lower commodity costs.")
     _, out = _analysis(ag, _Provider(section, "NO"), draft)
-    assert out.startswith("PG audited report headline: investment rating HOLD")
+    assert out.startswith("VYNN's report rates PG HOLD")
     assert "SELL" not in out and "Organic sales rose 4%" in out
 
 
@@ -637,17 +641,17 @@ def test_the_writer_sees_the_transcript_only_up_to_the_tool_work():
     source = (Path(__file__).resolve().parents[1] / "src" / "agents" / "generalist_agent.py").read_text()
     mark = source.index("tool_work = len(messages)")
     report = source.index("final_text = await self._ensure_report_if_requested(", mark)
-    step = source.index("self._add_analysis(messages[:tool_work], provider, guarded, tool_defs)", report)
+    step = source.index("self._add_analysis(messages[:tool_work], provider, template, tool_defs)", report)
     assert mark < report < step
 
 
 def test_the_guarded_text_is_committed_before_the_analysis_step():
     from pathlib import Path
     source = (Path(__file__).resolve().parents[1] / "src" / "agents" / "generalist_agent.py").read_text()
-    guard = source.index("guarded = self._guard_final_answer(final_text)")
+    guard = source.index("guarded = self._guard_final_answer(draft)")
     commit = source.index("final_text = guarded", guard)
     condition = source.index("if self._guard_template is not None and guarded == self._guard_template:", guard)
-    step = source.index("final_text = await self._add_analysis(messages[:tool_work], provider, guarded, tool_defs)", guard)
+    step = source.index("self._add_analysis(messages[:tool_work], provider, template, tool_defs)", guard)
     assert guard < commit < condition < step
 
 
@@ -710,3 +714,234 @@ def test_a_rating_action_in_the_first_person_is_still_a_call(text):
 def test_an_action_verb_near_a_rating_word_is_not_a_rating_action(text):
     review = review_section(XOM_SECTION + "\n\n" + text)
     assert review.publishable and text in review.text
+
+
+# --------------------------------------------------------------------------
+# From the 18 Nov Sonnet check
+# --------------------------------------------------------------------------
+
+def _ruled_out_state():
+    from src.valuation_methodology import UNCONFIRMED_OUTLIER_REASON
+    state = _withheld_state()
+    state.financial_model.valuation_metrics["method_suitability"] = {
+        "primary_method": "scenario_only_pending_corroboration",
+        "publication_allowed": False, "reason": UNCONFIRMED_OUTLIER_REASON,
+    }
+    return state
+
+
+def test_a_ruled_out_model_does_not_call_its_answer_a_range():
+    # Tesla and Costco read "because its valuation is a range rather than one
+    # value", while the reason below was that the model itself was ruled out.
+    ag = _chat_agent("is TSLA a buy?", _ruled_out_state(), "TSLA")
+    ag._guard_kind = "withheld"
+    line = ag._short_answer_line()
+    assert line.startswith("**Short answer: VYNN gives no buy or sell call here")
+    assert "not reliable enough" in line and "range" not in line
+    ag2 = _chat_agent("is TEST a buy?", _withheld_state(), "TEST")
+    ag2._guard_kind = "withheld"
+    assert "a range rather than one value" in ag2._short_answer_line()
+    assert _chat_agent("why is TSLA up?", _ruled_out_state(), "TSLA")._short_answer_line() == ""
+
+
+def test_lines_copied_from_the_fixed_statement_do_not_sink_the_analysis():
+    # Costco: the analysis repeated the analysts' target line word for word,
+    # the review counted it as a claim, and the whole analysis was dropped.
+    from src.agents.generalist_agent import _without_template_lines
+    template = ("COST: the cash-flow model is shown only as a scenario.\n\n"
+                "What analysts think, for comparison (not VYNN's view):\n"
+                "- Average price target: $1,085.35 from 37 analysts, 2.2% below today's price (Yahoo Finance).")
+    section = ("**Price.** Costco closed at $1,109.80.\n"
+               "- **Average price target: $1,085.35 from 37 analysts, 2.2% below today's price (Yahoo Finance).**\n"
+               "Membership fees rose 10%.")
+    out = _without_template_lines(section, template)
+    assert "1,085.35" not in out and "Costco closed at $1,109.80" in out and "Membership" in out
+
+
+def test_with_several_companies_the_analysis_comes_first():
+    # A stock-picks reply opened with the last company's "no rating" statement.
+    ag = _chat_agent("any stocks you would recommend today?", _withheld_state(), "TEST")
+    ag._analysis_names = {"GOOGL": "Alphabet Inc.", "META": "Meta Platforms, Inc.", "TEST": None}
+    section = ("I screened ten large companies on growth, margins and trading multiples, "
+               "then built models for three of them. Alphabet had the strongest growth.")
+    template, out = _analysis(ag, _Provider(section, "NO"),
+                              "Verdict: Buy. The model's midpoint of $167.67 sits well below the price.")
+    assert out.startswith("I screened ten large companies") and out.endswith(template)
+    # One company: the fixed statement still comes first.
+    ag1 = _chat_agent("Give me the bull and bear case for TEST.", _withheld_state(), "TEST")
+    template1, out1 = _analysis(ag1, _Provider(section, "NO"),
+                                "Verdict: Buy. The model's midpoint of $167.67 sits well below the price.")
+    assert out1.startswith(template1.split("\n\n")[0])
+
+
+def test_the_closing_offer_goes_after_the_analysts_block():
+    from answer_evidence import compose
+    template = ("TEST: no single value.\n\nWhat analysts think, for comparison (not VYNN's view):\n"
+                "- Average price target: $200.00 from 20 analysts.")
+    section = "Revenue grew 8%.\n\nIf you'd like, I can compare it with its peers."
+    out = compose(template, section)
+    assert out.index("Revenue grew 8%") < out.index("What analysts think") < out.index("If you'd like")
+    zh = compose(template, "收入增长8%。\n\n如果你想看,我可以拿万科和同行做一次横向对比。")
+    assert zh.endswith("如果你想看,我可以拿万科和同行做一次横向对比。")
+    # A last paragraph that is not an offer stays where it was.
+    plain = compose(template, "Revenue grew 8%.\n\nMargins fell to 12%.")
+    assert plain.endswith("- Average price target: $200.00 from 20 analysts.")
+
+
+def test_one_company_whose_ticker_resolves_elsewhere_is_one_company(monkeypatch):
+    # A safeguard review: "AZN" built as AZN.L counted as two companies.
+    import json as _json
+    monkeypatch.delenv("VYNN_CACHE_DIR", raising=False)
+    ag = _chat_agent("Should I buy AstraZeneca?", None, None)
+    ag.ctx.company_name = None
+
+    class _Registry:
+        async def execute(self, name, arguments):
+            ag.ctx.ticker, ag.ctx.company_name = "AZN.L", "AstraZeneca PLC"
+            return _json.dumps({"status": "ok" if arguments["ticker"] != "BAD" else "error"})
+
+    ag.registry = _Registry()
+    ag._friendly_progress = lambda name, arguments: None
+    for ticker in ("AZN", "AZN.L", "BAD"):
+        asyncio.run(ag._execute_tool("build_model", {"ticker": ticker}))
+    assert ag._analysis_names == {"AZN.L": "AstraZeneca PLC"} and not ag._multi_company()
+
+
+def test_a_question_starting_should_is_not_a_closing_offer():
+    from answer_evidence import compose
+    template = ("TEST: no single value.\n\nWhat analysts think, for comparison (not VYNN's view):\n"
+                "- Average price target: $200.00 from 20 analysts.")
+    out = compose(template, "Revenue grew 8%.\n\nShould interest rates fall, its funding costs drop.")
+    assert out.endswith("- Average price target: $200.00 from 20 analysts.")
+
+
+# --------------------------------------------------------------------------
+# A YES that names its sentences (18 Nov 2026 Sonnet check, Costco)
+# --------------------------------------------------------------------------
+#
+# Costco's whole analysis was dropped because the check read one sentence as
+# a call. The check now quotes the sentences it objects to; they are removed
+# and the rest must pass both checks again, once.
+
+SOFT = "After the pullback, the risk/reward looks favorable."
+
+
+def test_the_quoted_sentence_is_left_out_and_the_rest_is_published():
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    audits = []
+    ag._audit = audits.append
+    provider = _Provider(XOM_SECTION + "\n\n" + SOFT, f'YES\n"{SOFT}"', "NO")
+    template, out = _analysis(ag, provider, XOM_DRAFT_2)
+    assert "Guyana and the Permian" in out and "risk/reward" not in out
+    assert len(provider.calls) == 3
+    # The second check sees the section without the sentence.
+    second = provider.calls[2]["messages"][0]["content"].split("Section:\n<<<\n", 1)[1]
+    assert "risk/reward" not in second and "Guyana and the Permian" in second
+    assert any("Left out 1 sentence" in line for line in ag.logs)
+    # What the check objected to is never in the log the user can open.
+    assert not any("risk/reward" in line for line in ag.logs)
+    assert any("risk/reward" in line for line in audits)
+
+
+@pytest.mark.parametrize("replies", [
+    # A quote that matches no sentence: the reply does not name what it saw.
+    (f'YES\n"XOM is a compelling buy for patient investors."', ),
+    # An explanation, not a quote (Costco's reply began "YES. The section rep").
+    ("YES. The section reports a judgement on the valuation.", ),
+    # Still a call after the removal.
+    (f'YES\n"{SOFT}"', "YES"),
+    (f'YES\n"{SOFT}"', f'YES\n"{SOFT}"'),
+    (f'YES\n"{SOFT}"', RuntimeError("check failed")),
+])
+def test_a_yes_that_cannot_be_narrowed_leaves_the_fixed_statement(replies):
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    ag._audit = lambda msg: None
+    template, out = _analysis(ag, _Provider(XOM_SECTION + "\n\n" + SOFT, *replies), XOM_DRAFT_2)
+    assert out == template
+
+
+def test_a_yes_quoting_most_of_the_section_leaves_the_fixed_statement():
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    ag._audit = lambda msg: None
+    section = "XOM rose 41% over the past year.\n\n" + SOFT
+    quotes = "YES\n- XOM rose 41% over the past year.\n- " + SOFT
+    template, out = _analysis(ag, _Provider(section, quotes, "NO"), XOM_DRAFT_2)
+    assert out == template
+
+
+def test_a_rejected_explicit_claim_stays_out_of_the_visible_log():
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    audits = []
+    ag._audit = audits.append
+    _analysis(ag, _Provider(XOM_SECTION + "\n\nFair value is about $180 per share."), XOM_DRAFT_2)
+    assert any("explicit claim" in line for line in ag.logs)
+    assert not any("$180" in line for line in ag.logs)
+    assert any("$180" in line for line in audits)
+
+
+@pytest.mark.parametrize("verdict, quotes", [
+    ("NO", []),
+    ("YES", []),
+    (f'YES: "{SOFT}"', [f'"{SOFT}"']),
+    (f"YES\n- {SOFT}\n- XOM looks cheap at 12 times earnings.",
+     [SOFT, "XOM looks cheap at 12 times earnings."]),
+    ("NO\nYES\nsomething long enough to count", []),
+])
+def test_the_quoted_sentences_are_read_from_a_yes(verdict, quotes):
+    from src.answer_evidence import _quote_key, flagged_sentences
+    assert [_quote_key(q) for q in flagged_sentences(verdict)] == [_quote_key(q) for q in quotes]
+
+
+def test_a_quoted_sentence_matches_despite_emphasis_and_quotes():
+    section = ("Revenue rose 8% on membership fees.\n\n"
+               "- **The shares trade at a rich premium** to the retail group.\n\n"
+               "Comparable sales grew 6% excluding fuel.")
+    review = review_section(section, drop=['"The shares trade at a rich premium to the retail group."'])
+    assert review.quotes_unmatched == 0 and len(review.dropped) == 1
+    assert "premium" not in review.text and "membership fees" in review.text
+
+
+# The independent review's cases: in each, the flagged call would have stayed
+# in the text while the log said it was removed.
+STRETCHED = "At 50 times earnings the shares look stretched versus peers."
+
+
+@pytest.mark.parametrize("verdict", [
+    # A long quote "found" through the innocent sentence inside it.
+    "YES\nComparable sales grew 6% excluding fuel, and at 50x earnings the shares look "
+    "stretched relative to peers.",
+    # A flagged sentence too short to match.
+    f"YES\nLooks cheap.\n{STRETCHED}",
+    # A preface is not a sentence of the section.
+    f"YES, these sentences:\n{STRETCHED}",
+])
+def test_a_quote_the_removal_does_not_account_for_leaves_the_fixed_statement(verdict):
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    ag._audit = lambda msg: None
+    section = (XOM_SECTION + "\n\nComparable sales grew 6% excluding fuel. Looks cheap.\n\n"
+               + STRETCHED)
+    template, out = _analysis(ag, _Provider(section, verdict, "NO"), XOM_DRAFT_2)
+    assert out == template
+
+
+def test_a_quote_joining_two_flagged_sentences_removes_both():
+    section = ("Revenue rose 8% on membership fees. The shares look stretched at 50 times "
+               "earnings. Few retailers look as pricey on that measure.")
+    quote = ("The shares look stretched at 50 times earnings, and few retailers look as "
+             "pricey on that measure.")
+    review = review_section(section, drop=[quote])
+    assert review.quotes_unmatched == 0 and len(review.dropped) == 2
+    assert review.text == "" or "stretched" not in review.text
+
+
+def test_the_number_check_keeps_corrected_text_out_of_the_visible_log():
+    ag = _chat_agent("should i buy/hold xom?", _exxon_state(), "XOM")
+    ag._tools_used = {"get_prices"}
+    audits = []
+    ag._audit = audits.append
+    text = "XOM rose 41% in 2025 to $160.59, a fair value of $180 by our count."
+    provider = _Provider('[{"wrong": "a fair value of $180", "right": "a fair value of $181"}]')
+    out = asyncio.run(ag._check_numbers([], provider, text, None))
+    assert "$181" in out
+    assert not any("fair value" in line for line in ag.logs)
+    assert any("fair value" in line for line in audits)

@@ -26,6 +26,9 @@ from typing import Dict, Any, List, Tuple, Optional, Union
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.utils import get_column_letter, column_index_from_string
 
+# One Excel text constant: quotes around text, a quote inside written twice.
+_STRING_LITERAL = re.compile(r'^"(?:[^"]|"")*"$')
+
 
 def formula_integrity(results: Dict[str, Any]) -> Dict[str, Any]:
     """Return a bounded manifest of formula failures in an evaluated model."""
@@ -728,7 +731,14 @@ class FormulaEvaluator:
         # Handle cell references
         if self._is_cell_reference(expr):
             return self._get_cell_value(expr, current_tab)
-        
+
+        # A text constant, before the arithmetic check: "n/m" holds a "/", and
+        # the sensitivity grid's IF(wacc<=g,"n/m",...) failed as arithmetic,
+        # which failed the whole workbook for every company with a cell where
+        # the discount rate is at or below terminal growth (China Vanke).
+        if _STRING_LITERAL.match(expr):
+            return expr[1:-1].replace('""', '"')
+
         # Handle arithmetic expressions
         if any(op in expr for op in ['+', '-', '*', '/', '^', '(', ')', '&']):
             return self._evaluate_arithmetic(expr, current_tab, current_row, current_col)

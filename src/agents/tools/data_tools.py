@@ -364,6 +364,39 @@ def listing_identity(ticker: str) -> tuple:
         return None, None
 
 
+LIVE_PRICE = "live: the market is open now, so this price is not a close"
+LAST_CLOSE = "the latest close: the market is closed now"
+CRYPTO_PRICE = "live: crypto trades around the clock and has no close"
+
+
+def quote_session(daily_index: Any, ticker: str, now: Optional[datetime] = None) -> Optional[str]:
+    """Whether the latest daily price is live or a close, from the bar's own date.
+
+    Asked at 1:52 pm ET, Costco's answer said it "closed at $1,112.99": the
+    tool gave a latest price and a previous close, and nothing said the
+    session was still open. Yahoo's daily bars carry the exchange's time zone;
+    today's bar before the local close is a live price. None on any doubt.
+    """
+    try:
+        if str(ticker or "").upper().endswith("-USD"):
+            return CRYPTO_PRICE
+        last = daily_index[-1]
+        zone = getattr(last, "tzinfo", None)
+        if zone is None:
+            return None
+        from src.company_news import _CLOSES
+        close = _CLOSES.get(getattr(zone, "key", None) or getattr(zone, "zone", None) or str(zone))
+        if not close:
+            return None
+        from datetime import timezone as _tz
+        local = (now or datetime.now(_tz.utc)).astimezone(zone)
+        if last.date() == local.date() and local.weekday() < 5 and (local.hour, local.minute) < close:
+            return LIVE_PRICE
+        return LAST_CLOSE
+    except Exception:
+        return None
+
+
 class GetPricesTool(Tool):
     name = "get_prices"
     description = (
@@ -400,8 +433,10 @@ class GetPricesTool(Tool):
             from src.price_moves import latest_and_previous_close
             from .yf_resilience import live_price
             latest = prev_close = None
+            session = None
             df = fetch_history(ticker, "5d")
             if df is not None and len(df) >= 1:
+                session = quote_session(df.index, ticker)
                 # After the close Yahoo's bar for the day has no Close yet:
                 # the last valid close is then the PREVIOUS close, and the
                 # latest price is the live one.
@@ -426,6 +461,8 @@ class GetPricesTool(Tool):
             if latest is not None and prev_close:
                 q["day_change"] = round(latest - prev_close, 2)
                 q["day_change_pct"] = round((latest - prev_close) / prev_close * 100, 2)
+            if session and latest is not None:
+                q["latest_price_is"] = session
             return q
 
         def _period_stats():
@@ -447,6 +484,8 @@ class GetPricesTool(Tool):
                 "period_pct_change": round((last - first) / first * 100, 2) if first else None,
                 "period_high": round(float(df["High"].max()), 2),
                 "period_low": round(float(df["Low"].min()), 2),
+                "pct_from_period_high": pct_from(last, float(df["High"].max())),
+                "pct_from_period_low": pct_from(last, float(df["Low"].min())),
                 "start": str(df.index[0]),
                 "end": str(df.index[-1]),
             }
@@ -478,6 +517,39 @@ class GetPricesTool(Tool):
 # ---------------------------------------------------------------------------
 # get_technicals — RSI/MACD/SMA/Bollinger (computed locally from yfinance)
 # ---------------------------------------------------------------------------
+# Readings worked out here, so the answer does not: a blind review of real
+# answers found "RSI 37 is oversold", "A$3.57 sits in the upper half of the
+# A$3.49-3.73 band" and "21% above the low" written as 40%.
+def pct_from(value: Optional[float], reference: Optional[float]) -> Optional[float]:
+    """How far ``value`` is above (+) or below (-) ``reference``, in percent."""
+    if value is None or not reference:
+        return None
+    return round((value / reference - 1.0) * 100, 1)
+
+
+def rsi_reading(rsi: Optional[float]) -> Optional[str]:
+    if rsi is None:
+        return None
+    if rsi >= 70:
+        return "overbought (70 or above)"
+    if rsi <= 30:
+        return "oversold (30 or below)"
+    return "neutral (between 30 and 70; oversold is 30 or below, overbought 70 or above)"
+
+
+def band_position(last: float, lower: float, upper: float) -> Optional[str]:
+    import math
+    if (upper is None or lower is None or last is None
+            or not all(math.isfinite(float(v)) for v in (last, lower, upper)) or upper <= lower):
+        return None
+    if last > upper:
+        return "above the upper band"
+    if last < lower:
+        return "below the lower band"
+    share = (last - lower) / (upper - lower)
+    return "upper half of the band" if share > 0.5 else "lower half of the band" if share < 0.5 else "at the middle"
+
+
 def wilder_rsi(closes, period: int = 14) -> Optional[float]:
     """RSI as Wilder defined it, the figure every broker and chart shows.
 
@@ -567,9 +639,17 @@ class GetTechnicalsTool(Tool):
             bb_upper = float((mid + 2 * std).iloc[-1])
             bb_lower = float((mid - 2 * std).iloc[-1])
 
+            session = quote_session(df.index, ticker)
             return {
                 "latest_close": round(last, 2),
+                **({"latest_close_is": session} if session else {}),
                 "rsi_14": round(rsi, 1) if rsi is not None else None,
+                "rsi_reading": rsi_reading(rsi),
+                "pct_vs_sma_50": pct_from(last, sma50),
+                "pct_vs_sma_200": pct_from(last, sma200),
+                "bollinger_middle": (round((bb_upper + bb_lower) / 2, 2)
+                                     if band_position(last, bb_lower, bb_upper) else None),
+                "bollinger_position": band_position(last, bb_lower, bb_upper),
                 "sma_50": round(sma50, 2) if sma50 else None,
                 "sma_200": round(sma200, 2) if sma200 else None,
                 "above_sma_50": (last > sma50) if sma50 else None,

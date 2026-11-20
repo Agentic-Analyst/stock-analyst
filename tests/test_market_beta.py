@@ -254,8 +254,12 @@ class TestCapmIntegration:
         # published implied premium and legitimately moves on each update.
         # What this asserts is the COMPOSITION, which does not.
         assert c["equity_risk_premium_total"] == pytest.approx(ag._mature_erp() + published)
-        assert c["cost_of_equity"] == pytest.approx(
+        assert c["cost_of_equity_capm"] == pytest.approx(
             c["risk_free_rate"] + c["beta"] * c["equity_risk_premium_total"])
+        # Where debt is 30%+ of capital, never below the pre-tax cost of debt.
+        floor = c["debt_weight"] >= ag._KE_FLOOR_DEBT_WEIGHT
+        assert c["cost_of_equity"] == pytest.approx(
+            max(c["cost_of_equity_capm"], c["pre_tax_cost_of_debt"]) if floor else c["cost_of_equity_capm"])
         assert "India" in c["crp_source"] and "Damodaran" in c["crp_source"]
 
     def test_falls_back_to_yahoo_and_says_so(self, monkeypatch):

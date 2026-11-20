@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from .base import Tool, tool_ok, tool_error
 
@@ -58,6 +58,10 @@ class AgentContext:
         # SESSION_ID would drift, and the next follow-up would read the wrong
         # session file. A fresh chat leaves this None and derives a name lazily.
         self.session_name: Optional[str] = session_id or None
+        # (symbol, timeframe) already drawn in this chat, and this turn's charts
+        # (saved with the turn so the next message knows them).
+        self.charts_in_chat = set()
+        self.charts_this_turn = []
         self.base_path = None        # run folder (ticker folder, or a CHAT folder)
         self.chat_base_path = None   # original CHAT folder, kept when base_path repoints
         self._ticker_announced = False
@@ -783,9 +787,13 @@ def _rehydrate_report_guard_state(base: Path, ticker: str, content: str):
         # is $3,656.10-$4,014.84", the audit scenario; with it, a follow-up on
         # a mid-cycle report says how the value was reached.
         try:
-            from src.valuation_methodology import built_method_suitability
+            from src.valuation_methodology import built_method_suitability, workbook_nopat
+            _published = (computed.get("_vynn") or {}).get("valuation_publication") or {}
             metrics["method_suitability"] = built_method_suitability(
-                financial_data, (computed.get("_vynn") or {}).get("model_inputs"))
+                financial_data, (computed.get("_vynn") or {}).get("model_inputs"),
+                nopat=workbook_nopat(computed),
+                model_value=_published.get("model_value_for_audit"),
+                comps_value=(_published.get("method_values_for_audit") or {}).get("market_comps"))
         except Exception:
             pass
 
@@ -1557,13 +1565,23 @@ class GetFinancialsTool(_CtxTool):
         km = state.financial_data.key_metrics if state.financial_data else {}
         basic = km.get("basic_info", {}) if isinstance(km, dict) else {}
         market = km.get("market_data", {}) if isinstance(km, dict) else {}
+        # The analysts' targets, rating and estimates were collected but not
+        # returned: asked "what are analysts saying about it?", the answer
+        # said it had none (local full-stack run, 19 Nov 2026). The same
+        # block build_model returns, an outside view and not VYNN's.
+        raw = getattr(state.financial_data, "raw_data", None) if state.financial_data else None
+        street = raw.get("external_expectations") if isinstance(raw, dict) else None
         return tool_ok(
             ticker=getattr(state, "ticker", None) or ticker,
             company_name=state.company_name,
             sector=basic.get("sector"),
             industry=basic.get("industry"),
             trailing_pe=market.get("trailing_pe"),
-            note="Financial data collected and saved. You can now build_model or write_report.",
+            **({"street_expectations": street} if isinstance(street, dict) and street else {}),
+            note=("Financial data collected and saved. You can now build_model or write_report."
+                  + (" street_expectations holds the analysts' price targets, rating and estimates, "
+                     "with their dates: an outside view, never VYNN's own."
+                     if isinstance(street, dict) and street else "")),
             **listing_figures(basic, market),
             **_listing_view_payload(_view_for(self.ctx, state), street=_street_of(state)),
         )
@@ -1897,6 +1915,11 @@ class BuildModelTool(_CtxTool):
             "value is defensible, so the range is reported instead."
         )
         withheld_payload = {}
+        if isinstance(vm, dict):
+            # What the chat was told, kept with the model: methods this far
+            # apart withhold the point here without setting
+            # point_estimate_withheld, and a picks answer is checked against it.
+            vm["chat_no_single_fair_value"] = withheld
         if withheld:
             fair_value_out, upside_out = None, None
             withheld_payload = {
@@ -1994,6 +2017,8 @@ class BuildModelTool(_CtxTool):
             benchmark_reconciliation = None
 
         view = _view_for(self.ctx, state)
+        coc = None if method == "justified_pb_roe" else _cost_of_capital(state)
+        margins = None if method == "justified_pb_roe" else _margin_assumptions(state)
         return tool_ok(
             # The listing the figures below are for (a US line moved to its
             # home listing is in listing_view).
@@ -2030,11 +2055,25 @@ class BuildModelTool(_CtxTool):
                if isinstance(vm, dict) and vm.get("dcf_fair_value") is not None
                and method and method != "justified_pb_roe" else {}),
             **({"data_quality_warning": warning} if warning else {}),
+            # How the discount rate was built: an input, not a conclusion, so
+            # it is shown whether or not a value is published. Asked "what
+            # discount rate, and why?", Vanke's answer had to back 14.5% out of
+            # the reverse DCF and could not say why it was so high.
+            **({"cost_of_capital": coc} if coc else {}),
+            # The model's projected margins beside what the company earned.
+            # Asked "what margins does it assume?", Hansen's answer could not
+            # say: the tool returned only headline results.
+            **({"margin_assumptions": margins} if margins else {}),
             note=(note + " " + NO_SINGLE_VALUE_NOTE + CONFIDENCE_ALERT_NOTE
                   + "Treat Street targets/ratings as a decision-relevant external "
                   "benchmark, not intrinsic value. When benchmark_reconciliation is "
                   "present, surface its dated coverage, conflict/corroboration result, "
-                  "and whole-path reverse DCF; do not reduce it to a generic caveat. "
+                  "and whole-path reverse DCF; do not reduce it to a generic caveat. Say them "
+                  "in plain words a retail investor uses: 'the analysts disagree sharply "
+                  "with VYNN's model', 'to justify today's price the company needs about "
+                  "N times the cash flow VYNN's model expects', 'the model counts only "
+                  "the cash flow it can forecast, not everything investors are paying "
+                  "for', never the labels 'whole-path reverse DCF' or 'diagnostic only'. "
                   "Never call a blended model value a DCF value; DCF means only the "
                   "perpetual/exit DCF midpoint or range. Reinvestment sensitivity is "
                   "an audit scenario only: surface it when material, but never count "
@@ -2042,15 +2081,168 @@ class BuildModelTool(_CtxTool):
         )
 
 
+def _cost_of_capital(state) -> Optional[Dict[str, Any]]:
+    """The discount rate and its build-up, from the model's own CAPM record; None without one."""
+    model = getattr(state, "financial_model", None)
+    assumptions = getattr(model, "assumptions", None) if model else None
+    capm = assumptions.get("capm") if isinstance(assumptions, dict) else None
+    if not isinstance(capm, dict) or not isinstance(capm.get("wacc"), (int, float)):
+        return None
+
+    def pct(key):
+        value = capm.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            return None
+        return round(float(value), 4)
+
+    out = {
+        "wacc": pct("wacc"),
+        "risk_free_rate": pct("risk_free_rate"), "risk_free_source": capm.get("risk_free_source"),
+        "beta": None if pct("beta") is None else round(float(capm["beta"]), 2),
+        "beta_source": capm.get("beta_source"),
+        "equity_risk_premium": pct("equity_risk_premium"),
+        "country_risk_premium": pct("country_risk_premium"),
+        "cost_of_equity": pct("cost_of_equity"),
+        "cost_of_equity_capm": pct("cost_of_equity_capm") if capm.get("cost_of_equity_floored_at_debt") else None,
+        "cost_of_equity_raised_to_cost_of_debt": True if capm.get("cost_of_equity_floored_at_debt") else None,
+        "pre_tax_cost_of_debt": pct("pre_tax_cost_of_debt"),
+        "issuer_credit_spread": pct("issuer_credit_spread"),
+        "issuer_synthetic_rating": capm.get("issuer_synthetic_rating"),
+        "issuer_interest_coverage": (None if pct("issuer_interest_coverage") is None
+                                     else round(float(capm["issuer_interest_coverage"]), 2)),
+        "credit_spread_basis": capm.get("issuer_credit_spread_source"),
+        "after_tax_cost_of_debt": pct("after_tax_cost_of_debt"),
+        "equity_weight": pct("equity_weight"),
+        "debt_weight": pct("debt_weight"),
+        # The chat's copy names it terminal_growth; the grounded one, terminal_growth_rate.
+        "terminal_growth": next((round(float(v), 4) for v in (assumptions.get("terminal_growth"),
+                                                              assumptions.get("terminal_growth_rate"))
+                                 if isinstance(v, (int, float)) and not isinstance(v, bool)), None),
+    }
+    if capm.get("wacc_clamped"):
+        out["wacc_outside_usual_band"] = True
+    out = {k: (str(v)[:300] if isinstance(v, str) else v) for k, v in out.items() if v is not None}
+    out["how_to_read"] = ("rates are decimals (0.145 = 14.5%); cost of equity = risk-free + beta x "
+                          "(equity risk premium + country risk premium), never below the pre-tax cost of debt "
+                          "because shareholders are paid after lenders; WACC weights it with the "
+                          "after-tax cost of debt; credit_spread_basis says how the borrowing spread was set")
+    return out
+
+
+def _margin_assumptions(state) -> Optional[Dict[str, Any]]:
+    """The model's five projected years and the last three reported ones, as margins of revenue."""
+    import json as _json
+    from datetime import date as _date
+    model = getattr(state, "financial_model", None)
+    path = getattr(model, "json_computed_values_path", None) if model else None
+    if not path:
+        return None
+    try:
+        with open(path) as handle:
+            computed = _json.load(handle)
+    except Exception:
+        return None
+    cells = (computed.get("Projections") or {}).get("cells") or {}
+    growth_cells = (computed.get("Assumptions") or {}).get("cells") or {}
+
+    def number(value):
+        return (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(float(value)) else None)
+
+    def share(part, whole):
+        part, whole = number(part), number(whole)
+        return round(part / whole, 4) if part is not None and whole else None
+
+    # Reported years straight from the statements: a line the company did not
+    # report is missing, not zero (Booking has no EBITDA line for 2025).
+    raw = getattr(getattr(state, "financial_data", None), "raw_data", None)
+    statements = raw.get("financial_statements") if isinstance(raw, dict) else None
+    statements = statements if isinstance(statements, dict) else {}
+    income = statements.get("income_statement") or {}
+    cash = statements.get("cash_flow") or {}
+    def revenue_of(row):
+        return number(row.get("Total Revenue")) or number(row.get("Operating Revenue"))
+    periods = [p for p in sorted(income) if isinstance(income.get(p), dict) and revenue_of(income[p])][-3:]
+    reported = []
+    for period in periods:
+        row, flows = income[period], cash.get(period) or {}
+        revenue = revenue_of(row)
+        gross = share(row.get("Gross Profit"), revenue)
+        capex = number(flows.get("Capital Expenditure"))
+        reported.append({k: v for k, v in {
+            "fiscal_year": str(period),
+            "revenue": round(revenue),
+            "gross_margin": "not reported (no cost of revenue)" if gross is not None and gross >= 0.999 else gross,
+            "operating_margin": share(row.get("Operating Income"), revenue),
+            "ebitda_margin": share(row.get("EBITDA"), revenue),
+            "net_margin": share(row.get("Net Income"), revenue),
+            "capex_share_of_revenue": share(abs(capex), revenue) if capex is not None else None,
+        }.items() if v is not None})
+
+    # A model built on the latest twelve months projects twelve-month periods
+    # from that point, not fiscal years: its first year is not "FY2027".
+    assumptions = getattr(model, "assumptions", None)
+    basis = assumptions.get("forecast_basis") if isinstance(assumptions, dict) else None
+    rolling_end = None
+    if isinstance(basis, dict) and basis.get("basis") == "rolling_twelve_months":
+        try:
+            rolling_end = _date.fromisoformat(str(basis.get("period_end"))[:10])
+        except ValueError:
+            rolling_end = None
+
+    def label(i, col):
+        if rolling_end:
+            try:
+                end_day = rolling_end.replace(year=rolling_end.year + i + 1)
+            except ValueError:
+                end_day = rolling_end.replace(year=rolling_end.year + i + 1, day=28)
+            return f"12 months to {end_day.isoformat()}"
+        year = number(cells.get(f"(2, {col})"))
+        return f"FY{int(year)}" if year else f"forecast year {i + 1}"
+
+    projected = []
+    for i, col in enumerate(range(2, 7)):
+        revenue = number(cells.get(f"(3, {col})"))
+        if not revenue:
+            continue
+        capex = number(cells.get(f"(13, {col})"))
+        # The model's own growth assumption (Assumptions row 7, FY1-FY5 in C-G).
+        growth = number(growth_cells.get(f"(7, {col + 1})"))
+        projected.append({k: v for k, v in {
+            "period": label(i, col),
+            "revenue": round(revenue),
+            "revenue_growth": round(growth, 4) if growth is not None else None,
+            "gross_margin": share(cells.get(f"(5, {col})"), revenue),
+            "operating_margin": share(cells.get(f"(9, {col})"), revenue),
+            "ebitda_margin": share(cells.get(f"(21, {col})"), revenue),
+            "capex_share_of_revenue": share(abs(capex), revenue) if capex is not None else None,
+        }.items() if v is not None})
+    if not projected:
+        return None
+    out = {"projected": projected, "reported": reported,
+           "how_to_read": ("margins are decimals of revenue (0.131 = 13.1%); reported years are the "
+                           "company's fiscal statements (a missing line is left out, not zero); projected "
+                           "periods are VYNN's model, with its own revenue growth; operating margin is "
+                           "EBIT, EBITDA adds back depreciation and amortization")}
+    if rolling_end:
+        out["period_note"] = (f"the model projects twelve-month periods from {rolling_end.isoformat()}, "
+                              "not the company's fiscal years")
+    if any(r.get("gross_margin") == "not reported (no cost of revenue)" for r in reported):
+        out["gross_margin_note"] = ("the company reports no cost of revenue, so its gross margin has no "
+                                    "reported counterpart; compare operating and EBITDA margins instead")
+    return out
+
+
 class AnalyzeNewsTool(_CtxTool):
     name = "analyze_news"
     description = (
-        "Analyze recent news for a company and extract investment insights: growth "
-        "catalysts, risks, and, only when fresh source-dated coverage is sufficient, "
-        "an overall news sentiment. Scrapes and screens news articles "
-        "(runs in parallel). Use for 'what's the latest on X', 'why did X move', "
-        "sentiment, catalysts, or risks. Always returns freshness metadata; stale or "
-        "limited coverage never returns a directional sentiment."
+        "SLOW (20-60 seconds): downloads and screens full news articles into growth "
+        "catalysts, risks and, only when fresh source-dated coverage is sufficient, an "
+        "overall news sentiment. Use it inside a full analysis, or when the user asks "
+        "specifically for catalysts, risks or news sentiment. For 'what's the latest on "
+        "X', a company overview or a bare ticker, use get_global_news with the ticker "
+        "(about a second); for 'why did X move', use explain_price_move. Always returns "
+        "freshness metadata; stale or limited coverage never returns a directional sentiment."
     )
     parameters = {"type": "object", "properties": _TICKER_PARAM, "required": ["ticker"]}
 
@@ -2273,6 +2465,9 @@ class WriteReportTool(_CtxTool):
             "The valuation methods disagree by more than 2.5x. The report "
             "publishes the supported range and no directional rating or target."
         )
+        if isinstance(vm, dict):
+            # As in build_model: what the chat was told, kept with the model.
+            vm["chat_no_single_fair_value"] = withheld
         if withheld:
             fair_value = None
             upside = None
@@ -2347,7 +2542,9 @@ class WriteReportTool(_CtxTool):
         view = _view_for(self.ctx, state)
         return tool_ok(
             ticker=getattr(state, "ticker", None) or ticker,
-            report_path=state.report.report_path,
+            # File name only: the full path holds the user's email, and the model
+            # used to print it. The report reaches the user as a download.
+            report_file=Path(str(state.report.report_path)).name if state.report.report_path else None,
             content_length=len(state.report.content) if state.report.content else 0,
             currency=_listing_currency(state),
             **_listing_price_note(state),
@@ -2418,18 +2615,12 @@ class ReadReportTool(_CtxTool):
             return tool_error("read_report needs a real ticker.", ticker=ticker)
 
         def _read(symbol):
-            from path_utils import get_latest_analysis_path
-            base = get_latest_analysis_path(self.ctx.email, symbol)
-            if not base:
+            from path_utils import find_latest_report
+            found = find_latest_report(self.ctx.email, symbol)
+            if not found:
                 return None
-            candidate = base / f"{symbol}_Professional_Analysis_Report.md"
-            if candidate.exists():
-                return base, candidate.read_text(encoding="utf-8", errors="ignore")
-            # Fallback: any *Report*.md in the folder (filename conventions may vary).
-            for p in sorted(base.glob("*Report*.md")) + sorted(base.glob("*report*.md")):
-                if p.exists():
-                    return base, p.read_text(encoding="utf-8", errors="ignore")
-            return None
+            base, path = found
+            return base, path.read_text(encoding="utf-8", errors="ignore")
 
         folder = ticker
         try:

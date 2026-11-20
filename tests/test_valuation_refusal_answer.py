@@ -109,7 +109,7 @@ def test_a_refused_run_gets_a_plain_answer_not_a_published_template():
     assert "NOT RATED" not in out and "No rating" not in out
     assert "published without a point headline" not in out
     assert "172.55" in out          # the Street's view stays, as a benchmark
-    assert "not as VYNN's rating" in out
+    assert "for comparison (not VYNN's view)" in out
 
 
 def test_an_honest_refusal_answer_from_the_model_is_kept():

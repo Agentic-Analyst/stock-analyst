@@ -55,7 +55,9 @@ class ArticleConfig:
     # the successful first query in the launch dry run; operators may tune it
     # only within a deliberately narrow reliability/latency band.
     SERPAPI_SEARCH_TIMEOUT_SECONDS = _bounded_env_float(
-        "SERPAPI_SEARCH_TIMEOUT_SECONDS", 15.0, minimum=5.0, maximum=30.0,
+        # News results usually come back in 2-5 s; a hung search held runs
+        # the full 15 s three times in one night, before the fallback news.
+        "SERPAPI_SEARCH_TIMEOUT_SECONDS", 8.0, minimum=5.0, maximum=30.0,
     )
 
 

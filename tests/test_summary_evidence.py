@@ -129,8 +129,7 @@ def test_external_benchmark_carries_target_rating_and_model_reconciliation():
     assert "39 target observations" in rendered
     assert "53 rating observations" in rendered
     compact = render_external_benchmark_compact(evidence)
-    assert "External analyst view: STRONG BUY from finnhub" in compact
-    assert "not Vynn's rating" in compact
+    assert "Their consensus rating: Strong Buy (53 ratings, Finnhub)." in compact
     assert "2 current structured observation(s)" in rendered
     assert "Firm One / 2026-09-11 / action Maintains" in rendered
     assert "Licensed rationale prose was not read or collected" in rendered
@@ -331,8 +330,39 @@ def test_extreme_reverse_dcf_gap_is_labeled_as_model_scope_not_company_value():
     full = render_external_benchmark(evidence)
     compact = render_external_benchmark_compact(evidence)
 
-    for rendered in (full, compact):
-        assert "43.07" in rendered
-        assert "modeled operating cash-flow path" in rendered
-        assert "not a comprehensive company value" in rendered
-        assert "does not validate the market price" in rendered
+    assert "43.07" in full
+    assert "modeled operating cash-flow path" in full
+    assert "not a comprehensive company value" in full
+    assert "does not validate the market price" in full
+    # The user's version says the same in plain words.
+    assert "about 43.1 times the cash flow VYNN's model expects" in compact
+    assert "not everything investors are paying for" in compact
+    assert "does not make today's price right" in compact
+
+
+def test_the_plain_block_skips_a_missing_rating_and_can_leave_the_model_out():
+    # China Vanke, 17 Nov 2026: Yahoo's "none" printed as a consensus rating,
+    # and a model ruled out for the company was still set against the Street.
+    value = {
+        "currency": "CNY", "target_mean": 3.34, "target_return_vs_market": 0.135,
+        "target_source": "yahoo_finance", "target_analyst_count": 8,
+        "target_low": 1.85, "target_median": 2.90, "target_high": 8.30,
+        "rating": "none", "rating_source": "yahoo_finance",
+        "benchmark_relationship": "material_conflict",
+        "target_range_relationship": "analyst_range_entirely_below_model_range",
+        "forward": [{"horizon": "NTM1", "street_revenue": 1.0, "model_uses_street_anchor": True}],
+        "market_implied_fcf_path_delta": -0.40, "analyst_target_implied_fcf_path_delta": -0.09,
+        "market_implied_wacc": 0.041, "market_implied_terminal_growth": -0.014,
+        "model_wacc": 0.025, "model_terminal_growth": 0.01,
+        "target_implied_ev_to_forward_revenue": 3.5,
+    }
+    full = render_external_benchmark_compact(value)
+    assert "consensus rating" not in full
+    assert "disagree sharply" in full and "0.60 times" in full
+
+    analysts_only = render_external_benchmark_compact(value, model_comparison=False)
+    assert analysts_only.splitlines() == [
+        "- Average price target: ¥3.34 from 8 analysts, 13.5% above today's price (Yahoo Finance).",
+        "- Their targets range from ¥1.85 to ¥8.30 (middle: ¥2.90).",
+        "- At the average target, the whole company, debt included, would be valued at 3.5 times next year's expected sales.",
+    ]
