@@ -1107,7 +1107,7 @@ Examples:
                 # on Claude Sonnet the news step alone cost ~60x).
                 chat_model = os.getenv("CHAT_MODEL", "gpt-6-luna").strip()
                 if chat_model not in list_available_models():
-                    print(f"[chat] '{chat_model}' has no key here; the chat agent uses {args.llm}")
+                    print(f"[chat] '{chat_model}' is unknown or has no key here; the chat agent uses {args.llm}")
                 # Load prior conversation context for follow-ups (best-effort).
                 # Must use the SAME key the agent writes with in _save_session:
                 # a fixed "CHAT" namespace + the session_id as session_name. This

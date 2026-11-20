@@ -87,14 +87,23 @@ class _CircuitBreaker:
             self._opened_at = time.monotonic()
 
 
-# One breaker per process. The news fan-out shares it, so a genuine provider
-# outage trips it once for everyone rather than each batch discovering it.
-_breaker = _CircuitBreaker()
+# One breaker per provider family per process. The news fan-out shares it, so
+# a genuine outage trips it once for everyone rather than each batch
+# discovering it. Per family since 19 Nov 2026: with the chat agent on Claude
+# (Bedrock) and the news step on OpenAI, failing OpenAI batches opened the one
+# shared breaker and the chat agent's healthy Claude turn failed with it.
+_breakers = {"openai": _CircuitBreaker(), "other": _CircuitBreaker()}
+_breaker = _breakers["openai"]
+
+
+def _breaker_for(is_openai: bool) -> "_CircuitBreaker":
+    return _breakers["openai" if is_openai else "other"]
 
 
 def reset_circuit_breaker() -> None:
-    """Test/ops hook: force the breaker closed."""
-    _breaker.record_success()
+    """Test/ops hook: force every breaker closed."""
+    for breaker in _breakers.values():
+        breaker.record_success()
 
 
 class CircuitOpenError(RuntimeError):
@@ -364,7 +373,7 @@ class AsyncLLMProvider:
     ) -> Tuple[str, float]:
         logger = get_logger()
 
-        if _breaker.is_open():
+        if _breaker_for(self.is_openai).is_open():
             # Fail fast — do not add load to a provider we already believe is down.
             raise CircuitOpenError(
                 "LLM circuit breaker is open (too many consecutive failures); "
@@ -380,7 +389,7 @@ class AsyncLLMProvider:
                     model_id = _MODEL_TO_ANTHROPIC_ID.get(self.model_name, self.model_name)
                     text, cost = await _call_anthropic_async(model_id, messages, temperature)
 
-                _breaker.record_success()
+                _breaker_for(self.is_openai).record_success()
                 if logger:
                     logger.llm_call(self.model_name, cost, 0)
                 return text, cost
@@ -395,7 +404,7 @@ class AsyncLLMProvider:
                     )
                 if not retryable or attempt == max_retries - 1:
                     # Only hard/terminal failures count toward the breaker.
-                    _breaker.record_failure()
+                    _breaker_for(self.is_openai).record_failure()
                     break
                 # Exponential backoff with full jitter: 0.5, 1, 2, 4 … + [0, base).
                 base = 0.5 * (2 ** attempt)
@@ -423,7 +432,7 @@ class AsyncLLMProvider:
         Same backoff + circuit-breaker behaviour as ``__call__``.
         """
         logger = get_logger()
-        if _breaker.is_open():
+        if _breaker_for(self.is_openai).is_open():
             raise CircuitOpenError(
                 "LLM circuit breaker is open (too many consecutive failures)."
             )
@@ -439,7 +448,7 @@ class AsyncLLMProvider:
                     resp = await _call_anthropic_tools(
                         self.resolved_model_id(), messages, tools, temperature, tool_choice
                     )
-                _breaker.record_success()
+                _breaker_for(self.is_openai).record_success()
                 if logger:
                     logger.llm_call(self.model_name, resp.cost, 0)
                 return resp
@@ -452,7 +461,7 @@ class AsyncLLMProvider:
                         f"{attempt + 1}/{max_retries} (retryable={retryable}): {exc}"
                     )
                 if not retryable or attempt == max_retries - 1:
-                    _breaker.record_failure()
+                    _breaker_for(self.is_openai).record_failure()
                     break
                 base = 0.5 * (2 ** attempt)
                 await asyncio.sleep(base + random.uniform(0, base))
