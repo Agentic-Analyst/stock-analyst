@@ -1275,6 +1275,23 @@ class FinancialScraper:
             from src.financial_period_bridge import build_ttm_bridge
             modeling_data["ttm_bridge"] = build_ttm_bridge(quarterly)
             bridge = modeling_data["ttm_bridge"]
+            # Yahoo's quarter tables lag a company's results by days to weeks (src/latest_quarter.py).
+            try:
+                from src.latest_quarter import fresh_revenue
+                update = fresh_revenue(bridge, self.ticker, getattr(self.yf_ticker, "info", None))
+            except Exception:
+                update = {}
+            if update:
+                bridge.update(update)
+                fresh = update.get("fresh_revenue") or {}
+                pending = update.get("results_pending") or {}
+                if fresh:
+                    self._log("info", f"✅ Twelve-month revenue refreshed to {fresh.get('period_end')} "
+                                      f"from {fresh.get('source')}: {fresh.get('revenue'):,.0f} "
+                                      f"(quarter tables ended {fresh.get('previous_period_end')})")
+                elif pending:
+                    self._log("warning", f"Results released {pending.get('filed')} for a quarter after "
+                                         f"{pending.get('figures_through')}; figures not yet in a structured source")
             if bridge.get("status") == "current":
                 self._log(
                     "info",
@@ -1464,6 +1481,12 @@ class FinancialScraper:
         modeling_data["data_summary"] = self._generate_data_summary(modeling_data)
         from src.financial_freshness import financial_statement_freshness
         modeling_data["financial_freshness"] = financial_statement_freshness(modeling_data)
+        _bridge = modeling_data.get("ttm_bridge") or {}
+        if _bridge.get("results_pending") and isinstance(modeling_data["financial_freshness"], dict):
+            # Every surface reading freshness can now say the figures predate released results.
+            modeling_data["financial_freshness"]["results_pending"] = _bridge["results_pending"]
+        if _bridge.get("fresh_revenue") and isinstance(modeling_data["financial_freshness"], dict):
+            modeling_data["financial_freshness"]["revenue_through"] = _bridge["fresh_revenue"].get("period_end")
         from src.valuation_methodology import assess_valuation_methodology
         modeling_data["valuation_methodology"] = assess_valuation_methodology(modeling_data)
         

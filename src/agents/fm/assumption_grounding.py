@@ -1411,6 +1411,7 @@ def _rolling_consensus_revenue_path(
         return None
     base_revenue = _positive_number((bridge.get("normalized") or {}).get("revenue"))
     period_end = _period_date(bridge.get("latest_period"))
+    fresh = bridge.get("fresh_revenue") if isinstance(bridge.get("fresh_revenue"), dict) else {}
     income = (((json_data or {}).get("financial_statements") or {}).get(
         "income_statement") or {})
     latest_annual_key = next(
@@ -1425,6 +1426,15 @@ def _rolling_consensus_revenue_path(
     ):
         return None
     next_fiscal_end = _next_fiscal_anniversary(latest_annual_end)
+    # A newer reported quarter (src/latest_quarter.py) replaces the stale quarter tables' revenue and date, but only
+    # inside the same fiscal year: when the new quarter completes the year, Yahoo's annual table and the analysts'
+    # 0y/+1y labels roll over at different times, and blending across that boundary would mislabel a whole year.
+    fresh_end = _period_date(fresh.get("period_end")) if fresh else None
+    fresh_revenue = _positive_number(fresh.get("revenue")) if fresh else None
+    base_source = "ttm_bridge"
+    if (fresh_end is not None and fresh_revenue is not None and fresh_end > period_end
+            and (next_fiscal_end - fresh_end).days > 10):
+        base_revenue, period_end, base_source = fresh_revenue, fresh_end, str(fresh.get("source") or "fresh")
     fiscal_days = (next_fiscal_end - latest_annual_end).days
     elapsed_days = (period_end - latest_annual_end).days
     if fiscal_days <= 0 or not 0 <= elapsed_days <= fiscal_days + 7:
@@ -1470,6 +1480,7 @@ def _rolling_consensus_revenue_path(
     return {
         "basis": "rolling_twelve_months",
         "period_end": period_end.isoformat(),
+        "base_revenue_source": base_source,
         "latest_annual_end": latest_annual_end.isoformat(),
         "next_fiscal_end": next_fiscal_end.isoformat(),
         "fiscal_year_progress": progress,
